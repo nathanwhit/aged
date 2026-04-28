@@ -1,5 +1,6 @@
 aged.db
 aged.db-*
+.aged/
 .gomodcache/
 node_modules/
 web/dist/

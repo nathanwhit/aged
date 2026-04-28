@@ -35,6 +35,7 @@ const (
 	EventTaskPlanned     EventType = "task.planned"
 	EventTaskSteered     EventType = "task.steered"
 	EventWorkerWorkspace EventType = "worker.workspace_prepared"
+	EventWorkerCleanup   EventType = "worker.workspace_cleaned"
 	EventWorkerCreated   EventType = "worker.created"
 	EventWorkerStarted   EventType = "worker.started"
 	EventWorkerOutput    EventType = "worker.output"

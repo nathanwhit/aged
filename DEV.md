@@ -17,6 +17,8 @@ The initial local-first vertical slice is implemented.
 - Frontend toolchain is on Vite 8 with `@vitejs/plugin-react` 6.
 - Scheduling is recorded as `task.planned` before worker creation.
 - Workspace preflight is recorded as `worker.workspace_prepared` before worker creation.
+- Workspace allocation is VCS-pluggable: `auto`, `jj`, or `git`.
+- Workspace cleanup policy is configurable: `retain`, `delete_on_success`, or `delete_on_terminal`.
 - Worker output is normalized into log/result/error/needs-input events, with raw JSON preserved for Codex and Claude streams.
 
 ## Verified
@@ -41,6 +43,8 @@ The initial local-first vertical slice is implemented.
   - service passes the prepared cwd into the runner
   - service emits `worker.workspace_prepared`
   - `JJWorkspaceManager` captures the current repo root, `jj @` change, status, mode, and dirty flag
+  - auto workspace selection uses the current repo VCS
+  - cleanup decisions honor retain/delete-on-success/delete-on-terminal policies
 - Real CLI smoke tests:
   - `codex exec --json` in `/tmp/aged-real-cli-smoke` emitted `thread.started`, `turn.started`, `item.completed`, and `turn.completed`.
   - `claude --print --output-format stream-json` in `/tmp/aged-real-cli-smoke` emitted `system`, `rate_limit_event`, `assistant`, and `result`.
@@ -74,7 +78,9 @@ http://127.0.0.1:8787
 - Codex and Claude runners are wired as subprocess adapters, but their real-world behavior still needs deeper integration testing.
 - Worker output normalization has been tuned against one real Codex and one real Claude smoke stream; broader task streams still need coverage.
 - Claude smoke used `--no-session-persistence` to avoid durable state from a disposable parser probe. The default runner does not hard-code that policy.
-- `JJWorkspaceManager` currently uses shared workspace mode. Isolated per-task workspaces are still future work.
+- Isolated workspace mode is the default.
+- Jujutsu isolated workspaces are created with `jj workspace add -r @`.
+- Git isolated workspaces are implemented with `git worktree add --detach HEAD`, but require a clean source working tree because Git worktrees cannot safely carry uncommitted source changes.
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
 - User steering is recorded as events, but active workers do not yet consume steering messages mid-run.
 - Remote VM execution is intentionally not implemented yet; the runner interface is the extension point.
@@ -84,7 +90,7 @@ http://127.0.0.1:8787
 - Add tests for event replay and state reconstruction.
 - Exercise worker normalization against real Codex/Claude runs and tune parsers to their exact event schemas.
 - Add worker result semantics to `worker.completed`: final summary, artifacts, changed files, and needs-input reason.
-- Add isolated workspace allocation so concurrent workers do not share one mutable working copy.
+- Add UI affordances for workspace location and cleanup status.
 - Exercise the API brain against a real provider and tune `prompts/scheduler.md`.
 - Decide the exact plugin process protocol for external worker/plugins.
 - Improve task cancellation so task-scoped worker indexing survives daemon restart.

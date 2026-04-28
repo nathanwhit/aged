@@ -28,12 +28,12 @@ type Service struct {
 }
 
 func NewService(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string) *Service {
-	return NewServiceWithWorkspaceManager(store, brain, runners, workDir, JJWorkspaceManager{})
+	return NewServiceWithWorkspaceManager(store, brain, runners, workDir, NewWorkspaceManager(WorkspaceVCSAuto, WorkspaceModeIsolated, "", WorkspaceCleanupRetain))
 }
 
 func NewServiceWithWorkspaceManager(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string, workspaces WorkspaceManager) *Service {
 	if workspaces == nil {
-		workspaces = JJWorkspaceManager{}
+		workspaces = NewWorkspaceManager(WorkspaceVCSAuto, WorkspaceModeIsolated, "", WorkspaceCleanupRetain)
 	}
 	return &Service{
 		store:      store,
@@ -240,9 +240,11 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	if err != nil {
 		status := core.WorkerFailed
 		taskStatus := core.TaskFailed
+		workspaceResult := WorkspaceResultFailed
 		if errors.Is(workerCtx.Err(), context.Canceled) {
 			status = core.WorkerCanceled
 			taskStatus = core.TaskCanceled
+			workspaceResult = WorkspaceResultCanceled
 		}
 		_, _ = s.append(ctx, core.Event{
 			Type:     core.EventWorkerCompleted,
@@ -253,6 +255,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 				"error":  err.Error(),
 			}),
 		})
+		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		_ = s.setTaskStatus(ctx, task.ID, taskStatus)
 		return
 	}
@@ -265,7 +268,25 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			"status": core.WorkerSucceeded,
 		}),
 	})
+	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func (s *Service) cleanupWorkspace(ctx context.Context, taskID string, workerID string, workspace PreparedWorkspace, result WorkspaceResult) error {
+	cleanup, err := s.workspaces.Cleanup(ctx, workspace, result)
+	if err != nil && cleanup.Error == "" {
+		cleanup.Error = err.Error()
+	}
+	_, appendErr := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCleanup,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(cleanup),
+	})
+	if appendErr != nil {
+		return appendErr
+	}
+	return err
 }
 
 func (s *Service) setTaskStatus(ctx context.Context, taskID string, status core.TaskStatus) error {

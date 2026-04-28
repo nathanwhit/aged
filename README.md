@@ -8,7 +8,7 @@ The current implementation is an initial vertical slice:
 - Prompt-driven and API-backed orchestrator brain providers
 - Mock, Codex, Claude, and shell worker runner adapters selected by the orchestrator
 - Normalized worker events for logs, results, errors, and worker requests for input
-- Workspace preflight using `jj` before workers start
+- VCS-pluggable workspace preflight before workers start
 - HTTP API and SSE event stream
 - React/Vite dashboard for task creation, steering, cancellation, and live state
 
@@ -32,7 +32,10 @@ Scheduler behavior:
 - Users do not choose workers per task; task creation only supplies the work request.
 - Available runner adapters include `mock`, `codex`, `claude`, and `shell`.
 - Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
-- Before a worker is created, the orchestrator records `worker.workspace_prepared` with the prepared cwd, repo root, current `jj @` change, dirty status, VCS type, and workspace mode.
+- Before a worker is created, the orchestrator records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
+- Workspace backends are selected with `-workspace-vcs auto|jj|git`; `auto` prefers `jj` when `.jj` is present and otherwise supports Git repos.
+- Isolated mode is the default. Jujutsu repos use `jj workspace add -r @`; Git repos use `git worktree add --detach HEAD` and require a clean source working tree.
+- Workspace cleanup is selected with `-workspace-cleanup retain|delete_on_success|delete_on_terminal`. Cleanup emits `worker.workspace_cleaned` and does not hide the worker's terminal status.
 - Worker subprocess output is normalized into `worker.output` events. Plain output becomes log/error events; Codex and Claude JSONL output preserves raw payloads and is classified as `log`, `result`, `error`, or `needs_input`.
 
 API-backed scheduling can be enabled with:

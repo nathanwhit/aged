@@ -20,17 +20,21 @@ import (
 
 func main() {
 	var (
-		addr            = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
-		dbPath          = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
-		workDir         = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
-		workerKind      = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
-		brainMode       = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, api, or static")
-		promptPath      = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
-		schedulerPrompt = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
-		brainEndpoint   = flag.String("brain-endpoint", envOr("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
-		brainAPIKey     = flag.String("brain-api-key", envFirst("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
-		brainModel      = flag.String("brain-model", envOr("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
-		webDistPath     = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
+		addr             = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
+		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
+		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
+		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
+		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, api, or static")
+		promptPath       = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
+		schedulerPrompt  = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
+		brainEndpoint    = flag.String("brain-endpoint", envOr("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
+		brainAPIKey      = flag.String("brain-api-key", envFirst("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
+		brainModel       = flag.String("brain-model", envOr("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
+		workspaceVCS     = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
+		workspaceMode    = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
+		workspaceRoot    = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "directory for isolated worker workspaces")
+		workspaceCleanup = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
+		webDistPath      = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
 	)
 	flag.Parse()
 
@@ -79,7 +83,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	service := orchestrator.NewService(store, brain, worker.DefaultRunners(), absWorkDir)
+	service := orchestrator.NewServiceWithWorkspaceManager(
+		store,
+		brain,
+		worker.DefaultRunners(),
+		absWorkDir,
+		orchestrator.NewWorkspaceManager(orchestrator.WorkspaceVCS(*workspaceVCS), orchestrator.WorkspaceMode(*workspaceMode), *workspaceRoot, orchestrator.WorkspaceCleanupPolicy(*workspaceCleanup)),
+	)
 	server := &http.Server{
 		Addr:              *addr,
 		Handler:           httpapi.New(service, staticHandler(*webDistPath)).Routes(),

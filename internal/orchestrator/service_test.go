@@ -47,6 +47,9 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	if !hasEvent(snapshot.Events, core.EventWorkerWorkspace, task.ID, "") {
 		t.Fatalf("missing worker.workspace_prepared event")
 	}
+	if !hasEvent(snapshot.Events, core.EventWorkerCleanup, task.ID, "") {
+		t.Fatalf("missing worker.workspace_cleaned event")
+	}
 	if !hasWorkerCreated(snapshot.Events, task.ID, "chosen") {
 		t.Fatalf("missing worker.created with chosen kind")
 	}
@@ -120,6 +123,19 @@ func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (Pr
 		Dirty:    false,
 		WorkerID: spec.WorkerID,
 		TaskID:   spec.TaskID,
+	}, nil
+}
+
+func (m fakeWorkspaceManager) Cleanup(_ context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
+	return WorkspaceCleanup{
+		Root:          workspace.Root,
+		CWD:           workspace.CWD,
+		WorkspaceName: workspace.WorkspaceName,
+		Mode:          workspace.Mode,
+		VCSType:       workspace.VCSType,
+		Policy:        workspace.CleanupPolicy,
+		Result:        result,
+		Reason:        "fake cleanup retained workspace",
 	}, nil
 }
 
