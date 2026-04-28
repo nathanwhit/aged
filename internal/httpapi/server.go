@@ -16,15 +16,23 @@ import (
 type Server struct {
 	service *orchestrator.Service
 	static  http.Handler
+	auth    *GoogleAuth
 }
 
 func New(service *orchestrator.Service, static http.Handler) *Server {
 	return &Server{service: service, static: static}
 }
 
+func NewWithAuth(service *orchestrator.Service, static http.Handler, auth *GoogleAuth) *Server {
+	return &Server{service: service, static: static, auth: auth}
+}
+
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	if s.auth != nil {
+		s.auth.RegisterRoutes(mux)
+	}
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
@@ -40,7 +48,11 @@ func (s *Server) Routes() http.Handler {
 	if s.static != nil {
 		mux.Handle("/", s.static)
 	}
-	return withCORS(mux)
+	var handler http.Handler = mux
+	if s.auth != nil {
+		handler = s.auth.Middleware(handler)
+	}
+	return withCORS(handler)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -208,6 +220,10 @@ func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	if errors.Is(err, eventstore.ErrNotFound) {
 		status = http.StatusNotFound
+	} else if strings.Contains(err.Error(), "not allowed") {
+		status = http.StatusForbidden
+	} else if strings.Contains(err.Error(), "oauth") || strings.Contains(err.Error(), "id token") || strings.Contains(err.Error(), "email is not verified") {
+		status = http.StatusUnauthorized
 	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "terminal tasks") {
 		status = http.StatusBadRequest
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,6 +38,12 @@ func main() {
 		workspaceCleanup = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
 		targetsPath      = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
 		webDistPath      = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
+		authMode         = flag.String("auth", envOr("AGED_AUTH", "none"), "HTTP authentication mode: none or google")
+		googleClientID   = flag.String("google-client-id", envOr("AGED_GOOGLE_CLIENT_ID", ""), "Google OAuth client ID")
+		googleSecret     = flag.String("google-client-secret", envOr("AGED_GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret")
+		authEmails       = flag.String("auth-allowed-emails", envOr("AGED_AUTH_ALLOWED_EMAILS", ""), "comma-separated Google account emails allowed to access aged")
+		authSessionKey   = flag.String("auth-session-key", envOr("AGED_AUTH_SESSION_KEY", ""), "session signing key; use at least 32 random bytes")
+		authRedirectURL  = flag.String("auth-redirect-url", envOr("AGED_AUTH_REDIRECT_URL", ""), "public OAuth callback URL, for example https://aged.example.com/auth/callback")
 	)
 	flag.Parse()
 
@@ -115,9 +122,23 @@ func main() {
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		slog.Warn("recover remote workers", "error", err)
 	}
+	auth, err := configureAuth(*authMode, httpapi.GoogleAuthConfig{
+		ClientID:     *googleClientID,
+		ClientSecret: *googleSecret,
+		AllowedEmail: splitCSV(*authEmails),
+		SessionKey:   *authSessionKey,
+		RedirectURL:  *authRedirectURL,
+	})
+	if err != nil {
+		slog.Error("configure auth", "error", err)
+		os.Exit(1)
+	}
+	if *authMode == "google" && *authSessionKey == "" {
+		slog.Warn("using ephemeral auth session key; sessions will be invalid after daemon restart")
+	}
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.New(service, staticHandler(*webDistPath)).Routes(),
+		Handler:           httpapi.NewWithAuth(service, staticHandler(*webDistPath), auth).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -151,6 +172,31 @@ func envFirst(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func configureAuth(mode string, config httpapi.GoogleAuthConfig) (*httpapi.GoogleAuth, error) {
+	switch mode {
+	case "", "none":
+		return nil, nil
+	case "google":
+		return httpapi.NewGoogleAuth(config)
+	default:
+		return nil, errors.New("unknown auth mode")
+	}
+}
+
+func splitCSV(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func staticHandler(path string) http.Handler {

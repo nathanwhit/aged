@@ -16,6 +16,7 @@ The initial local-first vertical slice is implemented.
 - React/Vite dashboard for creating tasks, viewing state/logs, steering, and cancellation.
 - Dashboard has a phone-friendly responsive layout and a current-state summary with progress, active work, worker counts, target state, execution nodes, and timeline.
 - Dashboard can clear finished tasks individually or in bulk. Clearing records `task.cleared` and hides the task, workers, and execution nodes from snapshots/UI without deleting event history.
+- Google OAuth can protect the dashboard/API for public exposure. `-auth google` requires Google client credentials, an allowed-email list, and uses signed HTTP-only session cookies.
 - Built dashboard can be served directly by the Go daemon from `web/dist`.
 - Dev control server in `cmd/aged-dev` can rebuild the daemon, rebuild the UI, and restart the managed daemon through a local HTTP trigger.
 - Dev control can be launched with `-daemon-addr 0.0.0.0:8787` so the dashboard is reachable from other devices on the local network.
@@ -44,6 +45,7 @@ The initial local-first vertical slice is implemented.
 - `go test ./...`
 - `npm run build`
 - Clear-task tests verify `task.cleared` hides tasks/workers/execution nodes while preserving events, and the bulk clear HTTP endpoint hides terminal tasks.
+- Auth tests verify Google auth protects API/static routes, leaves health public, and creates a session through a fake OAuth callback for an allowed Google account.
 - `npm ls vite @vitejs/plugin-react`
 - Scheduler tests:
   - Codex brain parses Codex `agent_message` plans.

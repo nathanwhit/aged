@@ -87,6 +87,37 @@ AGED_BRAIN=codex go run ./cmd/aged
 
 The Codex brain runs `codex exec --json` against `prompts/scheduler.md`, extracts the final agent message as the scheduler plan JSON, validates it, and falls back to the local prompt brain on command or validation failures. Override the binary with `AGED_CODEX_PATH` or `-codex-path`.
 
+## Google authentication
+
+Local development is unauthenticated by default. To expose the daemon on the web, enable Google OAuth and allowlist the Google account that should have access:
+
+```sh
+AGED_AUTH=google \
+AGED_GOOGLE_CLIENT_ID=<client-id> \
+AGED_GOOGLE_CLIENT_SECRET=<client-secret> \
+AGED_AUTH_ALLOWED_EMAILS=you@example.com \
+AGED_AUTH_SESSION_KEY="$(openssl rand -base64 32)" \
+AGED_AUTH_REDIRECT_URL=https://aged.example.com/auth/callback \
+go run ./cmd/aged -addr 0.0.0.0:8787
+```
+
+Create the OAuth client in Google Cloud Console as a web application and add the same callback URL as an authorized redirect URI:
+
+```text
+https://aged.example.com/auth/callback
+```
+
+Useful flags and env vars:
+
+- `-auth` / `AGED_AUTH`: `none` or `google`
+- `-google-client-id` / `AGED_GOOGLE_CLIENT_ID`
+- `-google-client-secret` / `AGED_GOOGLE_CLIENT_SECRET`
+- `-auth-allowed-emails` / `AGED_AUTH_ALLOWED_EMAILS`: comma-separated allowlist
+- `-auth-session-key` / `AGED_AUTH_SESSION_KEY`: stable random key, at least 32 bytes
+- `-auth-redirect-url` / `AGED_AUTH_REDIRECT_URL`: public callback URL when running behind a tunnel or reverse proxy
+
+When auth is enabled, `/api/health`, `/auth/login`, `/auth/callback`, `/auth/logout`, and `/api/auth/me` remain public enough to complete login/logout. Dashboard pages and operational APIs require a signed session cookie. If `AGED_AUTH_SESSION_KEY` is omitted, the daemon generates an ephemeral key and existing sessions are invalidated on restart.
+
 ## Run the dashboard
 
 ```sh
@@ -133,10 +164,13 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 ## API sketch
 
 - `GET /api/health`
+- `GET /api/auth/me`
 - `GET /api/snapshot`
 - `GET /api/events?after=<id>`
 - `GET /api/events/stream?after=<id>`
 - `POST /api/tasks`
+- `POST /api/tasks/clear-terminal`
+- `POST /api/tasks/{id}/clear`
 - `POST /api/tasks/{id}/steer`
 - `POST /api/tasks/{id}/cancel`
 - `GET /api/workers/{id}/changes`
