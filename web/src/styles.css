@@ -138,6 +138,11 @@ textarea {
   padding: 8px 12px;
 }
 
+.primary.compact {
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
 .icon-button {
   aspect-ratio: 1;
   padding: 0;
@@ -254,6 +259,42 @@ small {
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto auto;
   padding: 12px;
+}
+
+.worker-review {
+  align-items: start;
+  border-top: 1px solid #e9e5dd;
+  display: grid;
+  gap: 10px;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding-top: 10px;
+}
+
+.worker-review summary {
+  color: #4b4f58;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.worker-review ul {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 8px 0 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 0;
+}
+
+.worker-review li {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+
+.worker-review li span {
+  overflow-wrap: anywhere;
 }
 
 .event-log {

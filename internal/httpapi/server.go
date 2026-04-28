@@ -31,6 +31,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
+	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
+	mux.HandleFunc("POST /api/workers/{id}/apply", s.applyWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/cancel", s.cancelWorker)
 	if s.static != nil {
 		mux.Handle("/", s.static)
@@ -103,6 +105,24 @@ func (s *Server) cancelWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) reviewWorkerChanges(w http.ResponseWriter, r *http.Request) {
+	review, err := s.service.ReviewWorkerChanges(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, review)
+}
+
+func (s *Server) applyWorkerChanges(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ApplyWorkerChanges(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {

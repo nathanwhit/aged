@@ -14,6 +14,8 @@ import (
 
 type WorkspaceManager interface {
 	Prepare(ctx context.Context, spec WorkspaceSpec) (PreparedWorkspace, error)
+	DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error)
+	ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error)
 	Cleanup(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error)
 }
 
@@ -39,6 +41,24 @@ type PreparedWorkspace struct {
 	CleanupPolicy string `json:"cleanupPolicy"`
 	WorkerID      string `json:"workerId"`
 	TaskID        string `json:"taskId"`
+}
+
+type WorkspaceChangedFile struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
+type WorkspaceChanges struct {
+	Root          string                 `json:"root"`
+	CWD           string                 `json:"cwd"`
+	WorkspaceName string                 `json:"workspaceName"`
+	Mode          string                 `json:"mode"`
+	VCSType       string                 `json:"vcsType"`
+	Status        string                 `json:"status"`
+	DiffStat      string                 `json:"diffStat"`
+	ChangedFiles  []WorkspaceChangedFile `json:"changedFiles"`
+	Dirty         bool                   `json:"dirty"`
+	Error         string                 `json:"error,omitempty"`
 }
 
 type WorkspaceResult string
@@ -133,6 +153,34 @@ func (m AutoWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWor
 	default:
 		cleanup := cleanupSkipped(workspace, result, "unsupported VCS type")
 		return cleanup, nil
+	}
+}
+
+func (m AutoWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	switch workspace.VCSType {
+	case "jj":
+		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.DescribeChanges(ctx, workspace)
+	case "git":
+		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.DescribeChanges(ctx, workspace)
+	default:
+		changes := baseWorkspaceChanges(workspace)
+		changes.Error = "unsupported VCS type"
+		return changes, nil
+	}
+}
+
+func (m AutoWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	switch workspace.VCSType {
+	case "jj":
+		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.ApplyChanges(ctx, workspace, changes)
+	case "git":
+		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.ApplyChanges(ctx, workspace, changes)
+	default:
+		return baseWorkerApplyResult(workspace, "unsupported"), fmt.Errorf("unsupported VCS type %q", workspace.VCSType)
 	}
 }
 
@@ -308,6 +356,60 @@ func (m JJWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWorks
 	return cleanup, nil
 }
 
+func (m JJWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	changes := baseWorkspaceChanges(workspace)
+	if workspace.CWD == "" {
+		changes.Error = "workspace cwd is required"
+		return changes, errors.New(changes.Error)
+	}
+
+	status, err := runJJRefreshingStale(ctx, workspace.CWD, "status")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read jj workspace status: %w", err)
+	}
+	changes.Status = strings.TrimSpace(status)
+	changes.Dirty = isDirty(changes.Status)
+
+	diffStat, err := runJJRefreshingStale(ctx, workspace.CWD, "diff", "--stat")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read jj workspace diff stat: %w", err)
+	}
+	changes.DiffStat = strings.TrimSpace(diffStat)
+
+	summary, err := runJJRefreshingStale(ctx, workspace.CWD, "diff", "--summary")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read jj workspace diff summary: %w", err)
+	}
+	changes.ChangedFiles = parseJJDiffSummary(summary)
+	return changes, nil
+}
+
+func (m JJWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	result := baseWorkerApplyResult(workspace, "jj_new_merge")
+	result.AppliedFiles = changes.ChangedFiles
+	if workspace.Mode != string(WorkspaceModeIsolated) {
+		return result, errors.New("applying jj worker changes requires an isolated workspace")
+	}
+	if workspace.SourceRoot == "" || workspace.WorkspaceName == "" {
+		return result, errors.New("applying jj worker changes requires source root and workspace name")
+	}
+	if len(changes.ChangedFiles) == 0 && !changes.Dirty {
+		return result, nil
+	}
+	workerRevision := workspace.WorkspaceName + "@"
+	message := "Apply worker " + shortID(workspace.WorkerID)
+	if _, err := runJJRefreshingStale(ctx, workspace.CWD, "status"); err != nil {
+		return result, fmt.Errorf("refresh jj worker workspace: %w", err)
+	}
+	if _, err := runJJ(ctx, workspace.SourceRoot, "new", "--message", message, "@", workerRevision); err != nil {
+		return result, fmt.Errorf("create jj merge revision: %w", err)
+	}
+	return result, nil
+}
+
 func isDirty(status string) bool {
 	return !strings.Contains(status, "The working copy has no changes.")
 }
@@ -328,6 +430,17 @@ func shortID(id string) string {
 
 func runJJ(ctx context.Context, dir string, args ...string) (string, error) {
 	return runCommand(ctx, dir, "jj", args...)
+}
+
+func runJJRefreshingStale(ctx context.Context, dir string, args ...string) (string, error) {
+	out, err := runJJ(ctx, dir, args...)
+	if err == nil || !strings.Contains(err.Error(), "working copy is stale") {
+		return out, err
+	}
+	if _, updateErr := runJJ(ctx, dir, "workspace", "update-stale"); updateErr != nil {
+		return out, err
+	}
+	return runJJ(ctx, dir, args...)
 }
 
 type GitWorkspaceManager struct {
@@ -478,6 +591,65 @@ func (m GitWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWork
 	return cleanup, nil
 }
 
+func (m GitWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	changes := baseWorkspaceChanges(workspace)
+	if workspace.CWD == "" {
+		changes.Error = "workspace cwd is required"
+		return changes, errors.New(changes.Error)
+	}
+
+	status, err := runGit(ctx, workspace.CWD, "status", "--short", "--branch")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read git workspace status: %w", err)
+	}
+	changes.Status = strings.TrimSpace(status)
+	changes.Dirty = gitStatusDirty(changes.Status)
+
+	diffStat, err := runGit(ctx, workspace.CWD, "diff", "--stat", "HEAD", "--")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read git workspace diff stat: %w", err)
+	}
+	changes.DiffStat = strings.TrimSpace(diffStat)
+
+	porcelain, err := runGit(ctx, workspace.CWD, "status", "--porcelain=v1")
+	if err != nil {
+		changes.Error = err.Error()
+		return changes, fmt.Errorf("read git workspace changed files: %w", err)
+	}
+	changes.ChangedFiles = parseGitPorcelain(porcelain)
+	return changes, nil
+}
+
+func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	result := baseWorkerApplyResult(workspace, "git_commit_merge")
+	result.AppliedFiles = changes.ChangedFiles
+	if workspace.Mode != string(WorkspaceModeIsolated) {
+		return result, errors.New("applying git worker changes requires an isolated workspace")
+	}
+	if workspace.SourceRoot == "" || workspace.Root == "" {
+		return result, errors.New("applying git worker changes requires source and workspace roots")
+	}
+	if len(changes.ChangedFiles) == 0 && !changes.Dirty {
+		return result, nil
+	}
+	if _, err := runGit(ctx, workspace.Root, "add", "-A"); err != nil {
+		return result, fmt.Errorf("stage git worker changes: %w", err)
+	}
+	if _, err := runGit(ctx, workspace.Root, "commit", "-m", "Apply worker "+shortID(workspace.WorkerID)); err != nil {
+		return result, fmt.Errorf("commit git worker changes: %w", err)
+	}
+	commit, err := runGit(ctx, workspace.Root, "rev-parse", "HEAD")
+	if err != nil {
+		return result, fmt.Errorf("read git worker commit: %w", err)
+	}
+	if _, err := runGit(ctx, workspace.SourceRoot, "merge", "--no-ff", strings.TrimSpace(commit)); err != nil {
+		return result, fmt.Errorf("merge git worker commit: %w", err)
+	}
+	return result, nil
+}
+
 func cleanupDecision(workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, bool) {
 	policy := WorkspaceCleanupPolicy(workspace.CleanupPolicy)
 	if policy == "" {
@@ -517,6 +689,79 @@ func cleanupSkipped(workspace PreparedWorkspace, result WorkspaceResult, reason 
 		Policy:        workspace.CleanupPolicy,
 		Result:        result,
 		Reason:        reason,
+	}
+}
+
+func baseWorkspaceChanges(workspace PreparedWorkspace) WorkspaceChanges {
+	return WorkspaceChanges{
+		Root:          workspace.Root,
+		CWD:           workspace.CWD,
+		WorkspaceName: workspace.WorkspaceName,
+		Mode:          workspace.Mode,
+		VCSType:       workspace.VCSType,
+		Status:        workspace.Status,
+		Dirty:         workspace.Dirty,
+	}
+}
+
+func baseWorkerApplyResult(workspace PreparedWorkspace, method string) WorkerApplyResult {
+	return WorkerApplyResult{
+		SourceRoot:    workspace.SourceRoot,
+		WorkspaceRoot: workspace.Root,
+		Method:        method,
+	}
+}
+
+func parseJJDiffSummary(summary string) []WorkspaceChangedFile {
+	var files []WorkspaceChangedFile
+	for _, line := range strings.Split(summary, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		status, path, ok := strings.Cut(line, " ")
+		if !ok {
+			files = append(files, WorkspaceChangedFile{Path: line, Status: "changed"})
+			continue
+		}
+		files = append(files, WorkspaceChangedFile{Path: strings.TrimSpace(path), Status: normalizeChangeStatus(status)})
+	}
+	return files
+}
+
+func parseGitPorcelain(status string) []WorkspaceChangedFile {
+	var files []WorkspaceChangedFile
+	for _, line := range strings.Split(status, "\n") {
+		if strings.TrimSpace(line) == "" || len(line) < 4 {
+			continue
+		}
+		code := strings.TrimSpace(line[:2])
+		path := strings.TrimSpace(line[3:])
+		if before, after, ok := strings.Cut(path, " -> "); ok {
+			files = append(files, WorkspaceChangedFile{Path: before, Status: "renamed_from"})
+			path = after
+		}
+		files = append(files, WorkspaceChangedFile{Path: path, Status: normalizeChangeStatus(code)})
+	}
+	return files
+}
+
+func normalizeChangeStatus(status string) string {
+	switch {
+	case strings.Contains(status, "?"):
+		return "untracked"
+	case strings.Contains(status, "A"):
+		return "added"
+	case strings.Contains(status, "D"):
+		return "deleted"
+	case strings.Contains(status, "R"):
+		return "renamed"
+	case strings.Contains(status, "C"):
+		return "copied"
+	case strings.Contains(status, "M"):
+		return "modified"
+	default:
+		return strings.ToLower(status)
 	}
 }
 

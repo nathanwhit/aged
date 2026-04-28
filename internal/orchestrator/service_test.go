@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,6 +81,152 @@ func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	}
 }
 
+func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	resultSummary := "implemented the requested change"
+	changedFiles := []WorkspaceChangedFile{{Path: "internal/orchestrator/service_test.go", Status: "modified"}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "summary",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"summary": eventRunner{
+		kind: "summary",
+		events: []worker.Event{
+			worker.LogEvent("stdout", "starting work"),
+			{
+				Kind: worker.EventResult,
+				Text: resultSummary,
+			},
+		},
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: changedFiles,
+			DiffStat:     "internal/orchestrator/service_test.go | 1 +",
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
+	if payload.Summary != resultSummary {
+		t.Fatalf("summary = %q", payload.Summary)
+	}
+	if payload.LogCount != 1 {
+		t.Fatalf("logCount = %d", payload.LogCount)
+	}
+	if len(payload.ChangedFiles) != 1 || payload.ChangedFiles[0] != changedFiles[0] {
+		t.Fatalf("changedFiles = %+v", payload.ChangedFiles)
+	}
+	if !payload.WorkspaceChanges.Dirty {
+		t.Fatalf("workspaceChanges.dirty = false")
+	}
+	if payload.Status != core.WorkerSucceeded {
+		t.Fatalf("status = %q", payload.Status)
+	}
+}
+
+func TestServiceMovesTaskToWaitingWhenWorkerNeedsInput(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "input",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"input": eventRunner{
+		kind: "input",
+		events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "approve dependency install?",
+		}},
+	}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
+	if payload.Status != core.WorkerWaiting {
+		t.Fatalf("status = %q", payload.Status)
+	}
+	if !payload.NeedsInput {
+		t.Fatalf("needsInput = false")
+	}
+	if hasEvent(snapshot.Events, core.EventWorkerCleanup, task.ID, "") {
+		t.Fatalf("waiting worker workspace should be retained")
+	}
+}
+
+func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	workspaceRoot := t.TempDir()
+	changed := WorkspaceChangedFile{Path: "internal/example.txt", Status: "modified"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: changed.Path,
+		body: "worker output\n",
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        workspaceRoot,
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{changed},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	result, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.AppliedFiles) != 1 || result.AppliedFiles[0] != changed {
+		t.Fatalf("applied files = %+v", result.AppliedFiles)
+	}
+	if result.Method != "fake_merge" {
+		t.Fatalf("method = %q", result.Method)
+	}
+	appliedSnapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(appliedSnapshot.Events, core.EventWorkerApplied, task.ID, snapshot.Workers[0].ID) {
+		t.Fatalf("missing worker.changes_applied event")
+	}
+}
+
 type fixedBrain struct {
 	plan Plan
 	err  error
@@ -92,6 +240,50 @@ type recordingRunner struct {
 	kind    string
 	prompt  string
 	workDir string
+}
+
+type eventRunner struct {
+	kind   string
+	events []worker.Event
+}
+
+type fileWritingRunner struct {
+	kind string
+	path string
+	body string
+}
+
+func (r eventRunner) Kind() string {
+	return r.kind
+}
+
+func (r eventRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r eventRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) error {
+	for _, event := range r.events {
+		if err := sink.Event(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r fileWritingRunner) Kind() string {
+	return r.kind
+}
+
+func (r fileWritingRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r fileWritingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink) error {
+	target := filepath.Join(spec.WorkDir, r.path)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, []byte(r.body), 0o644)
 }
 
 func (r *recordingRunner) Kind() string {
@@ -109,20 +301,30 @@ func (r *recordingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink
 }
 
 type fakeWorkspaceManager struct {
-	cwd string
+	cwd        string
+	sourceRoot string
+	changes    WorkspaceChanges
 }
 
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
+	sourceRoot := m.sourceRoot
+	mode := string(WorkspaceModeShared)
+	if sourceRoot == "" {
+		sourceRoot = m.cwd
+	} else if sourceRoot != m.cwd {
+		mode = string(WorkspaceModeIsolated)
+	}
 	return PreparedWorkspace{
-		Root:     m.cwd,
-		CWD:      m.cwd,
-		Change:   "@ fake",
-		Status:   "The working copy has no changes.",
-		Mode:     "shared",
-		VCSType:  "jj",
-		Dirty:    false,
-		WorkerID: spec.WorkerID,
-		TaskID:   spec.TaskID,
+		Root:       m.cwd,
+		CWD:        m.cwd,
+		SourceRoot: sourceRoot,
+		Change:     "@ fake",
+		Status:     "The working copy has no changes.",
+		Mode:       mode,
+		VCSType:    "jj",
+		Dirty:      false,
+		WorkerID:   spec.WorkerID,
+		TaskID:     spec.TaskID,
 	}, nil
 }
 
@@ -136,6 +338,35 @@ func (m fakeWorkspaceManager) Cleanup(_ context.Context, workspace PreparedWorks
 		Policy:        workspace.CleanupPolicy,
 		Result:        result,
 		Reason:        "fake cleanup retained workspace",
+	}, nil
+}
+
+func (m fakeWorkspaceManager) DescribeChanges(_ context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	changes := m.changes
+	if changes.Root == "" {
+		changes.Root = workspace.Root
+	}
+	if changes.CWD == "" {
+		changes.CWD = workspace.CWD
+	}
+	if changes.WorkspaceName == "" {
+		changes.WorkspaceName = workspace.WorkspaceName
+	}
+	if changes.Mode == "" {
+		changes.Mode = workspace.Mode
+	}
+	if changes.VCSType == "" {
+		changes.VCSType = workspace.VCSType
+	}
+	return changes, nil
+}
+
+func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	return WorkerApplyResult{
+		SourceRoot:    workspace.SourceRoot,
+		WorkspaceRoot: workspace.Root,
+		Method:        "fake_merge",
+		AppliedFiles:  changes.ChangedFiles,
 	}, nil
 }
 
@@ -190,4 +421,41 @@ func hasWorkerCreated(events []core.Event, taskID string, kind string) bool {
 		}
 	}
 	return false
+}
+
+func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) struct {
+	Status           core.WorkerStatus      `json:"status"`
+	Summary          string                 `json:"summary"`
+	NeedsInput       bool                   `json:"needsInput"`
+	LogCount         int                    `json:"logCount"`
+	ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
+	WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
+} {
+	t.Helper()
+	for _, event := range events {
+		if event.Type != core.EventWorkerCompleted || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Status           core.WorkerStatus      `json:"status"`
+			Summary          string                 `json:"summary"`
+			NeedsInput       bool                   `json:"needsInput"`
+			LogCount         int                    `json:"logCount"`
+			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
+			WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	t.Fatalf("missing worker.completed for task %s", taskID)
+	return struct {
+		Status           core.WorkerStatus      `json:"status"`
+		Summary          string                 `json:"summary"`
+		NeedsInput       bool                   `json:"needsInput"`
+		LogCount         int                    `json:"logCount"`
+		ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
+		WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
+	}{}
 }

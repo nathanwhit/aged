@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -13,6 +14,21 @@ import (
 
 	"github.com/google/uuid"
 )
+
+type WorkerChangesReview struct {
+	WorkerID  string            `json:"workerId"`
+	Workspace PreparedWorkspace `json:"workspace"`
+	Changes   WorkspaceChanges  `json:"changes"`
+}
+
+type WorkerApplyResult struct {
+	WorkerID      string                 `json:"workerId"`
+	SourceRoot    string                 `json:"sourceRoot"`
+	WorkspaceRoot string                 `json:"workspaceRoot"`
+	Method        string                 `json:"method"`
+	AppliedFiles  []WorkspaceChangedFile `json:"appliedFiles"`
+	SkippedFiles  []WorkspaceChangedFile `json:"skippedFiles,omitempty"`
+}
 
 type Service struct {
 	store      eventstore.Store
@@ -142,6 +158,37 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	return err
 }
 
+func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
+	workspace, err := s.workspaceForWorker(ctx, workerID)
+	if err != nil {
+		return WorkerChangesReview{}, err
+	}
+	return WorkerChangesReview{
+		WorkerID:  workerID,
+		Workspace: workspace,
+		Changes:   s.describeWorkspaceChanges(ctx, workspace),
+	}, nil
+}
+
+func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (WorkerApplyResult, error) {
+	review, err := s.ReviewWorkerChanges(ctx, workerID)
+	if err != nil {
+		return WorkerApplyResult{}, err
+	}
+	result, err := s.workspaces.ApplyChanges(ctx, review.Workspace, review.Changes)
+	if err != nil {
+		return WorkerApplyResult{}, err
+	}
+	result.WorkerID = workerID
+	_, err = s.append(ctx, core.Event{
+		Type:     core.EventWorkerApplied,
+		TaskID:   review.Workspace.TaskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(result),
+	})
+	return result, err
+}
+
 func (s *Service) runTask(ctx context.Context, task core.Task) {
 	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
 		return
@@ -236,7 +283,8 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		Payload:  core.MustJSON(map[string]any{}),
 	})
 
-	err = runner.Run(workerCtx, spec, eventSink{service: s, taskID: task.ID, workerID: workerID})
+	runState := &workerRunState{}
+	err = runner.Run(workerCtx, spec, eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState})
 	if err != nil {
 		status := core.WorkerFailed
 		taskStatus := core.TaskFailed
@@ -246,30 +294,66 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			taskStatus = core.TaskCanceled
 			workspaceResult = WorkspaceResultCanceled
 		}
+		changes := s.describeWorkspaceChanges(ctx, workspace)
 		_, _ = s.append(ctx, core.Event{
 			Type:     core.EventWorkerCompleted,
 			TaskID:   task.ID,
 			WorkerID: workerID,
-			Payload: core.MustJSON(map[string]any{
-				"status": status,
-				"error":  err.Error(),
-			}),
+			Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
 		})
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		_ = s.setTaskStatus(ctx, task.ID, taskStatus)
 		return
 	}
 
+	if runState.isWaitingForInput() {
+		changes := s.describeWorkspaceChanges(ctx, workspace)
+		_, _ = s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   task.ID,
+			WorkerID: workerID,
+			Payload:  core.MustJSON(runState.completionPayload(core.WorkerWaiting, nil, changes)),
+		})
+		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		return
+	}
+
+	changes := s.describeWorkspaceChanges(ctx, workspace)
 	_, _ = s.append(ctx, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   task.ID,
 		WorkerID: workerID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.WorkerSucceeded,
-		}),
+		Payload:  core.MustJSON(runState.completionPayload(core.WorkerSucceeded, nil, changes)),
 	})
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func (s *Service) describeWorkspaceChanges(ctx context.Context, workspace PreparedWorkspace) WorkspaceChanges {
+	changes, err := s.workspaces.DescribeChanges(ctx, workspace)
+	if err != nil && changes.Error == "" {
+		changes.Error = err.Error()
+	}
+	return changes
+}
+
+func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (PreparedWorkspace, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return PreparedWorkspace{}, err
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventWorkerWorkspace || event.WorkerID != workerID {
+			continue
+		}
+		var workspace PreparedWorkspace
+		if err := json.Unmarshal(event.Payload, &workspace); err != nil {
+			return PreparedWorkspace{}, fmt.Errorf("decode worker workspace: %w", err)
+		}
+		return workspace, nil
+	}
+	return PreparedWorkspace{}, eventstore.ErrNotFound
 }
 
 func (s *Service) cleanupWorkspace(ctx context.Context, taskID string, workerID string, workspace PreparedWorkspace, result WorkspaceResult) error {
@@ -350,9 +434,13 @@ type eventSink struct {
 	service  *Service
 	taskID   string
 	workerID string
+	state    *workerRunState
 }
 
 func (s eventSink) Event(ctx context.Context, event worker.Event) error {
+	if s.state != nil {
+		s.state.observe(event)
+	}
 	_, err := s.service.append(ctx, core.Event{
 		Type:     core.EventWorkerOutput,
 		TaskID:   s.taskID,
@@ -360,4 +448,77 @@ func (s eventSink) Event(ctx context.Context, event worker.Event) error {
 		Payload:  core.MustJSON(event),
 	})
 	return err
+}
+
+type workerRunState struct {
+	mu         sync.Mutex
+	logCount   int
+	summary    string
+	lastError  string
+	needsInput bool
+	rawResult  []byte
+}
+
+func (s *workerRunState) observe(event worker.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	switch event.Kind {
+	case worker.EventResult:
+		s.summary = event.Text
+		if len(event.Raw) > 0 {
+			s.rawResult = append(s.rawResult[:0], event.Raw...)
+		}
+	case worker.EventError:
+		s.lastError = event.Text
+	case worker.EventNeedsInput:
+		s.needsInput = true
+		if s.summary == "" {
+			s.summary = event.Text
+		}
+	default:
+		s.logCount++
+	}
+}
+
+func (s *workerRunState) isWaitingForInput() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.needsInput
+}
+
+func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr error, changes WorkspaceChanges) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	payload := map[string]any{
+		"status":           status,
+		"logCount":         s.logCount,
+		"needsInput":       s.needsInput,
+		"workspaceChanges": changes,
+	}
+	if len(changes.ChangedFiles) > 0 {
+		payload["changedFiles"] = changes.ChangedFiles
+	}
+	if s.summary != "" {
+		payload["summary"] = s.summary
+	}
+	if s.lastError != "" {
+		payload["error"] = s.lastError
+	} else if runErr != nil {
+		payload["error"] = runErr.Error()
+	}
+	if len(s.rawResult) > 0 {
+		payload["rawResult"] = core.MustJSON(jsonRawMessage(s.rawResult))
+	}
+	return payload
+}
+
+type jsonRawMessage []byte
+
+func (m jsonRawMessage) MarshalJSON() ([]byte, error) {
+	if len(m) == 0 {
+		return []byte("null"), nil
+	}
+	return m, nil
 }

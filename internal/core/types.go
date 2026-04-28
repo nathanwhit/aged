@@ -22,6 +22,7 @@ type WorkerStatus string
 const (
 	WorkerQueued    WorkerStatus = "queued"
 	WorkerRunning   WorkerStatus = "running"
+	WorkerWaiting   WorkerStatus = "waiting"
 	WorkerSucceeded WorkerStatus = "succeeded"
 	WorkerFailed    WorkerStatus = "failed"
 	WorkerCanceled  WorkerStatus = "canceled"
@@ -40,6 +41,7 @@ const (
 	EventWorkerStarted   EventType = "worker.started"
 	EventWorkerOutput    EventType = "worker.output"
 	EventWorkerCompleted EventType = "worker.completed"
+	EventWorkerApplied   EventType = "worker.changes_applied"
 	EventApprovalNeeded  EventType = "approval.needed"
 	EventApprovalDecided EventType = "approval.decided"
 )

@@ -210,6 +210,26 @@ func classifyPayload(stream string, payload map[string]any) EventKind {
 	if stream == "stderr" {
 		return EventError
 	}
+	if stringField(payload, "type") == "turn.completed" {
+		return EventLog
+	}
+	if item, ok := payload["item"].(map[string]any); ok {
+		itemType := stringField(item, "type")
+		switch itemType {
+		case "agent_message":
+			return EventResult
+		case "command_execution":
+			if exitCode, ok := item["exit_code"].(float64); ok && exitCode != 0 {
+				return EventError
+			}
+			if stringField(item, "status") == "failed" {
+				return EventError
+			}
+			return EventLog
+		case "file_change":
+			return EventLog
+		}
+	}
 	value := strings.ToLower(strings.Join([]string{
 		stringField(payload, "type"),
 		stringField(payload, "event"),

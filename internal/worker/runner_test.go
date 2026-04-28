@@ -153,6 +153,23 @@ func TestParserClassifiesNeedsInput(t *testing.T) {
 	}
 }
 
+func TestParserDoesNotTreatCodexTurnCompletionAsResult(t *testing.T) {
+	parser := ParserForKind("codex")
+
+	agentMessage := parser.ParseLine("stdout", `{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
+	if agentMessage.Kind != EventResult {
+		t.Fatalf("agent message kind = %q", agentMessage.Kind)
+	}
+	if agentMessage.Text != "done" {
+		t.Fatalf("agent message text = %q", agentMessage.Text)
+	}
+
+	turnCompleted := parser.ParseLine("stdout", `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
+	if turnCompleted.Kind != EventLog {
+		t.Fatalf("turn completed kind = %q", turnCompleted.Kind)
+	}
+}
+
 type recordingSink struct {
 	mu     sync.Mutex
 	events []Event

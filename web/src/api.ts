@@ -52,6 +52,16 @@ export async function cancelWorker(workerId: string) {
   }
 }
 
+export async function applyWorkerChanges(workerId: string) {
+  const response = await fetch(`/api/workers/${workerId}/apply`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
 async function errorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json();

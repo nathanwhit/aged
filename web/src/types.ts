@@ -10,6 +10,7 @@ export type TaskStatus =
 export type WorkerStatus =
   | "queued"
   | "running"
+  | "waiting"
   | "succeeded"
   | "failed"
   | "canceled";

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   Activity,
   Bot,
+  Check,
   CircleStop,
   MessageSquarePlus,
   Play,
@@ -10,7 +11,7 @@ import {
   Send,
   Terminal,
 } from "lucide-react";
-import { cancelTask, cancelWorker, createTask, getSnapshot, steerTask } from "./api";
+import { applyWorkerChanges, cancelTask, cancelWorker, createTask, getSnapshot, steerTask } from "./api";
 import type { EventRecord, Snapshot, Task, Worker } from "./types";
 import "./styles.css";
 
@@ -121,7 +122,7 @@ function App() {
           {selectedTask ? (
             <>
               <TaskDetail task={selectedTask} onCancel={cancelTask} onSteer={steerTask} onError={setError} />
-              <WorkerList workers={selectedWorkers} onCancel={cancelWorker} onError={setError} />
+              <WorkerList workers={selectedWorkers} events={selectedEvents} onApply={applyWorkerChanges} onApplied={refresh} onCancel={cancelWorker} onError={setError} />
               <EventLog events={selectedEvents} />
             </>
           ) : (
@@ -229,13 +230,33 @@ function TaskDetail({
 
 function WorkerList({
   workers,
+  events,
+  onApply,
+  onApplied,
   onCancel,
   onError,
 }: {
   workers: Worker[];
+  events: EventRecord[];
+  onApply: (id: string) => Promise<void>;
+  onApplied: () => Promise<void>;
   onCancel: (id: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
+  const [applying, setApplying] = useState<string>("");
+
+  async function apply(workerId: string) {
+    setApplying(workerId);
+    try {
+      await onApply(workerId);
+      await onApplied();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setApplying("");
+    }
+  }
+
   return (
     <section className="panel">
       <div className="panel-title">
@@ -246,22 +267,60 @@ function WorkerList({
         <p className="empty">No workers have been spawned.</p>
       ) : (
         <div className="worker-grid">
-          {workers.map((worker) => (
-            <article key={worker.id} className="worker-card">
-              <div>
-                <strong>{worker.kind}</strong>
-                <small>{worker.id.slice(0, 8)}</small>
-              </div>
-              <Status value={worker.status} />
-              <button className="icon-button danger" onClick={() => onCancel(worker.id).catch((err: Error) => onError(err.message))} title="Cancel worker">
-                <CircleStop size={16} />
-              </button>
-            </article>
-          ))}
+          {workers.map((worker) => {
+            const completion = latestWorkerCompletion(events, worker.id);
+            const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
+            return (
+              <article key={worker.id} className="worker-card">
+                <div>
+                  <strong>{worker.kind}</strong>
+                  <small>{worker.id.slice(0, 8)}</small>
+                </div>
+                <Status value={worker.status} />
+                <button className="icon-button danger" onClick={() => onCancel(worker.id).catch((err: Error) => onError(err.message))} title="Cancel worker">
+                  <CircleStop size={16} />
+                </button>
+                {changes.length > 0 && (
+                  <div className="worker-review">
+                    <details>
+                      <summary>{changes.length} changed files</summary>
+                      <ul>
+                        {changes.slice(0, 8).map((file) => (
+                          <li key={`${file.status}-${file.path}`}>
+                            <code>{file.status ?? "changed"}</code>
+                            <span>{file.path}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                    <button className="primary compact" disabled={applying === worker.id} onClick={() => apply(worker.id)} title="Apply worker changes">
+                      <Check size={16} />
+                      {applying === worker.id ? "Applying" : "Apply"}
+                    </button>
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
     </section>
   );
+}
+
+type WorkerCompletionPayload = {
+  changedFiles?: { path: string; status?: string }[];
+  workspaceChanges?: { changedFiles?: { path: string; status?: string }[] };
+};
+
+function latestWorkerCompletion(events: EventRecord[], workerId: string): WorkerCompletionPayload {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type === "worker.completed" && event.workerId === workerId) {
+      return event.payload as WorkerCompletionPayload;
+    }
+  }
+  return {};
 }
 
 function EventLog({ events }: { events: EventRecord[] }) {
@@ -283,8 +342,39 @@ function EventLog({ events }: { events: EventRecord[] }) {
 }
 
 function EventLine({ event }: { event: EventRecord }) {
-  const payload = event.payload as { text?: string; stream?: string; status?: string; message?: string; error?: string };
-  const text = payload.text ?? payload.message ?? payload.error ?? payload.status ?? JSON.stringify(event.payload);
+  const payload = event.payload as {
+    text?: string;
+    stream?: string;
+    status?: string;
+    message?: string;
+    error?: string;
+    summary?: string;
+    reason?: string;
+    cleaned?: boolean;
+    changedFiles?: { path: string; status?: string }[];
+    workspaceChanges?: { changedFiles?: { path: string; status?: string }[]; dirty?: boolean };
+  };
+  const changedFiles = payload.changedFiles ?? payload.workspaceChanges?.changedFiles ?? [];
+  const changeText =
+    changedFiles.length > 0
+      ? `${changedFiles.length} changed: ${changedFiles
+          .slice(0, 4)
+          .map((file) => file.path)
+          .join(", ")}${changedFiles.length > 4 ? "..." : ""}`
+      : undefined;
+  const primaryText =
+    payload.text ??
+    payload.summary ??
+    payload.message ??
+    payload.error ??
+    payload.reason ??
+    payload.status ??
+    (typeof payload.cleaned === "boolean" ? `cleaned: ${payload.cleaned}` : undefined);
+  const text = primaryText
+    ? changeText
+      ? `${primaryText} | ${changeText}`
+      : primaryText
+    : (changeText ?? JSON.stringify(event.payload));
   return (
     <div className="event-line">
       <time>{new Date(event.at).toLocaleTimeString()}</time>
