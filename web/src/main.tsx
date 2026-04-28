@@ -10,15 +10,17 @@ import {
   RefreshCw,
   Send,
   Terminal,
+  Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, cancelTask, cancelWorker, createTask, getSnapshot, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, Snapshot, Task, Worker } from "./types";
+import { applyWorkerChanges, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, steerTask } from "./api";
+import type { EventRecord, ExecutionNode, Snapshot, TargetState, Task, Worker } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
   tasks: Task[];
   workers: Worker[];
   executionNodes: ExecutionNode[];
+  targets: TargetState[];
   events: EventRecord[];
 };
 
@@ -26,6 +28,7 @@ const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
   executionNodes: [],
+  targets: [],
   events: [],
 };
 
@@ -38,7 +41,7 @@ function App() {
   async function refresh() {
     const next = normalizeSnapshot(await getSnapshot());
     setSnapshot(next);
-    setSelectedTaskId((current) => current || next.tasks.at(-1)?.id || "");
+    setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : next.tasks.at(-1)?.id || ""));
   }
 
   useEffect(() => {
@@ -64,6 +67,28 @@ function App() {
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
+  const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
+  const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
+
+  async function handleClearTask(taskId: string) {
+    try {
+      setError("");
+      await clearTask(taskId);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleClearFinished() {
+    try {
+      setError("");
+      await clearFinishedTasks();
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
 
   return (
     <main className="app">
@@ -98,25 +123,36 @@ function App() {
         />
 
         <section className="panel task-list">
-          <div className="panel-title">
-            <Activity size={18} />
-            <h2>Tasks</h2>
+          <div className="panel-title split-title">
+            <span>
+              <Activity size={18} />
+              <h2>Tasks</h2>
+            </span>
+            <button className="icon-button ghost" disabled={!hasTerminalTasks} onClick={handleClearFinished} title="Clear finished tasks">
+              <Trash2 size={16} />
+            </button>
           </div>
           {snapshot.tasks.length === 0 ? (
             <p className="empty">No tasks yet.</p>
           ) : (
             snapshot.tasks.map((task) => (
-              <button
+              <div
                 key={task.id}
                 className={task.id === selectedTask?.id ? "task-row selected" : "task-row"}
-                onClick={() => setSelectedTaskId(task.id)}
               >
-                <span>
-                  <strong>{task.title}</strong>
-                  <small>{task.id.slice(0, 8)}</small>
-                </span>
-                <Status value={task.status} />
-              </button>
+                <button className="task-row-main" onClick={() => setSelectedTaskId(task.id)}>
+                  <span>
+                    <strong>{task.title}</strong>
+                    <small>{task.id.slice(0, 8)}</small>
+                  </span>
+                  <Status value={task.status} />
+                </button>
+                {isTerminalTask(task) && (
+                  <button className="icon-button ghost danger-text task-clear" onClick={() => handleClearTask(task.id)} title="Clear task">
+                    <Trash2 size={16} />
+                  </button>
+                )}
+              </div>
             ))
           )}
         </section>
@@ -125,6 +161,8 @@ function App() {
           {selectedTask ? (
             <>
               <TaskDetail task={selectedTask} onCancel={cancelTask} onSteer={steerTask} onError={setError} />
+              <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />
+              <TargetPanel targets={snapshot.targets} />
               <ExecutionGraph nodes={selectedNodes} />
               <WorkerList workers={selectedWorkers} events={selectedEvents} onApply={applyWorkerChanges} onApplied={refresh} onCancel={cancelWorker} onError={setError} />
               <EventLog events={selectedEvents} />
@@ -135,6 +173,78 @@ function App() {
         </section>
       </section>
     </main>
+  );
+}
+
+type WorkProgress = {
+  total: number;
+  done: number;
+  running: number;
+  waiting: number;
+  failed: number;
+  percent: number;
+};
+
+function workProgress(task: Task | undefined, workers: Worker[], nodes: ExecutionNode[]): WorkProgress {
+  const items = nodes.length > 0 ? nodes.map((node) => node.status) : workers.map((worker) => worker.status);
+  const total = items.length || (task ? 1 : 0);
+  const done = items.filter((status) => status === "succeeded").length;
+  const running = items.filter((status) => status === "running").length + (task?.status === "planning" ? 1 : 0);
+  const waiting = items.filter((status) => status === "waiting" || status === "queued").length;
+  const failed = items.filter((status) => status === "failed" || status === "canceled").length;
+  const terminalTaskDone = task?.status === "succeeded" && total === 1 ? 1 : done;
+  return {
+    total,
+    done: terminalTaskDone,
+    running,
+    waiting,
+    failed,
+    percent: total > 0 ? Math.round((terminalTaskDone / total) * 100) : 0,
+  };
+}
+
+function isTerminalTask(task: Task): boolean {
+  return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
+}
+
+function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[] }) {
+  const activeNodes = nodes.filter((node) => node.status === "running" || node.status === "queued" || node.status === "waiting");
+  const activeWorkers = workers.filter((worker) => worker.status === "running" || worker.status === "queued" || worker.status === "waiting");
+  const activeCount = activeNodes.length || activeWorkers.length;
+  return (
+    <section className="panel summary-panel">
+      <div className="panel-title">
+        <Activity size={18} />
+        <h2>Current State</h2>
+      </div>
+      <div className="summary-grid">
+        <Metric label="Progress" value={`${progress.percent}%`} />
+        <Metric label="Done" value={`${progress.done}/${progress.total}`} />
+        <Metric label="Running" value={String(progress.running)} />
+        <Metric label="Waiting" value={String(progress.waiting)} />
+        <Metric label="Failed" value={String(progress.failed)} />
+      </div>
+      <div className="progress-track" aria-label={`Progress ${progress.percent}%`}>
+        <div style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="active-work">
+        <strong>{activeCount} active</strong>
+        {(activeNodes.length > 0 ? activeNodes : activeWorkers).slice(0, 4).map((item) => (
+          <span key={item.id}>
+            {"workerKind" in item ? (item.role || item.workerKind) : item.kind} <Status value={item.status} />
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -332,12 +442,40 @@ function ExecutionGraph({ nodes }: { nodes: ExecutionNode[] }) {
             </div>
             <Status value={node.status} />
             <small>{node.workerKind}</small>
+            {node.targetId && <small>{node.targetKind ?? "target"}: {node.targetId}</small>}
             {(node.spawnId || node.dependsOn?.length) && (
               <p>
                 {node.spawnId ? `spawn ${node.spawnId}` : ""}
                 {node.dependsOn?.length ? ` depends on ${node.dependsOn.join(", ")}` : ""}
               </p>
             )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function TargetPanel({ targets }: { targets: TargetState[] }) {
+  if (targets.length === 0) return null;
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <Activity size={18} />
+        <h2>Targets</h2>
+      </div>
+      <div className="node-grid">
+        {targets.map((target) => (
+          <article key={target.id} className="node-card">
+            <div>
+              <strong>{target.id}</strong>
+              <small>{target.kind}</small>
+            </div>
+            <Status value={target.available ? "running" : "waiting"} />
+            <p>
+              {target.running}/{target.capacity.maxWorkers} workers
+              {target.capacity.memoryGB ? ` | ${target.capacity.memoryGB} GB` : ""}
+            </p>
           </article>
         ))}
       </div>
@@ -434,6 +572,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     tasks: snapshot.tasks ?? [],
     workers: snapshot.workers ?? [],
     executionNodes: snapshot.executionNodes ?? [],
+    targets: snapshot.targets ?? [],
     events: snapshot.events ?? [],
   };
 }
@@ -449,6 +588,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   const tasks = new Map<string, Task>();
   const workers = new Map<string, Worker>();
   const executionNodes = new Map<string, ExecutionNode>();
+  const clearedTasks = new Set<string>();
 
   for (const event of snapshot.events) {
     const payload = event.payload as Record<string, unknown>;
@@ -468,6 +608,9 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         tasks.set(event.taskId, { ...task, status: String(payload.status) as Task["status"], updatedAt: event.at });
       }
     }
+    if (event.type === "task.cleared" && event.taskId) {
+      clearedTasks.add(event.taskId);
+    }
     if (event.type === "execution.node_planned" && event.taskId) {
       const nodeId = String(payload.nodeId ?? "");
       if (nodeId) {
@@ -482,6 +625,11 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
           spawnId: String(payload.spawnId ?? "") || undefined,
           role: String(payload.role ?? "") || undefined,
           reason: String(payload.reason ?? "") || undefined,
+          targetId: String(payload.targetId ?? "") || undefined,
+          targetKind: String(payload.targetKind ?? "") || undefined,
+          remoteSession: String(payload.remoteSession ?? "") || undefined,
+          remoteRunDir: String(payload.remoteRunDir ?? "") || undefined,
+          remoteWorkDir: String(payload.remoteWorkDir ?? "") || undefined,
           dependsOn: Array.isArray(payload.dependsOn) ? payload.dependsOn.map(String) : undefined,
           createdAt: event.at,
           updatedAt: event.at,
@@ -521,9 +669,10 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   }
 
   return {
-    tasks: [...tasks.values()],
-    workers: [...workers.values()],
-    executionNodes: [...executionNodes.values()],
+    tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
+    workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
+    executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    targets: snapshot.targets,
     events: snapshot.events,
   };
 }

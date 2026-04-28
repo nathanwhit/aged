@@ -43,6 +43,25 @@ export async function cancelTask(taskId: string) {
   }
 }
 
+export async function clearTask(taskId: string) {
+  const response = await fetch(`/api/tasks/${taskId}/clear`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+export async function clearFinishedTasks() {
+  const response = await fetch("/api/tasks/clear-terminal", {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
 export async function cancelWorker(workerId: string) {
   const response = await fetch(`/api/workers/${workerId}/cancel`, {
     method: "POST",

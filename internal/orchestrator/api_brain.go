@@ -232,6 +232,10 @@ func planResponseFormat() map[string]any {
 							},
 						},
 					},
+					"metadata": map[string]any{
+						"type":                 "object",
+						"additionalProperties": true,
+					},
 					"spawns": map[string]any{
 						"type": "array",
 						"items": map[string]any{

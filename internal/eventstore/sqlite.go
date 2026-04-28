@@ -116,6 +116,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	tasks := map[string]core.Task{}
 	workers := map[string]core.Worker{}
 	nodes := map[string]core.ExecutionNode{}
+	clearedTasks := map[string]bool{}
 	workerNodes := map[string]string{}
 	workspaceMetadata := map[string]json.RawMessage{}
 
@@ -150,37 +151,49 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			task.Status = payload.Status
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
+		case core.EventTaskCleared:
+			clearedTasks[event.TaskID] = true
 		case core.EventExecutionPlanned:
 			var payload struct {
-				NodeID       string          `json:"nodeId"`
-				WorkerID     string          `json:"workerId,omitempty"`
-				WorkerKind   string          `json:"workerKind"`
-				PlanID       string          `json:"planId,omitempty"`
-				ParentNodeID string          `json:"parentNodeId,omitempty"`
-				SpawnID      string          `json:"spawnId,omitempty"`
-				Role         string          `json:"role,omitempty"`
-				Reason       string          `json:"reason,omitempty"`
-				DependsOn    []string        `json:"dependsOn,omitempty"`
-				Metadata     json.RawMessage `json:"metadata,omitempty"`
+				NodeID        string          `json:"nodeId"`
+				WorkerID      string          `json:"workerId,omitempty"`
+				WorkerKind    string          `json:"workerKind"`
+				PlanID        string          `json:"planId,omitempty"`
+				ParentNodeID  string          `json:"parentNodeId,omitempty"`
+				SpawnID       string          `json:"spawnId,omitempty"`
+				Role          string          `json:"role,omitempty"`
+				Reason        string          `json:"reason,omitempty"`
+				TargetID      string          `json:"targetId,omitempty"`
+				TargetKind    string          `json:"targetKind,omitempty"`
+				RemoteSession string          `json:"remoteSession,omitempty"`
+				RemoteRunDir  string          `json:"remoteRunDir,omitempty"`
+				RemoteWorkDir string          `json:"remoteWorkDir,omitempty"`
+				DependsOn     []string        `json:"dependsOn,omitempty"`
+				Metadata      json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode execution.node_planned: %w", err)
 			}
 			node := core.ExecutionNode{
-				ID:           payload.NodeID,
-				TaskID:       event.TaskID,
-				WorkerID:     payload.WorkerID,
-				WorkerKind:   payload.WorkerKind,
-				Status:       core.WorkerQueued,
-				PlanID:       payload.PlanID,
-				ParentNodeID: payload.ParentNodeID,
-				SpawnID:      payload.SpawnID,
-				Role:         payload.Role,
-				Reason:       payload.Reason,
-				DependsOn:    payload.DependsOn,
-				CreatedAt:    event.At,
-				UpdatedAt:    event.At,
-				Metadata:     payload.Metadata,
+				ID:            payload.NodeID,
+				TaskID:        event.TaskID,
+				WorkerID:      payload.WorkerID,
+				WorkerKind:    payload.WorkerKind,
+				Status:        core.WorkerQueued,
+				PlanID:        payload.PlanID,
+				ParentNodeID:  payload.ParentNodeID,
+				SpawnID:       payload.SpawnID,
+				Role:          payload.Role,
+				Reason:        payload.Reason,
+				TargetID:      payload.TargetID,
+				TargetKind:    payload.TargetKind,
+				RemoteSession: payload.RemoteSession,
+				RemoteRunDir:  payload.RemoteRunDir,
+				RemoteWorkDir: payload.RemoteWorkDir,
+				DependsOn:     payload.DependsOn,
+				CreatedAt:     event.At,
+				UpdatedAt:     event.At,
+				Metadata:      payload.Metadata,
 			}
 			nodes[payload.NodeID] = node
 			if payload.WorkerID != "" {
@@ -266,11 +279,41 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	}
 
 	return core.Snapshot{
-		Tasks:          orderedTasks(tasks),
-		Workers:        orderedWorkers(workers),
-		ExecutionNodes: orderedExecutionNodes(nodes),
+		Tasks:          orderedTasks(filterClearedTasks(tasks, clearedTasks)),
+		Workers:        orderedWorkers(filterClearedWorkers(workers, clearedTasks)),
+		ExecutionNodes: orderedExecutionNodes(filterClearedExecutionNodes(nodes, clearedTasks)),
 		Events:         events,
 	}, nil
+}
+
+func filterClearedTasks(values map[string]core.Task, cleared map[string]bool) map[string]core.Task {
+	out := map[string]core.Task{}
+	for id, task := range values {
+		if !cleared[id] {
+			out[id] = task
+		}
+	}
+	return out
+}
+
+func filterClearedWorkers(values map[string]core.Worker, cleared map[string]bool) map[string]core.Worker {
+	out := map[string]core.Worker{}
+	for id, worker := range values {
+		if !cleared[worker.TaskID] {
+			out[id] = worker
+		}
+	}
+	return out
+}
+
+func filterClearedExecutionNodes(values map[string]core.ExecutionNode, cleared map[string]bool) map[string]core.ExecutionNode {
+	out := map[string]core.ExecutionNode{}
+	for id, node := range values {
+		if !cleared[node.TaskID] {
+			out[id] = node
+		}
+	}
+	return out
 }
 
 func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {

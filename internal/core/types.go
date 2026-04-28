@@ -36,6 +36,7 @@ const (
 	EventTaskPlanned      EventType = "task.planned"
 	EventTaskReplanned    EventType = "task.replanned"
 	EventTaskSteered      EventType = "task.steered"
+	EventTaskCleared      EventType = "task.cleared"
 	EventExecutionPlanned EventType = "execution.node_planned"
 	EventExecutionStatus  EventType = "execution.node_status"
 	EventApplyPolicy      EventType = "apply.policy_recommended"
@@ -81,20 +82,40 @@ type Worker struct {
 }
 
 type ExecutionNode struct {
-	ID           string          `json:"id"`
-	TaskID       string          `json:"taskId"`
-	WorkerID     string          `json:"workerId,omitempty"`
-	WorkerKind   string          `json:"workerKind"`
-	Status       WorkerStatus    `json:"status"`
-	PlanID       string          `json:"planId,omitempty"`
-	ParentNodeID string          `json:"parentNodeId,omitempty"`
-	SpawnID      string          `json:"spawnId,omitempty"`
-	Role         string          `json:"role,omitempty"`
-	Reason       string          `json:"reason,omitempty"`
-	DependsOn    []string        `json:"dependsOn,omitempty"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
-	Metadata     json.RawMessage `json:"metadata,omitempty"`
+	ID            string          `json:"id"`
+	TaskID        string          `json:"taskId"`
+	WorkerID      string          `json:"workerId,omitempty"`
+	WorkerKind    string          `json:"workerKind"`
+	Status        WorkerStatus    `json:"status"`
+	PlanID        string          `json:"planId,omitempty"`
+	ParentNodeID  string          `json:"parentNodeId,omitempty"`
+	SpawnID       string          `json:"spawnId,omitempty"`
+	Role          string          `json:"role,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	TargetID      string          `json:"targetId,omitempty"`
+	TargetKind    string          `json:"targetKind,omitempty"`
+	RemoteSession string          `json:"remoteSession,omitempty"`
+	RemoteRunDir  string          `json:"remoteRunDir,omitempty"`
+	RemoteWorkDir string          `json:"remoteWorkDir,omitempty"`
+	DependsOn     []string        `json:"dependsOn,omitempty"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+}
+
+type TargetCapacity struct {
+	MaxWorkers int     `json:"maxWorkers"`
+	CPUWeight  float64 `json:"cpuWeight,omitempty"`
+	MemoryGB   float64 `json:"memoryGB,omitempty"`
+}
+
+type TargetState struct {
+	ID        string            `json:"id"`
+	Kind      string            `json:"kind"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	Capacity  TargetCapacity    `json:"capacity"`
+	Running   int               `json:"running"`
+	Available bool              `json:"available"`
 }
 
 type CreateTaskRequest struct {
@@ -115,6 +136,7 @@ type Snapshot struct {
 	Tasks          []Task          `json:"tasks"`
 	Workers        []Worker        `json:"workers"`
 	ExecutionNodes []ExecutionNode `json:"executionNodes"`
+	Targets        []TargetState   `json:"targets,omitempty"`
 	Events         []Event         `json:"events"`
 }
 

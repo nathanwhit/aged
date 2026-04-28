@@ -36,6 +36,12 @@ The JSON object must have exactly these top-level fields:
       "reason": "string"
     }
   ],
+  "metadata": {
+    "targetLabels": {
+      "role": "benchmark"
+    },
+    "workerSize": "large"
+  },
   "spawns": [
     {
       "id": "string",
@@ -55,6 +61,7 @@ Field rules:
 - `rationale` must be a concise reason for the scheduling choice.
 - `steps` must be an array of objects. Each object must have string fields `title` and `description`.
 - `requiredApprovals` must be an array of objects. Each object must have string fields `title` and `reason`. Use `[]` when no approval is needed.
+- `metadata` is optional. Use `metadata.targetLabels` to request target labels such as `{ "role": "benchmark" }` when the work needs a specialized VM. Use `metadata.workerSize` as `"small"`, `"medium"`, or `"large"` to help load balancing.
 - `spawns` must be an array of objects. Each object must have string fields `role` and `reason`. Use `[]` when no additional future workers are useful.
 - Each spawn may include `id`, `workerKind`, and `dependsOn`. Use `id` when another spawn depends on it. `workerKind`, when present, must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`. `dependsOn` must contain spawn ids from the same `spawns` array.
 - Spawns with no `dependsOn` can run in parallel after the initial worker succeeds. Spawns with dependencies wait until all dependency workers succeed.

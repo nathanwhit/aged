@@ -35,6 +35,7 @@ func main() {
 		workspaceMode    = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
 		workspaceRoot    = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "directory for isolated worker workspaces")
 		workspaceCleanup = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
+		targetsPath      = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
 		webDistPath      = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
 	)
 	flag.Parse()
@@ -96,13 +97,24 @@ func main() {
 		slog.Warn("unknown brain mode; using fallback prompt brain", "brain", *brainMode)
 	}
 
-	service := orchestrator.NewServiceWithWorkspaceManager(
+	targets, err := orchestrator.LoadTargetRegistry(*targetsPath)
+	if err != nil {
+		slog.Error("load execution targets", "error", err)
+		os.Exit(1)
+	}
+
+	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
 		store,
 		brain,
 		worker.DefaultRunners(),
 		absWorkDir,
 		orchestrator.NewWorkspaceManager(orchestrator.WorkspaceVCS(*workspaceVCS), orchestrator.WorkspaceMode(*workspaceMode), *workspaceRoot, orchestrator.WorkspaceCleanupPolicy(*workspaceCleanup)),
+		targets,
+		orchestrator.NewSSHRunner(),
 	)
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		slog.Warn("recover remote workers", "error", err)
+	}
 	server := &http.Server{
 		Addr:              *addr,
 		Handler:           httpapi.New(service, staticHandler(*webDistPath)).Routes(),

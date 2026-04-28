@@ -11,6 +11,7 @@ We are developing an agent orchestrator, for autonomous work. The architecture s
   Ability to schedule review/feedback loops, such as one worker implementing a change, another reviewing it, and a later worker incorporating that feedback
   Complex-task decision making: the orchestrator should be able to decompose large work, sequence or parallelize worker turns, inspect outputs, request approvals, and decide when to continue, revise, merge, or stop
   Ability to run workers on other vms, or on the same machine (docker, subprocesses)
+  Given a configured pool of worker VMs, the orchestrator should schedule workers onto targets based on labels, capacity, current assigned work, and task size. The first remote backend can use SSH plus detached tmux sessions so work survives SSH disconnects; VM provisioning is intentionally outside the orchestrator.
   Ability to work with codex, claude code (headless modes)
   User visibility into the state of work
   Steerability by the user

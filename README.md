@@ -26,6 +26,29 @@ Useful flags:
 go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker mock -workdir .
 ```
 
+Remote execution targets are configured with `-targets` / `AGED_TARGETS` using JSON:
+
+```json
+{
+  "targets": [
+    {
+      "id": "perf-1",
+      "kind": "ssh",
+      "host": "perf-1.internal",
+      "user": "aged",
+      "identityFile": "/Users/me/.ssh/id_ed25519",
+      "insecureIgnoreHostKey": false,
+      "workDir": "/srv/aged/repo",
+      "workRoot": "/srv/aged/runs",
+      "labels": { "role": "benchmark" },
+      "capacity": { "maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32 }
+    }
+  ]
+}
+```
+
+SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
+
 Scheduler behavior:
 
 - `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
@@ -33,6 +56,7 @@ Scheduler behavior:
 - Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
 - Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
+- The orchestrator chooses an execution target for each worker. Plans can request labels through `metadata.targetLabels`, and the target registry scores matching VMs by capacity, current running workers, worker size, and target labels.
 - The scheduler is expected to support long-lived work by planning bounded worker turns, then using later turns for review, validation, feedback incorporation, or follow-up implementation.
 - `spawns` from initial and dynamically replanned plans are executed as a dependency graph after the plan's primary worker succeeds. Independent spawns run in parallel; spawns with `dependsOn` wait for their prerequisite spawn ids. Follow-up prompts include the original request plus prior worker summaries, errors, and changed files.
 - Brains that implement dynamic replanning can inspect completed worker turns after follow-ups and return `continue`, `complete`, `wait`, or `fail`. `continue` schedules another worker turn, runs that plan's follow-up graph, and records `task.replanned`.
@@ -91,6 +115,14 @@ go run ./cmd/aged-dev
 ```
 
 It listens on `http://127.0.0.1:8790` by default and manages the daemon at `http://127.0.0.1:8787`.
+
+To view the dashboard from a phone or another device on the same network, bind both listeners to all interfaces:
+
+```sh
+go run ./cmd/aged-dev -addr 0.0.0.0:8790 -daemon-addr 0.0.0.0:8787
+```
+
+Then open `http://<your-lan-ip>:8787` from the device.
 
 - `GET /health` checks the control server.
 - `GET /status` returns the last rebuild/restart result.

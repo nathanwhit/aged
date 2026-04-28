@@ -54,14 +54,33 @@ export type ExecutionNode = {
   spawnId?: string;
   role?: string;
   reason?: string;
+  targetId?: string;
+  targetKind?: string;
+  remoteSession?: string;
+  remoteRunDir?: string;
+  remoteWorkDir?: string;
   dependsOn?: string[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type TargetState = {
+  id: string;
+  kind: string;
+  labels?: Record<string, string>;
+  capacity: {
+    maxWorkers: number;
+    cpuWeight?: number;
+    memoryGB?: number;
+  };
+  running: number;
+  available: boolean;
 };
 
 export type Snapshot = {
   tasks: Task[] | null;
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;
+  targets?: TargetState[] | null;
   events: EventRecord[] | null;
 };

@@ -29,6 +29,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
+	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/apply-policy", s.recommendApplyPolicy)
@@ -98,6 +100,23 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearTask(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.ClearTask(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearTerminalTasks(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.ClearTerminalTasks(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) cancelWorker(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +208,7 @@ func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	if errors.Is(err, eventstore.ErrNotFound) {
 		status = http.StatusNotFound
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "terminal tasks") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})

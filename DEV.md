@@ -14,8 +14,11 @@ The initial local-first vertical slice is implemented.
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
 - Worker runners for `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - React/Vite dashboard for creating tasks, viewing state/logs, steering, and cancellation.
+- Dashboard has a phone-friendly responsive layout and a current-state summary with progress, active work, worker counts, target state, execution nodes, and timeline.
+- Dashboard can clear finished tasks individually or in bulk. Clearing records `task.cleared` and hides the task, workers, and execution nodes from snapshots/UI without deleting event history.
 - Built dashboard can be served directly by the Go daemon from `web/dist`.
 - Dev control server in `cmd/aged-dev` can rebuild the daemon, rebuild the UI, and restart the managed daemon through a local HTTP trigger.
+- Dev control can be launched with `-daemon-addr 0.0.0.0:8787` so the dashboard is reachable from other devices on the local network.
 - Frontend toolchain is on Vite 8 with `@vitejs/plugin-react` 6.
 - Scheduling is recorded as `task.planned` before worker creation.
 - Workspace preflight is recorded as `worker.workspace_prepared` before worker creation.
@@ -24,6 +27,8 @@ The initial local-first vertical slice is implemented.
 - Worker output is normalized into log/result/error/needs-input events, with raw JSON preserved for Codex and Claude streams.
 - Worker completion records derived `summary`, `error`, `needsInput`, `logCount`, changed files, and workspace diffstat/status fields.
 - Worker execution is projected as first-class `executionNodes` snapshot state from `execution.node_planned` events, with node id, worker id, worker kind, spawn id, dependencies, role/reason, and status.
+- Execution target pools are configurable with `-targets` / `AGED_TARGETS`. The default target is local; SSH targets use detached tmux sessions and remote status/log files so work can outlive the SSH connection.
+- Target scheduling scores matching targets by labels, capacity, current running workers, worker size, and memory/CPU hints.
 - Retained isolated worker changes can be reviewed and applied through HTTP/UI; jj apply creates a merge revision and records `worker.changes_applied`.
 - Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; multiple competing changed workers produce a `manual_select` recommendation instead of pretending there is a safe automatic merge order.
 - Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude command adapters now forward steering messages to subprocess stdin and record delivery log events.
@@ -38,6 +43,7 @@ The initial local-first vertical slice is implemented.
 
 - `go test ./...`
 - `npm run build`
+- Clear-task tests verify `task.cleared` hides tasks/workers/execution nodes while preserving events, and the bulk clear HTTP endpoint hides terminal tasks.
 - `npm ls vite @vitejs/plugin-react`
 - Scheduler tests:
   - Codex brain parses Codex `agent_message` plans.
@@ -51,7 +57,8 @@ The initial local-first vertical slice is implemented.
   - Follow-up worker prompts include prior worker result context.
   - Service dynamically replans after follow-up output and can schedule an incorporation worker.
   - Service runs spawned workers from dynamic replans before asking the brain for the next decision.
-  - Service emits durable execution graph nodes into snapshots.
+- Service emits durable execution graph nodes into snapshots.
+- Service schedules workers onto local or SSH execution targets and records target/session metadata on execution nodes.
   - Service delivers task steering to compatible running workers.
   - Service recommends manual apply selection when multiple changed worker branches compete.
   - Unknown brain-selected workers fail the task cleanly.
@@ -140,7 +147,7 @@ http://127.0.0.1:8787
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
 - User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude subprocess adapters forward steering to stdin, but behavior still depends on whether the underlying CLI reads stdin during that run.
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
-- Remote VM execution is intentionally not implemented yet; the runner interface is the extension point.
+- SSH target execution exists for pre-provisioned machines; richer remote workspace synchronization and patch collection are still open.
 
 ## Next Work
 
@@ -154,4 +161,5 @@ http://127.0.0.1:8787
 - Decide the exact plugin process protocol for external worker/plugins.
 - Improve task cancellation so task-scoped worker indexing survives daemon restart.
 - Add approval request/decision flow in the UI and orchestrator.
-- Add remote runner design once local runner behavior is stable.
+- Add richer remote workspace synchronization and remote patch/apply collection for SSH targets.
+- Add live SSH resource probes for CPU/memory/load rather than relying only on configured capacity and assigned worker count.

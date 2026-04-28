@@ -48,6 +48,10 @@ type ApplyCandidate struct {
 	Applied      bool                   `json:"applied"`
 }
 
+type ClearTasksResult struct {
+	Cleared []string `json:"cleared"`
+}
+
 type Service struct {
 	store      eventstore.Store
 	broker     *Broker
@@ -55,11 +59,14 @@ type Service struct {
 	runners    map[string]worker.Runner
 	workDir    string
 	workspaces WorkspaceManager
+	targets    *TargetRegistry
+	sshRunner  SSHRunner
 
-	mu       sync.Mutex
-	cancels  map[string]context.CancelFunc
-	tasks    map[string]string
-	steering map[string]chan string
+	mu         sync.Mutex
+	cancels    map[string]context.CancelFunc
+	tasks      map[string]string
+	steering   map[string]chan string
+	remoteRuns map[string]remoteRun
 }
 
 const maxDynamicReplanTurns = 4
@@ -80,8 +87,15 @@ func NewService(store eventstore.Store, brain BrainProvider, runners map[string]
 }
 
 func NewServiceWithWorkspaceManager(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string, workspaces WorkspaceManager) *Service {
+	return NewServiceWithWorkspaceManagerAndTargets(store, brain, runners, workDir, workspaces, NewLocalTargetRegistry(), NewSSHRunner())
+}
+
+func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string, workspaces WorkspaceManager, targets *TargetRegistry, sshRunner SSHRunner) *Service {
 	if workspaces == nil {
 		workspaces = NewWorkspaceManager(WorkspaceVCSAuto, WorkspaceModeIsolated, "", WorkspaceCleanupRetain)
+	}
+	if targets == nil {
+		targets = NewLocalTargetRegistry()
 	}
 	return &Service{
 		store:      store,
@@ -90,14 +104,82 @@ func NewServiceWithWorkspaceManager(store eventstore.Store, brain BrainProvider,
 		runners:    runners,
 		workDir:    workDir,
 		workspaces: workspaces,
+		targets:    targets,
+		sshRunner:  sshRunner,
 		cancels:    map[string]context.CancelFunc{},
 		tasks:      map[string]string{},
 		steering:   map[string]chan string{},
+		remoteRuns: map[string]remoteRun{},
 	}
 }
 
 func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
-	return s.store.Snapshot(ctx)
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	if s.targets != nil {
+		snapshot.Targets = s.targets.Snapshot()
+	}
+	return snapshot, nil
+}
+
+func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	completed := map[string]bool{}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventWorkerCompleted {
+			completed[event.WorkerID] = true
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TargetKind != string(TargetKindSSH) || node.WorkerID == "" || completed[node.WorkerID] {
+			continue
+		}
+		if node.Status != core.WorkerRunning && node.Status != core.WorkerQueued {
+			continue
+		}
+		target, ok := s.targets.Get(node.TargetID)
+		if !ok {
+			continue
+		}
+		run := remoteRun{
+			Target:  target,
+			Session: node.RemoteSession,
+			RunDir:  node.RemoteRunDir,
+			WorkDir: node.RemoteWorkDir,
+			Status:  "running",
+		}
+		go s.recoverRemoteWorker(context.Background(), node, run)
+	}
+	return nil
+}
+
+func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNode, run remoteRun) {
+	runState := &workerRunState{}
+	sink := eventSink{service: s, taskID: node.TaskID, workerID: node.WorkerID, state: runState}
+	status, err := s.sshRunner.Poll(ctx, run, worker.ParserForKind(node.WorkerKind), sink)
+	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		statusErr = err
+		workerStatus = core.WorkerFailed
+	}
+	changes := WorkspaceChanges{
+		Root:     run.RunDir,
+		CWD:      run.WorkDir,
+		Mode:     "remote",
+		VCSType:  "ssh",
+		DiffStat: "remote worker changes are reported through worker output",
+	}
+	_, _ = s.append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   node.TaskID,
+		WorkerID: node.WorkerID,
+		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
+	})
 }
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
@@ -178,9 +260,13 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	s.mu.Lock()
 	cancel := s.cancels[workerID]
+	remote := s.remoteRuns[workerID]
 	s.mu.Unlock()
 	if cancel == nil {
 		return eventstore.ErrNotFound
+	}
+	if remote.Session != "" {
+		_ = s.sshRunner.Cancel(ctx, remote)
 	}
 	cancel()
 	return nil
@@ -203,6 +289,58 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 		}),
 	})
 	return err
+}
+
+func (s *Service) ClearTask(ctx context.Context, taskID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID != taskID {
+			continue
+		}
+		if !isTerminalTaskStatus(task.Status) {
+			return errors.New("can only clear terminal tasks")
+		}
+		_, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskCleared,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"reason": "user_cleared",
+			}),
+		})
+		return err
+	}
+	return eventstore.ErrNotFound
+}
+
+func (s *Service) ClearTerminalTasks(ctx context.Context) (ClearTasksResult, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return ClearTasksResult{}, err
+	}
+	result := ClearTasksResult{Cleared: []string{}}
+	for _, task := range snapshot.Tasks {
+		if !isTerminalTaskStatus(task.Status) {
+			continue
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskCleared,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"reason": "user_cleared_terminal",
+			}),
+		}); err != nil {
+			return result, err
+		}
+		result.Cleared = append(result.Cleared, task.ID)
+	}
+	return result, nil
+}
+
+func isTerminalTaskStatus(status core.TaskStatus) bool {
+	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
 }
 
 func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
@@ -399,11 +537,22 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if runner == nil {
 		return WorkerTurnResult{}, fmt.Errorf("unknown worker kind %q", plan.WorkerKind)
 	}
-
-	workerID := uuid.NewString()
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
+	target, err := s.targets.Select(plan)
+	if err != nil {
+		return WorkerTurnResult{}, err
+	}
+	s.targets.Begin(target.ID)
+	defer s.targets.Finish(target.ID)
+	plan.Metadata["targetID"] = target.ID
+	plan.Metadata["targetKind"] = string(target.Kind)
+	if target.Kind == TargetKindSSH {
+		return s.runSSHPlannedWorker(ctx, task, plan, runner, target)
+	}
+
+	workerID := uuid.NewString()
 	nodeID := stringMetadata(plan.Metadata, "nodeID")
 	if nodeID == "" {
 		nodeID = uuid.NewString()
@@ -427,6 +576,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			"spawnId":      stringMetadata(plan.Metadata, "spawnID"),
 			"role":         stringMetadata(plan.Metadata, "spawnRole"),
 			"reason":       stringMetadata(plan.Metadata, "spawnReason"),
+			"targetId":     target.ID,
+			"targetKind":   string(target.Kind),
 			"dependsOn":    stringSliceMetadata(plan.Metadata, "dependsOn"),
 			"metadata":     planMetadata(plan),
 		}),
@@ -546,6 +697,147 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	})
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
+}
+
+func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan Plan, runner worker.Runner, target TargetConfig) (WorkerTurnResult, error) {
+	workerID := uuid.NewString()
+	nodeID := stringMetadata(plan.Metadata, "nodeID")
+	if nodeID == "" {
+		nodeID = uuid.NewString()
+		plan.Metadata["nodeID"] = nodeID
+	}
+	planID := stringMetadata(plan.Metadata, "planID")
+	if planID == "" {
+		planID = uuid.NewString()
+		plan.Metadata["planID"] = planID
+	}
+	steering := make(chan string, 16)
+	spec := worker.Spec{
+		ID:       workerID,
+		TaskID:   task.ID,
+		Kind:     plan.WorkerKind,
+		Prompt:   plan.Prompt,
+		WorkDir:  nonEmpty(target.WorkDir, s.workDir),
+		Steering: steering,
+	}
+	command := runner.BuildCommand(spec)
+	remoteRun := NewRemoteRun(target, spec)
+	plan.Metadata["remoteSession"] = remoteRun.Session
+	plan.Metadata["remoteRunDir"] = remoteRun.RunDir
+	plan.Metadata["remoteWorkDir"] = remoteRun.WorkDir
+
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        nodeID,
+			"workerId":      workerID,
+			"workerKind":    plan.WorkerKind,
+			"planId":        planID,
+			"parentNodeId":  stringMetadata(plan.Metadata, "parentNodeID"),
+			"spawnId":       stringMetadata(plan.Metadata, "spawnID"),
+			"role":          stringMetadata(plan.Metadata, "spawnRole"),
+			"reason":        stringMetadata(plan.Metadata, "spawnReason"),
+			"targetId":      target.ID,
+			"targetKind":    string(target.Kind),
+			"remoteSession": remoteRun.Session,
+			"remoteRunDir":  remoteRun.RunDir,
+			"remoteWorkDir": remoteRun.WorkDir,
+			"dependsOn":     stringSliceMetadata(plan.Metadata, "dependsOn"),
+			"metadata":      planMetadata(plan),
+		}),
+	}); err != nil {
+		return WorkerTurnResult{}, err
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          remoteRun.RunDir,
+			CWD:           remoteRun.WorkDir,
+			SourceRoot:    remoteRun.WorkDir,
+			WorkspaceName: remoteRun.Session,
+			Mode:          "remote",
+			VCSType:       "ssh",
+			WorkerID:      workerID,
+			TaskID:        task.ID,
+		}),
+	}); err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     plan.WorkerKind,
+			"command":  command,
+			"metadata": planMetadata(plan),
+		}),
+	}); err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancels[workerID] = cancel
+	s.tasks[workerID] = task.ID
+	s.steering[workerID] = steering
+	s.remoteRuns[workerID] = remoteRun
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		close(s.steering[workerID])
+		delete(s.cancels, workerID)
+		delete(s.tasks, workerID)
+		delete(s.steering, workerID)
+		delete(s.remoteRuns, workerID)
+		s.mu.Unlock()
+	}()
+
+	_ = s.setTaskStatus(ctx, task.ID, core.TaskRunning)
+	_, _ = s.append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": target.ID, "session": remoteRun.Session}),
+	})
+	runState := &workerRunState{}
+	sink := eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState}
+	if err := s.sshRunner.Start(workerCtx, remoteRun, command); err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
+	status, err := s.sshRunner.Poll(workerCtx, remoteRun, worker.ParserForKind(plan.WorkerKind), sink)
+	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		statusErr = err
+		workerStatus = core.WorkerFailed
+	}
+	if errors.Is(workerCtx.Err(), context.Canceled) {
+		workerStatus = core.WorkerCanceled
+		statusErr = context.Canceled
+	}
+	changes := WorkspaceChanges{
+		Root:     remoteRun.RunDir,
+		CWD:      remoteRun.WorkDir,
+		Mode:     "remote",
+		VCSType:  "ssh",
+		Dirty:    false,
+		DiffStat: "remote worker changes are reported through worker output",
+	}
+	_, _ = s.append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
+	})
+	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
 }
 
 func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, result WorkerTurnResult) bool {
@@ -987,6 +1279,11 @@ func planMetadata(plan Plan) map[string]any {
 		"nodeID",
 		"parentNodeID",
 		"planID",
+		"targetID",
+		"targetKind",
+		"remoteSession",
+		"remoteRunDir",
+		"remoteWorkDir",
 		"spawnID",
 		"spawnReason",
 		"spawnRole",

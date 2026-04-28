@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -747,6 +748,47 @@ func TestServiceRecommendsManualApplyPolicyForMultipleCandidates(t *testing.T) {
 	}
 }
 
+func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Labels:   map[string]string{"role": "remote"},
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 4},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "remote",
+		Prompt:     "run remotely",
+		Metadata: map[string]any{
+			"targetLabels": map[string]any{"role": "remote"},
+		},
+	}}, map[string]worker.Runner{
+		"remote": buildOnlyRunner{kind: "remote", command: []string{"sh", "-lc", "echo remote output"}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Remote", Prompt: "Run on VM."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 {
+		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
+	}
+	node := snapshot.ExecutionNodes[0]
+	if node.TargetID != "vm-1" || node.TargetKind != "ssh" || node.RemoteSession == "" {
+		t.Fatalf("node = %+v", node)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, snapshot.Workers[0].ID) {
+		t.Fatalf("missing remote worker output")
+	}
+}
+
 type fixedBrain struct {
 	plan Plan
 	err  error
@@ -813,6 +855,11 @@ type blockingEventRunner struct {
 type steeringRunner struct {
 	started chan<- struct{}
 	got     chan<- string
+}
+
+type buildOnlyRunner struct {
+	kind    string
+	command []string
 }
 
 func (r eventRunner) Kind() string {
@@ -910,6 +957,18 @@ func (r steeringRunner) Run(ctx context.Context, spec worker.Spec, sink worker.S
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (r buildOnlyRunner) Kind() string {
+	return r.kind
+}
+
+func (r buildOnlyRunner) BuildCommand(worker.Spec) []string {
+	return r.command
+}
+
+func (r buildOnlyRunner) Run(context.Context, worker.Spec, worker.Sink) error {
+	return errors.New("build-only runner should not run locally")
 }
 
 func (r fileWritingRunner) Kind() string {
