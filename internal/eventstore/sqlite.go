@@ -108,7 +108,7 @@ LIMIT ?`, afterID, limit)
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
-	events, err := s.ListEvents(ctx, 0, 100000)
+	events, err := s.allEvents(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
 	}
@@ -200,6 +200,25 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		Workers: orderedWorkers(workers),
 		Events:  events,
 	}, nil
+}
+
+func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
+	var events []core.Event
+	var afterID int64
+	for {
+		batch, err := s.ListEvents(ctx, afterID, 1000)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			return events, nil
+		}
+		events = append(events, batch...)
+		afterID = batch[len(batch)-1].ID
+		if len(batch) < 1000 {
+			return events, nil
+		}
+	}
 }
 
 func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMessage {

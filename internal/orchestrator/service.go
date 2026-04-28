@@ -171,6 +171,11 @@ func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (Wor
 }
 
 func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (WorkerApplyResult, error) {
+	if applied, err := s.workerChangesApplied(ctx, workerID); err != nil {
+		return WorkerApplyResult{}, err
+	} else if applied {
+		return WorkerApplyResult{}, fmt.Errorf("worker changes already applied: %s", workerID)
+	}
 	review, err := s.ReviewWorkerChanges(ctx, workerID)
 	if err != nil {
 		return WorkerApplyResult{}, err
@@ -187,6 +192,19 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 		Payload:  core.MustJSON(result),
 	})
 	return result, err
+}
+
+func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventWorkerApplied && event.WorkerID == workerID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Service) runTask(ctx context.Context, task core.Task) {

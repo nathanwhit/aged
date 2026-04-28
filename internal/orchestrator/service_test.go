@@ -180,6 +180,7 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 
 	workspaceRoot := t.TempDir()
 	changed := WorkspaceChangedFile{Path: "internal/example.txt", Status: "modified"}
+	applyCalls := 0
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "writer",
 		Prompt:     "worker prompt",
@@ -194,6 +195,7 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{changed},
 		},
+		applyCalls: &applyCalls,
 	})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -224,6 +226,15 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if !hasEvent(appliedSnapshot.Events, core.EventWorkerApplied, task.ID, snapshot.Workers[0].ID) {
 		t.Fatalf("missing worker.changes_applied event")
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+	if _, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID); err == nil {
+		t.Fatal("second apply succeeded, want error")
+	}
+	if applyCalls != 1 {
+		t.Fatalf("second apply changed apply calls to %d, want 1", applyCalls)
 	}
 }
 
@@ -304,6 +315,7 @@ type fakeWorkspaceManager struct {
 	cwd        string
 	sourceRoot string
 	changes    WorkspaceChanges
+	applyCalls *int
 }
 
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
@@ -362,6 +374,9 @@ func (m fakeWorkspaceManager) DescribeChanges(_ context.Context, workspace Prepa
 }
 
 func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	if m.applyCalls != nil {
+		*m.applyCalls = *m.applyCalls + 1
+	}
 	return WorkerApplyResult{
 		SourceRoot:    workspace.SourceRoot,
 		WorkspaceRoot: workspace.Root,

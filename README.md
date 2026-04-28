@@ -5,7 +5,7 @@
 The current implementation is an initial vertical slice:
 
 - Go daemon with SQLite event persistence
-- Prompt-driven and API-backed orchestrator brain providers
+- Prompt-driven, Codex-backed, and API-backed orchestrator brain providers
 - Mock, Codex, Claude, and shell worker runner adapters selected by the orchestrator
 - Normalized worker events for logs, results, errors, and worker requests for input
 - VCS-pluggable workspace preflight before workers start
@@ -47,6 +47,14 @@ AGED_BRAIN=api AGED_BRAIN_MODEL=<model> AGED_BRAIN_API_KEY=<key> go run ./cmd/ag
 ```
 
 The API brain uses an OpenAI-compatible chat completions endpoint. Override it with `AGED_BRAIN_ENDPOINT` or `-brain-endpoint`. If the API brain is not configured or returns invalid structured output, the daemon falls back to the local prompt brain.
+
+Codex-backed scheduling can be enabled with:
+
+```sh
+AGED_BRAIN=codex go run ./cmd/aged
+```
+
+The Codex brain runs `codex exec --json` against `prompts/scheduler.md`, extracts the final agent message as the scheduler plan JSON, validates it, and falls back to the local prompt brain on command or validation failures. Override the binary with `AGED_CODEX_PATH` or `-codex-path`.
 
 ## Run the dashboard
 

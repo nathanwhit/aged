@@ -270,6 +270,7 @@ function WorkerList({
           {workers.map((worker) => {
             const completion = latestWorkerCompletion(events, worker.id);
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
+            const applied = workerChangesApplied(events, worker.id);
             return (
               <article key={worker.id} className="worker-card">
                 <div>
@@ -293,9 +294,9 @@ function WorkerList({
                         ))}
                       </ul>
                     </details>
-                    <button className="primary compact" disabled={applying === worker.id} onClick={() => apply(worker.id)} title="Apply worker changes">
+                    <button className="primary compact" disabled={applied || applying === worker.id} onClick={() => apply(worker.id)} title={applied ? "Worker changes already applied" : "Apply worker changes"}>
                       <Check size={16} />
-                      {applying === worker.id ? "Applying" : "Apply"}
+                      {applied ? "Applied" : applying === worker.id ? "Applying" : "Apply"}
                     </button>
                   </div>
                 )}
@@ -321,6 +322,10 @@ function latestWorkerCompletion(events: EventRecord[], workerId: string): Worker
     }
   }
   return {};
+}
+
+function workerChangesApplied(events: EventRecord[], workerId: string): boolean {
+  return events.some((event) => event.type === "worker.changes_applied" && event.workerId === workerId);
 }
 
 function EventLog({ events }: { events: EventRecord[] }) {

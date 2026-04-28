@@ -93,6 +93,66 @@ func TestParseGitPorcelain(t *testing.T) {
 	}
 }
 
+func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
+	changedFiles := []WorkspaceChangedFile{
+		{Path: "internal/orchestrator/workspace.go", Status: "modified"},
+		{Path: "web/src/main.tsx", Status: "added"},
+	}
+	changes := WorkspaceChanges{
+		Dirty:        true,
+		ChangedFiles: changedFiles,
+	}
+
+	tests := []struct {
+		name      string
+		workspace PreparedWorkspace
+		apply     func(context.Context, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
+		method    string
+	}{
+		{
+			name: "jj",
+			workspace: PreparedWorkspace{
+				Root:          "/tmp/worker",
+				SourceRoot:    "/tmp/source",
+				WorkspaceName: "aged-worker",
+				Mode:          string(WorkspaceModeShared),
+			},
+			apply:  NewJJWorkspaceManager(WorkspaceModeIsolated, "", WorkspaceCleanupRetain).ApplyChanges,
+			method: "jj_new_merge",
+		},
+		{
+			name: "git",
+			workspace: PreparedWorkspace{
+				Root:       "/tmp/worker",
+				SourceRoot: "/tmp/source",
+				Mode:       string(WorkspaceModeShared),
+			},
+			apply:  NewGitWorkspaceManager(WorkspaceModeIsolated, "", WorkspaceCleanupRetain).ApplyChanges,
+			method: "git_commit_merge",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tt.apply(context.Background(), tt.workspace, changes)
+			if err == nil {
+				t.Fatalf("expected validation error")
+			}
+			if result.Method != tt.method {
+				t.Fatalf("method = %q, want %q", result.Method, tt.method)
+			}
+			if len(result.AppliedFiles) != len(changedFiles) {
+				t.Fatalf("applied files = %+v", result.AppliedFiles)
+			}
+			for i := range changedFiles {
+				if result.AppliedFiles[i] != changedFiles[i] {
+					t.Fatalf("applied files = %+v", result.AppliedFiles)
+				}
+			}
+		})
+	}
+}
+
 func TestCleanupDecisionPolicies(t *testing.T) {
 	workspace := PreparedWorkspace{
 		Root:          "/tmp/workspace",
