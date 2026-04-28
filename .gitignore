@@ -1,0 +1,8 @@
+aged.db
+aged.db-*
+.gomodcache/
+node_modules/
+web/dist/
+*.tsbuildinfo
+web/vite.config.d.ts
+web/vite.config.js
