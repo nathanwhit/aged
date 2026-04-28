@@ -43,8 +43,25 @@ export type Worker = {
   updatedAt: string;
 };
 
+export type ExecutionNode = {
+  id: string;
+  taskId: string;
+  workerId?: string;
+  workerKind: string;
+  status: WorkerStatus;
+  planId?: string;
+  parentNodeId?: string;
+  spawnId?: string;
+  role?: string;
+  reason?: string;
+  dependsOn?: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Snapshot = {
   tasks: Task[] | null;
   workers: Worker[] | null;
+  executionNodes?: ExecutionNode[] | null;
   events: EventRecord[] | null;
 };

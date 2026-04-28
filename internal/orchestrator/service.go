@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +32,22 @@ type WorkerApplyResult struct {
 	SkippedFiles  []WorkspaceChangedFile `json:"skippedFiles,omitempty"`
 }
 
+type ApplyPolicyRecommendation struct {
+	TaskID     string           `json:"taskId"`
+	Strategy   string           `json:"strategy"`
+	Reason     string           `json:"reason"`
+	Candidates []ApplyCandidate `json:"candidates"`
+}
+
+type ApplyCandidate struct {
+	WorkerID     string                 `json:"workerId"`
+	NodeID       string                 `json:"nodeId,omitempty"`
+	WorkerKind   string                 `json:"workerKind"`
+	Summary      string                 `json:"summary,omitempty"`
+	ChangedFiles []WorkspaceChangedFile `json:"changedFiles,omitempty"`
+	Applied      bool                   `json:"applied"`
+}
+
 type Service struct {
 	store      eventstore.Store
 	broker     *Broker
@@ -38,9 +56,23 @@ type Service struct {
 	workDir    string
 	workspaces WorkspaceManager
 
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
-	tasks   map[string]string
+	mu       sync.Mutex
+	cancels  map[string]context.CancelFunc
+	tasks    map[string]string
+	steering map[string]chan string
+}
+
+const maxDynamicReplanTurns = 4
+
+type WorkerTurnResult struct {
+	WorkerID string            `json:"workerId"`
+	NodeID   string            `json:"nodeId,omitempty"`
+	Status   core.WorkerStatus `json:"status"`
+	Kind     string            `json:"kind"`
+	Role     string            `json:"role,omitempty"`
+	Summary  string            `json:"summary,omitempty"`
+	Error    string            `json:"error,omitempty"`
+	Changes  WorkspaceChanges  `json:"changes"`
 }
 
 func NewService(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string) *Service {
@@ -60,6 +92,7 @@ func NewServiceWithWorkspaceManager(store eventstore.Store, brain BrainProvider,
 		workspaces: workspaces,
 		cancels:    map[string]context.CancelFunc{},
 		tasks:      map[string]string{},
+		steering:   map[string]chan string{},
 	}
 }
 
@@ -125,6 +158,20 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 			"message": req.Message,
 		}),
 	})
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for workerID, ch := range s.steering {
+		if s.tasks[workerID] != taskID {
+			continue
+		}
+		select {
+		case ch <- req.Message:
+		default:
+		}
+	}
+	s.mu.Unlock()
 	return err
 }
 
@@ -194,6 +241,96 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	return result, err
 }
 
+func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (ApplyPolicyRecommendation, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return ApplyPolicyRecommendation{}, err
+	}
+	candidates := applyCandidates(snapshot, taskID)
+	recommendation := ApplyPolicyRecommendation{
+		TaskID:     taskID,
+		Strategy:   "none",
+		Reason:     "no unapplied successful workers with source changes",
+		Candidates: candidates,
+	}
+	unapplied := 0
+	for _, candidate := range candidates {
+		if !candidate.Applied {
+			unapplied++
+		}
+	}
+	switch {
+	case unapplied == 1:
+		recommendation.Strategy = "apply_single"
+		recommendation.Reason = "exactly one unapplied successful worker has source changes"
+	case unapplied > 1:
+		recommendation.Strategy = "manual_select"
+		recommendation.Reason = "multiple unapplied successful workers have source changes; select one or schedule a review/benchmark comparison before applying"
+	}
+	_, err = s.append(ctx, core.Event{
+		Type:    core.EventApplyPolicy,
+		TaskID:  taskID,
+		Payload: core.MustJSON(recommendation),
+	})
+	return recommendation, err
+}
+
+func applyCandidates(snapshot core.Snapshot, taskID string) []ApplyCandidate {
+	workers := map[string]core.Worker{}
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID == taskID {
+			workers[worker.ID] = worker
+		}
+	}
+	nodesByWorker := map[string]string{}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && node.WorkerID != "" {
+			nodesByWorker[node.WorkerID] = node.ID
+		}
+	}
+	applied := map[string]bool{}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventWorkerApplied {
+			applied[event.WorkerID] = true
+		}
+	}
+	var candidates []ApplyCandidate
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventWorkerCompleted || event.TaskID != taskID {
+			continue
+		}
+		worker := workers[event.WorkerID]
+		if worker.ID == "" {
+			continue
+		}
+		var payload struct {
+			Status           core.WorkerStatus      `json:"status"`
+			Summary          string                 `json:"summary,omitempty"`
+			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
+			WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		changedFiles := payload.ChangedFiles
+		if len(changedFiles) == 0 {
+			changedFiles = payload.WorkspaceChanges.ChangedFiles
+		}
+		if payload.Status != core.WorkerSucceeded || len(changedFiles) == 0 {
+			continue
+		}
+		candidates = append(candidates, ApplyCandidate{
+			WorkerID:     event.WorkerID,
+			NodeID:       nodesByWorker[event.WorkerID],
+			WorkerKind:   worker.Kind,
+			Summary:      payload.Summary,
+			ChangedFiles: changedFiles,
+			Applied:      applied[event.WorkerID],
+		})
+	}
+	return candidates
+}
+
 func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -230,15 +367,71 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 
+	results := []WorkerTurnResult{}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	results = append(results, result)
+	if !s.finishOrContinueTask(ctx, task.ID, result) {
+		return
+	}
+
+	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+
+	if !s.replanLoop(ctx, task, plan, results) {
+		return
+	}
+
+	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
 	runner := s.runners[plan.WorkerKind]
 	if runner == nil {
-		_ = s.failTask(ctx, task.ID, fmt.Errorf("unknown worker kind %q", plan.WorkerKind))
-		return
+		return WorkerTurnResult{}, fmt.Errorf("unknown worker kind %q", plan.WorkerKind)
 	}
 
 	workerID := uuid.NewString()
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
+	}
+	nodeID := stringMetadata(plan.Metadata, "nodeID")
+	if nodeID == "" {
+		nodeID = uuid.NewString()
+		plan.Metadata["nodeID"] = nodeID
+	}
+	planID := stringMetadata(plan.Metadata, "planID")
+	if planID == "" {
+		planID = uuid.NewString()
+		plan.Metadata["planID"] = planID
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":       nodeID,
+			"workerId":     workerID,
+			"workerKind":   plan.WorkerKind,
+			"planId":       planID,
+			"parentNodeId": stringMetadata(plan.Metadata, "parentNodeID"),
+			"spawnId":      stringMetadata(plan.Metadata, "spawnID"),
+			"role":         stringMetadata(plan.Metadata, "spawnRole"),
+			"reason":       stringMetadata(plan.Metadata, "spawnReason"),
+			"dependsOn":    stringSliceMetadata(plan.Metadata, "dependsOn"),
+			"metadata":     planMetadata(plan),
+		}),
+	}); err != nil {
+		return WorkerTurnResult{}, err
 	}
 	workspace, err := s.workspaces.Prepare(ctx, WorkspaceSpec{
 		TaskID:   task.ID,
@@ -246,8 +439,8 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		WorkDir:  s.workDir,
 	})
 	if err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-		return
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerWorkspace,
@@ -255,15 +448,20 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		WorkerID: workerID,
 		Payload:  core.MustJSON(workspace),
 	}); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-		return
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
+	var steering chan string
+	if runnerSupportsSteering(runner) {
+		steering = make(chan string, 16)
 	}
 	spec := worker.Spec{
-		ID:      workerID,
-		TaskID:  task.ID,
-		Kind:    plan.WorkerKind,
-		Prompt:  plan.Prompt,
-		WorkDir: workspace.CWD,
+		ID:       workerID,
+		TaskID:   task.ID,
+		Kind:     plan.WorkerKind,
+		Prompt:   plan.Prompt,
+		WorkDir:  workspace.CWD,
+		Steering: steering,
 	}
 	command := runner.BuildCommand(spec)
 	if _, err := s.append(ctx, core.Event{
@@ -276,20 +474,27 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			"metadata": planMetadata(plan),
 		}),
 	}); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-		return
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
 	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.cancels[workerID] = cancel
 	s.tasks[workerID] = task.ID
+	if steering != nil {
+		s.steering[workerID] = steering
+	}
 	s.mu.Unlock()
 	defer func() {
 		cancel()
 		s.mu.Lock()
+		if ch := s.steering[workerID]; ch != nil {
+			close(ch)
+		}
 		delete(s.cancels, workerID)
 		delete(s.tasks, workerID)
+		delete(s.steering, workerID)
 		s.mu.Unlock()
 	}()
 
@@ -305,11 +510,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	err = runner.Run(workerCtx, spec, eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState})
 	if err != nil {
 		status := core.WorkerFailed
-		taskStatus := core.TaskFailed
 		workspaceResult := WorkspaceResultFailed
 		if errors.Is(workerCtx.Err(), context.Canceled) {
 			status = core.WorkerCanceled
-			taskStatus = core.TaskCanceled
 			workspaceResult = WorkspaceResultCanceled
 		}
 		changes := s.describeWorkspaceChanges(ctx, workspace)
@@ -320,8 +523,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
 		})
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
-		_ = s.setTaskStatus(ctx, task.ID, taskStatus)
-		return
+		return runState.turnResult(workerID, plan, status, err, changes), nil
 	}
 
 	if runState.isWaitingForInput() {
@@ -332,8 +534,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			WorkerID: workerID,
 			Payload:  core.MustJSON(runState.completionPayload(core.WorkerWaiting, nil, changes)),
 		})
-		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
-		return
+		return runState.turnResult(workerID, plan, core.WorkerWaiting, nil, changes), nil
 	}
 
 	changes := s.describeWorkspaceChanges(ctx, workspace)
@@ -344,7 +545,355 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		Payload:  core.MustJSON(runState.completionPayload(core.WorkerSucceeded, nil, changes)),
 	})
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
-	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
+}
+
+func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, result WorkerTurnResult) bool {
+	switch result.Status {
+	case core.WorkerSucceeded:
+		return true
+	case core.WorkerWaiting:
+		_ = s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+	case core.WorkerCanceled:
+		_ = s.setTaskStatus(ctx, taskID, core.TaskCanceled)
+	default:
+		_ = s.setTaskStatus(ctx, taskID, core.TaskFailed)
+	}
+	return false
+}
+
+func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) bool {
+	replanner, ok := s.brain.(ReplanProvider)
+	if !ok {
+		return true
+	}
+	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
+		decision, err := replanner.Replan(ctx, task, OrchestrationState{
+			InitialPlan: initial,
+			Results:     results,
+			Turn:        turn,
+		})
+		if err != nil {
+			_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replan failed: %w", err))
+			return false
+		}
+		if err := decision.Validate(); err != nil {
+			_ = s.failTask(ctx, task.ID, fmt.Errorf("invalid dynamic replan decision: %w", err))
+			return false
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskReplanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"turn":     turn,
+				"decision": decision,
+			}),
+		}); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+			return false
+		}
+		switch decision.Action {
+		case "complete":
+			return true
+		case "wait":
+			_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+			return false
+		case "fail":
+			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
+			return false
+		case "continue":
+			next := *decision.Plan
+			if next.Metadata == nil {
+				next.Metadata = map[string]any{}
+			}
+			next.Metadata["dynamicReplanTurn"] = turn
+			if _, err := s.append(ctx, core.Event{
+				Type:    core.EventTaskPlanned,
+				TaskID:  task.ID,
+				Payload: core.MustJSON(next),
+			}); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false
+			}
+			result, err := s.runPlannedWorker(ctx, task, next)
+			if err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false
+			}
+			results = append(results, result)
+			if !s.finishOrContinueTask(ctx, task.ID, result) {
+				return false
+			}
+			var ok bool
+			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
+			if err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false
+			}
+			if !ok {
+				return false
+			}
+		}
+	}
+	_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replanning exceeded %d turns", maxDynamicReplanTurns))
+	return false
+}
+
+type followUpNode struct {
+	id    string
+	index int
+	spawn SpawnRequest
+	deps  []string
+}
+
+func (s *Service) runFollowUpWorkers(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
+	if len(initial.Spawns) == 0 {
+		return results, true, nil
+	}
+	pending, err := followUpNodes(initial.Spawns)
+	if err != nil {
+		return results, false, err
+	}
+	completed := map[string]WorkerTurnResult{}
+	for len(pending) > 0 {
+		ready := readyFollowUps(pending, completed)
+		if len(ready) == 0 {
+			return results, false, fmt.Errorf("spawn dependency cycle or missing dependency")
+		}
+		waveResults, ok, err := s.runFollowUpWave(ctx, task, initial, ready, results, parentNodeID)
+		results = append(results, waveResults...)
+		for index, result := range waveResults {
+			completed[ready[index].id] = result
+			delete(pending, ready[index].id)
+		}
+		if err != nil {
+			return results, false, err
+		}
+		if !ok {
+			return results, false, nil
+		}
+	}
+	return results, true, nil
+}
+
+func followUpNodes(spawns []SpawnRequest) (map[string]followUpNode, error) {
+	nodes := map[string]followUpNode{}
+	for index, spawn := range spawns {
+		id := spawnID(spawn, index)
+		if _, ok := nodes[id]; ok {
+			return nil, fmt.Errorf("duplicate spawn id %q", id)
+		}
+		deps := make([]string, 0, len(spawn.DependsOn))
+		for _, dep := range spawn.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep != "" {
+				deps = append(deps, dep)
+			}
+		}
+		nodes[id] = followUpNode{id: id, index: index, spawn: spawn, deps: deps}
+	}
+	for _, node := range nodes {
+		for _, dep := range node.deps {
+			if _, ok := nodes[dep]; !ok {
+				return nil, fmt.Errorf("spawn %q depends on unknown spawn %q", node.id, dep)
+			}
+			if dep == node.id {
+				return nil, fmt.Errorf("spawn %q depends on itself", node.id)
+			}
+		}
+	}
+	return nodes, nil
+}
+
+func spawnID(spawn SpawnRequest, index int) string {
+	if strings.TrimSpace(spawn.ID) != "" {
+		return strings.TrimSpace(spawn.ID)
+	}
+	return fmt.Sprintf("spawn-%d", index+1)
+}
+
+func readyFollowUps(pending map[string]followUpNode, completed map[string]WorkerTurnResult) []followUpNode {
+	ready := []followUpNode{}
+	for _, node := range pending {
+		blocked := false
+		for _, dep := range node.deps {
+			if _, ok := completed[dep]; !ok {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			ready = append(ready, node)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool {
+		return ready[i].index < ready[j].index
+	})
+	return ready
+}
+
+func (s *Service) runFollowUpWave(ctx context.Context, task core.Task, initial Plan, nodes []followUpNode, priorResults []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
+	waveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type outcome struct {
+		index  int
+		result WorkerTurnResult
+		err    error
+	}
+	outcomes := make(chan outcome, len(nodes))
+	for index, node := range nodes {
+		followUp := s.followUpPlan(task, initial, node.spawn, priorResults, node.index+2, node.id, node.deps, parentNodeID)
+		if _, err := s.append(ctx, core.Event{
+			Type:    core.EventTaskPlanned,
+			TaskID:  task.ID,
+			Payload: core.MustJSON(followUp),
+		}); err != nil {
+			return nil, false, err
+		}
+		go func(index int, plan Plan) {
+			result, err := s.runPlannedWorker(waveCtx, task, plan)
+			outcomes <- outcome{index: index, result: result, err: err}
+		}(index, followUp)
+	}
+
+	ordered := make([]WorkerTurnResult, len(nodes))
+	var firstErr error
+	var firstProblem *WorkerTurnResult
+	for range nodes {
+		outcome := <-outcomes
+		ordered[outcome.index] = outcome.result
+		if outcome.err != nil && firstErr == nil {
+			firstErr = outcome.err
+			cancel()
+			continue
+		}
+		if outcome.err == nil && outcome.result.Status != core.WorkerSucceeded && firstProblem == nil {
+			result := outcome.result
+			firstProblem = &result
+			cancel()
+		}
+	}
+	if firstErr != nil {
+		return ordered, false, firstErr
+	}
+	if firstProblem != nil {
+		s.finishOrContinueTask(ctx, task.ID, *firstProblem)
+		return ordered, false, nil
+	}
+	return ordered, true, nil
+}
+
+func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest, results []WorkerTurnResult, turn int, spawnID string, dependsOn []string, parentNodeID string) Plan {
+	workerKind := s.workerKindForSpawn(spawn, initial.WorkerKind)
+	prompt := buildFollowUpPrompt(task, spawn, results)
+	return Plan{
+		WorkerKind: workerKind,
+		Prompt:     prompt,
+		Rationale:  "follow-up worker scheduled from initial plan: " + spawn.Reason,
+		Steps: []PlanStep{{
+			Title:       "Run " + spawn.Role,
+			Description: spawn.Reason,
+		}},
+		RequiredApprovals: []ApprovalRequest{},
+		Spawns:            []SpawnRequest{},
+		Metadata: map[string]any{
+			"brain":           "orchestrator",
+			"scheduler":       "orchestrator",
+			"turn":            turn,
+			"spawnID":         spawnID,
+			"spawnRole":       spawn.Role,
+			"spawnReason":     spawn.Reason,
+			"dependsOn":       dependsOn,
+			"parentNodeID":    parentNodeID,
+			"parentRationale": initial.Rationale,
+		},
+	}
+}
+
+func (s *Service) workerKindForSpawn(spawn SpawnRequest, fallback string) string {
+	if strings.TrimSpace(spawn.WorkerKind) != "" {
+		if _, ok := s.runners[spawn.WorkerKind]; ok {
+			return spawn.WorkerKind
+		}
+	}
+	role := strings.ToLower(spawn.Role + " " + spawn.Reason)
+	if strings.Contains(role, "review") || strings.Contains(role, "feedback") || strings.Contains(role, "critique") {
+		if _, ok := s.runners["claude"]; ok {
+			return "claude"
+		}
+	}
+	if _, ok := s.runners["codex"]; ok {
+		return "codex"
+	}
+	if _, ok := s.runners[fallback]; ok {
+		return fallback
+	}
+	if _, ok := s.runners["mock"]; ok {
+		return "mock"
+	}
+	for kind := range s.runners {
+		return kind
+	}
+	return fallback
+}
+
+func buildFollowUpPrompt(task core.Task, spawn SpawnRequest, results []WorkerTurnResult) string {
+	var builder strings.Builder
+	builder.WriteString("# Orchestrator Follow-up Worker Prompt\n\n")
+	builder.WriteString("Task: ")
+	builder.WriteString(task.Title)
+	builder.WriteString("\n\nOriginal user request:\n")
+	builder.WriteString(task.Prompt)
+	builder.WriteString("\n\nFollow-up role:\n")
+	builder.WriteString(spawn.Role)
+	builder.WriteString("\n\nReason for this follow-up:\n")
+	builder.WriteString(spawn.Reason)
+	builder.WriteString("\n\nPrior worker results:\n")
+	for index, result := range results {
+		builder.WriteString(fmt.Sprintf("\n%d. Worker %s status: %s\n", index+1, result.WorkerID, result.Status))
+		if result.Summary != "" {
+			builder.WriteString("Summary: ")
+			builder.WriteString(result.Summary)
+			builder.WriteString("\n")
+		}
+		if result.Error != "" {
+			builder.WriteString("Error: ")
+			builder.WriteString(result.Error)
+			builder.WriteString("\n")
+		}
+		if len(result.Changes.ChangedFiles) > 0 {
+			builder.WriteString("Changed files:\n")
+			for _, file := range result.Changes.ChangedFiles {
+				builder.WriteString("- ")
+				if file.Status != "" {
+					builder.WriteString(file.Status)
+					builder.WriteString(" ")
+				}
+				builder.WriteString(file.Path)
+				builder.WriteString("\n")
+			}
+		}
+	}
+	builder.WriteString("\nExecute only this follow-up role. Do not apply changes unless this role explicitly requires implementation.\n")
+	builder.WriteString("\nReport with these markdown sections when applicable:\n")
+	builder.WriteString("- Findings\n")
+	builder.WriteString("- Commands Run\n")
+	builder.WriteString("- Benchmark Results\n")
+	builder.WriteString("- Changed Files\n")
+	builder.WriteString("- Blockers\n")
+	builder.WriteString("- Recommended Next Turns\n")
+	builder.WriteString("\nFor benchmark or profiler work, include exact commands, baseline numbers, candidate numbers, sample count when known, and confidence in whether the change is a real improvement.\n")
+	return builder.String()
+}
+
+func nonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Service) describeWorkspaceChanges(ctx context.Context, workspace PreparedWorkspace) WorkspaceChanges {
@@ -402,6 +951,18 @@ func (s *Service) setTaskStatus(ctx context.Context, taskID string, status core.
 	return err
 }
 
+func (s *Service) setExecutionNodeStatus(ctx context.Context, taskID string, nodeID string, status core.WorkerStatus) error {
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventExecutionStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId": nodeID,
+			"status": status,
+		}),
+	})
+	return err
+}
+
 func (s *Service) failTask(ctx context.Context, taskID string, err error) error {
 	_, appendErr := s.append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
@@ -416,7 +977,22 @@ func (s *Service) failTask(ctx context.Context, taskID string, err error) error 
 
 func planMetadata(plan Plan) map[string]any {
 	metadata := map[string]any{}
-	for _, key := range []string{"brain", "scheduler", "model", "fallbackReason"} {
+	for _, key := range []string{
+		"brain",
+		"scheduler",
+		"model",
+		"fallbackReason",
+		"parentRationale",
+		"dependsOn",
+		"nodeID",
+		"parentNodeID",
+		"planID",
+		"spawnID",
+		"spawnReason",
+		"spawnRole",
+		"turn",
+		"dynamicReplanTurn",
+	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
 			metadata[key] = value
 		}
@@ -434,6 +1010,43 @@ func planMetadata(plan Plan) map[string]any {
 		metadata["spawns"] = plan.Spawns
 	}
 	return metadata
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	switch value := metadata[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
+}
+
+func stringSliceMetadata(metadata map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	switch value := metadata[key].(type) {
+	case []string:
+		return value
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func runnerSupportsSteering(runner worker.Runner) bool {
+	support, ok := runner.(worker.SteeringSupport)
+	return ok && support.SupportsSteering()
 }
 
 func (s *Service) append(ctx context.Context, event core.Event) (core.Event, error) {
@@ -530,6 +1143,33 @@ func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr erro
 		payload["rawResult"] = core.MustJSON(jsonRawMessage(s.rawResult))
 	}
 	return payload
+}
+
+func (s *workerRunState) turnResult(workerID string, plan Plan, status core.WorkerStatus, runErr error, changes WorkspaceChanges) WorkerTurnResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := WorkerTurnResult{
+		WorkerID: workerID,
+		Status:   status,
+		Kind:     plan.WorkerKind,
+		Summary:  s.summary,
+		Changes:  changes,
+	}
+	if plan.Metadata != nil {
+		if nodeID, ok := plan.Metadata["nodeID"].(string); ok {
+			result.NodeID = nodeID
+		}
+		if role, ok := plan.Metadata["spawnRole"].(string); ok {
+			result.Role = role
+		}
+	}
+	if s.lastError != "" {
+		result.Error = s.lastError
+	} else if runErr != nil {
+		result.Error = runErr.Error()
+	}
+	return result
 }
 
 type jsonRawMessage []byte

@@ -12,9 +12,10 @@ The initial local-first vertical slice is implemented.
 - HTTP API for health, snapshots, event history, task creation, steering, and cancellation.
 - SSE event stream for live dashboard updates.
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
-- Worker runners for `mock`, `codex`, `claude`, and `shell`.
+- Worker runners for `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - React/Vite dashboard for creating tasks, viewing state/logs, steering, and cancellation.
 - Built dashboard can be served directly by the Go daemon from `web/dist`.
+- Dev control server in `cmd/aged-dev` can rebuild the daemon, rebuild the UI, and restart the managed daemon through a local HTTP trigger.
 - Frontend toolchain is on Vite 8 with `@vitejs/plugin-react` 6.
 - Scheduling is recorded as `task.planned` before worker creation.
 - Workspace preflight is recorded as `worker.workspace_prepared` before worker creation.
@@ -22,8 +23,15 @@ The initial local-first vertical slice is implemented.
 - Workspace cleanup policy is configurable: `retain`, `delete_on_success`, or `delete_on_terminal`.
 - Worker output is normalized into log/result/error/needs-input events, with raw JSON preserved for Codex and Claude streams.
 - Worker completion records derived `summary`, `error`, `needsInput`, `logCount`, changed files, and workspace diffstat/status fields.
+- Worker execution is projected as first-class `executionNodes` snapshot state from `execution.node_planned` events, with node id, worker id, worker kind, spawn id, dependencies, role/reason, and status.
 - Retained isolated worker changes can be reviewed and applied through HTTP/UI; jj apply creates a merge revision and records `worker.changes_applied`.
+- Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; multiple competing changed workers produce a `manual_select` recommendation instead of pretending there is a safe automatic merge order.
+- Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude command adapters now forward steering messages to subprocess stdin and record delivery log events.
+- `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison.
 - Repeated worker apply attempts are blocked in the service and already-applied workers render as disabled `Applied` actions in the dashboard.
+- Scheduler `spawns` now run as dependency-aware follow-up worker turns after the plan's primary worker succeeds; independent spawns run in parallel and dependent spawns wait for prerequisite spawn ids. This applies to both initial plans and dynamic `continue` replans.
+- Follow-up worker prompts include the original request, follow-up role/reason, prior worker summaries/errors, and changed files.
+- Dynamic replanning is available for brains that implement `Replan`: after follow-up workers, the brain can return `continue`, `complete`, `wait`, or `fail`; `continue` schedules another worker turn and records `task.replanned`.
 - Codex parser treats `agent_message` as the useful result summary and leaves `turn.completed` usage records as logs.
 
 ## Verified
@@ -37,6 +45,15 @@ The initial local-first vertical slice is implemented.
   - API brain parses structured plans.
   - API brain falls back on invalid output.
   - Service uses the brain-selected worker.
+  - Service runs a spawned follow-up review worker after the initial worker succeeds.
+  - Service runs independent spawned follow-up workers in parallel.
+  - Service honors spawned worker dependencies before starting dependent follow-ups.
+  - Follow-up worker prompts include prior worker result context.
+  - Service dynamically replans after follow-up output and can schedule an incorporation worker.
+  - Service runs spawned workers from dynamic replans before asking the brain for the next decision.
+  - Service emits durable execution graph nodes into snapshots.
+  - Service delivers task steering to compatible running workers.
+  - Service recommends manual apply selection when multiple changed worker branches compete.
   - Unknown brain-selected workers fail the task cleanly.
   - HTTP API rejects user-supplied worker selection.
 - Worker runner integration tests:
@@ -47,6 +64,7 @@ The initial local-first vertical slice is implemented.
   - command-not-found
   - Codex/Claude JSONL normalization
   - Codex `turn.completed` does not overwrite the final agent-message summary
+  - Benchmark comparison primitive emits an improvement verdict for explicit before/after inputs
 - Workspace tests:
   - service passes the prepared cwd into the runner
   - service emits `worker.workspace_prepared`
@@ -68,6 +86,15 @@ The initial local-first vertical slice is implemented.
   - `GET /api/snapshot` showed the mock task reaching `succeeded`
   - After a daemon restart, `GET /api/snapshot` correctly replayed the self-apply task past event 200 and showed task/worker `succeeded`.
   - Firefox Developer Edition loaded `http://127.0.0.1:8787`, showed the self-apply task/worker as `Succeeded`, and showed the applied worker action as disabled `Applied`.
+- Dev control smoke test:
+  - Ran `cmd/aged-dev` on `127.0.0.1:8791` managing a test daemon on `127.0.0.1:8789`.
+  - `GET /rebuild` built `./cmd/aged`, ran `npm run build`, started the rebuilt daemon, and `GET /api/health` on the managed daemon returned ok.
+  - Stopping the dev control server stopped its managed daemon child.
+- Codex brain smoke test:
+  - Ran daemon with `-brain codex -worker mock -workspace-mode shared` on `127.0.0.1:8788`.
+  - Initial run fell back because the scheduler prompt did not explicitly require object-shaped `steps`.
+  - Tightened `prompts/scheduler.md` with the exact output object schema and field rules.
+  - Re-run produced `metadata.brain: codex`, selected `workerKind: mock`, emitted object-shaped `steps`, and the mock worker reached `succeeded`.
 - Self-bootstrap smoke test:
   - Started a retained Codex worker in an isolated jj workspace.
   - Worker refined a focused completion-summary test and reported package-test sandbox limitations.
@@ -97,8 +124,11 @@ http://127.0.0.1:8787
 
 - `aged.db` is local runtime state and is ignored.
 - `web/dist` is generated by `npm run build` and is ignored.
+- `.aged/dev/` contains the dev-control-built daemon binary and logs and is ignored through `.aged/`.
 - The `mock` worker is best for cheap orchestration/UI validation; `codex` is now usable for retained local self-bootstrap probes.
 - Users do not choose workers per task. Scheduling is owned by the orchestrator brain/provider.
+- The orchestrator must support long-lived, multi-turn tasks: it should be able to decompose large refactors, schedule implementation/review/follow-up worker turns, inspect outputs, incorporate feedback, request approvals, and decide when to continue, revise, merge, or stop.
+- Performance-improvement tasks currently rely on prompt conventions: scheduler guidance should decompose work into investigation, profiling/benchmark analysis, implementation, and validation turns; workers should report stable markdown sections including benchmark commands and before/after numbers when applicable.
 - Codex-backed scheduling is available with `AGED_BRAIN=codex`.
 - API-backed scheduling is available with `AGED_BRAIN=api`, `AGED_BRAIN_MODEL`, and `AGED_BRAIN_API_KEY`.
 - Codex and Claude runners are wired as subprocess adapters; Codex has now completed retained self-bootstrap and self-apply tasks end to end.
@@ -108,15 +138,19 @@ http://127.0.0.1:8787
 - Jujutsu isolated workspaces are created with `jj workspace add -r @`.
 - Git isolated workspaces are implemented with `git worktree add --detach HEAD`, but require a clean source working tree because Git worktrees cannot safely carry uncommitted source changes.
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
-- User steering is recorded as events, but active workers do not yet consume steering messages mid-run.
+- User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude subprocess adapters forward steering to stdin, but behavior still depends on whether the underlying CLI reads stdin during that run.
+- Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
 - Remote VM execution is intentionally not implemented yet; the runner interface is the extension point.
 
 ## Next Work
 
-- Add tests for event replay and state reconstruction.
+- Add more tests for event replay and state reconstruction.
 - Add richer artifact semantics beyond changed source files.
+- Add structured benchmark/profiler artifact semantics when prompt-parsed text stops being reliable enough for comparison, UI display, or audit trails.
+- Extend benchmark comparison beyond explicit numeric prompt fields if the orchestrator needs to enforce same-command before/after runs, repeated samples, thresholds, or anti-cherry-picking rules.
 - Add UI affordances for workspace location and cleanup status.
-- Exercise the Codex/API brains against real tasks and tune `prompts/scheduler.md`.
+- Exercise the Codex/API brains against real code-editing tasks and continue tuning `prompts/scheduler.md`.
+- Exercise dynamic replanning with a real Codex brain on a retained self-editing task.
 - Decide the exact plugin process protocol for external worker/plugins.
 - Improve task cancellation so task-scoped worker indexing survives daemon restart.
 - Add approval request/decision flow in the UI and orchestrator.

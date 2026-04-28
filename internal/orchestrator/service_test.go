@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,514 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 }
 
+func TestServiceRunsSpawnedFollowUpWorkerWithPriorResultContext(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	implementationSummary := "implemented the first refactor slice"
+	changed := WorkspaceChangedFile{Path: "internal/refactor.go", Status: "modified"}
+	reviewer := &recordingEventRunner{
+		kind: "claude",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "reviewed implementation",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement the first bounded refactor slice",
+		Rationale:  "large refactor should start with one bounded implementation turn",
+		Steps: []PlanStep{{
+			Title:       "Implement slice",
+			Description: "Make the first scoped code change.",
+		}},
+		Spawns: []SpawnRequest{{
+			Role:   "reviewer",
+			Reason: "Review the implementation output and recommend required follow-up fixes.",
+		}},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{
+			kind: "codex",
+			events: []worker.Event{{
+				Kind: worker.EventResult,
+				Text: implementationSummary,
+			}},
+		},
+		"claude": reviewer,
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{changed},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Large refactor",
+		Prompt: "Refactor the subsystem and have another worker review it.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 2 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "codex") {
+		t.Fatalf("missing initial codex worker")
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "claude") {
+		t.Fatalf("missing follow-up claude reviewer worker")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 2 {
+		t.Fatalf("task.planned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+
+	prompt := reviewer.promptValue()
+	for _, want := range []string{
+		"Follow-up role:\nreviewer",
+		implementationSummary,
+		"modified internal/refactor.go",
+		"Review the implementation output",
+		"Benchmark Results",
+		"Recommended Next Turns",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestServiceRunsIndependentSpawnedWorkersInParallel(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement the first bounded refactor slice",
+		Spawns: []SpawnRequest{
+			{
+				ID:         "review",
+				Role:       "reviewer",
+				Reason:     "Review the implementation output.",
+				WorkerKind: "left",
+			},
+			{
+				ID:         "test",
+				Role:       "tester",
+				Reason:     "Validate the implementation output.",
+				WorkerKind: "right",
+			},
+		},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{
+			kind: "codex",
+			events: []worker.Event{{
+				Kind: worker.EventResult,
+				Text: "implemented the first slice",
+			}},
+		},
+		"left":  &blockingEventRunner{kind: "left", started: started, release: release, summary: "left done"},
+		"right": &blockingEventRunner{kind: "right", started: started, release: release, summary: "right done"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Parallel review",
+		Prompt: "Implement, then review and test in parallel.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	deadline := time.After(500 * time.Millisecond)
+	for len(got) < 2 {
+		select {
+		case kind := <-started:
+			got[kind] = true
+		case <-deadline:
+			t.Fatalf("spawned workers did not start in parallel; started = %+v", got)
+		}
+	}
+	close(release)
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "left") || !hasWorkerCreated(snapshot.Events, task.ID, "right") {
+		t.Fatalf("missing parallel spawned workers")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 3 {
+		t.Fatalf("task.planned count = %d, want 3", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+}
+
+func TestServiceHonorsSpawnDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	firstStarted := make(chan string, 1)
+	secondStarted := make(chan string, 1)
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
+	second := &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "second done"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement the first bounded refactor slice",
+		Spawns: []SpawnRequest{
+			{
+				ID:         "review",
+				Role:       "reviewer",
+				Reason:     "Review the implementation output.",
+				WorkerKind: "first",
+			},
+			{
+				ID:         "incorporate",
+				Role:       "implementer",
+				Reason:     "Incorporate required review feedback.",
+				WorkerKind: "second",
+				DependsOn:  []string{"review"},
+			},
+		},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{
+			kind: "codex",
+			events: []worker.Event{{
+				Kind: worker.EventResult,
+				Text: "implemented the first slice",
+			}},
+		},
+		"first":  &blockingEventRunner{kind: "first", started: firstStarted, release: firstRelease, summary: "review summary"},
+		"second": second,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent follow-up",
+		Prompt: "Implement, review, then incorporate feedback.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-firstStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first spawned worker did not start")
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("dependent worker started before dependency completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(firstRelease)
+	select {
+	case <-secondStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("dependent worker did not start after dependency completed")
+	}
+	close(secondRelease)
+
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !strings.Contains(second.promptValue(), "review summary") {
+		t.Fatalf("dependent prompt missing dependency summary:\n%s", second.promptValue())
+	}
+}
+
+func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	implementer := &recordingEventRunner{
+		kind: "codex",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "implemented the first slice",
+		}},
+	}
+	reviewer := &recordingEventRunner{
+		kind: "claude",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "review found a missing edge case",
+		}},
+	}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement first slice",
+			Rationale:  "start with implementation",
+			Spawns: []SpawnRequest{{
+				Role:   "reviewer",
+				Reason: "Review the initial implementation.",
+			}},
+		},
+		decisions: []ReplanDecision{
+			{
+				Action:    "continue",
+				Rationale: "review requested an incorporation turn",
+				Plan: &Plan{
+					WorkerKind: "codex",
+					Prompt:     "incorporate reviewer feedback about the missing edge case",
+					Rationale:  "review found a missing edge case",
+					Steps: []PlanStep{{
+						Title:       "Incorporate feedback",
+						Description: "Fix the reviewed edge case.",
+					}},
+					RequiredApprovals: []ApprovalRequest{},
+					Spawns:            []SpawnRequest{},
+				},
+			},
+			{
+				Action:    "complete",
+				Rationale: "incorporation turn completed",
+			},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  implementer,
+		"claude": reviewer,
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/refactor.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Large refactor",
+		Prompt: "Implement, review, then incorporate review feedback.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 3 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 3 {
+		t.Fatalf("task.planned count = %d, want 3", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 2 {
+		t.Fatalf("task.replanned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
+	}
+	if !strings.Contains(implementer.promptValue(), "incorporate reviewer feedback") {
+		t.Fatalf("last implementer prompt = %q", implementer.promptValue())
+	}
+	if len(brain.states) != 2 {
+		t.Fatalf("replan states = %d, want 2", len(brain.states))
+	}
+	if len(brain.states[0].Results) != 2 {
+		t.Fatalf("first replan results = %d, want 2", len(brain.states[0].Results))
+	}
+	if len(brain.states[1].Results) != 3 {
+		t.Fatalf("second replan results = %d, want 3", len(brain.states[1].Results))
+	}
+}
+
+func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement initial slice",
+		},
+		decisions: []ReplanDecision{
+			{
+				Action: "continue",
+				Plan: &Plan{
+					WorkerKind: "codex",
+					Prompt:     "incorporate the first result",
+					Rationale:  "initial result needs review and validation",
+					Spawns: []SpawnRequest{
+						{
+							ID:         "review",
+							Role:       "reviewer",
+							Reason:     "Review the incorporated result.",
+							WorkerKind: "reviewer",
+						},
+						{
+							ID:         "test",
+							Role:       "tester",
+							Reason:     "Validate the incorporated result.",
+							WorkerKind: "tester",
+						},
+					},
+				},
+			},
+			{
+				Action:    "complete",
+				Rationale: "implementation and spawned verification completed",
+			},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{
+			kind: "codex",
+			events: []worker.Event{{
+				Kind: worker.EventResult,
+				Text: "codex turn done",
+			}},
+		},
+		"reviewer": &blockingEventRunner{kind: "reviewer", started: started, release: release, summary: "review passed"},
+		"tester":   &blockingEventRunner{kind: "tester", started: started, release: release, summary: "tests passed"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dynamic spawn",
+		Prompt: "Use dynamic replanning to schedule parallel verification.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	deadline := time.After(500 * time.Millisecond)
+	for len(got) < 2 {
+		select {
+		case kind := <-started:
+			got[kind] = true
+		case <-deadline:
+			t.Fatalf("replanned spawned workers did not start in parallel; started = %+v", got)
+		}
+	}
+	close(release)
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "reviewer") || !hasWorkerCreated(snapshot.Events, task.ID, "tester") {
+		t.Fatalf("missing replanned spawned workers")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 4 {
+		t.Fatalf("task.planned count = %d, want 4", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	if len(brain.states) != 2 {
+		t.Fatalf("replan states = %d, want 2", len(brain.states))
+	}
+	if len(brain.states[1].Results) != 4 {
+		t.Fatalf("second replan results = %d, want 4", len(brain.states[1].Results))
+	}
+}
+
+func TestServiceEmitsExecutionGraphNodes(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement first slice",
+		Spawns: []SpawnRequest{{
+			ID:         "review",
+			Role:       "reviewer",
+			Reason:     "Review the first slice.",
+			WorkerKind: "claude",
+		}},
+	}}, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"claude": eventRunner{kind: "claude", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Graph", Prompt: "Run graph task."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 2 {
+		t.Fatalf("execution nodes = %+v", snapshot.ExecutionNodes)
+	}
+	if snapshot.ExecutionNodes[0].WorkerKind != "codex" || snapshot.ExecutionNodes[0].Status != core.WorkerSucceeded {
+		t.Fatalf("primary node = %+v", snapshot.ExecutionNodes[0])
+	}
+	if snapshot.ExecutionNodes[1].SpawnID != "review" || snapshot.ExecutionNodes[1].ParentNodeID != snapshot.ExecutionNodes[0].ID {
+		t.Fatalf("follow-up node = %+v, primary = %+v", snapshot.ExecutionNodes[1], snapshot.ExecutionNodes[0])
+	}
+}
+
+func TestServiceDeliversSteeringToRunningWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	gotSteering := make(chan string, 1)
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "steerable",
+		Prompt:     "wait for steering",
+	}}, map[string]worker.Runner{
+		"steerable": steeringRunner{started: started, got: gotSteering},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Steer", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "adjust course"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-gotSteering:
+		if message != "adjust course" {
+			t.Fatalf("steering = %q", message)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("worker did not receive steering")
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+}
+
+func TestServiceRecommendsManualApplyPolicyForMultipleCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement baseline",
+		Spawns: []SpawnRequest{
+			{ID: "opt-a", Role: "optimizer", Reason: "Try optimization A.", WorkerKind: "left"},
+			{ID: "opt-b", Role: "optimizer", Reason: "Try optimization B.", WorkerKind: "right"},
+		},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
+		"left":  fileWritingRunner{kind: "left", path: "a.txt", body: "a"},
+		"right": fileWritingRunner{kind: "right", path: "b.txt", body: "b"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.txt", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Apply policy", Prompt: "Try alternatives."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	policy, err := service.RecommendApplyPolicy(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Strategy != "manual_select" {
+		t.Fatalf("strategy = %q, policy = %+v", policy.Strategy, policy)
+	}
+	if len(policy.Candidates) < 2 {
+		t.Fatalf("candidates = %+v", policy.Candidates)
+	}
+}
+
 type fixedBrain struct {
 	plan Plan
 	err  error
@@ -245,6 +754,26 @@ type fixedBrain struct {
 
 func (b fixedBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
 	return b.plan, b.err
+}
+
+type replanningBrain struct {
+	plan      Plan
+	decisions []ReplanDecision
+	states    []OrchestrationState
+}
+
+func (b *replanningBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return b.plan, nil
+}
+
+func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	if len(b.decisions) == 0 {
+		return ReplanDecision{Action: "complete"}, nil
+	}
+	decision := b.decisions[0]
+	b.decisions = b.decisions[1:]
+	return decision, nil
 }
 
 type recordingRunner struct {
@@ -264,6 +793,28 @@ type fileWritingRunner struct {
 	body string
 }
 
+type recordingEventRunner struct {
+	mu      sync.Mutex
+	kind    string
+	events  []worker.Event
+	prompt  string
+	workDir string
+}
+
+type blockingEventRunner struct {
+	mu      sync.Mutex
+	kind    string
+	started chan<- string
+	release <-chan struct{}
+	summary string
+	prompt  string
+}
+
+type steeringRunner struct {
+	started chan<- struct{}
+	got     chan<- string
+}
+
 func (r eventRunner) Kind() string {
 	return r.kind
 }
@@ -279,6 +830,86 @@ func (r eventRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) e
 		}
 	}
 	return nil
+}
+
+func (r *recordingEventRunner) Kind() string {
+	return r.kind
+}
+
+func (r *recordingEventRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *recordingEventRunner) Run(ctx context.Context, spec worker.Spec, sink worker.Sink) error {
+	r.mu.Lock()
+	r.prompt = spec.Prompt
+	r.workDir = spec.WorkDir
+	r.mu.Unlock()
+	for _, event := range r.events {
+		if err := sink.Event(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *recordingEventRunner) promptValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prompt
+}
+
+func (r *blockingEventRunner) Kind() string {
+	return r.kind
+}
+
+func (r *blockingEventRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *blockingEventRunner) Run(ctx context.Context, spec worker.Spec, sink worker.Sink) error {
+	r.mu.Lock()
+	r.prompt = spec.Prompt
+	r.mu.Unlock()
+	r.started <- r.kind
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if r.summary != "" {
+		return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: r.summary})
+	}
+	return nil
+}
+
+func (r *blockingEventRunner) promptValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prompt
+}
+
+func (r steeringRunner) Kind() string {
+	return "steerable"
+}
+
+func (r steeringRunner) SupportsSteering() bool {
+	return true
+}
+
+func (r steeringRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r steeringRunner) Run(ctx context.Context, spec worker.Spec, sink worker.Sink) error {
+	close(r.started)
+	select {
+	case message := <-spec.Steering:
+		r.got <- message
+		return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: "received steering"})
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r fileWritingRunner) Kind() string {
@@ -421,6 +1052,16 @@ func hasEvent(events []core.Event, eventType core.EventType, taskID string, work
 		}
 	}
 	return false
+}
+
+func countEvents(events []core.Event, eventType core.EventType, taskID string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType && event.TaskID == taskID {
+			count++
+		}
+	}
+	return count
 }
 
 func hasWorkerCreated(events []core.Event, taskID string, kind string) bool {

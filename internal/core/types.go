@@ -31,19 +31,23 @@ const (
 type EventType string
 
 const (
-	EventTaskCreated     EventType = "task.created"
-	EventTaskStatus      EventType = "task.status"
-	EventTaskPlanned     EventType = "task.planned"
-	EventTaskSteered     EventType = "task.steered"
-	EventWorkerWorkspace EventType = "worker.workspace_prepared"
-	EventWorkerCleanup   EventType = "worker.workspace_cleaned"
-	EventWorkerCreated   EventType = "worker.created"
-	EventWorkerStarted   EventType = "worker.started"
-	EventWorkerOutput    EventType = "worker.output"
-	EventWorkerCompleted EventType = "worker.completed"
-	EventWorkerApplied   EventType = "worker.changes_applied"
-	EventApprovalNeeded  EventType = "approval.needed"
-	EventApprovalDecided EventType = "approval.decided"
+	EventTaskCreated      EventType = "task.created"
+	EventTaskStatus       EventType = "task.status"
+	EventTaskPlanned      EventType = "task.planned"
+	EventTaskReplanned    EventType = "task.replanned"
+	EventTaskSteered      EventType = "task.steered"
+	EventExecutionPlanned EventType = "execution.node_planned"
+	EventExecutionStatus  EventType = "execution.node_status"
+	EventApplyPolicy      EventType = "apply.policy_recommended"
+	EventWorkerWorkspace  EventType = "worker.workspace_prepared"
+	EventWorkerCleanup    EventType = "worker.workspace_cleaned"
+	EventWorkerCreated    EventType = "worker.created"
+	EventWorkerStarted    EventType = "worker.started"
+	EventWorkerOutput     EventType = "worker.output"
+	EventWorkerCompleted  EventType = "worker.completed"
+	EventWorkerApplied    EventType = "worker.changes_applied"
+	EventApprovalNeeded   EventType = "approval.needed"
+	EventApprovalDecided  EventType = "approval.decided"
 )
 
 type Event struct {
@@ -76,6 +80,23 @@ type Worker struct {
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
+type ExecutionNode struct {
+	ID           string          `json:"id"`
+	TaskID       string          `json:"taskId"`
+	WorkerID     string          `json:"workerId,omitempty"`
+	WorkerKind   string          `json:"workerKind"`
+	Status       WorkerStatus    `json:"status"`
+	PlanID       string          `json:"planId,omitempty"`
+	ParentNodeID string          `json:"parentNodeId,omitempty"`
+	SpawnID      string          `json:"spawnId,omitempty"`
+	Role         string          `json:"role,omitempty"`
+	Reason       string          `json:"reason,omitempty"`
+	DependsOn    []string        `json:"dependsOn,omitempty"`
+	CreatedAt    time.Time       `json:"createdAt"`
+	UpdatedAt    time.Time       `json:"updatedAt"`
+	Metadata     json.RawMessage `json:"metadata,omitempty"`
+}
+
 type CreateTaskRequest struct {
 	Title  string `json:"title"`
 	Prompt string `json:"prompt"`
@@ -91,9 +112,10 @@ type ApprovalDecision struct {
 }
 
 type Snapshot struct {
-	Tasks   []Task   `json:"tasks"`
-	Workers []Worker `json:"workers"`
-	Events  []Event  `json:"events"`
+	Tasks          []Task          `json:"tasks"`
+	Workers        []Worker        `json:"workers"`
+	ExecutionNodes []ExecutionNode `json:"executionNodes"`
+	Events         []Event         `json:"events"`
 }
 
 func MustJSON(v any) json.RawMessage {

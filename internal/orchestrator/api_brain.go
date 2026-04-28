@@ -199,7 +199,7 @@ func planResponseFormat() map[string]any {
 				"properties": map[string]any{
 					"workerKind": map[string]any{
 						"type": "string",
-						"enum": []string{"codex", "claude", "mock"},
+						"enum": []string{"codex", "claude", "mock", "benchmark_compare"},
 					},
 					"workerPrompt": map[string]any{
 						"type":      "string",
@@ -239,8 +239,14 @@ func planResponseFormat() map[string]any {
 							"additionalProperties": false,
 							"required":             []string{"role", "reason"},
 							"properties": map[string]any{
-								"role":   map[string]any{"type": "string"},
-								"reason": map[string]any{"type": "string"},
+								"id":         map[string]any{"type": "string"},
+								"role":       map[string]any{"type": "string"},
+								"reason":     map[string]any{"type": "string"},
+								"workerKind": map[string]any{"type": "string", "enum": []string{"codex", "claude", "mock", "benchmark_compare"}},
+								"dependsOn": map[string]any{
+									"type":  "array",
+									"items": map[string]any{"type": "string"},
+								},
 							},
 						},
 					},

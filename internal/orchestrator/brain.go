@@ -14,6 +14,10 @@ type BrainProvider interface {
 	Plan(ctx context.Context, task core.Task, steering []string) (Plan, error)
 }
 
+type ReplanProvider interface {
+	Replan(ctx context.Context, task core.Task, state OrchestrationState) (ReplanDecision, error)
+}
+
 type Plan struct {
 	WorkerKind        string            `json:"workerKind"`
 	Prompt            string            `json:"workerPrompt"`
@@ -35,8 +39,25 @@ type ApprovalRequest struct {
 }
 
 type SpawnRequest struct {
-	Role   string `json:"role"`
-	Reason string `json:"reason"`
+	ID         string   `json:"id,omitempty"`
+	Role       string   `json:"role"`
+	Reason     string   `json:"reason"`
+	WorkerKind string   `json:"workerKind,omitempty"`
+	DependsOn  []string `json:"dependsOn,omitempty"`
+}
+
+type OrchestrationState struct {
+	InitialPlan Plan               `json:"initialPlan"`
+	Results     []WorkerTurnResult `json:"results"`
+	Turn        int                `json:"turn"`
+}
+
+type ReplanDecision struct {
+	Action    string         `json:"action"`
+	Plan      *Plan          `json:"plan,omitempty"`
+	Rationale string         `json:"rationale,omitempty"`
+	Message   string         `json:"message,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
 func (p Plan) Validate() error {
@@ -47,6 +68,20 @@ func (p Plan) Validate() error {
 		return errors.New("plan workerPrompt is required")
 	}
 	return nil
+}
+
+func (d ReplanDecision) Validate() error {
+	switch strings.TrimSpace(d.Action) {
+	case "continue":
+		if d.Plan == nil {
+			return errors.New("replan continue action requires plan")
+		}
+		return d.Plan.Validate()
+	case "complete", "wait", "fail":
+		return nil
+	default:
+		return errors.New("replan action must be one of continue, complete, wait, or fail")
+	}
 }
 
 type PromptBrain struct {

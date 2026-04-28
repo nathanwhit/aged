@@ -31,6 +31,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
+	mux.HandleFunc("POST /api/tasks/{id}/apply-policy", s.recommendApplyPolicy)
 	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/apply", s.applyWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/cancel", s.cancelWorker)
@@ -118,6 +119,15 @@ func (s *Server) reviewWorkerChanges(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) applyWorkerChanges(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ApplyWorkerChanges(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) recommendApplyPolicy(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.RecommendApplyPolicy(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
 		return

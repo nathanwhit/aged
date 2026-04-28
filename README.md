@@ -1,4 +1,4 @@
-# aged
+# aged - agent daemon like a fine wine
 
 `aged` is a local-first agent orchestrator for autonomous development work.
 
@@ -30,8 +30,12 @@ Scheduler behavior:
 
 - `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
 - Users do not choose workers per task; task creation only supplies the work request.
-- Available runner adapters include `mock`, `codex`, `claude`, and `shell`.
+- Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
+- Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
+- The scheduler is expected to support long-lived work by planning bounded worker turns, then using later turns for review, validation, feedback incorporation, or follow-up implementation.
+- `spawns` from initial and dynamically replanned plans are executed as a dependency graph after the plan's primary worker succeeds. Independent spawns run in parallel; spawns with `dependsOn` wait for their prerequisite spawn ids. Follow-up prompts include the original request plus prior worker summaries, errors, and changed files.
+- Brains that implement dynamic replanning can inspect completed worker turns after follow-ups and return `continue`, `complete`, `wait`, or `fail`. `continue` schedules another worker turn, runs that plan's follow-up graph, and records `task.replanned`.
 - Before a worker is created, the orchestrator records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
 - Workspace backends are selected with `-workspace-vcs auto|jj|git`; `auto` prefers `jj` when `.jj` is present and otherwise supports Git repos.
 - Isolated mode is the default. Jujutsu repos use `jj workspace add -r @`; Git repos use `git worktree add --detach HEAD` and require a clean source working tree.
@@ -39,6 +43,9 @@ Scheduler behavior:
 - Worker subprocess output is normalized into `worker.output` events. Plain output becomes log/error events; Codex and Claude JSONL output preserves raw payloads and is classified as `log`, `result`, `error`, or `needs_input`.
 - `worker.completed` includes derived run semantics: `summary`, `error`, `needsInput`, `logCount`, and `workspaceChanges` when available. Workspace changes include dirty status, diffstat, and changed files. Workers that emit `needs_input` move the task to `waiting` and retain the workspace.
 - Retained isolated workspace changes can be reviewed with `GET /api/workers/{id}/changes` and applied back to the source checkout with `POST /api/workers/{id}/apply`. Jujutsu apply creates a new merge revision with source `@` and the worker workspace revision as parents; Git apply commits the worker worktree and merges that commit. Apply records `worker.changes_applied`.
+- Apply policy recommendations can be requested with `POST /api/tasks/{id}/apply-policy`; the service reports whether there are no candidates, exactly one candidate, or multiple competing candidates requiring manual selection or review.
+- Running workers receive task steering through `worker.Spec.Steering` when a runner supports it. The Codex and Claude command adapters forward steering messages to the subprocess stdin and record a delivery log event; CLI behavior still depends on whether the underlying tool reads stdin during that run.
+- `benchmark_compare` compares explicit `baseline`, `candidate`, `threshold_percent`, and `higher_is_better` prompt fields and emits a benchmark comparison report.
 
 API-backed scheduling can be enabled with:
 
@@ -74,6 +81,22 @@ cd web && npm run build
 ```
 
 After `web/dist` exists, the Go daemon serves it from the same origin.
+
+## Dev control server
+
+For self-iteration, run the local dev control server:
+
+```sh
+go run ./cmd/aged-dev
+```
+
+It listens on `http://127.0.0.1:8790` by default and manages the daemon at `http://127.0.0.1:8787`.
+
+- `GET /health` checks the control server.
+- `GET /status` returns the last rebuild/restart result.
+- `GET /rebuild` or `POST /rebuild` stops the previously managed daemon, kills any process listening on the daemon port, rebuilds `./cmd/aged`, runs `npm run build` in `web`, and starts the rebuilt daemon.
+
+The rebuilt daemon binary and logs live under `.aged/dev/`.
 
 ## API sketch
 

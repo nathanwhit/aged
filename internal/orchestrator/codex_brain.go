@@ -73,6 +73,39 @@ func (b *CodexBrain) Plan(ctx context.Context, task core.Task, steering []string
 	return fallbackPlan, nil
 }
 
+func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state OrchestrationState) (ReplanDecision, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, b.codexPath, "exec", "--json", "--cd", b.workDir, b.replanPrompt(task, state))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return ReplanDecision{}, fmt.Errorf("codex replan command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return ReplanDecision{}, err
+	}
+	content = trimJSONFence(content)
+	decision, err := decodeReplanDecision([]byte(content))
+	if err != nil {
+		return ReplanDecision{}, fmt.Errorf("decode codex replan decision: %w", err)
+	}
+	if err := decision.Validate(); err != nil {
+		return ReplanDecision{}, err
+	}
+	if decision.Metadata == nil {
+		decision.Metadata = map[string]any{}
+	}
+	decision.Metadata["brain"] = "codex"
+	decision.Metadata["scheduler"] = "orchestrator"
+	return decision, nil
+}
+
 func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -104,6 +137,33 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	plan.Metadata["brain"] = "codex"
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
+}
+
+func decodeReplanDecision(data []byte) (ReplanDecision, error) {
+	var raw struct {
+		Action    string          `json:"action"`
+		Plan      json.RawMessage `json:"plan,omitempty"`
+		Rationale string          `json:"rationale,omitempty"`
+		Message   string          `json:"message,omitempty"`
+		Metadata  map[string]any  `json:"metadata,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ReplanDecision{}, err
+	}
+	decision := ReplanDecision{
+		Action:    raw.Action,
+		Rationale: raw.Rationale,
+		Message:   raw.Message,
+		Metadata:  raw.Metadata,
+	}
+	if len(raw.Plan) > 0 && string(raw.Plan) != "null" {
+		plan, err := decodeCodexPlan(raw.Plan)
+		if err != nil {
+			return ReplanDecision{}, fmt.Errorf("decode plan: %w", err)
+		}
+		decision.Plan = &plan
+	}
+	return decision, nil
 }
 
 func decodeCodexPlan(data []byte) (Plan, error) {
@@ -225,6 +285,7 @@ func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
 			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
+			{"kind": "benchmark_compare", "description": "Deterministic benchmark comparison worker for prompts containing explicit baseline and candidate numeric values."},
 			{"kind": "mock", "description": "No-op deterministic worker for smoke tests and scheduler validation."},
 		},
 		"steering": steering,
@@ -234,6 +295,56 @@ func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 		return task.Prompt
 	}
 	return "Schedule this task. Return only the JSON plan, with no prose or markdown.\n\n" + string(data)
+}
+
+func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"state": state,
+		"availableWorkers": []map[string]string{
+			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
+			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
+			{"kind": "mock", "description": "No-op deterministic worker for smoke tests and scheduler validation."},
+		},
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return strings.TrimSpace(b.template) + `	
+
+You are making a dynamic replanning decision after one or more worker turns.
+
+Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+
+The JSON object must have exactly these top-level fields:
+
+{
+  "action": "complete",
+  "rationale": "string",
+  "message": "string",
+  "plan": null
+}
+
+Field rules:
+- "action" must be exactly one of "continue", "complete", "wait", or "fail".
+- Use "complete" when the task appears done.
+- Use "continue" when another worker turn is needed.
+- Use "wait" when user input or approval is needed.
+- Use "fail" when the task cannot continue.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, rationale, steps, requiredApprovals, spawns.
+- Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
+- Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
+- When action is not "continue", "plan" must be null or omitted.
+- "steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects, never arrays of strings.
+
+Dynamic replanning input:
+
+` + string(data)
 }
 
 func extractCodexAgentMessage(output []byte) (string, error) {

@@ -12,18 +12,20 @@ import {
   Terminal,
 } from "lucide-react";
 import { applyWorkerChanges, cancelTask, cancelWorker, createTask, getSnapshot, steerTask } from "./api";
-import type { EventRecord, Snapshot, Task, Worker } from "./types";
+import type { EventRecord, ExecutionNode, Snapshot, Task, Worker } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
   tasks: Task[];
   workers: Worker[];
+  executionNodes: ExecutionNode[];
   events: EventRecord[];
 };
 
 const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
+  executionNodes: [],
   events: [],
 };
 
@@ -60,6 +62,7 @@ function App() {
     [selectedTaskId, snapshot.tasks],
   );
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
+  const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
 
   return (
@@ -122,6 +125,7 @@ function App() {
           {selectedTask ? (
             <>
               <TaskDetail task={selectedTask} onCancel={cancelTask} onSteer={steerTask} onError={setError} />
+              <ExecutionGraph nodes={selectedNodes} />
               <WorkerList workers={selectedWorkers} events={selectedEvents} onApply={applyWorkerChanges} onApplied={refresh} onCancel={cancelWorker} onError={setError} />
               <EventLog events={selectedEvents} />
             </>
@@ -309,6 +313,38 @@ function WorkerList({
   );
 }
 
+function ExecutionGraph({ nodes }: { nodes: ExecutionNode[] }) {
+  if (nodes.length === 0) {
+    return null;
+  }
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <Activity size={18} />
+        <h2>Execution</h2>
+      </div>
+      <div className="node-grid">
+        {nodes.map((node) => (
+          <article key={node.id} className="node-card">
+            <div>
+              <strong>{node.role || node.workerKind}</strong>
+              <small>{node.id.slice(0, 8)}</small>
+            </div>
+            <Status value={node.status} />
+            <small>{node.workerKind}</small>
+            {(node.spawnId || node.dependsOn?.length) && (
+              <p>
+                {node.spawnId ? `spawn ${node.spawnId}` : ""}
+                {node.dependsOn?.length ? ` depends on ${node.dependsOn.join(", ")}` : ""}
+              </p>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 type WorkerCompletionPayload = {
   changedFiles?: { path: string; status?: string }[];
   workspaceChanges?: { changedFiles?: { path: string; status?: string }[] };
@@ -397,6 +433,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
   return {
     tasks: snapshot.tasks ?? [],
     workers: snapshot.workers ?? [],
+    executionNodes: snapshot.executionNodes ?? [],
     events: snapshot.events ?? [],
   };
 }
@@ -411,6 +448,7 @@ function reduceEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {
 function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   const tasks = new Map<string, Task>();
   const workers = new Map<string, Worker>();
+  const executionNodes = new Map<string, ExecutionNode>();
 
   for (const event of snapshot.events) {
     const payload = event.payload as Record<string, unknown>;
@@ -430,6 +468,33 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         tasks.set(event.taskId, { ...task, status: String(payload.status) as Task["status"], updatedAt: event.at });
       }
     }
+    if (event.type === "execution.node_planned" && event.taskId) {
+      const nodeId = String(payload.nodeId ?? "");
+      if (nodeId) {
+        executionNodes.set(nodeId, {
+          id: nodeId,
+          taskId: event.taskId,
+          workerId: String(payload.workerId ?? event.workerId ?? "") || undefined,
+          workerKind: String(payload.workerKind ?? "unknown"),
+          status: "queued",
+          planId: String(payload.planId ?? "") || undefined,
+          parentNodeId: String(payload.parentNodeId ?? "") || undefined,
+          spawnId: String(payload.spawnId ?? "") || undefined,
+          role: String(payload.role ?? "") || undefined,
+          reason: String(payload.reason ?? "") || undefined,
+          dependsOn: Array.isArray(payload.dependsOn) ? payload.dependsOn.map(String) : undefined,
+          createdAt: event.at,
+          updatedAt: event.at,
+        });
+      }
+    }
+    if (event.type === "execution.node_status") {
+      const nodeId = String(payload.nodeId ?? "");
+      const node = executionNodes.get(nodeId);
+      if (node) {
+        executionNodes.set(nodeId, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+      }
+    }
     if (event.type === "worker.created" && event.workerId && event.taskId) {
       workers.set(event.workerId, {
         id: event.workerId,
@@ -444,16 +509,21 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     if (event.type === "worker.started" && event.workerId) {
       const worker = workers.get(event.workerId);
       if (worker) workers.set(event.workerId, { ...worker, status: "running", updatedAt: event.at });
+      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
+      if (node) executionNodes.set(node.id, { ...node, status: "running", updatedAt: event.at });
     }
     if (event.type === "worker.completed" && event.workerId) {
       const worker = workers.get(event.workerId);
       if (worker) workers.set(event.workerId, { ...worker, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
+      if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
     }
   }
 
   return {
     tasks: [...tasks.values()],
     workers: [...workers.values()],
+    executionNodes: [...executionNodes.values()],
     events: snapshot.events,
   };
 }

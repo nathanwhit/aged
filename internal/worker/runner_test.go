@@ -143,6 +143,32 @@ func TestCommandRunnerNormalizesClaudeJSONLines(t *testing.T) {
 	}
 }
 
+func TestSteerableCommandRunnerForwardsSteeringToStdin(t *testing.T) {
+	runner := NewSteerableCommandRunner("codex", func(spec Spec) []string {
+		return spec.Command
+	}, func(message string) string {
+		return "STEER:" + message
+	})
+	sink := &recordingSink{}
+	steering := make(chan string, 1)
+	steering <- "adjust course"
+	close(steering)
+
+	err := runner.Run(context.Background(), Spec{
+		Command:  []string{"/bin/sh", "-c", "IFS= read -r line; printf '%s\\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":{\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"$line\\\"}}\""},
+		Steering: steering,
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sink.has(EventResult, "stdout", "STEER:adjust course") {
+		t.Fatalf("missing stdin steering result: %+v", sink.events)
+	}
+	if !sink.has(EventLog, "stdin", "delivered steering to worker stdin") {
+		t.Fatalf("missing steering delivery log: %+v", sink.events)
+	}
+}
+
 func TestParserClassifiesNeedsInput(t *testing.T) {
 	event := ParserForKind("codex").ParseLine("stdout", `{"type":"approval_request","message":"approve?"}`)
 	if event.Kind != EventNeedsInput {
@@ -167,6 +193,26 @@ func TestParserDoesNotTreatCodexTurnCompletionAsResult(t *testing.T) {
 	turnCompleted := parser.ParseLine("stdout", `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
 	if turnCompleted.Kind != EventLog {
 		t.Fatalf("turn completed kind = %q", turnCompleted.Kind)
+	}
+}
+
+func TestBenchmarkCompareRunnerReportsImprovement(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+command: go test -bench=Parser
+baseline: 100
+candidate: 112
+threshold_percent: 5
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
+		t.Fatalf("events = %+v", sink.events)
+	}
+	if !strings.Contains(sink.events[0].Text, "verdict: improved") {
+		t.Fatalf("report = %s", sink.events[0].Text)
 	}
 }
 

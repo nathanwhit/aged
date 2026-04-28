@@ -115,6 +115,8 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 
 	tasks := map[string]core.Task{}
 	workers := map[string]core.Worker{}
+	nodes := map[string]core.ExecutionNode{}
+	workerNodes := map[string]string{}
 	workspaceMetadata := map[string]json.RawMessage{}
 
 	for _, event := range events {
@@ -148,6 +150,56 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			task.Status = payload.Status
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
+		case core.EventExecutionPlanned:
+			var payload struct {
+				NodeID       string          `json:"nodeId"`
+				WorkerID     string          `json:"workerId,omitempty"`
+				WorkerKind   string          `json:"workerKind"`
+				PlanID       string          `json:"planId,omitempty"`
+				ParentNodeID string          `json:"parentNodeId,omitempty"`
+				SpawnID      string          `json:"spawnId,omitempty"`
+				Role         string          `json:"role,omitempty"`
+				Reason       string          `json:"reason,omitempty"`
+				DependsOn    []string        `json:"dependsOn,omitempty"`
+				Metadata     json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode execution.node_planned: %w", err)
+			}
+			node := core.ExecutionNode{
+				ID:           payload.NodeID,
+				TaskID:       event.TaskID,
+				WorkerID:     payload.WorkerID,
+				WorkerKind:   payload.WorkerKind,
+				Status:       core.WorkerQueued,
+				PlanID:       payload.PlanID,
+				ParentNodeID: payload.ParentNodeID,
+				SpawnID:      payload.SpawnID,
+				Role:         payload.Role,
+				Reason:       payload.Reason,
+				DependsOn:    payload.DependsOn,
+				CreatedAt:    event.At,
+				UpdatedAt:    event.At,
+				Metadata:     payload.Metadata,
+			}
+			nodes[payload.NodeID] = node
+			if payload.WorkerID != "" {
+				workerNodes[payload.WorkerID] = payload.NodeID
+			}
+		case core.EventExecutionStatus:
+			var payload struct {
+				NodeID string            `json:"nodeId"`
+				Status core.WorkerStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode execution.node_status: %w", err)
+			}
+			node := nodes[payload.NodeID]
+			if node.ID != "" {
+				node.Status = payload.Status
+				node.UpdatedAt = event.At
+				nodes[payload.NodeID] = node
+			}
 		case core.EventWorkerCreated:
 			var payload struct {
 				Kind     string          `json:"kind"`
@@ -168,6 +220,12 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 				UpdatedAt: event.At,
 				Metadata:  metadata,
 			}
+			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
+				node := nodes[nodeID]
+				node.WorkerKind = payload.Kind
+				node.UpdatedAt = event.At
+				nodes[nodeID] = node
+			}
 		case core.EventWorkerWorkspace:
 			workspaceMetadata[event.WorkerID] = event.Payload
 			worker := workers[event.WorkerID]
@@ -181,6 +239,12 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			worker.Status = core.WorkerRunning
 			worker.UpdatedAt = event.At
 			workers[event.WorkerID] = worker
+			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
+				node := nodes[nodeID]
+				node.Status = core.WorkerRunning
+				node.UpdatedAt = event.At
+				nodes[nodeID] = node
+			}
 		case core.EventWorkerCompleted:
 			var payload struct {
 				Status core.WorkerStatus `json:"status"`
@@ -192,13 +256,20 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			worker.Status = payload.Status
 			worker.UpdatedAt = event.At
 			workers[event.WorkerID] = worker
+			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
+				node := nodes[nodeID]
+				node.Status = payload.Status
+				node.UpdatedAt = event.At
+				nodes[nodeID] = node
+			}
 		}
 	}
 
 	return core.Snapshot{
-		Tasks:   orderedTasks(tasks),
-		Workers: orderedWorkers(workers),
-		Events:  events,
+		Tasks:          orderedTasks(tasks),
+		Workers:        orderedWorkers(workers),
+		ExecutionNodes: orderedExecutionNodes(nodes),
+		Events:         events,
 	}, nil
 }
 
@@ -284,6 +355,23 @@ func orderedWorkers(values map[string]core.Worker) []core.Worker {
 	for _, worker := range values {
 		if worker.ID != "" {
 			out = append(out, worker)
+		}
+	}
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].CreatedAt.Before(out[i].CreatedAt) {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+func orderedExecutionNodes(values map[string]core.ExecutionNode) []core.ExecutionNode {
+	out := make([]core.ExecutionNode, 0, len(values))
+	for _, node := range values {
+		if node.ID != "" {
+			out = append(out, node)
 		}
 	}
 	for i := 0; i < len(out); i++ {

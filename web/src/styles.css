@@ -261,6 +261,27 @@ small {
   padding: 12px;
 }
 
+.node-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.node-card {
+  border: 1px solid #e0ddd5;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.node-card p {
+  color: #4b4f58;
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+}
+
 .worker-review {
   align-items: start;
   border-top: 1px solid #e9e5dd;

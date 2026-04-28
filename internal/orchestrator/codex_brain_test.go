@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestDecodeCodexPlanAcceptsStringLists(t *testing.T) {
 	if plan.RequiredApprovals[0] != (ApprovalRequest{Title: "Confirm external upload", Reason: "Confirm external upload"}) {
 		t.Fatalf("approvals = %+v", plan.RequiredApprovals)
 	}
-	if plan.Spawns[0] != (SpawnRequest{Role: "reviewer", Reason: "reviewer"}) {
+	if plan.Spawns[0].Role != "reviewer" || plan.Spawns[0].Reason != "reviewer" {
 		t.Fatalf("spawns = %+v", plan.Spawns)
 	}
 }
@@ -83,7 +84,7 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 		"rationale": "The request asks for scheduler validation.",
 		"steps": [{"title": "Run", "description": "Run mock worker"}],
 		"requiredApprovals": [{"title": "Approval", "reason": "Needed"}],
-		"spawns": [{"role": "reviewer", "reason": "Check output"}]
+		"spawns": [{"id": "review", "role": "reviewer", "reason": "Check output", "workerKind": "claude", "dependsOn": ["test"]}]
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -94,8 +95,57 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 	if plan.RequiredApprovals[0] != (ApprovalRequest{Title: "Approval", Reason: "Needed"}) {
 		t.Fatalf("approvals = %+v", plan.RequiredApprovals)
 	}
-	if plan.Spawns[0] != (SpawnRequest{Role: "reviewer", Reason: "Check output"}) {
+	if !reflect.DeepEqual(plan.Spawns[0], SpawnRequest{ID: "review", Role: "reviewer", Reason: "Check output", WorkerKind: "claude", DependsOn: []string{"test"}}) {
 		t.Fatalf("spawns = %+v", plan.Spawns)
+	}
+}
+
+func TestDecodeReplanDecisionContinue(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+		"action": "continue",
+		"rationale": "review found a missing case",
+		"message": "run an incorporation worker",
+		"plan": {
+			"workerKind": "codex",
+			"workerPrompt": "incorporate review feedback",
+			"rationale": "review found a missing case",
+			"steps": [{"title": "Fix", "description": "Patch the missing case"}],
+			"requiredApprovals": [],
+			"spawns": []
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != "continue" {
+		t.Fatalf("action = %q", decision.Action)
+	}
+	if decision.Plan == nil || decision.Plan.Prompt != "incorporate review feedback" {
+		t.Fatalf("plan = %+v", decision.Plan)
+	}
+}
+
+func TestDecodeReplanDecisionComplete(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+		"action": "complete",
+		"rationale": "all follow-up work is done",
+		"message": "ready for user review",
+		"plan": null
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != "complete" {
+		t.Fatalf("action = %q", decision.Action)
+	}
+	if decision.Plan != nil {
+		t.Fatalf("plan = %+v", decision.Plan)
 	}
 }
 

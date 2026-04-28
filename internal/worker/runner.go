@@ -12,12 +12,13 @@ import (
 )
 
 type Spec struct {
-	ID      string
-	TaskID  string
-	Kind    string
-	Prompt  string
-	WorkDir string
-	Command []string
+	ID       string
+	TaskID   string
+	Kind     string
+	Prompt   string
+	WorkDir  string
+	Command  []string
+	Steering <-chan string
 }
 
 type Sink interface {
@@ -54,6 +55,10 @@ type Runner interface {
 	Run(ctx context.Context, spec Spec, sink Sink) error
 }
 
+type SteeringSupport interface {
+	SupportsSteering() bool
+}
+
 type MockRunner struct{}
 
 func (MockRunner) Kind() string {
@@ -75,16 +80,28 @@ func (MockRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 }
 
 type CommandRunner struct {
-	kind    string
-	command func(Spec) []string
+	kind              string
+	command           func(Spec) []string
+	steeringFormatter func(string) string
 }
 
 func NewCommandRunner(kind string, command func(Spec) []string) CommandRunner {
 	return CommandRunner{kind: kind, command: command}
 }
 
+func NewSteerableCommandRunner(kind string, command func(Spec) []string, steeringFormatter func(string) string) CommandRunner {
+	if steeringFormatter == nil {
+		steeringFormatter = defaultSteeringFormatter
+	}
+	return CommandRunner{kind: kind, command: command, steeringFormatter: steeringFormatter}
+}
+
 func (r CommandRunner) Kind() string {
 	return r.kind
+}
+
+func (r CommandRunner) SupportsSteering() bool {
+	return r.steeringFormatter != nil
 }
 
 func (r CommandRunner) BuildCommand(spec Spec) []string {
@@ -110,6 +127,13 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if err != nil {
 		return err
 	}
+	var stdin io.WriteCloser
+	if r.SupportsSteering() && spec.Steering != nil {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return err
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -118,6 +142,9 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	parser := ParserForKind(r.kind)
 	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
 	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
+	if stdin != nil {
+		go forwardSteering(ctx, sink, spec.Steering, stdin, r.steeringFormatter)
+	}
 
 	for i := 0; i < 2; i++ {
 		if streamErr := <-errCh; streamErr != nil {
@@ -130,6 +157,33 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return fmt.Errorf("worker command failed: %w", waitErr)
 	}
 	return nil
+}
+
+func forwardSteering(ctx context.Context, sink Sink, steering <-chan string, stdin io.WriteCloser, formatter func(string) string) {
+	defer stdin.Close()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case message, ok := <-steering:
+			if !ok {
+				return
+			}
+			message = strings.TrimSpace(message)
+			if message == "" {
+				continue
+			}
+			if _, err := fmt.Fprintln(stdin, formatter(message)); err != nil {
+				_ = sink.Event(ctx, Event{Kind: EventError, Stream: "stdin", Text: "failed to deliver steering: " + err.Error()})
+				return
+			}
+			_ = sink.Event(ctx, Event{Kind: EventLog, Stream: "stdin", Text: "delivered steering to worker stdin"})
+		}
+	}
+}
+
+func defaultSteeringFormatter(message string) string {
+	return "\n[orchestrator steering]\n" + message + "\n[/orchestrator steering]"
 }
 
 func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, reader io.Reader, errCh chan<- error) {
@@ -149,12 +203,13 @@ func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, r
 func DefaultRunners() map[string]Runner {
 	runners := []Runner{
 		MockRunner{},
-		NewCommandRunner("codex", func(spec Spec) []string {
+		BenchmarkCompareRunner{},
+		NewSteerableCommandRunner("codex", func(spec Spec) []string {
 			return []string{"codex", "exec", "--json", "--cd", spec.WorkDir, spec.Prompt}
-		}),
-		NewCommandRunner("claude", func(spec Spec) []string {
+		}, defaultSteeringFormatter),
+		NewSteerableCommandRunner("claude", func(spec Spec) []string {
 			return []string{"claude", "--print", "--output-format", "stream-json", spec.Prompt}
-		}),
+		}, defaultSteeringFormatter),
 		NewCommandRunner("shell", func(spec Spec) []string {
 			return spec.Command
 		}),
