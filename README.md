@@ -6,7 +6,7 @@ The current implementation is an initial vertical slice:
 
 - Go daemon with SQLite event persistence
 - Prompt-driven orchestrator brain interface
-- Mock, Codex, Claude, and shell worker runner adapters
+- Mock, Codex, Claude, and shell worker runner adapters selected by the orchestrator
 - HTTP API and SSE event stream
 - React/Vite dashboard for task creation, steering, cancellation, and live state
 
@@ -24,11 +24,11 @@ Useful flags:
 go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker mock -workdir .
 ```
 
-Default worker choices:
+Default scheduler fallback:
 
-- `mock`: no external agent call; useful for UI and orchestration testing
-- `codex`: runs `codex exec --json`
-- `claude`: runs `claude -p --output-format stream-json`
+- `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
+- Users do not choose workers per task; task creation only supplies the work request.
+- Available runner adapters include `mock`, `codex`, `claude`, and `shell`.
 
 ## Run the dashboard
 

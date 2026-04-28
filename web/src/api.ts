@@ -11,7 +11,6 @@ export async function getSnapshot(): Promise<Snapshot> {
 export async function createTask(input: {
   title: string;
   prompt: string;
-  kind?: string;
 }) {
   const response = await fetch("/api/tasks", {
     method: "POST",

@@ -137,19 +137,18 @@ function TaskComposer({
   onCreate,
   onError,
 }: {
-  onCreate: (input: { title: string; prompt: string; kind?: string }) => Promise<void>;
+  onCreate: (input: { title: string; prompt: string }) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [kind, setKind] = useState("mock");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     try {
-      await onCreate({ title, prompt, kind });
+      await onCreate({ title, prompt });
       setTitle("");
       setPrompt("");
     } catch (err) {
@@ -168,14 +167,6 @@ function TaskComposer({
       <label>
         Title
         <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Implement parser retry path" required />
-      </label>
-      <label>
-        Worker
-        <select value={kind} onChange={(event) => setKind(event.target.value)}>
-          <option value="mock">Mock</option>
-          <option value="codex">Codex</option>
-          <option value="claude">Claude</option>
-        </select>
       </label>
       <label>
         Prompt

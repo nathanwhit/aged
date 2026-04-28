@@ -48,7 +48,8 @@ func (b *PromptBrain) Plan(_ context.Context, task core.Task, steering []string)
 		WorkerKind: b.defaultKind,
 		Prompt:     strings.TrimSpace(prompt),
 		Metadata: map[string]any{
-			"brain": "prompt",
+			"brain":     "prompt",
+			"scheduler": "orchestrator",
 		},
 	}, nil
 }
@@ -70,7 +71,8 @@ func (b StaticBrain) Plan(_ context.Context, task core.Task, steering []string) 
 		WorkerKind: kind,
 		Prompt:     fmt.Sprintf("%s\n\n%s%s", task.Title, task.Prompt, extra),
 		Metadata: map[string]any{
-			"brain": "static",
+			"brain":     "static",
+			"scheduler": "orchestrator",
 		},
 	}, nil
 }

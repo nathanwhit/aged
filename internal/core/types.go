@@ -74,7 +74,6 @@ type Worker struct {
 type CreateTaskRequest struct {
 	Title  string `json:"title"`
 	Prompt string `json:"prompt"`
-	Kind   string `json:"kind,omitempty"`
 }
 
 type SteeringRequest struct {

@@ -68,11 +68,9 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
-			"title":  req.Title,
-			"prompt": req.Prompt,
-			"metadata": map[string]any{
-				"requestedWorkerKind": req.Kind,
-			},
+			"title":    req.Title,
+			"prompt":   req.Prompt,
+			"metadata": map[string]any{},
 		}),
 	})
 	if err != nil {
@@ -88,7 +86,7 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		UpdatedAt: created.At,
 	}
 
-	go s.runTask(context.Background(), task, req.Kind)
+	go s.runTask(context.Background(), task)
 	return task, nil
 }
 
@@ -136,7 +134,7 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	return err
 }
 
-func (s *Service) runTask(ctx context.Context, task core.Task, requestedKind string) {
+func (s *Service) runTask(ctx context.Context, task core.Task) {
 	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
 		return
 	}
@@ -145,9 +143,6 @@ func (s *Service) runTask(ctx context.Context, task core.Task, requestedKind str
 	if err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 		return
-	}
-	if requestedKind != "" {
-		plan.WorkerKind = requestedKind
 	}
 
 	runner := s.runners[plan.WorkerKind]
