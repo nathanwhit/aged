@@ -1,0 +1,262 @@
+package orchestrator
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"aged/internal/core"
+)
+
+type APIBrainConfig struct {
+	Endpoint     string
+	APIKey       string
+	Model        string
+	TemplatePath string
+	HTTPClient   *http.Client
+	Fallback     BrainProvider
+}
+
+type APIBrain struct {
+	endpoint   string
+	apiKey     string
+	model      string
+	template   string
+	httpClient *http.Client
+	fallback   BrainProvider
+}
+
+func NewAPIBrain(config APIBrainConfig) (*APIBrain, error) {
+	if strings.TrimSpace(config.Endpoint) == "" {
+		return nil, errors.New("api brain endpoint is required")
+	}
+	if strings.TrimSpace(config.APIKey) == "" {
+		return nil, errors.New("api brain API key is required")
+	}
+	if strings.TrimSpace(config.Model) == "" {
+		return nil, errors.New("api brain model is required")
+	}
+	template, err := os.ReadFile(config.TemplatePath)
+	if err != nil {
+		return nil, err
+	}
+	client := config.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	return &APIBrain{
+		endpoint:   config.Endpoint,
+		apiKey:     config.APIKey,
+		model:      config.Model,
+		template:   string(template),
+		httpClient: client,
+		fallback:   config.Fallback,
+	}, nil
+}
+
+func (b *APIBrain) Plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
+	plan, err := b.plan(ctx, task, steering)
+	if err == nil {
+		return plan, nil
+	}
+	if b.fallback == nil {
+		return Plan{}, err
+	}
+	fallbackPlan, fallbackErr := b.fallback.Plan(ctx, task, steering)
+	if fallbackErr != nil {
+		return Plan{}, fmt.Errorf("api brain failed: %w; fallback failed: %w", err, fallbackErr)
+	}
+	if fallbackPlan.Metadata == nil {
+		fallbackPlan.Metadata = map[string]any{}
+	}
+	fallbackPlan.Metadata["brain"] = "api-fallback"
+	fallbackPlan.Metadata["fallbackReason"] = err.Error()
+	return fallbackPlan, nil
+}
+
+func (b *APIBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
+	request := chatCompletionRequest{
+		Model: b.model,
+		Messages: []chatMessage{
+			{
+				Role:    "system",
+				Content: strings.TrimSpace(b.template),
+			},
+			{
+				Role:    "user",
+				Content: b.taskMessage(task, steering),
+			},
+		},
+		ResponseFormat: planResponseFormat(),
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return Plan{}, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return Plan{}, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpRes, err := b.httpClient.Do(httpReq)
+	if err != nil {
+		return Plan{}, err
+	}
+	defer httpRes.Body.Close()
+
+	responseBody, err := io.ReadAll(io.LimitReader(httpRes.Body, 4<<20))
+	if err != nil {
+		return Plan{}, err
+	}
+	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
+		return Plan{}, fmt.Errorf("api brain returned %s: %s", httpRes.Status, strings.TrimSpace(string(responseBody)))
+	}
+
+	var response chatCompletionResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return Plan{}, fmt.Errorf("decode api brain response: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return Plan{}, errors.New("api brain returned no choices")
+	}
+
+	content := strings.TrimSpace(response.Choices[0].Message.Content)
+	content = trimJSONFence(content)
+	var plan Plan
+	if err := json.Unmarshal([]byte(content), &plan); err != nil {
+		return Plan{}, fmt.Errorf("decode api brain plan: %w", err)
+	}
+	if err := plan.Validate(); err != nil {
+		return Plan{}, err
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["brain"] = "api"
+	plan.Metadata["scheduler"] = "orchestrator"
+	plan.Metadata["model"] = b.model
+	return plan, nil
+}
+
+func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"availableWorkers": []map[string]string{
+			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
+			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
+			{"kind": "mock", "description": "No-op deterministic worker for smoke tests and scheduler validation."},
+		},
+		"steering": steering,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return string(data)
+}
+
+type chatCompletionRequest struct {
+	Model          string         `json:"model"`
+	Messages       []chatMessage  `json:"messages"`
+	ResponseFormat map[string]any `json:"response_format"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatCompletionResponse struct {
+	Choices []struct {
+		Message chatMessage `json:"message"`
+	} `json:"choices"`
+}
+
+func planResponseFormat() map[string]any {
+	return map[string]any{
+		"type": "json_schema",
+		"json_schema": map[string]any{
+			"name":   "orchestration_plan",
+			"strict": true,
+			"schema": map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []string{"workerKind", "workerPrompt", "rationale", "steps", "requiredApprovals", "spawns"},
+				"properties": map[string]any{
+					"workerKind": map[string]any{
+						"type": "string",
+						"enum": []string{"codex", "claude", "mock"},
+					},
+					"workerPrompt": map[string]any{
+						"type":      "string",
+						"minLength": 1,
+					},
+					"rationale": map[string]any{
+						"type": "string",
+					},
+					"steps": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"title", "description"},
+							"properties": map[string]any{
+								"title":       map[string]any{"type": "string"},
+								"description": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"requiredApprovals": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"title", "reason"},
+							"properties": map[string]any{
+								"title":  map[string]any{"type": "string"},
+								"reason": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"spawns": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"role", "reason"},
+							"properties": map[string]any{
+								"role":   map[string]any{"type": "string"},
+								"reason": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func trimJSONFence(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "```") {
+		return value
+	}
+	value = strings.TrimPrefix(value, "```json")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	return strings.TrimSpace(value)
+}

@@ -20,12 +20,17 @@ import (
 
 func main() {
 	var (
-		addr        = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
-		dbPath      = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
-		workDir     = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
-		workerKind  = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "default worker kind")
-		promptPath  = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "orchestrator prompt template")
-		webDistPath = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
+		addr            = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
+		dbPath          = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
+		workDir         = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
+		workerKind      = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
+		brainMode       = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, api, or static")
+		promptPath      = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
+		schedulerPrompt = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
+		brainEndpoint   = flag.String("brain-endpoint", envOr("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
+		brainAPIKey     = flag.String("brain-api-key", envFirst("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
+		brainModel      = flag.String("brain-model", envOr("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
+		webDistPath     = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
 	)
 	flag.Parse()
 
@@ -39,11 +44,33 @@ func main() {
 	}
 	defer store.Close()
 
-	var brain orchestrator.BrainProvider
-	brain, err = orchestrator.NewPromptBrain(*workerKind, *promptPath)
+	var fallbackBrain orchestrator.BrainProvider
+	fallbackBrain, err = orchestrator.NewPromptBrain(*workerKind, *promptPath)
 	if err != nil {
 		slog.Warn("using static brain because prompt template could not be loaded", "error", err)
+		fallbackBrain = &orchestrator.StaticBrain{WorkerKind: *workerKind}
+	}
+
+	var brain orchestrator.BrainProvider = fallbackBrain
+	switch *brainMode {
+	case "prompt":
+	case "static":
 		brain = &orchestrator.StaticBrain{WorkerKind: *workerKind}
+	case "api":
+		apiBrain, err := orchestrator.NewAPIBrain(orchestrator.APIBrainConfig{
+			Endpoint:     *brainEndpoint,
+			APIKey:       *brainAPIKey,
+			Model:        *brainModel,
+			TemplatePath: *schedulerPrompt,
+			Fallback:     fallbackBrain,
+		})
+		if err != nil {
+			slog.Warn("using fallback brain because API brain could not be configured", "error", err)
+		} else {
+			brain = apiBrain
+		}
+	default:
+		slog.Warn("unknown brain mode; using fallback prompt brain", "brain", *brainMode)
 	}
 
 	absWorkDir, err := filepath.Abs(*workDir)
@@ -80,6 +107,15 @@ func envOr(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envFirst(keys ...string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func staticHandler(path string) http.Handler {

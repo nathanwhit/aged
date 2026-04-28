@@ -5,8 +5,10 @@
 The current implementation is an initial vertical slice:
 
 - Go daemon with SQLite event persistence
-- Prompt-driven orchestrator brain interface
+- Prompt-driven and API-backed orchestrator brain providers
 - Mock, Codex, Claude, and shell worker runner adapters selected by the orchestrator
+- Normalized worker events for logs, results, errors, and worker requests for input
+- Workspace preflight using `jj` before workers start
 - HTTP API and SSE event stream
 - React/Vite dashboard for task creation, steering, cancellation, and live state
 
@@ -24,11 +26,22 @@ Useful flags:
 go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker mock -workdir .
 ```
 
-Default scheduler fallback:
+Scheduler behavior:
 
 - `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
 - Users do not choose workers per task; task creation only supplies the work request.
 - Available runner adapters include `mock`, `codex`, `claude`, and `shell`.
+- Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
+- Before a worker is created, the orchestrator records `worker.workspace_prepared` with the prepared cwd, repo root, current `jj @` change, dirty status, VCS type, and workspace mode.
+- Worker subprocess output is normalized into `worker.output` events. Plain output becomes log/error events; Codex and Claude JSONL output preserves raw payloads and is classified as `log`, `result`, `error`, or `needs_input`.
+
+API-backed scheduling can be enabled with:
+
+```sh
+AGED_BRAIN=api AGED_BRAIN_MODEL=<model> AGED_BRAIN_API_KEY=<key> go run ./cmd/aged
+```
+
+The API brain uses an OpenAI-compatible chat completions endpoint. Override it with `AGED_BRAIN_ENDPOINT` or `-brain-endpoint`. If the API brain is not configured or returns invalid structured output, the daemon falls back to the local prompt brain.
 
 ## Run the dashboard
 

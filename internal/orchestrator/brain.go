@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -14,9 +15,38 @@ type BrainProvider interface {
 }
 
 type Plan struct {
-	WorkerKind string         `json:"workerKind"`
-	Prompt     string         `json:"prompt"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	WorkerKind        string            `json:"workerKind"`
+	Prompt            string            `json:"workerPrompt"`
+	Rationale         string            `json:"rationale,omitempty"`
+	Steps             []PlanStep        `json:"steps,omitempty"`
+	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
+	Spawns            []SpawnRequest    `json:"spawns,omitempty"`
+	Metadata          map[string]any    `json:"metadata,omitempty"`
+}
+
+type PlanStep struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type ApprovalRequest struct {
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+}
+
+type SpawnRequest struct {
+	Role   string `json:"role"`
+	Reason string `json:"reason"`
+}
+
+func (p Plan) Validate() error {
+	if strings.TrimSpace(p.WorkerKind) == "" {
+		return errors.New("plan workerKind is required")
+	}
+	if strings.TrimSpace(p.Prompt) == "" {
+		return errors.New("plan workerPrompt is required")
+	}
+	return nil
 }
 
 type PromptBrain struct {
@@ -47,6 +77,11 @@ func (b *PromptBrain) Plan(_ context.Context, task core.Task, steering []string)
 	return Plan{
 		WorkerKind: b.defaultKind,
 		Prompt:     strings.TrimSpace(prompt),
+		Rationale:  "fallback prompt brain selected the configured default worker",
+		Steps: []PlanStep{{
+			Title:       "Execute requested work",
+			Description: "Run one worker with the user request and current steering context.",
+		}},
 		Metadata: map[string]any{
 			"brain":     "prompt",
 			"scheduler": "orchestrator",
@@ -70,6 +105,11 @@ func (b StaticBrain) Plan(_ context.Context, task core.Task, steering []string) 
 	return Plan{
 		WorkerKind: kind,
 		Prompt:     fmt.Sprintf("%s\n\n%s%s", task.Title, task.Prompt, extra),
+		Rationale:  "static brain selected the configured default worker",
+		Steps: []PlanStep{{
+			Title:       "Execute requested work",
+			Description: "Run one worker with the user request.",
+		}},
 		Metadata: map[string]any{
 			"brain":     "static",
 			"scheduler": "orchestrator",

@@ -115,6 +115,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 
 	tasks := map[string]core.Task{}
 	workers := map[string]core.Worker{}
+	workspaceMetadata := map[string]json.RawMessage{}
 
 	for _, event := range events {
 		switch event.Type {
@@ -156,6 +157,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode worker.created: %w", err)
 			}
+			metadata := mergeMetadata(payload.Metadata, workspaceMetadata[event.WorkerID])
 			workers[event.WorkerID] = core.Worker{
 				ID:        event.WorkerID,
 				TaskID:    event.TaskID,
@@ -164,7 +166,15 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 				Command:   payload.Command,
 				CreatedAt: event.At,
 				UpdatedAt: event.At,
-				Metadata:  payload.Metadata,
+				Metadata:  metadata,
+			}
+		case core.EventWorkerWorkspace:
+			workspaceMetadata[event.WorkerID] = event.Payload
+			worker := workers[event.WorkerID]
+			if worker.ID != "" {
+				worker.Metadata = mergeMetadata(worker.Metadata, event.Payload)
+				worker.UpdatedAt = event.At
+				workers[event.WorkerID] = worker
 			}
 		case core.EventWorkerStarted:
 			worker := workers[event.WorkerID]
@@ -190,6 +200,21 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		Workers: orderedWorkers(workers),
 		Events:  events,
 	}, nil
+}
+
+func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMessage {
+	if len(workspace) == 0 {
+		return base
+	}
+	out := map[string]any{}
+	if len(base) > 0 {
+		_ = json.Unmarshal(base, &out)
+	}
+	var workspacePayload any
+	if err := json.Unmarshal(workspace, &workspacePayload); err == nil {
+		out["workspace"] = workspacePayload
+	}
+	return core.MustJSON(out)
 }
 
 func (s *SQLiteStore) Close() error {

@@ -32,7 +32,9 @@ type EventType string
 const (
 	EventTaskCreated     EventType = "task.created"
 	EventTaskStatus      EventType = "task.status"
+	EventTaskPlanned     EventType = "task.planned"
 	EventTaskSteered     EventType = "task.steered"
+	EventWorkerWorkspace EventType = "worker.workspace_prepared"
 	EventWorkerCreated   EventType = "worker.created"
 	EventWorkerStarted   EventType = "worker.started"
 	EventWorkerOutput    EventType = "worker.output"

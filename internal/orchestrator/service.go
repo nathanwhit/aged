@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -16,11 +15,12 @@ import (
 )
 
 type Service struct {
-	store   eventstore.Store
-	broker  *Broker
-	brain   BrainProvider
-	runners map[string]worker.Runner
-	workDir string
+	store      eventstore.Store
+	broker     *Broker
+	brain      BrainProvider
+	runners    map[string]worker.Runner
+	workDir    string
+	workspaces WorkspaceManager
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -28,14 +28,22 @@ type Service struct {
 }
 
 func NewService(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string) *Service {
+	return NewServiceWithWorkspaceManager(store, brain, runners, workDir, JJWorkspaceManager{})
+}
+
+func NewServiceWithWorkspaceManager(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string, workspaces WorkspaceManager) *Service {
+	if workspaces == nil {
+		workspaces = JJWorkspaceManager{}
+	}
 	return &Service{
-		store:   store,
-		broker:  NewBroker(),
-		brain:   brain,
-		runners: runners,
-		workDir: workDir,
-		cancels: map[string]context.CancelFunc{},
-		tasks:   map[string]string{},
+		store:      store,
+		broker:     NewBroker(),
+		brain:      brain,
+		runners:    runners,
+		workDir:    workDir,
+		workspaces: workspaces,
+		cancels:    map[string]context.CancelFunc{},
+		tasks:      map[string]string{},
 	}
 }
 
@@ -144,6 +152,18 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
+	if err := plan.Validate(); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
 
 	runner := s.runners[plan.WorkerKind]
 	if runner == nil {
@@ -152,12 +172,33 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	}
 
 	workerID := uuid.NewString()
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	workspace, err := s.workspaces.Prepare(ctx, WorkspaceSpec{
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		WorkDir:  s.workDir,
+	})
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(workspace),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
 	spec := worker.Spec{
 		ID:      workerID,
 		TaskID:  task.ID,
 		Kind:    plan.WorkerKind,
 		Prompt:  plan.Prompt,
-		WorkDir: s.workDir,
+		WorkDir: workspace.CWD,
 	}
 	command := runner.BuildCommand(spec)
 	if _, err := s.append(ctx, core.Event{
@@ -167,7 +208,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		Payload: core.MustJSON(map[string]any{
 			"kind":     plan.WorkerKind,
 			"command":  command,
-			"metadata": plan.Metadata,
+			"metadata": planMetadata(plan),
 		}),
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
@@ -250,6 +291,28 @@ func (s *Service) failTask(ctx context.Context, taskID string, err error) error 
 	return appendErr
 }
 
+func planMetadata(plan Plan) map[string]any {
+	metadata := map[string]any{}
+	for _, key := range []string{"brain", "scheduler", "model", "fallbackReason"} {
+		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
+			metadata[key] = value
+		}
+	}
+	if plan.Rationale != "" {
+		metadata["rationale"] = plan.Rationale
+	}
+	if len(plan.Steps) > 0 {
+		metadata["steps"] = plan.Steps
+	}
+	if len(plan.RequiredApprovals) > 0 {
+		metadata["requiredApprovals"] = plan.RequiredApprovals
+	}
+	if len(plan.Spawns) > 0 {
+		metadata["spawns"] = plan.Spawns
+	}
+	return metadata
+}
+
 func (s *Service) append(ctx context.Context, event core.Event) (core.Event, error) {
 	if event.At.IsZero() {
 		event.At = time.Now().UTC()
@@ -268,19 +331,12 @@ type eventSink struct {
 	workerID string
 }
 
-func (s eventSink) Output(ctx context.Context, stream string, text string) error {
-	payload, err := json.Marshal(map[string]any{
-		"stream": stream,
-		"text":   text,
-	})
-	if err != nil {
-		return err
-	}
-	_, err = s.service.append(ctx, core.Event{
+func (s eventSink) Event(ctx context.Context, event worker.Event) error {
+	_, err := s.service.append(ctx, core.Event{
 		Type:     core.EventWorkerOutput,
 		TaskID:   s.taskID,
 		WorkerID: s.workerID,
-		Payload:  payload,
+		Payload:  core.MustJSON(event),
 	})
 	return err
 }
