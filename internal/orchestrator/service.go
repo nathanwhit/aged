@@ -105,6 +105,21 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	return b.String()
 }
 
+func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string) string {
+	var b strings.Builder
+	b.WriteString("# Retry Context\n\n")
+	b.WriteString("This is a retry of a previously failed or canceled worker turn.\n")
+	b.WriteString("Previous worker ID: ")
+	b.WriteString(previousWorkerID)
+	b.WriteString("\n")
+	if strings.TrimSpace(resumeSessionID) != "" {
+		b.WriteString("The worker provider session is being resumed when supported.\n")
+	}
+	b.WriteString("The execution workspace may already contain partial changes from that worker. Inspect the current workspace state first, preserve useful existing work, and continue from there instead of starting over.\n\n")
+	b.WriteString(prompt)
+	return b.String()
+}
+
 type WorkerTurnResult struct {
 	WorkerID string            `json:"workerId"`
 	NodeID   string            `json:"nodeId,omitempty"`
@@ -846,8 +861,8 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if !ok {
 		return core.Task{}, eventstore.ErrNotFound
 	}
-	if task.Status != core.TaskFailed {
-		return core.Task{}, errors.New("can only retry failed tasks")
+	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
+		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
 	plan, err := retryPlanForTask(snapshot, taskID)
 	if err != nil {
@@ -1432,7 +1447,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["targetLabels"] = project.TargetLabels
 		plan.Metadata["targetSelectionSource"] = "project"
 	}
-	target, err := s.targets.Select(plan)
+	target, err := s.selectExecutionTarget(plan)
 	if err != nil {
 		return WorkerTurnResult{}, err
 	}
@@ -1455,6 +1470,19 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		planID = uuid.NewString()
 		plan.Metadata["planID"] = planID
 	}
+	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
+	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	workspace, reusedWorkspace, workspaceErr := s.retryWorkspace(ctx, task.ID, workerID, retryFromWorkerID)
+	if workspaceErr != nil {
+		plan.Metadata["retryWorkspaceReused"] = false
+		plan.Metadata["retryWorkspaceError"] = workspaceErr.Error()
+	}
+	if reusedWorkspace {
+		plan.Metadata["retryWorkspaceReused"] = true
+		plan.Metadata["retryWorkspaceCWD"] = workspace.CWD
+	} else if retryFromWorkerID != "" {
+		plan.Metadata["retryWorkspaceReused"] = false
+	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventExecutionPlanned,
 		TaskID:   task.ID,
@@ -1476,14 +1504,16 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}); err != nil {
 		return WorkerTurnResult{}, err
 	}
-	workspace, err := s.workspaces.Prepare(ctx, WorkspaceSpec{
-		TaskID:   task.ID,
-		WorkerID: workerID,
-		WorkDir:  project.LocalPath,
-	})
-	if err != nil {
-		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
-		return WorkerTurnResult{}, err
+	if !reusedWorkspace {
+		workspace, err = s.workspaces.Prepare(ctx, WorkspaceSpec{
+			TaskID:   task.ID,
+			WorkerID: workerID,
+			WorkDir:  project.LocalPath,
+		})
+		if err != nil {
+			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+			return WorkerTurnResult{}, err
+		}
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerWorkspace,
@@ -1498,12 +1528,20 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if runnerSupportsSteering(runner) {
 		steering = make(chan string, 16)
 	}
+	prompt := workerExecutionPrompt(plan.Prompt, workspace)
+	if reusedWorkspace {
+		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID)
+	} else {
+		resumeSessionID = ""
+		delete(plan.Metadata, "retryResumeSessionID")
+	}
 	spec := worker.Spec{
 		ID:              workerID,
 		TaskID:          task.ID,
 		Kind:            plan.WorkerKind,
-		Prompt:          workerExecutionPrompt(plan.Prompt, workspace),
+		Prompt:          prompt,
 		WorkDir:         workspace.CWD,
+		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
 		Steering:        steering,
 	}
@@ -1592,6 +1630,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
 }
 
+func (s *Service) selectExecutionTarget(plan Plan) (TargetConfig, error) {
+	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
+		return s.targets.SelectID(retryTargetID)
+	}
+	return s.targets.Select(plan)
+}
+
 func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan Plan, runner worker.Runner, target TargetConfig) (WorkerTurnResult, error) {
 	workerID := uuid.NewString()
 	nodeID := stringMetadata(plan.Metadata, "nodeID")
@@ -1606,6 +1651,22 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	project := s.projectForTask(task)
 	remoteWorkDir := nonEmpty(target.WorkDir, project.LocalPath)
+	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
+	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	reusedWorkspace := false
+	if retryFromWorkerID != "" {
+		if retryWorkDir, err := s.remoteRetryWorkDir(ctx, target, retryFromWorkerID); err != nil {
+			plan.Metadata["retryWorkspaceReused"] = false
+			plan.Metadata["retryWorkspaceError"] = err.Error()
+			resumeSessionID = ""
+			delete(plan.Metadata, "retryResumeSessionID")
+		} else {
+			remoteWorkDir = retryWorkDir
+			reusedWorkspace = true
+			plan.Metadata["retryWorkspaceReused"] = true
+			plan.Metadata["retryWorkspaceCWD"] = remoteWorkDir
+		}
+	}
 	workspace := PreparedWorkspace{
 		Root:       remoteWorkDir,
 		CWD:        remoteWorkDir,
@@ -1622,8 +1683,12 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		Kind:            plan.WorkerKind,
 		Prompt:          workerExecutionPrompt(plan.Prompt, workspace),
 		WorkDir:         remoteWorkDir,
+		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
 		Steering:        steering,
+	}
+	if reusedWorkspace {
+		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID)
 	}
 	command := runner.BuildCommand(spec)
 	remoteRun := NewRemoteRun(target, spec)
@@ -2206,7 +2271,7 @@ func taskSteering(snapshot core.Snapshot, taskID string) []string {
 func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 	var plans []Plan
 	var workerIDs []string
-	failedWorkerID := ""
+	terminalWorkerID := ""
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID {
 			continue
@@ -2233,22 +2298,101 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return Plan{}, fmt.Errorf("decode worker completion: %w", err)
 			}
-			if payload.Status == core.WorkerFailed {
-				failedWorkerID = event.WorkerID
+			if payload.Status == core.WorkerFailed || payload.Status == core.WorkerCanceled {
+				terminalWorkerID = event.WorkerID
 			}
 		}
 	}
 	if len(plans) == 0 {
-		return Plan{}, errors.New("failed task has no persisted plan to retry")
+		return Plan{}, errors.New("task has no persisted plan to retry")
 	}
-	if failedWorkerID != "" {
+	if terminalWorkerID != "" {
 		for i := len(workerIDs) - 1; i >= 0; i-- {
-			if workerIDs[i] == failedWorkerID && i < len(plans) {
-				return plans[i], nil
+			if workerIDs[i] == terminalWorkerID && i < len(plans) {
+				return retryPlanWithResume(snapshot, plans[i], terminalWorkerID), nil
 			}
 		}
 	}
-	return plans[len(plans)-1], nil
+	return retryPlanWithResume(snapshot, plans[len(plans)-1], terminalWorkerID), nil
+}
+
+func retryPlanWithResume(snapshot core.Snapshot, plan Plan, workerID string) Plan {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return plan
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["retryFromWorkerID"] = workerID
+	if execution := workerExecutionInfo(snapshot, workerID); len(execution) > 0 {
+		if targetID := stringMetadataValue(execution["targetId"]); targetID != "" {
+			plan.Metadata["retryTargetID"] = targetID
+		}
+		if targetKind := stringMetadataValue(execution["targetKind"]); targetKind != "" {
+			plan.Metadata["retryTargetKind"] = targetKind
+		}
+		if remoteSession := stringMetadataValue(execution["remoteSession"]); remoteSession != "" {
+			plan.Metadata["retryRemoteSession"] = remoteSession
+		}
+		if remoteRunDir := stringMetadataValue(execution["remoteRunDir"]); remoteRunDir != "" {
+			plan.Metadata["retryRemoteRunDir"] = remoteRunDir
+		}
+		if remoteWorkDir := stringMetadataValue(execution["remoteWorkDir"]); remoteWorkDir != "" {
+			plan.Metadata["retryRemoteWorkDir"] = remoteWorkDir
+		}
+	}
+	if sessionID := workerProviderSessionID(snapshot, workerID, plan.WorkerKind); sessionID != "" {
+		plan.Metadata["retryResumeSessionID"] = sessionID
+	}
+	return plan
+}
+
+func workerProviderSessionID(snapshot core.Snapshot, workerID string, kind string) string {
+	for _, event := range snapshot.Events {
+		if event.WorkerID != workerID || event.Type != core.EventWorkerOutput {
+			continue
+		}
+		var payload struct {
+			Raw json.RawMessage `json:"raw"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || len(payload.Raw) == 0 {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(payload.Raw, &raw); err != nil {
+			continue
+		}
+		switch kind {
+		case "codex":
+			if raw["type"] == "thread.started" {
+				if sessionID := stringMetadataValue(raw["thread_id"]); sessionID != "" {
+					return sessionID
+				}
+			}
+		case "claude":
+			if raw["type"] == "system" && raw["subtype"] == "init" {
+				if sessionID := stringMetadataValue(raw["session_id"]); sessionID != "" {
+					return sessionID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func workerExecutionInfo(snapshot core.Snapshot, workerID string) map[string]any {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.WorkerID != workerID || event.Type != core.EventExecutionPlanned {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			return payload
+		}
+	}
+	return nil
 }
 
 func latestWorkerQuestion(snapshot core.Snapshot, taskID string) (string, string) {
@@ -2297,6 +2441,50 @@ func (s *Service) describeWorkspaceDiff(ctx context.Context, workspace PreparedW
 		return "", nil
 	}
 	return differ.DescribeDiff(ctx, workspace)
+}
+
+func (s *Service) retryWorkspace(ctx context.Context, taskID string, newWorkerID string, previousWorkerID string) (PreparedWorkspace, bool, error) {
+	previousWorkerID = strings.TrimSpace(previousWorkerID)
+	if previousWorkerID == "" {
+		return PreparedWorkspace{}, false, nil
+	}
+	workspace, err := s.workspaceForWorker(ctx, previousWorkerID)
+	if err != nil {
+		return PreparedWorkspace{}, false, fmt.Errorf("load retry workspace for %s: %w", previousWorkerID, err)
+	}
+	cwd := strings.TrimSpace(workspace.CWD)
+	if cwd == "" {
+		return PreparedWorkspace{}, false, fmt.Errorf("retry workspace for %s has no cwd", previousWorkerID)
+	}
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return PreparedWorkspace{}, false, fmt.Errorf("retry workspace %s is not available: %w", cwd, err)
+	}
+	if !info.IsDir() {
+		return PreparedWorkspace{}, false, fmt.Errorf("retry workspace %s is not a directory", cwd)
+	}
+	workspace.TaskID = taskID
+	workspace.WorkerID = newWorkerID
+	return workspace, true, nil
+}
+
+func (s *Service) remoteRetryWorkDir(ctx context.Context, target TargetConfig, previousWorkerID string) (string, error) {
+	workspace, err := s.workspaceForWorker(ctx, previousWorkerID)
+	if err != nil {
+		return "", fmt.Errorf("load retry workspace for %s: %w", previousWorkerID, err)
+	}
+	cwd := strings.TrimSpace(workspace.CWD)
+	if cwd == "" {
+		return "", fmt.Errorf("retry workspace for %s has no cwd", previousWorkerID)
+	}
+	ok, err := s.sshRunner.DirectoryExists(ctx, target, cwd)
+	if err != nil {
+		return "", fmt.Errorf("check retry workspace %s: %w", cwd, err)
+	}
+	if !ok {
+		return "", fmt.Errorf("retry workspace %s is not available", cwd)
+	}
+	return cwd, nil
 }
 
 func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (PreparedWorkspace, error) {
@@ -2454,6 +2642,16 @@ func planMetadata(plan Plan) map[string]any {
 		"turn",
 		"dynamicReplanTurn",
 		"reasoningEffort",
+		"retryFromWorkerID",
+		"retryTargetID",
+		"retryTargetKind",
+		"retryRemoteSession",
+		"retryRemoteRunDir",
+		"retryRemoteWorkDir",
+		"retryResumeSessionID",
+		"retryWorkspaceReused",
+		"retryWorkspaceCWD",
+		"retryWorkspaceError",
 	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
 			metadata[key] = value

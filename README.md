@@ -1,12 +1,12 @@
 # aged - agent daemon like a fine wine
 
-`aged` is a local-first agent orchestrator for autonomous development work.
+`aged` is an agent orchestrator for autonomous development work.
 
 The current implementation is an initial vertical slice:
 
 - Go daemon with SQLite event persistence
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain providers
-- Mock, Codex, Claude, and shell worker runner adapters selected by the orchestrator
+- Codex, Claude, and shell worker runner adapters selected by the orchestrator
 - Normalized worker events for logs, results, errors, and worker requests for input
 - VCS-pluggable workspace preflight before workers start
 - HTTP API and SSE event stream
@@ -194,7 +194,7 @@ Scheduler behavior:
 - Applied task changes can be published as GitHub pull requests with `POST /api/tasks/{id}/pull-request`. If exactly one successful worker has unapplied changes, the service applies it first, creates/pushes a branch from the source checkout, opens the PR with `gh`, and records `pull_request.published`.
 - Pull request state is first-class snapshot data. `POST /api/pull-requests/{id}/refresh` re-inspects CI/review/merge state, and `POST /api/pull-requests/{id}/babysit` schedules a normal orchestrated task to monitor the PR and address failing checks or review comments.
 - Running workers receive task steering through `worker.Spec.Steering` when a runner supports it. The built-in Codex and Claude exec adapters do not hold stdin open for steering because those CLIs treat piped stdin as extra initial prompt input and may wait indefinitely.
-- Failed tasks can be retried with `POST /api/tasks/{id}/retry`; retry reuses the persisted failed plan on the same task id and runs the normal follow-up/replan flow again.
+- Failed or canceled tasks can be retried with `POST /api/tasks/{id}/retry`; retry reuses the persisted plan on the same task id and runs the normal follow-up/replan flow again. This is intended to recover tasks that were marked canceled after a daemon restart.
 - `benchmark_compare` compares explicit `baseline`, `candidate`, `threshold_percent`, and `higher_is_better` prompt fields and emits a benchmark comparison report.
 
 API-backed scheduling can be enabled with:

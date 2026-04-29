@@ -20,6 +20,7 @@ type Spec struct {
 	Prompt          string
 	WorkDir         string
 	Command         []string
+	ResumeSessionID string
 	ReasoningEffort string
 	Steering        <-chan string
 }
@@ -208,6 +209,13 @@ func DefaultRunners() map[string]Runner {
 		MockRunner{},
 		BenchmarkCompareRunner{},
 		NewCommandRunner("codex", func(spec Spec) []string {
+			if strings.TrimSpace(spec.ResumeSessionID) != "" {
+				args := []string{"codex", "exec", "resume", codexYoloFlag, "--json"}
+				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
+					args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
+				}
+				return append(args, strings.TrimSpace(spec.ResumeSessionID), spec.Prompt)
+			}
 			args := []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir}
 			if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
 				args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
@@ -216,6 +224,9 @@ func DefaultRunners() map[string]Runner {
 		}),
 		NewCommandRunner("claude", func(spec Spec) []string {
 			args := []string{"claude", "--print", "--output-format", "stream-json"}
+			if strings.TrimSpace(spec.ResumeSessionID) != "" {
+				args = append(args, "--resume", strings.TrimSpace(spec.ResumeSessionID))
+			}
 			if effort := ReasoningEffort(spec.ReasoningEffort); effort != "" {
 				args = append(args, "--effort", effort)
 			}

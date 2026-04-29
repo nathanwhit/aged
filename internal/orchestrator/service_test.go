@@ -668,6 +668,182 @@ func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-canceled"
+	plan := Plan{WorkerKind: "retryable", Prompt: "resume canceled work"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Canceled work",
+			"prompt": "Pick up where the canceled worker left off.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := eventRunner{kind: "retryable", events: []worker.Event{{Kind: worker.EventResult, Text: "resumed"}}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: plan}, map[string]worker.Runner{"retryable": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	retried, err := service.RetryTask(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID != taskID || retried.Status != core.TaskPlanning {
+		t.Fatalf("retried = %+v", retried)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if countEvents(snapshot.Events, core.EventTaskPlanned, taskID) != 2 {
+		t.Fatalf("task.planned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskPlanned, taskID))
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
+		t.Fatalf("worker.created count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
+func TestServiceRetryReusesCanceledWorkerWorkspaceAndSession(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-resume"
+	previousWorkerID := "worker-old"
+	workspaceRoot := t.TempDir()
+	sourceRoot := t.TempDir()
+	freshWorkspaceRoot := t.TempDir()
+	plan := Plan{WorkerKind: "codex", Prompt: "continue the partial implementation"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Resume canceled work",
+			"prompt": "Continue the task.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "codex",
+			"nodeId":     "node-old",
+			"targetId":   "local",
+			"targetKind": "local",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          workspaceRoot,
+			CWD:           workspaceRoot,
+			SourceRoot:    sourceRoot,
+			WorkspaceName: "aged-old",
+			Mode:          string(WorkspaceModeIsolated),
+			VCSType:       "jj",
+			TaskID:        taskID,
+			WorkerID:      previousWorkerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(worker.Event{
+			Kind:   worker.EventLog,
+			Stream: "stdout",
+			Text:   `{"type":"thread.started","thread_id":"thread-1"}`,
+			Raw:    json.RawMessage(`{"type":"thread.started","thread_id":"thread-1"}`),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &recordingRunner{kind: "codex"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: plan}, map[string]worker.Runner{"codex": runner}, sourceRoot, fakeWorkspaceManager{
+		cwd:        freshWorkspaceRoot,
+		sourceRoot: sourceRoot,
+	})
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if runner.workDir != workspaceRoot {
+		t.Fatalf("runner workDir = %q, want retained workspace %q", runner.workDir, workspaceRoot)
+	}
+	if runner.resumeSessionID != "thread-1" {
+		t.Fatalf("resume session = %q, want thread-1", runner.resumeSessionID)
+	}
+	if !strings.Contains(runner.prompt, "Previous worker ID: "+previousWorkerID) {
+		t.Fatalf("runner prompt missing retry context:\n%s", runner.prompt)
+	}
+	if !strings.Contains(runner.prompt, "Run every command from this execution workspace:\n"+workspaceRoot) {
+		t.Fatalf("runner prompt missing retained workspace:\n%s", runner.prompt)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, taskID, `"retryWorkspaceReused":true`) {
+		t.Fatalf("missing retry workspace reuse metadata")
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, taskID, "retryResumeSessionID", "thread-1") {
+		t.Fatalf("missing retry session metadata")
+	}
+}
+
 func TestServiceGuardsWorkerPromptWithPreparedWorkspace(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1688,6 +1864,135 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	}
 }
 
+func TestServiceRetryReusesRemoteWorkerTargetWorkspaceAndSession(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-remote-retry"
+	previousWorkerID := "worker-remote-old"
+	plan := Plan{WorkerKind: "codex", Prompt: "continue remote work"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote retry",
+			"prompt": "Continue the remote task.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":      previousWorkerID,
+			"workerKind":    "codex",
+			"nodeId":        "node-remote-old",
+			"targetId":      "vm-old",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-old",
+			"remoteRunDir":  "/runs/old",
+			"remoteWorkDir": "/repo-old",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          "/runs/old",
+			CWD:           "/repo-old",
+			SourceRoot:    "/repo-old",
+			WorkspaceName: "aged-old",
+			Mode:          "remote",
+			VCSType:       "ssh",
+			TaskID:        taskID,
+			WorkerID:      previousWorkerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(worker.Event{
+			Kind:   worker.EventLog,
+			Stream: "stdout",
+			Text:   `{"type":"thread.started","thread_id":"thread-remote"}`,
+			Raw:    json.RawMessage(`{"type":"thread.started","thread_id":"thread-remote"}`),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-new", Kind: TargetKindSSH, Host: "new-vm", WorkDir: "/repo-new", WorkRoot: "/runs", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 10}},
+		{ID: "vm-old", Kind: TargetKindSSH, Host: "old-vm", WorkDir: "/repo-default", WorkRoot: "/runs", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	runner := &recordingBuildRunner{kind: "codex"}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: plan}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if runner.spec.WorkDir != "/repo-old" {
+		t.Fatalf("remote retry work dir = %q, want /repo-old", runner.spec.WorkDir)
+	}
+	if runner.spec.ResumeSessionID != "thread-remote" {
+		t.Fatalf("remote retry session = %q, want thread-remote", runner.spec.ResumeSessionID)
+	}
+	if !strings.Contains(runner.spec.Prompt, "Previous worker ID: "+previousWorkerID) {
+		t.Fatalf("remote retry prompt missing context:\n%s", runner.spec.Prompt)
+	}
+	newNode := latestExecutionNodeForTask(snapshot, taskID, previousWorkerID)
+	if newNode.TargetID != "vm-old" || newNode.RemoteWorkDir != "/repo-old" {
+		t.Fatalf("new execution node = %+v", newNode)
+	}
+	if newNode.RemoteRunDir == "/runs/old" || newNode.RemoteSession == "aged-old" {
+		t.Fatalf("remote retry should allocate a fresh run/session for logs: %+v", newNode)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, taskID, "retryResumeSessionID", "thread-remote") {
+		t.Fatalf("missing remote retry session metadata")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, taskID, `"retryWorkspaceReused":true`) {
+		t.Fatalf("missing remote retry workspace reuse metadata")
+	}
+}
+
 func TestServiceIgnoresSchedulerTargetLabels(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1889,6 +2194,7 @@ type recordingRunner struct {
 	kind            string
 	prompt          string
 	workDir         string
+	resumeSessionID string
 	reasoningEffort string
 }
 
@@ -1934,6 +2240,11 @@ type steeringRunner struct {
 type buildOnlyRunner struct {
 	kind    string
 	command []string
+}
+
+type recordingBuildRunner struct {
+	kind string
+	spec worker.Spec
 }
 
 func (r eventRunner) Kind() string {
@@ -2070,6 +2381,19 @@ func (r buildOnlyRunner) Run(context.Context, worker.Spec, worker.Sink) error {
 	return errors.New("build-only runner should not run locally")
 }
 
+func (r *recordingBuildRunner) Kind() string {
+	return r.kind
+}
+
+func (r *recordingBuildRunner) BuildCommand(spec worker.Spec) []string {
+	r.spec = spec
+	return []string{"worker", spec.WorkDir, spec.ResumeSessionID}
+}
+
+func (r *recordingBuildRunner) Run(context.Context, worker.Spec, worker.Sink) error {
+	return errors.New("recording build runner should not run locally")
+}
+
 func (r fileWritingRunner) Kind() string {
 	return r.kind
 }
@@ -2097,6 +2421,7 @@ func (r *recordingRunner) BuildCommand(worker.Spec) []string {
 func (r *recordingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink) error {
 	r.prompt = spec.Prompt
 	r.workDir = spec.WorkDir
+	r.resumeSessionID = spec.ResumeSessionID
 	r.reasoningEffort = spec.ReasoningEffort
 	return nil
 }
@@ -2280,6 +2605,25 @@ func countEvents(events []core.Event, eventType core.EventType, taskID string) i
 		}
 	}
 	return count
+}
+
+func latestExecutionNodeForTask(snapshot core.Snapshot, taskID string, excludeWorkerID string) core.ExecutionNode {
+	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
+		node := snapshot.ExecutionNodes[i]
+		if node.TaskID == taskID && node.WorkerID != excludeWorkerID {
+			return node
+		}
+	}
+	return core.ExecutionNode{}
+}
+
+func eventPayloadContains(events []core.Event, eventType core.EventType, taskID string, needle string) bool {
+	for _, event := range events {
+		if event.Type == eventType && event.TaskID == taskID && strings.Contains(string(event.Payload), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func hasEventPayloadValue(events []core.Event, eventType core.EventType, taskID string, key string, want string) bool {

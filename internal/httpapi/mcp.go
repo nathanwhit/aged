@@ -421,7 +421,7 @@ func mcpTools() []mcpTool {
 		{
 			Name:        "aged_retry_task",
 			Title:       "Retry task",
-			Description: "Retry a failed task from its persisted plan.",
+			Description: "Retry a failed or canceled task from its persisted plan.",
 			InputSchema: objectSchema(map[string]any{"taskId": stringSchema("Task id.")}, []string{"taskId"}),
 		},
 		{

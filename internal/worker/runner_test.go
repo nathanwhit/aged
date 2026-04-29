@@ -204,10 +204,28 @@ func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestDefaultCodexRunnerResumesSession(t *testing.T) {
+	runner := DefaultRunners()["codex"]
+	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "continue", ResumeSessionID: "thread-1"})
+	want := []string{"codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "continue"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+}
+
 func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "review this", ReasoningEffort: "xhigh"})
 	want := []string{"claude", "--print", "--output-format", "stream-json", "--effort", "xhigh", "review this"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+}
+
+func TestDefaultClaudeRunnerResumesSession(t *testing.T) {
+	runner := DefaultRunners()["claude"]
+	got := runner.BuildCommand(Spec{Prompt: "continue", ResumeSessionID: "session-1"})
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--resume", "session-1", "continue"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}

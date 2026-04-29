@@ -55,7 +55,7 @@ func NewRemoteRun(target TargetConfig, spec worker.Spec) remoteRun {
 		Target:    target,
 		Session:   "aged-" + shortWorkerID(spec.ID),
 		RunDir:    path.Join(nonEmpty(target.WorkRoot, "/tmp/aged-workers"), spec.ID),
-		WorkDir:   nonEmpty(nonEmpty(target.WorkDir, spec.WorkDir), "."),
+		WorkDir:   nonEmpty(nonEmpty(spec.WorkDir, target.WorkDir), "."),
 		Status:    "running",
 		StartedAt: time.Now().UTC(),
 	}
@@ -123,6 +123,17 @@ func (r SSHRunner) Cancel(ctx context.Context, run remoteRun) error {
 	}
 	_, err := r.Executor.Run(ctx, sshArgs(run.Target, "tmux", "kill-session", "-t", run.Session))
 	return err
+}
+
+func (r SSHRunner) DirectoryExists(ctx context.Context, target TargetConfig, dir string) (bool, error) {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	_, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", "test -d "+shellQuote(dir)))
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) WorkspaceChanges {

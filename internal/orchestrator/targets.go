@@ -127,6 +127,19 @@ func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
 	return candidates[0], nil
 }
 
+func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	target, ok := r.targets[id]
+	if !ok {
+		return TargetConfig{}, fmt.Errorf("execution target %q is not configured", id)
+	}
+	if r.running[target.ID] >= target.Capacity.MaxWorkers {
+		return TargetConfig{}, fmt.Errorf("execution target %q is at capacity", id)
+	}
+	return target, nil
+}
+
 func (r *TargetRegistry) Get(id string) (TargetConfig, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

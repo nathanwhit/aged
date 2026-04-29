@@ -61,7 +61,7 @@ The initial local-first vertical slice is implemented.
 - Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude exec adapters intentionally do not hold stdin open because those CLIs treat piped stdin as extra prompt input and may wait indefinitely.
 - `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison.
 - Repeated worker apply attempts are blocked in the service and already-applied workers render as disabled `Applied` actions in the dashboard.
-- Failed tasks can be retried through `POST /api/tasks/{id}/retry` and the dashboard. Retry reuses the persisted failed plan on the same task id, records a new `task.planned`, and runs normal follow-up/replan handling again.
+- Failed or canceled tasks can be retried through `POST /api/tasks/{id}/retry` and the dashboard. Retry reuses the persisted plan on the same task id, records a new `task.planned`, and runs normal follow-up/replan handling again; this supports picking work back up after daemon restart recovery marks local workers canceled.
 - Scheduler `spawns` now run as dependency-aware follow-up worker turns after the plan's primary worker succeeds; independent spawns run in parallel and dependent spawns wait for prerequisite spawn ids. This applies to both initial plans and dynamic `continue` replans.
 - Follow-up worker prompts include the original request, follow-up role/reason, prior worker summaries/errors, and changed files.
 - Dynamic replanning is available for brains that implement `Replan`: after follow-up workers, the brain can return `continue`, `complete`, `wait`, or `fail`; `continue` schedules another worker turn and records `task.replanned`.
@@ -85,7 +85,7 @@ The initial local-first vertical slice is implemented.
 - GitHub driver tests verify issue polling dedupes tasks, succeeded issue tasks are auto-published as PRs, and PRs needing attention are refreshed and babysat.
 - Discord driver tests verify startup history skipping, direct task creation, assistant-suggested `do it` task creation, and fallback task creation when the assistant cannot answer conversationally.
 - Project tests verify SQLite persistence, startup seeding/loading, runtime API creation, explicit `projectId` routing, external repo-to-project mapping, and PR publishing defaults from project repo/base settings.
-- Retry and workspace-guard tests verify failed tasks rerun from persisted plans and workers receive the prepared workspace path instead of relying on scheduler-generated paths.
+- Retry and workspace-guard tests verify failed/canceled tasks rerun from persisted plans and workers receive the prepared workspace path instead of relying on scheduler-generated paths.
 - `npm ls vite @vitejs/plugin-react`
 - Scheduler tests:
   - Codex brain parses Codex `agent_message` plans.
