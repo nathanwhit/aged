@@ -116,6 +116,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	tasks := map[string]core.Task{}
 	workers := map[string]core.Worker{}
 	nodes := map[string]core.ExecutionNode{}
+	pullRequests := map[string]core.PullRequest{}
 	clearedTasks := map[string]bool{}
 	workerNodes := map[string]string{}
 	workspaceMetadata := map[string]json.RawMessage{}
@@ -275,6 +276,87 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 				node.UpdatedAt = event.At
 				nodes[nodeID] = node
 			}
+		case core.EventPRPublished:
+			var payload struct {
+				ID           string          `json:"id"`
+				Repo         string          `json:"repo"`
+				Number       int             `json:"number,omitempty"`
+				URL          string          `json:"url"`
+				Branch       string          `json:"branch"`
+				Base         string          `json:"base"`
+				Title        string          `json:"title"`
+				State        string          `json:"state,omitempty"`
+				Draft        bool            `json:"draft,omitempty"`
+				ChecksStatus string          `json:"checksStatus,omitempty"`
+				MergeStatus  string          `json:"mergeStatus,omitempty"`
+				ReviewStatus string          `json:"reviewStatus,omitempty"`
+				Metadata     json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode pull_request.published: %w", err)
+			}
+			id := payload.ID
+			if id == "" {
+				id = fmt.Sprintf("%s#%d", payload.Repo, payload.Number)
+			}
+			pullRequests[id] = core.PullRequest{
+				ID:           id,
+				TaskID:       event.TaskID,
+				Repo:         payload.Repo,
+				Number:       payload.Number,
+				URL:          payload.URL,
+				Branch:       payload.Branch,
+				Base:         payload.Base,
+				Title:        payload.Title,
+				State:        payload.State,
+				Draft:        payload.Draft,
+				ChecksStatus: payload.ChecksStatus,
+				MergeStatus:  payload.MergeStatus,
+				ReviewStatus: payload.ReviewStatus,
+				CreatedAt:    event.At,
+				UpdatedAt:    event.At,
+				Metadata:     payload.Metadata,
+			}
+		case core.EventPRStatusChecked:
+			var payload struct {
+				ID           string          `json:"id"`
+				State        string          `json:"state,omitempty"`
+				Draft        bool            `json:"draft,omitempty"`
+				ChecksStatus string          `json:"checksStatus,omitempty"`
+				MergeStatus  string          `json:"mergeStatus,omitempty"`
+				ReviewStatus string          `json:"reviewStatus,omitempty"`
+				Metadata     json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode pull_request.status_checked: %w", err)
+			}
+			pr := pullRequests[payload.ID]
+			if pr.ID != "" {
+				pr.State = payload.State
+				pr.Draft = payload.Draft
+				pr.ChecksStatus = payload.ChecksStatus
+				pr.MergeStatus = payload.MergeStatus
+				pr.ReviewStatus = payload.ReviewStatus
+				pr.UpdatedAt = event.At
+				if len(payload.Metadata) > 0 {
+					pr.Metadata = payload.Metadata
+				}
+				pullRequests[payload.ID] = pr
+			}
+		case core.EventPRBabysitter:
+			var payload struct {
+				ID               string `json:"id"`
+				BabysitterTaskID string `json:"babysitterTaskId"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode pull_request.babysitter_started: %w", err)
+			}
+			pr := pullRequests[payload.ID]
+			if pr.ID != "" {
+				pr.BabysitterTaskID = payload.BabysitterTaskID
+				pr.UpdatedAt = event.At
+				pullRequests[payload.ID] = pr
+			}
 		}
 	}
 
@@ -282,6 +364,7 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		Tasks:          orderedTasks(filterClearedTasks(tasks, clearedTasks)),
 		Workers:        orderedWorkers(filterClearedWorkers(workers, clearedTasks)),
 		ExecutionNodes: orderedExecutionNodes(filterClearedExecutionNodes(nodes, clearedTasks)),
+		PullRequests:   orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
 		Events:         events,
 	}, nil
 }
@@ -311,6 +394,16 @@ func filterClearedExecutionNodes(values map[string]core.ExecutionNode, cleared m
 	for id, node := range values {
 		if !cleared[node.TaskID] {
 			out[id] = node
+		}
+	}
+	return out
+}
+
+func filterClearedPullRequests(values map[string]core.PullRequest, cleared map[string]bool) map[string]core.PullRequest {
+	out := map[string]core.PullRequest{}
+	for id, pr := range values {
+		if !cleared[pr.TaskID] {
+			out[id] = pr
 		}
 	}
 	return out
@@ -415,6 +508,23 @@ func orderedExecutionNodes(values map[string]core.ExecutionNode) []core.Executio
 	for _, node := range values {
 		if node.ID != "" {
 			out = append(out, node)
+		}
+	}
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].CreatedAt.Before(out[i].CreatedAt) {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+func orderedPullRequests(values map[string]core.PullRequest) []core.PullRequest {
+	out := make([]core.PullRequest, 0, len(values))
+	for _, pr := range values {
+		if pr.ID != "" {
+			out = append(out, pr)
 		}
 	}
 	for i := 0; i < len(out); i++ {

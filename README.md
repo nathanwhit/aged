@@ -10,7 +10,7 @@ The current implementation is an initial vertical slice:
 - Normalized worker events for logs, results, errors, and worker requests for input
 - VCS-pluggable workspace preflight before workers start
 - HTTP API and SSE event stream
-- React/Vite dashboard for task creation, steering, cancellation, and live state
+- React/Vite dashboard for task creation, assistant Q&A, PR publishing, steering, cancellation, and live state
 
 ## Run the daemon
 
@@ -68,6 +68,8 @@ Scheduler behavior:
 - `worker.completed` includes derived run semantics: `summary`, `error`, `needsInput`, `logCount`, and `workspaceChanges` when available. Workspace changes include dirty status, diffstat, and changed files. Workers that emit `needs_input` move the task to `waiting` and retain the workspace.
 - Retained isolated workspace changes can be reviewed with `GET /api/workers/{id}/changes` and applied back to the source checkout with `POST /api/workers/{id}/apply`. Jujutsu apply creates a new merge revision with source `@` and the worker workspace revision as parents; Git apply commits the worker worktree and merges that commit. Apply records `worker.changes_applied`.
 - Apply policy recommendations can be requested with `POST /api/tasks/{id}/apply-policy`; the service reports whether there are no candidates, exactly one candidate, or multiple competing candidates requiring manual selection or review.
+- Applied task changes can be published as GitHub pull requests with `POST /api/tasks/{id}/pull-request`. If exactly one successful worker has unapplied changes, the service applies it first, creates/pushes a branch from the source checkout, opens the PR with `gh`, and records `pull_request.published`.
+- Pull request state is first-class snapshot data. `POST /api/pull-requests/{id}/refresh` re-inspects CI/review/merge state, and `POST /api/pull-requests/{id}/babysit` schedules a normal orchestrated task to monitor the PR and address failing checks or review comments.
 - Running workers receive task steering through `worker.Spec.Steering` when a runner supports it. The built-in Codex and Claude exec adapters do not hold stdin open for steering because those CLIs treat piped stdin as extra initial prompt input and may wait indefinitely.
 - `benchmark_compare` compares explicit `baseline`, `candidate`, `threshold_percent`, and `higher_is_better` prompt fields and emits a benchmark comparison report.
 
@@ -168,12 +170,16 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `GET /api/snapshot`
 - `GET /api/events?after=<id>`
 - `GET /api/events/stream?after=<id>`
+- `POST /api/assistant`
 - `GET /api/tasks/lookup?source=<source>&externalId=<id>`
 - `POST /api/tasks`
 - `POST /api/tasks/clear-terminal`
 - `POST /api/tasks/{id}/clear`
 - `POST /api/tasks/{id}/steer`
 - `POST /api/tasks/{id}/cancel`
+- `POST /api/tasks/{id}/pull-request`
+- `POST /api/pull-requests/{id}/refresh`
+- `POST /api/pull-requests/{id}/babysit`
 - `GET /api/workers/{id}/changes`
 - `POST /api/workers/{id}/apply`
 - `POST /api/workers/{id}/cancel`

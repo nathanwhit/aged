@@ -36,6 +36,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
+	mux.HandleFunc("POST /api/assistant", s.assistant)
 	mux.HandleFunc("GET /api/tasks/lookup", s.lookupTask)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
@@ -43,6 +44,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/apply-policy", s.recommendApplyPolicy)
+	mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.publishTaskPullRequest)
+	mux.HandleFunc("POST /api/pull-requests/{id}/refresh", s.refreshPullRequest)
+	mux.HandleFunc("POST /api/pull-requests/{id}/babysit", s.startPullRequestBabysitter)
 	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/apply", s.applyWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/cancel", s.cancelWorker)
@@ -92,6 +96,20 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, task)
+}
+
+func (s *Server) assistant(w http.ResponseWriter, r *http.Request) {
+	var req core.AssistantRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	response, err := s.service.Ask(r.Context(), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) lookupTask(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +198,40 @@ func (s *Server) recommendApplyPolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, result)
 }
 
+func (s *Server) publishTaskPullRequest(w http.ResponseWriter, r *http.Request) {
+	var req core.PublishPullRequestRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	result, err := s.service.PublishTaskPullRequest(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) refreshPullRequest(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.RefreshPullRequest(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) startPullRequestBabysitter(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.StartPullRequestBabysitter(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -238,7 +290,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	} else if strings.Contains(err.Error(), "oauth") || strings.Contains(err.Error(), "id token") || strings.Contains(err.Error(), "email is not verified") {
 		status = http.StatusUnauthorized
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "terminal tasks") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})

@@ -31,24 +31,29 @@ const (
 type EventType string
 
 const (
-	EventTaskCreated      EventType = "task.created"
-	EventTaskStatus       EventType = "task.status"
-	EventTaskPlanned      EventType = "task.planned"
-	EventTaskReplanned    EventType = "task.replanned"
-	EventTaskSteered      EventType = "task.steered"
-	EventTaskCleared      EventType = "task.cleared"
-	EventExecutionPlanned EventType = "execution.node_planned"
-	EventExecutionStatus  EventType = "execution.node_status"
-	EventApplyPolicy      EventType = "apply.policy_recommended"
-	EventWorkerWorkspace  EventType = "worker.workspace_prepared"
-	EventWorkerCleanup    EventType = "worker.workspace_cleaned"
-	EventWorkerCreated    EventType = "worker.created"
-	EventWorkerStarted    EventType = "worker.started"
-	EventWorkerOutput     EventType = "worker.output"
-	EventWorkerCompleted  EventType = "worker.completed"
-	EventWorkerApplied    EventType = "worker.changes_applied"
-	EventApprovalNeeded   EventType = "approval.needed"
-	EventApprovalDecided  EventType = "approval.decided"
+	EventTaskCreated       EventType = "task.created"
+	EventTaskStatus        EventType = "task.status"
+	EventTaskPlanned       EventType = "task.planned"
+	EventTaskReplanned     EventType = "task.replanned"
+	EventTaskSteered       EventType = "task.steered"
+	EventTaskCleared       EventType = "task.cleared"
+	EventExecutionPlanned  EventType = "execution.node_planned"
+	EventExecutionStatus   EventType = "execution.node_status"
+	EventApplyPolicy       EventType = "apply.policy_recommended"
+	EventWorkerWorkspace   EventType = "worker.workspace_prepared"
+	EventWorkerCleanup     EventType = "worker.workspace_cleaned"
+	EventWorkerCreated     EventType = "worker.created"
+	EventWorkerStarted     EventType = "worker.started"
+	EventWorkerOutput      EventType = "worker.output"
+	EventWorkerCompleted   EventType = "worker.completed"
+	EventWorkerApplied     EventType = "worker.changes_applied"
+	EventApprovalNeeded    EventType = "approval.needed"
+	EventApprovalDecided   EventType = "approval.decided"
+	EventAssistantAsked    EventType = "assistant.asked"
+	EventAssistantAnswered EventType = "assistant.answered"
+	EventPRPublished       EventType = "pull_request.published"
+	EventPRStatusChecked   EventType = "pull_request.status_checked"
+	EventPRBabysitter      EventType = "pull_request.babysitter_started"
 )
 
 type Event struct {
@@ -118,12 +123,54 @@ type TargetState struct {
 	Available bool              `json:"available"`
 }
 
+type PullRequest struct {
+	ID               string          `json:"id"`
+	TaskID           string          `json:"taskId"`
+	Repo             string          `json:"repo"`
+	Number           int             `json:"number,omitempty"`
+	URL              string          `json:"url"`
+	Branch           string          `json:"branch"`
+	Base             string          `json:"base"`
+	Title            string          `json:"title"`
+	State            string          `json:"state,omitempty"`
+	Draft            bool            `json:"draft,omitempty"`
+	ChecksStatus     string          `json:"checksStatus,omitempty"`
+	MergeStatus      string          `json:"mergeStatus,omitempty"`
+	ReviewStatus     string          `json:"reviewStatus,omitempty"`
+	BabysitterTaskID string          `json:"babysitterTaskId,omitempty"`
+	CreatedAt        time.Time       `json:"createdAt"`
+	UpdatedAt        time.Time       `json:"updatedAt"`
+	Metadata         json.RawMessage `json:"metadata,omitempty"`
+}
+
 type CreateTaskRequest struct {
 	Title      string          `json:"title"`
 	Prompt     string          `json:"prompt"`
 	Source     string          `json:"source,omitempty"`
 	ExternalID string          `json:"externalId,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+type AssistantRequest struct {
+	ConversationID string          `json:"conversationId,omitempty"`
+	Message        string          `json:"message"`
+	Context        json.RawMessage `json:"context,omitempty"`
+}
+
+type AssistantResponse struct {
+	ConversationID string          `json:"conversationId"`
+	Message        string          `json:"message"`
+	Metadata       json.RawMessage `json:"metadata,omitempty"`
+}
+
+type PublishPullRequestRequest struct {
+	WorkerID string `json:"workerId,omitempty"`
+	Repo     string `json:"repo,omitempty"`
+	Base     string `json:"base,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Body     string `json:"body,omitempty"`
+	Draft    bool   `json:"draft,omitempty"`
 }
 
 type SteeringRequest struct {
@@ -140,6 +187,7 @@ type Snapshot struct {
 	Workers        []Worker        `json:"workers"`
 	ExecutionNodes []ExecutionNode `json:"executionNodes"`
 	Targets        []TargetState   `json:"targets,omitempty"`
+	PullRequests   []PullRequest   `json:"pullRequests,omitempty"`
 	Events         []Event         `json:"events"`
 }
 

@@ -148,6 +148,59 @@ func (b *APIBrain) plan(ctx context.Context, task core.Task, steering []string) 
 	return plan, nil
 }
 
+func (b *APIBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	request := chatCompletionRequest{
+		Model: b.model,
+		Messages: []chatMessage{
+			{
+				Role:    "system",
+				Content: "You are the interactive assistant for aged, a local autonomous development orchestrator. Answer directly. If a request requires long-running code work, explain the task the user should start.",
+			},
+			{
+				Role:    "user",
+				Content: b.assistantMessage(req),
+			},
+		},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpRes, err := b.httpClient.Do(httpReq)
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	defer httpRes.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(httpRes.Body, 4<<20))
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
+		return core.AssistantResponse{}, fmt.Errorf("api assistant returned %s: %s", httpRes.Status, strings.TrimSpace(string(responseBody)))
+	}
+	var response chatCompletionResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return core.AssistantResponse{}, fmt.Errorf("decode api assistant response: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return core.AssistantResponse{}, errors.New("api assistant returned no choices")
+	}
+	return core.AssistantResponse{
+		ConversationID: req.ConversationID,
+		Message:        strings.TrimSpace(response.Choices[0].Message.Content),
+		Metadata: core.MustJSON(map[string]any{
+			"brain": "api",
+			"model": b.model,
+		}),
+	}, nil
+}
+
 func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
 	payload := map[string]any{
 		"task": map[string]any{
@@ -169,10 +222,30 @@ func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
 	return string(data)
 }
 
+func (b *APIBrain) assistantMessage(req core.AssistantRequest) string {
+	payload := map[string]any{
+		"conversationId": req.ConversationID,
+		"message":        req.Message,
+	}
+	if len(req.Context) > 0 {
+		var contextValue any
+		if err := json.Unmarshal(req.Context, &contextValue); err == nil {
+			payload["context"] = contextValue
+		} else {
+			payload["context"] = string(req.Context)
+		}
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return req.Message
+	}
+	return string(data)
+}
+
 type chatCompletionRequest struct {
 	Model          string         `json:"model"`
 	Messages       []chatMessage  `json:"messages"`
-	ResponseFormat map[string]any `json:"response_format"`
+	ResponseFormat map[string]any `json:"response_format,omitempty"`
 }
 
 type chatMessage struct {

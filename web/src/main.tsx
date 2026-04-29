@@ -7,6 +7,7 @@ import {
   CircleStop,
   Eye,
   FileText,
+  GitPullRequest,
   MessageSquarePlus,
   Play,
   RefreshCw,
@@ -14,8 +15,8 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
+import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, steerTask } from "./api";
+import type { EventRecord, ExecutionNode, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -23,6 +24,7 @@ type AppSnapshot = {
   workers: Worker[];
   executionNodes: ExecutionNode[];
   targets: TargetState[];
+  pullRequests: PullRequestState[];
   events: EventRecord[];
 };
 
@@ -31,6 +33,7 @@ const emptySnapshot: AppSnapshot = {
   workers: [],
   executionNodes: [],
   targets: [],
+  pullRequests: [],
   events: [],
 };
 
@@ -70,6 +73,7 @@ function App() {
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
+  const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
   const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
   const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
@@ -127,6 +131,7 @@ function App() {
           }}
           onError={setError}
         />
+        <AssistantPanel onError={setError} />
 
         <section className="panel task-list">
           <div className="panel-title split-title">
@@ -167,6 +172,15 @@ function App() {
           {selectedTask ? (
             <>
               <TaskDetail task={selectedTask} onCancel={cancelTask} onSteer={steerTask} onError={setError} />
+              <PullRequestPanel
+                task={selectedTask}
+                pullRequests={selectedPullRequests}
+                onPublish={publishTaskPullRequest}
+                onRefresh={refreshPullRequest}
+                onBabysit={babysitPullRequest}
+                onDone={refresh}
+                onError={setError}
+              />
               <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />
               <TargetPanel targets={snapshot.targets} />
               <ExecutionGraph nodes={selectedNodes} />
@@ -312,6 +326,43 @@ function TaskComposer({
   );
 }
 
+function AssistantPanel({ onError }: { onError: (message: string) => void }) {
+  const [message, setMessage] = useState("");
+  const [conversationId, setConversationId] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const response = await askAssistant({ conversationId: conversationId || undefined, message });
+      setConversationId(response.conversationId);
+      setAnswer(response.message);
+      setMessage("");
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="panel assistant-panel" onSubmit={submit}>
+      <div className="panel-title">
+        <Bot size={18} />
+        <h2>Ask</h2>
+      </div>
+      <textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Ask about the system or repo..." required />
+      <button className="secondary" disabled={busy}>
+        <Send size={16} />
+        {busy ? "Asking" : "Ask"}
+      </button>
+      {answer && <pre className="assistant-answer">{answer}</pre>}
+    </form>
+  );
+}
+
 function TaskDetail({
   task,
   onCancel,
@@ -355,6 +406,86 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
+    </section>
+  );
+}
+
+function PullRequestPanel({
+  task,
+  pullRequests,
+  onPublish,
+  onRefresh,
+  onBabysit,
+  onDone,
+  onError,
+}: {
+  task: Task;
+  pullRequests: PullRequestState[];
+  onPublish: (taskId: string) => Promise<PullRequestState>;
+  onRefresh: (id: string) => Promise<PullRequestState>;
+  onBabysit: (id: string) => Promise<unknown>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const canPublish = isTerminalTask(task) && pullRequests.length === 0;
+
+  async function run(action: string, fn: () => Promise<unknown>) {
+    setBusy(action);
+    try {
+      await fn();
+      await onDone();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <section className="panel pr-panel">
+      <div className="panel-title split-title">
+        <span>
+          <GitPullRequest size={18} />
+          <h2>Pull Requests</h2>
+        </span>
+        <button className="secondary compact" disabled={!canPublish || busy === "publish"} onClick={() => run("publish", () => onPublish(task.id))}>
+          <GitPullRequest size={16} />
+          {busy === "publish" ? "Opening" : "Open PR"}
+        </button>
+      </div>
+      {pullRequests.length === 0 ? (
+        <p className="empty">No pull request has been opened for this task.</p>
+      ) : (
+        <div className="pr-list">
+          {pullRequests.map((pr) => (
+            <article key={pr.id} className="pr-card">
+              <div className="pr-main">
+                <a href={pr.url} target="_blank" rel="noreferrer">
+                  {pr.repo}
+                  {pr.number ? `#${pr.number}` : ""}
+                </a>
+                <small>{pr.title}</small>
+              </div>
+              <div className="pr-statuses">
+                <Status value={pr.state?.toLowerCase() || "waiting"} />
+                {pr.checksStatus && <span className="pill">{pr.checksStatus}</span>}
+                {pr.reviewStatus && <span className="pill">{pr.reviewStatus.toLowerCase()}</span>}
+              </div>
+              <div className="pr-actions">
+                <button className="secondary compact" disabled={busy === `refresh:${pr.id}`} onClick={() => run(`refresh:${pr.id}`, () => onRefresh(pr.id))}>
+                  <RefreshCw size={16} />
+                  Refresh
+                </button>
+                <button className="secondary compact" disabled={Boolean(pr.babysitterTaskId) || busy === `babysit:${pr.id}`} onClick={() => run(`babysit:${pr.id}`, () => onBabysit(pr.id))}>
+                  <Bot size={16} />
+                  {pr.babysitterTaskId ? "Babysitting" : "Babysit"}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -754,6 +885,7 @@ type WorkerCompletionPayload = {
 };
 
 type DisplayPayload = {
+  id?: string;
   text?: string;
   stream?: string;
   kind?: string;
@@ -781,6 +913,18 @@ type DisplayPayload = {
   cleanupPolicy?: string;
   policy?: string;
   result?: string;
+  repo?: string;
+  number?: number;
+  url?: string;
+  branch?: string;
+  base?: string;
+  title?: string;
+  state?: string;
+  draft?: boolean;
+  checksStatus?: string;
+  mergeStatus?: string;
+  reviewStatus?: string;
+  babysitterTaskId?: string;
   command?: string[];
   raw?: unknown;
   rawResult?: unknown;
@@ -904,6 +1048,8 @@ function eventDisplayText(event: EventRecord): string {
     payload.reason ??
     payload.question ??
     payload.answer ??
+    payload.title ??
+    payload.url ??
     payload.workspaceChanges?.diffStat ??
     workspaceText ??
     payload.status ??
@@ -938,6 +1084,15 @@ function eventDetailFields(payload: Record<string, unknown>): DetailField[] {
     ["Result", "result"],
     ["Cleaned", "cleaned"],
     ["Reason", "reason"],
+    ["Repo", "repo"],
+    ["Number", "number"],
+    ["URL", "url"],
+    ["Branch", "branch"],
+    ["Base", "base"],
+    ["Checks", "checksStatus"],
+    ["Merge", "mergeStatus"],
+    ["Review", "reviewStatus"],
+    ["Babysitter task", "babysitterTaskId"],
   ];
   return fieldKeys
     .map(([label, key]) => ({ label, value: payloadValue(payload[key]) }))
@@ -1017,6 +1172,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     workers: snapshot.workers ?? [],
     executionNodes: snapshot.executionNodes ?? [],
     targets: snapshot.targets ?? [],
+    pullRequests: snapshot.pullRequests ?? [],
     events: snapshot.events ?? [],
   };
 }
@@ -1032,6 +1188,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   const tasks = new Map<string, Task>();
   const workers = new Map<string, Worker>();
   const executionNodes = new Map<string, ExecutionNode>();
+  const pullRequests = new Map<string, PullRequestState>();
   const clearedTasks = new Set<string>();
 
   for (const event of snapshot.events) {
@@ -1111,12 +1268,63 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
       if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
     }
+    if (event.type === "pull_request.published" && event.taskId) {
+      const prId = String(payload.id ?? "");
+      if (prId) {
+        pullRequests.set(prId, {
+          id: prId,
+          taskId: event.taskId,
+          repo: String(payload.repo ?? ""),
+          number: typeof payload.number === "number" ? payload.number : undefined,
+          url: String(payload.url ?? ""),
+          branch: String(payload.branch ?? ""),
+          base: String(payload.base ?? ""),
+          title: String(payload.title ?? ""),
+          state: String(payload.state ?? "") || undefined,
+          draft: Boolean(payload.draft),
+          checksStatus: String(payload.checksStatus ?? "") || undefined,
+          mergeStatus: String(payload.mergeStatus ?? "") || undefined,
+          reviewStatus: String(payload.reviewStatus ?? "") || undefined,
+          createdAt: event.at,
+          updatedAt: event.at,
+          metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+        });
+      }
+    }
+    if (event.type === "pull_request.status_checked") {
+      const prId = String(payload.id ?? "");
+      const pr = pullRequests.get(prId);
+      if (pr) {
+        pullRequests.set(prId, {
+          ...pr,
+          state: String(payload.state ?? "") || pr.state,
+          draft: Boolean(payload.draft),
+          checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus,
+          mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus,
+          reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus,
+          updatedAt: event.at,
+          metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata,
+        });
+      }
+    }
+    if (event.type === "pull_request.babysitter_started") {
+      const prId = String(payload.id ?? "");
+      const pr = pullRequests.get(prId);
+      if (pr) {
+        pullRequests.set(prId, {
+          ...pr,
+          babysitterTaskId: String(payload.babysitterTaskId ?? "") || pr.babysitterTaskId,
+          updatedAt: event.at,
+        });
+      }
+    }
   }
 
   return {
     tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
     workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
     executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
     targets: snapshot.targets,
     events: snapshot.events,
   };

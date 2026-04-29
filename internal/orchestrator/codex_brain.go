@@ -108,6 +108,31 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	return decision, nil
 }
 
+func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.assistantPrompt(req))...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	return core.AssistantResponse{
+		ConversationID: req.ConversationID,
+		Message:        strings.TrimSpace(content),
+		Metadata: core.MustJSON(map[string]any{
+			"brain": "codex",
+		}),
+	}, nil
+}
+
 func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -139,6 +164,20 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	plan.Metadata["brain"] = "codex"
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
+}
+
+func (b *CodexBrain) assistantPrompt(req core.AssistantRequest) string {
+	var builder strings.Builder
+	builder.WriteString("You are the interactive assistant for aged, a local autonomous development orchestrator.\n")
+	builder.WriteString("Answer the user's question directly. If the request needs code execution or a long-running task, say what task should be started.\n\n")
+	if len(req.Context) > 0 {
+		builder.WriteString("Context JSON:\n")
+		builder.Write(req.Context)
+		builder.WriteString("\n\n")
+	}
+	builder.WriteString("User message:\n")
+	builder.WriteString(req.Message)
+	return builder.String()
 }
 
 func (b *CodexBrain) execArgs(prompt string) []string {

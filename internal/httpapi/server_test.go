@@ -101,6 +101,29 @@ func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
 	}
 }
 
+func TestAssistantEndpointReturnsAnswer(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, assistantBrain{}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/assistant", "application/json", strings.NewReader(`{
+		"message": "What can you do?"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
 func TestClearTerminalTasksEndpointHidesFinishedTask(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
@@ -152,6 +175,16 @@ func TestClearTerminalTasksEndpointHidesFinishedTask(t *testing.T) {
 	if countEventType(snapshot.Events, core.EventTaskCleared) != 1 {
 		t.Fatalf("task.cleared events = %d, want 1", countEventType(snapshot.Events, core.EventTaskCleared))
 	}
+}
+
+type assistantBrain struct{}
+
+func (assistantBrain) Plan(context.Context, core.Task, []string) (orchestrator.Plan, error) {
+	return orchestrator.Plan{WorkerKind: "mock", Prompt: "unused"}, nil
+}
+
+func (assistantBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	return core.AssistantResponse{ConversationID: req.ConversationID, Message: "answer"}, nil
 }
 
 func countEventType(events []core.Event, eventType core.EventType) int {

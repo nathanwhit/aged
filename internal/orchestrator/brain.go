@@ -18,6 +18,10 @@ type ReplanProvider interface {
 	Replan(ctx context.Context, task core.Task, state OrchestrationState) (ReplanDecision, error)
 }
 
+type AssistantProvider interface {
+	Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error)
+}
+
 type Plan struct {
 	WorkerKind        string            `json:"workerKind"`
 	Prompt            string            `json:"workerPrompt"`
@@ -124,6 +128,16 @@ func (b *PromptBrain) Plan(_ context.Context, task core.Task, steering []string)
 	}, nil
 }
 
+func (b *PromptBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	return core.AssistantResponse{
+		ConversationID: req.ConversationID,
+		Message:        "No interactive assistant brain is configured. Start a task when you want the orchestrator to schedule worker execution.",
+		Metadata: core.MustJSON(map[string]any{
+			"brain": "prompt",
+		}),
+	}, nil
+}
+
 type StaticBrain struct {
 	WorkerKind string
 }
@@ -149,5 +163,15 @@ func (b StaticBrain) Plan(_ context.Context, task core.Task, steering []string) 
 			"brain":     "static",
 			"scheduler": "orchestrator",
 		},
+	}, nil
+}
+
+func (b StaticBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	return core.AssistantResponse{
+		ConversationID: req.ConversationID,
+		Message:        "No interactive assistant brain is configured. Start a task when you want the orchestrator to schedule worker execution.",
+		Metadata: core.MustJSON(map[string]any{
+			"brain": "static",
+		}),
 	}, nil
 }

@@ -53,14 +53,15 @@ type ClearTasksResult struct {
 }
 
 type Service struct {
-	store      eventstore.Store
-	broker     *Broker
-	brain      BrainProvider
-	runners    map[string]worker.Runner
-	workDir    string
-	workspaces WorkspaceManager
-	targets    *TargetRegistry
-	sshRunner  SSHRunner
+	store       eventstore.Store
+	broker      *Broker
+	brain       BrainProvider
+	runners     map[string]worker.Runner
+	workDir     string
+	workspaces  WorkspaceManager
+	targets     *TargetRegistry
+	sshRunner   SSHRunner
+	prPublisher PullRequestPublisher
 
 	mu         sync.Mutex
 	cancels    map[string]context.CancelFunc
@@ -98,19 +99,24 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		targets = NewLocalTargetRegistry()
 	}
 	return &Service{
-		store:      store,
-		broker:     NewBroker(),
-		brain:      brain,
-		runners:    runners,
-		workDir:    workDir,
-		workspaces: workspaces,
-		targets:    targets,
-		sshRunner:  sshRunner,
-		cancels:    map[string]context.CancelFunc{},
-		tasks:      map[string]string{},
-		steering:   map[string]chan string{},
-		remoteRuns: map[string]remoteRun{},
+		store:       store,
+		broker:      NewBroker(),
+		brain:       brain,
+		runners:     runners,
+		workDir:     workDir,
+		workspaces:  workspaces,
+		targets:     targets,
+		sshRunner:   sshRunner,
+		prPublisher: NewLocalPullRequestPublisher(),
+		cancels:     map[string]context.CancelFunc{},
+		tasks:       map[string]string{},
+		steering:    map[string]chan string{},
+		remoteRuns:  map[string]remoteRun{},
 	}
+}
+
+func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
+	s.prPublisher = publisher
 }
 
 func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
@@ -289,6 +295,226 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	}
 
 	go s.runTask(context.Background(), task)
+	return task, nil
+}
+
+func (s *Service) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Message == "" {
+		return core.AssistantResponse{}, errors.New("message is required")
+	}
+	if strings.TrimSpace(req.ConversationID) == "" {
+		req.ConversationID = uuid.NewString()
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type: core.EventAssistantAsked,
+		Payload: core.MustJSON(map[string]any{
+			"conversationId": req.ConversationID,
+			"message":        req.Message,
+			"context":        req.Context,
+		}),
+	}); err != nil {
+		return core.AssistantResponse{}, err
+	}
+	assistant, ok := s.brain.(AssistantProvider)
+	if !ok {
+		return core.AssistantResponse{}, errors.New("assistant brain is not configured")
+	}
+	response, err := assistant.Ask(ctx, req)
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	if strings.TrimSpace(response.ConversationID) == "" {
+		response.ConversationID = req.ConversationID
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type: core.EventAssistantAnswered,
+		Payload: core.MustJSON(map[string]any{
+			"conversationId": response.ConversationID,
+			"message":        response.Message,
+			"metadata":       response.Metadata,
+		}),
+	}); err != nil {
+		return core.AssistantResponse{}, err
+	}
+	return response, nil
+}
+
+func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req core.PublishPullRequestRequest) (core.PullRequest, error) {
+	if s.prPublisher == nil {
+		return core.PullRequest{}, errors.New("pull request publisher is not configured")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return core.PullRequest{}, eventstore.ErrNotFound
+	}
+	if !isTerminalTaskStatus(task.Status) {
+		return core.PullRequest{}, errors.New("can only publish pull requests for terminal tasks")
+	}
+	workerID := strings.TrimSpace(req.WorkerID)
+	sourceRoot := s.workDir
+	if workerID == "" {
+		candidates := applyCandidates(snapshot, taskID)
+		unapplied := unappliedCandidates(candidates)
+		switch len(unapplied) {
+		case 0:
+			if latest := latestAppliedWorker(snapshot, taskID); latest != "" {
+				workerID = latest
+			}
+		case 1:
+			workerID = unapplied[0].WorkerID
+		default:
+			return core.PullRequest{}, errors.New("multiple unapplied worker changes exist; provide workerId")
+		}
+	}
+	if workerID != "" {
+		applied, err := s.workerChangesApplied(ctx, workerID)
+		if err != nil {
+			return core.PullRequest{}, err
+		}
+		if !applied {
+			result, err := s.ApplyWorkerChanges(ctx, workerID)
+			if err != nil {
+				return core.PullRequest{}, err
+			}
+			sourceRoot = result.SourceRoot
+		} else if appliedRoot := appliedWorkerSourceRoot(snapshot, workerID); appliedRoot != "" {
+			sourceRoot = appliedRoot
+		} else if workspace, err := s.workspaceForWorker(ctx, workerID); err == nil && workspace.SourceRoot != "" {
+			sourceRoot = workspace.SourceRoot
+		}
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		title = task.Title
+	}
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
+	}
+	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
+		TaskID:   taskID,
+		WorkerID: workerID,
+		WorkDir:  sourceRoot,
+		Repo:     req.Repo,
+		Base:     req.Base,
+		Branch:   req.Branch,
+		Title:    title,
+		Body:     body,
+		Draft:    req.Draft,
+		Metadata: map[string]any{
+			"workerId": workerID,
+			"workDir":  sourceRoot,
+		},
+	})
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if pr.ID == "" {
+		pr.ID = uuid.NewString()
+	}
+	pr.TaskID = taskID
+	event, err := s.append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":           pr.ID,
+			"repo":         pr.Repo,
+			"number":       pr.Number,
+			"url":          pr.URL,
+			"branch":       pr.Branch,
+			"base":         pr.Base,
+			"title":        pr.Title,
+			"state":        pr.State,
+			"draft":        pr.Draft,
+			"checksStatus": pr.ChecksStatus,
+			"mergeStatus":  pr.MergeStatus,
+			"reviewStatus": pr.ReviewStatus,
+			"metadata":     pr.Metadata,
+		}),
+	})
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	pr.CreatedAt = event.At
+	pr.UpdatedAt = event.At
+	return pr, nil
+}
+
+func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.PullRequest, error) {
+	if s.prPublisher == nil {
+		return core.PullRequest{}, errors.New("pull request publisher is not configured")
+	}
+	pr, ok, err := s.findPullRequest(ctx, prID)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if !ok {
+		return core.PullRequest{}, eventstore.ErrNotFound
+	}
+	checked, err := s.prPublisher.Inspect(ctx, pr)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	checked.ID = pr.ID
+	checked.TaskID = pr.TaskID
+	event, err := s.append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":           checked.ID,
+			"state":        checked.State,
+			"draft":        checked.Draft,
+			"checksStatus": checked.ChecksStatus,
+			"mergeStatus":  checked.MergeStatus,
+			"reviewStatus": checked.ReviewStatus,
+			"metadata":     checked.Metadata,
+		}),
+	})
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	checked.UpdatedAt = event.At
+	return checked, nil
+}
+
+func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (core.Task, error) {
+	pr, ok, err := s.findPullRequest(ctx, prID)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if !ok {
+		return core.Task{}, eventstore.ErrNotFound
+	}
+	task, err := s.CreateTask(ctx, core.CreateTaskRequest{
+		Title:      fmt.Sprintf("Babysit PR %s#%d", pr.Repo, pr.Number),
+		Prompt:     pullRequestBabysitterPrompt(pr),
+		Source:     "github-pr-babysitter",
+		ExternalID: pr.ID,
+		Metadata: core.MustJSON(map[string]any{
+			"pullRequestId": pr.ID,
+			"repo":          pr.Repo,
+			"number":        pr.Number,
+			"url":           pr.URL,
+		}),
+	})
+	if err != nil {
+		return core.Task{}, err
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventPRBabysitter,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":               pr.ID,
+			"babysitterTaskId": task.ID,
+		}),
+	}); err != nil {
+		return core.Task{}, err
+	}
 	return task, nil
 }
 
@@ -567,6 +793,42 @@ func applyCandidates(snapshot core.Snapshot, taskID string) []ApplyCandidate {
 	return candidates
 }
 
+func unappliedCandidates(candidates []ApplyCandidate) []ApplyCandidate {
+	var out []ApplyCandidate
+	for _, candidate := range candidates {
+		if !candidate.Applied {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+func latestAppliedWorker(snapshot core.Snapshot, taskID string) string {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type == core.EventWorkerApplied && event.TaskID == taskID {
+			return event.WorkerID
+		}
+	}
+	return ""
+}
+
+func appliedWorkerSourceRoot(snapshot core.Snapshot, workerID string) string {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventWorkerApplied || event.WorkerID != workerID {
+			continue
+		}
+		var payload struct {
+			SourceRoot string `json:"sourceRoot"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			return payload.SourceRoot
+		}
+	}
+	return ""
+}
+
 func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -578,6 +840,30 @@ func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bo
 		}
 	}
 	return false, nil
+}
+
+func (s *Service) findPullRequest(ctx context.Context, prID string) (core.PullRequest, bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false, err
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == prID {
+			return pr, true, nil
+		}
+	}
+	return core.PullRequest{}, false, nil
+}
+
+func pullRequestBabysitterPrompt(pr core.PullRequest) string {
+	return fmt.Sprintf(`Monitor GitHub pull request %s#%d until it is ready to merge.
+
+Pull request URL: %s
+Branch: %s
+Base: %s
+
+Repeatedly inspect CI status, review comments, and mergeability. If checks fail or review comments request changes, diagnose the issue, make the required code changes in the repo, and report what changed. If the PR is green and no action is needed, report that it is ready. Do not merge unless the user explicitly asks for merge.
+`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base)
 }
 
 func (s *Service) runTask(ctx context.Context, task core.Task) {

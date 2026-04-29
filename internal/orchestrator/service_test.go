@@ -100,6 +100,215 @@ func TestServiceDedupesExternalSourceTasks(t *testing.T) {
 	}
 }
 
+func TestServiceAssistantRecordsQuestionAndAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := fixedAssistantBrain{
+		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "unused"}},
+		answer:     "Use a worker task for code changes.",
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	response, err := service.Ask(ctx, core.AssistantRequest{Message: "Can you open PRs?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Message != brain.answer {
+		t.Fatalf("answer = %q", response.Message)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventAssistantAsked, "") != 1 {
+		t.Fatalf("assistant.asked count = %d, want 1", countEvents(snapshot.Events, core.EventAssistantAsked, ""))
+	}
+	if countEvents(snapshot.Events, core.EventAssistantAnswered, "") != 1 {
+		t.Fatalf("assistant.answered count = %d, want 1", countEvents(snapshot.Events, core.EventAssistantAnswered, ""))
+	}
+}
+
+func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	applyCalls := 0
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+		applyCalls: &applyCalls,
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Implement feature", Prompt: "Do it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+
+	pr, err := service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{
+		Repo: "owner/repo",
+		Base: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+	if pr.URL == "" || pr.Repo != "owner/repo" {
+		t.Fatalf("pr = %+v", pr)
+	}
+	if publisher.published.WorkerID == "" {
+		t.Fatalf("publisher worker id was empty")
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerApplied, task.ID, publisher.published.WorkerID) {
+		t.Fatalf("missing worker apply event")
+	}
+	if !hasEvent(snapshot.Events, core.EventPRPublished, task.ID, "") {
+		t.Fatalf("missing pr published event")
+	}
+}
+
+func TestServiceRefreshesPullRequestStatus(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		status: core.PullRequest{
+			State:        "OPEN",
+			ChecksStatus: "failing",
+			MergeStatus:  "BLOCKED",
+			ReviewStatus: "CHANGES_REQUESTED",
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "run"}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"title":  "Task",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pr, err := service.RefreshPullRequest(ctx, "pr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.ChecksStatus != "failing" || pr.MergeStatus != "BLOCKED" || pr.ReviewStatus != "CHANGES_REQUESTED" {
+		t.Fatalf("refreshed pr = %+v", pr)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.PullRequests[0].ChecksStatus != "failing" {
+		t.Fatalf("snapshot pr = %+v", snapshot.PullRequests[0])
+	}
+}
+
+func TestServiceStartsPullRequestBabysitterTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "babysit",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"title":  "Task",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := service.StartPullRequestBabysitter(ctx, "pr-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ID == "task-1" {
+		t.Fatalf("babysitter reused source task id")
+	}
+	if !hasEvent(snapshot.Events, core.EventPRBabysitter, "task-1", "") {
+		t.Fatalf("missing pr babysitter event")
+	}
+	var found bool
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == "pr-1" && pr.BabysitterTaskID == task.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pull request did not point at babysitter task: %+v", snapshot.PullRequests)
+	}
+}
+
 func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1017,6 +1226,72 @@ type fixedBrain struct {
 
 func (b fixedBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
 	return b.plan, b.err
+}
+
+type fixedAssistantBrain struct {
+	fixedBrain
+	answer string
+}
+
+func (b fixedAssistantBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	return core.AssistantResponse{
+		ConversationID: req.ConversationID,
+		Message:        b.answer,
+		Metadata:       core.MustJSON(map[string]any{"brain": "test"}),
+	}, nil
+}
+
+type fakePullRequestPublisher struct {
+	published PullRequestPublishSpec
+	status    core.PullRequest
+}
+
+func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
+	p.published = spec
+	return core.PullRequest{
+		ID:           "pr-1",
+		TaskID:       spec.TaskID,
+		Repo:         spec.Repo,
+		Number:       12,
+		URL:          "https://github.com/" + spec.Repo + "/pull/12",
+		Branch:       nonEmpty(spec.Branch, "codex/aged-test"),
+		Base:         nonEmpty(spec.Base, "main"),
+		Title:        spec.Title,
+		State:        "OPEN",
+		Draft:        spec.Draft,
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+		Metadata:     core.MustJSON(spec.Metadata),
+	}, nil
+}
+
+func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullRequest) (core.PullRequest, error) {
+	if p.status.ID == "" {
+		p.status.ID = pr.ID
+	}
+	if p.status.TaskID == "" {
+		p.status.TaskID = pr.TaskID
+	}
+	if p.status.Repo == "" {
+		p.status.Repo = pr.Repo
+	}
+	if p.status.Number == 0 {
+		p.status.Number = pr.Number
+	}
+	if p.status.URL == "" {
+		p.status.URL = pr.URL
+	}
+	if p.status.Branch == "" {
+		p.status.Branch = pr.Branch
+	}
+	if p.status.Base == "" {
+		p.status.Base = pr.Base
+	}
+	if p.status.Title == "" {
+		p.status.Title = pr.Title
+	}
+	return p.status, nil
 }
 
 type replanningBrain struct {

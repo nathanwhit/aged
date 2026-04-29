@@ -107,7 +107,8 @@ button {
   margin: 0;
 }
 
-.composer {
+.composer,
+.assistant-panel {
   align-self: start;
   display: grid;
   gap: 14px;
@@ -134,6 +135,24 @@ textarea {
 textarea {
   min-height: 180px;
   resize: vertical;
+}
+
+.assistant-panel textarea {
+  min-height: 110px;
+}
+
+.assistant-answer {
+  background: #f7f5ef;
+  border: 1px solid #e0ddd5;
+  border-radius: 6px;
+  color: #343741;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
 }
 
 .primary,
@@ -274,7 +293,8 @@ small {
 }
 
 .status.running,
-.status.planning {
+.status.planning,
+.status.open {
   background: #e6f0ff;
   border-color: #a7c3f3;
   color: #245aa5;
@@ -371,6 +391,48 @@ small {
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) 38px;
+}
+
+.pr-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.pr-list {
+  display: grid;
+  gap: 10px;
+}
+
+.pr-card {
+  align-items: center;
+  border: 1px solid #e0ddd5;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 12px;
+}
+
+.pr-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pr-main a {
+  color: #245aa5;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.pr-statuses,
+.pr-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: end;
 }
 
 .worker-grid {
@@ -864,6 +926,16 @@ small {
   .worker-card {
     align-items: stretch;
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .pr-card {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .pr-statuses,
+  .pr-actions {
+    justify-content: start;
   }
 
   .worker-card > .icon-button {

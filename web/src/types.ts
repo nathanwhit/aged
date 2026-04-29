@@ -110,10 +110,31 @@ export type TargetState = {
   available: boolean;
 };
 
+export type PullRequestState = {
+  id: string;
+  taskId: string;
+  repo: string;
+  number?: number;
+  url: string;
+  branch: string;
+  base: string;
+  title: string;
+  state?: string;
+  draft?: boolean;
+  checksStatus?: string;
+  mergeStatus?: string;
+  reviewStatus?: string;
+  babysitterTaskId?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type Snapshot = {
   tasks: Task[] | null;
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;
   targets?: TargetState[] | null;
+  pullRequests?: PullRequestState[] | null;
   events: EventRecord[] | null;
 };

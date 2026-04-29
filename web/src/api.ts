@@ -1,4 +1,4 @@
-import type { Snapshot, WorkerChangesReview } from "./types";
+import type { PullRequestState, Snapshot, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -16,6 +16,22 @@ export async function createTask(input: {
   metadata?: Record<string, unknown>;
 }) {
   const response = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function askAssistant(input: {
+  conversationId?: string;
+  message: string;
+  context?: Record<string, unknown>;
+}): Promise<{ conversationId: string; message: string }> {
+  const response = await fetch("/api/assistant", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
@@ -84,6 +100,46 @@ export async function getWorkerChanges(workerId: string): Promise<WorkerChangesR
 
 export async function applyWorkerChanges(workerId: string) {
   const response = await fetch(`/api/workers/${workerId}/apply`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function publishTaskPullRequest(taskId: string, input: {
+  workerId?: string;
+  repo?: string;
+  base?: string;
+  branch?: string;
+  title?: string;
+  body?: string;
+  draft?: boolean;
+} = {}): Promise<PullRequestState> {
+  const response = await fetch(`/api/tasks/${taskId}/pull-request`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function refreshPullRequest(id: string): Promise<PullRequestState> {
+  const response = await fetch(`/api/pull-requests/${id}/refresh`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function babysitPullRequest(id: string) {
+  const response = await fetch(`/api/pull-requests/${id}/babysit`, {
     method: "POST",
   });
   if (!response.ok) {
