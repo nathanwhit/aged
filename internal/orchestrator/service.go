@@ -121,14 +121,16 @@ func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSe
 }
 
 type WorkerTurnResult struct {
-	WorkerID string            `json:"workerId"`
-	NodeID   string            `json:"nodeId,omitempty"`
-	Status   core.WorkerStatus `json:"status"`
-	Kind     string            `json:"kind"`
-	Role     string            `json:"role,omitempty"`
-	Summary  string            `json:"summary,omitempty"`
-	Error    string            `json:"error,omitempty"`
-	Changes  WorkspaceChanges  `json:"changes"`
+	WorkerID     string            `json:"workerId"`
+	NodeID       string            `json:"nodeId,omitempty"`
+	Status       core.WorkerStatus `json:"status"`
+	Kind         string            `json:"kind"`
+	Role         string            `json:"role,omitempty"`
+	SpawnID      string            `json:"spawnId,omitempty"`
+	BaseWorkerID string            `json:"baseWorkerId,omitempty"`
+	Summary      string            `json:"summary,omitempty"`
+	Error        string            `json:"error,omitempty"`
+	Changes      WorkspaceChanges  `json:"changes"`
 }
 
 func NewService(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string) *Service {
@@ -1284,11 +1286,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 
-	if !s.replanLoop(ctx, task, plan, results) {
+	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, plan, results)
+	if !replanOK {
 		return
 	}
 
-	_ = s.completeTask(ctx, task.ID, results)
+	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
 }
 
 func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
@@ -1364,12 +1367,12 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		} else if result.Status == core.WorkerWaiting {
 			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
 		} else if s.finishOrContinueTask(ctx, task.ID, result) {
-			_ = s.completeTask(ctx, task.ID, append(results, result))
+			_ = s.completeTask(ctx, task.ID, append(results, result), decision.FinalCandidateWorkerID, decision.Rationale)
 		}
 	case "wait":
 		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "complete":
-		_ = s.completeTask(ctx, task.ID, results)
+		_ = s.completeTask(ctx, task.ID, results, decision.FinalCandidateWorkerID, decision.Rationale)
 	case "fail":
 		_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "worker question could not be answered")))
 	}
@@ -1432,7 +1435,7 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		return
 	}
 	if s.finishOrContinueTask(ctx, taskID, result) {
-		_ = s.completeTask(ctx, taskID, []WorkerTurnResult{result})
+		_ = s.completeTask(ctx, taskID, []WorkerTurnResult{result}, "", "")
 	}
 }
 
@@ -1466,10 +1469,11 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	if !ok {
 		return
 	}
-	if !s.replanLoop(ctx, task, plan, results) {
+	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, plan, results)
+	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, task.ID, results)
+	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
 }
 
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
@@ -1883,15 +1887,21 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 	return false
 }
 
-func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult) error {
-	candidateWorkerID := latestCandidateWorkerID(results)
+func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
+	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
+	if err != nil {
+		return s.failTask(ctx, taskID, err)
+	}
 	if candidateWorkerID != "" {
+		if strings.TrimSpace(reason) == "" {
+			reason = candidateReason
+		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskCandidate,
 			TaskID: taskID,
 			Payload: core.MustJSON(map[string]any{
 				"workerId": candidateWorkerID,
-				"reason":   "latest successful worker with candidate changes",
+				"reason":   reason,
 			}),
 		}); err != nil {
 			return err
@@ -1907,6 +1917,64 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 		}
 	}
 	return nil
+}
+
+func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) (string, string, error) {
+	candidates := candidateResults(results)
+	selectedWorkerID = strings.TrimSpace(selectedWorkerID)
+	if selectedWorkerID != "" {
+		for _, candidate := range candidates {
+			if candidate.WorkerID == selectedWorkerID {
+				return selectedWorkerID, "orchestrator selected final candidate explicitly", nil
+			}
+		}
+		return "", "", fmt.Errorf("selected final candidate %q is not a successful worker with candidate changes", selectedWorkerID)
+	}
+	switch len(candidates) {
+	case 0:
+		return "", "", nil
+	case 1:
+		return candidates[0].WorkerID, "only successful worker with candidate changes", nil
+	}
+	leaves := candidateLeaves(candidates)
+	if len(leaves) == 1 {
+		return leaves[0].WorkerID, "only remaining candidate leaf after dependency lineage", nil
+	}
+	ids := make([]string, 0, len(leaves))
+	for _, leaf := range leaves {
+		ids = append(ids, leaf.WorkerID)
+	}
+	return "", "", fmt.Errorf("multiple competing final candidates remain (%s); the orchestrator must select finalCandidateWorkerId or schedule a consolidation/validation worker", strings.Join(ids, ", "))
+}
+
+func candidateResults(results []WorkerTurnResult) []WorkerTurnResult {
+	candidates := []WorkerTurnResult{}
+	for _, result := range results {
+		if result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
+			candidates = append(candidates, result)
+		}
+	}
+	return candidates
+}
+
+func candidateLeaves(candidates []WorkerTurnResult) []WorkerTurnResult {
+	candidateIDs := map[string]bool{}
+	for _, candidate := range candidates {
+		candidateIDs[candidate.WorkerID] = true
+	}
+	hasCandidateChild := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidateIDs[candidate.BaseWorkerID] {
+			hasCandidateChild[candidate.BaseWorkerID] = true
+		}
+	}
+	leaves := []WorkerTurnResult{}
+	for _, candidate := range candidates {
+		if !hasCandidateChild[candidate.WorkerID] {
+			leaves = append(leaves, candidate)
+		}
+	}
+	return leaves
 }
 
 func latestCandidateWorkerID(results []WorkerTurnResult) string {
@@ -1948,10 +2016,10 @@ func taskCompletionModeFromTask(task core.Task) string {
 	}
 }
 
-func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) bool {
+func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string) {
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
-		return true
+		return true, "", ""
 	}
 	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
@@ -1961,11 +2029,11 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 		})
 		if err != nil {
 			_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replan failed: %w", err))
-			return false
+			return false, "", ""
 		}
 		if err := decision.Validate(); err != nil {
 			_ = s.failTask(ctx, task.ID, fmt.Errorf("invalid dynamic replan decision: %w", err))
-			return false
+			return false, "", ""
 		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
@@ -1976,17 +2044,17 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			}),
 		}); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
-			return false
+			return false, "", ""
 		}
 		switch decision.Action {
 		case "complete":
-			return true
+			return true, decision.FinalCandidateWorkerID, decision.Rationale
 		case "wait":
 			_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
-			return false
+			return false, "", ""
 		case "fail":
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
-			return false
+			return false, "", ""
 		case "continue":
 			next := *decision.Plan
 			if next.Metadata == nil {
@@ -2005,30 +2073,30 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				Payload: core.MustJSON(next),
 			}); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false
+				return false, "", ""
 			}
 			result, err := s.runPlannedWorker(ctx, task, next)
 			if err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false
+				return false, "", ""
 			}
 			results = append(results, result)
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
-				return false
+				return false, "", ""
 			}
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false
+				return false, "", ""
 			}
 			if !ok {
-				return false
+				return false, "", ""
 			}
 		}
 	}
 	_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replanning exceeded %d turns", maxDynamicReplanTurns))
-	return false
+	return false, "", ""
 }
 
 type followUpNode struct {
@@ -3014,6 +3082,12 @@ func (s *workerRunState) turnResult(workerID string, plan Plan, status core.Work
 		}
 		if role, ok := plan.Metadata["spawnRole"].(string); ok {
 			result.Role = role
+		}
+		if spawnID, ok := plan.Metadata["spawnID"].(string); ok {
+			result.SpawnID = spawnID
+		}
+		if baseWorkerID, ok := plan.Metadata["baseWorkerID"].(string); ok {
+			result.BaseWorkerID = baseWorkerID
 		}
 	}
 	if s.lastError != "" {

@@ -59,11 +59,12 @@ type OrchestrationState struct {
 }
 
 type ReplanDecision struct {
-	Action    string         `json:"action"`
-	Plan      *Plan          `json:"plan,omitempty"`
-	Rationale string         `json:"rationale,omitempty"`
-	Message   string         `json:"message,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Action                 string         `json:"action"`
+	Plan                   *Plan          `json:"plan,omitempty"`
+	FinalCandidateWorkerID string         `json:"finalCandidateWorkerId,omitempty"`
+	Rationale              string         `json:"rationale,omitempty"`
+	Message                string         `json:"message,omitempty"`
+	Metadata               map[string]any `json:"metadata,omitempty"`
 }
 
 func (p Plan) Validate() error {

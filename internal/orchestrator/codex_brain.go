@@ -202,20 +202,22 @@ func (b *CodexBrain) execArgs(prompt string) []string {
 
 func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 	var raw struct {
-		Action    string          `json:"action"`
-		Plan      json.RawMessage `json:"plan,omitempty"`
-		Rationale string          `json:"rationale,omitempty"`
-		Message   string          `json:"message,omitempty"`
-		Metadata  map[string]any  `json:"metadata,omitempty"`
+		Action                 string          `json:"action"`
+		Plan                   json.RawMessage `json:"plan,omitempty"`
+		FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
+		Rationale              string          `json:"rationale,omitempty"`
+		Message                string          `json:"message,omitempty"`
+		Metadata               map[string]any  `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return ReplanDecision{}, err
 	}
 	decision := ReplanDecision{
-		Action:    raw.Action,
-		Rationale: raw.Rationale,
-		Message:   raw.Message,
-		Metadata:  raw.Metadata,
+		Action:                 raw.Action,
+		FinalCandidateWorkerID: raw.FinalCandidateWorkerID,
+		Rationale:              raw.Rationale,
+		Message:                raw.Message,
+		Metadata:               raw.Metadata,
 	}
 	if len(raw.Plan) > 0 && string(raw.Plan) != "null" {
 		plan, err := decodeCodexPlan(raw.Plan)
@@ -388,6 +390,7 @@ The JSON object must have exactly these top-level fields:
 
 {
   "action": "complete",
+  "finalCandidateWorkerId": "worker-id-or-empty",
   "rationale": "string",
   "message": "string",
   "plan": null
@@ -396,6 +399,8 @@ The JSON object must have exactly these top-level fields:
 Field rules:
 - "action" must be exactly one of "continue", "complete", "wait", or "fail".
 - Use "complete" when the task appears done.
+- When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id that should be the final task result. If no existing candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
+- When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty.
 - Use "continue" when another worker turn is needed.
 - Use "wait" when user input or approval is needed.
 - Use "fail" when the task cannot continue.

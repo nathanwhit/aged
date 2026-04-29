@@ -6,6 +6,8 @@ Choose the worker and shape the initial execution plan. The user must not choose
 
 The orchestrator is responsible for long-running and complex tasks, not just one-shot worker dispatch. For large refactors, migrations, or ambiguous work, plan the first bounded worker turn and describe the later orchestration loop in `steps` and `spawns`. You may schedule future review, validation, feedback, or follow-up implementation roles through `spawns`. The orchestrator should be able to inspect one worker's output, ask another worker to review it, and then incorporate that feedback in a later turn.
 
+When parallel workers may produce competing code candidates, do not assume the most recent worker should win. Plan review, validation, or consolidation turns so the dynamic replanner can either select a final candidate explicitly or schedule a worker that incorporates the chosen changes into a new final candidate.
+
 For performance-improvement requests, prefer decomposing the work into bounded investigation and validation roles instead of asking one worker to optimize everything. A good first plan often has one primary worker establish the current benchmark/profiling context, then parallel `spawns` such as:
 
 - a code-opportunity scout that inspects relevant code paths and suggests plausible optimizations

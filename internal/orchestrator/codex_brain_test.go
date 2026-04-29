@@ -147,6 +147,7 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 func TestDecodeReplanDecisionComplete(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "complete",
+		"finalCandidateWorkerId": "worker-123",
 		"rationale": "all follow-up work is done",
 		"message": "ready for user review",
 		"plan": null
@@ -162,6 +163,9 @@ func TestDecodeReplanDecisionComplete(t *testing.T) {
 	}
 	if decision.Plan != nil {
 		t.Fatalf("plan = %+v", decision.Plan)
+	}
+	if decision.FinalCandidateWorkerID != "worker-123" {
+		t.Fatalf("final candidate = %q", decision.FinalCandidateWorkerID)
 	}
 }
 

@@ -1923,14 +1923,15 @@ func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+	brain := &finalSelectingBrain{plan: Plan{
 		WorkerKind: "codex",
 		Prompt:     "implement baseline",
 		Spawns: []SpawnRequest{
 			{ID: "opt-a", Role: "optimizer", Reason: "Try optimization A.", WorkerKind: "left"},
 			{ID: "opt-b", Role: "optimizer", Reason: "Try optimization B.", WorkerKind: "right"},
 		},
-	}}, map[string]worker.Runner{
+	}, role: "optimizer"}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
 		"left":  fileWritingRunner{kind: "left", path: "a.txt", body: "a"},
 		"right": fileWritingRunner{kind: "right", path: "b.txt", body: "b"},
@@ -1956,6 +1957,85 @@ func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	}
 	if len(policy.Candidates) < 2 {
 		t.Fatalf("candidates = %+v", policy.Candidates)
+	}
+}
+
+func TestServiceFailsAmbiguousCompetingCandidatesWithoutFinalSelection(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement baseline",
+		Spawns: []SpawnRequest{
+			{ID: "opt-a", Role: "optimizer", Reason: "Try optimization A.", WorkerKind: "left"},
+			{ID: "opt-b", Role: "optimizer", Reason: "Try optimization B.", WorkerKind: "right"},
+		},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
+		"left":  fileWritingRunner{kind: "left", path: "a.txt", body: "a"},
+		"right": fileWritingRunner{kind: "right", path: "b.txt", body: "b"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.txt", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Ambiguous candidates", Prompt: "Try alternatives."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != "" {
+		t.Fatalf("final candidate = %q, want empty", snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+}
+
+func TestServiceUsesExplicitReplanFinalCandidateForCompetingBranches(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &finalSelectingBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement baseline",
+		Spawns: []SpawnRequest{
+			{ID: "opt-a", Role: "left", Reason: "Try optimization A.", WorkerKind: "left"},
+			{ID: "opt-b", Role: "right", Reason: "Try optimization B.", WorkerKind: "right"},
+		},
+	}, role: "right"}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
+		"left":  fileWritingRunner{kind: "left", path: "a.txt", body: "a"},
+		"right": fileWritingRunner{kind: "right", path: "b.txt", body: "b"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.txt", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Selected candidate", Prompt: "Try alternatives and choose one."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	var selected WorkerTurnResult
+	for _, result := range brain.states[0].Results {
+		if result.WorkerID == snapshot.Tasks[0].FinalCandidateWorkerID {
+			selected = result
+			break
+		}
+	}
+	if selected.Role != "right" {
+		t.Fatalf("selected role = %q, want right; final=%q results=%+v", selected.Role, snapshot.Tasks[0].FinalCandidateWorkerID, brain.states[0].Results)
 	}
 }
 
@@ -2306,6 +2386,31 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return decision, nil
+}
+
+type finalSelectingBrain struct {
+	plan   Plan
+	role   string
+	states []OrchestrationState
+}
+
+func (b *finalSelectingBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return b.plan, nil
+}
+
+func (b *finalSelectingBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	for i := len(state.Results) - 1; i >= 0; i-- {
+		result := state.Results[i]
+		if result.Role == b.role && resultHasCandidateChanges(result) {
+			return ReplanDecision{
+				Action:                 "complete",
+				FinalCandidateWorkerID: result.WorkerID,
+				Rationale:              "selected " + b.role + " candidate",
+			}, nil
+		}
+	}
+	return ReplanDecision{Action: "complete", Rationale: "no matching candidate"}, nil
 }
 
 type sequenceBrain struct {
