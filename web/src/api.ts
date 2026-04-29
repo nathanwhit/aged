@@ -140,6 +140,16 @@ export async function applyWorkerChanges(workerId: string) {
   return response.json();
 }
 
+export async function applyTaskResult(taskId: string) {
+  const response = await fetch(`/api/tasks/${taskId}/apply`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
 export async function publishTaskPullRequest(taskId: string, input: {
   workerId?: string;
   repo?: string;

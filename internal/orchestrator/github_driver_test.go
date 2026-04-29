@@ -65,17 +65,33 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	service.SetPullRequestPublisher(publisher)
 
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
-		Title:      "GitHub issue owner/repo#12",
-		Prompt:     "Fix it.",
-		Source:     "github-issue",
-		ExternalID: "owner/repo#12",
-		Metadata:   core.MustJSON(map[string]any{"repo": "owner/repo", "number": 12}),
-	})
-	if err != nil {
+	taskID := "task-gh-12"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "GitHub issue owner/repo#12",
+			"prompt": "Fix it.",
+			"metadata": map[string]any{
+				"source":         "github-issue",
+				"externalId":     "owner/repo#12",
+				"repo":           "owner/repo",
+				"number":         12,
+				"completionMode": "github",
+			},
+		}),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	driver := NewGitHubDriver(service, GitHubDriverConfig{
 		Enabled: true,
@@ -94,7 +110,7 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.PullRequests) != 1 || snapshot.PullRequests[0].TaskID != task.ID {
+	if len(snapshot.PullRequests) != 1 || snapshot.PullRequests[0].TaskID != taskID {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
 }

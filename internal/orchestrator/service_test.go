@@ -312,6 +312,49 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	applyCalls := 0
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+		applyCalls: &applyCalls,
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Implement feature",
+		Prompt:   "Do it.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" || publisher.published.WorkerID != snapshot.Tasks[0].FinalCandidateWorkerID {
+		t.Fatalf("published worker = %q, final candidate = %q", publisher.published.WorkerID, snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+}
+
 func TestServiceRoutesTaskToConfiguredProject(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1217,6 +1260,57 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 }
 
+func TestServiceAppliesFinalTaskCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	changed := WorkspaceChangedFile{Path: "internal/example.txt", Status: "modified"}
+	applyCalls := 0
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: changed.Path,
+		body: "worker output\n",
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{changed},
+		},
+		applyCalls: &applyCalls,
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("task final candidate was empty: %+v", snapshot.Tasks[0])
+	}
+	result, err := service.ApplyTaskResult(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkerID != snapshot.Tasks[0].FinalCandidateWorkerID {
+		t.Fatalf("applied worker = %q, want final candidate %q", result.WorkerID, snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	applied, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Tasks[0].AppliedWorkerID != snapshot.Tasks[0].FinalCandidateWorkerID {
+		t.Fatalf("applied worker id = %q, want %q", applied.Tasks[0].AppliedWorkerID, snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if applyCalls != 1 {
+		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+}
+
 func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1392,6 +1486,48 @@ func TestServiceRunsSpawnedFollowUpWorkerWithPriorResultContext(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestServiceBasesFollowUpWorkspaceOnLatestCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	workspace := &recordingWorkspaceManager{
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/refactor.go", Status: "modified"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement the first bounded refactor slice",
+		Spawns: []SpawnRequest{{
+			ID:         "review",
+			Role:       "reviewer",
+			Reason:     "Review the implementation output.",
+			WorkerKind: "reviewer",
+		}},
+	}}, map[string]worker.Runner{
+		"codex":    eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed"}}},
+	}, t.TempDir(), workspace)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Candidate review",
+		Prompt: "Implement, then review the candidate.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if workspace.baseWorkDir == "" || workspace.baseRevision != "shared@" {
+		t.Fatalf("follow-up base workdir=%q baseRevision=%q, want candidate workspace base", workspace.baseWorkDir, workspace.baseRevision)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "baseWorkerID", snapshot.Workers[0].ID) {
+		t.Fatalf("missing baseWorkerID metadata on follow-up worker")
 	}
 }
 
@@ -1782,7 +1918,7 @@ func TestServiceDeliversSteeringToRunningWorker(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 }
 
-func TestServiceRecommendsManualApplyPolicyForMultipleCandidates(t *testing.T) {
+func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -1815,7 +1951,7 @@ func TestServiceRecommendsManualApplyPolicyForMultipleCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.Strategy != "manual_select" {
+	if policy.Strategy != "apply_final" {
 		t.Fatalf("strategy = %q, policy = %+v", policy.Strategy, policy)
 	}
 	if len(policy.Candidates) < 2 {
@@ -2427,30 +2563,38 @@ func (r *recordingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink
 }
 
 type fakeWorkspaceManager struct {
-	cwd        string
-	sourceRoot string
-	changes    WorkspaceChanges
-	diff       string
-	applyCalls *int
-	diffCalls  *int
+	cwd          string
+	sourceRoot   string
+	baseWorkDir  string
+	baseRevision string
+	changes      WorkspaceChanges
+	diff         string
+	applyCalls   *int
+	diffCalls    *int
 }
 
 type recordingWorkspaceManager struct {
-	workDir string
+	workDir      string
+	baseWorkDir  string
+	baseRevision string
+	changes      WorkspaceChanges
 }
 
 func (m *recordingWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
 	m.workDir = spec.WorkDir
+	m.baseWorkDir = spec.BaseWorkDir
+	m.baseRevision = spec.BaseRevision
 	return PreparedWorkspace{
-		Root:       spec.WorkDir,
-		CWD:        spec.WorkDir,
-		SourceRoot: spec.WorkDir,
-		Change:     "@ fake",
-		Status:     "The working copy has no changes.",
-		Mode:       string(WorkspaceModeShared),
-		VCSType:    "jj",
-		WorkerID:   spec.WorkerID,
-		TaskID:     spec.TaskID,
+		Root:          spec.WorkDir,
+		CWD:           spec.WorkDir,
+		SourceRoot:    spec.WorkDir,
+		WorkspaceName: "shared",
+		Change:        "@ fake",
+		Status:        "The working copy has no changes.",
+		Mode:          string(WorkspaceModeShared),
+		VCSType:       "jj",
+		WorkerID:      spec.WorkerID,
+		TaskID:        spec.TaskID,
 	}, nil
 }
 
@@ -2467,6 +2611,22 @@ func (m *recordingWorkspaceManager) Cleanup(_ context.Context, workspace Prepare
 }
 
 func (m *recordingWorkspaceManager) DescribeChanges(_ context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	if m.changes.Root != "" || m.changes.CWD != "" || m.changes.Dirty || len(m.changes.ChangedFiles) > 0 {
+		changes := m.changes
+		if changes.Root == "" {
+			changes.Root = workspace.Root
+		}
+		if changes.CWD == "" {
+			changes.CWD = workspace.CWD
+		}
+		if changes.Mode == "" {
+			changes.Mode = workspace.Mode
+		}
+		if changes.VCSType == "" {
+			changes.VCSType = workspace.VCSType
+		}
+		return changes, nil
+	}
 	return WorkspaceChanges{
 		Root:    workspace.Root,
 		CWD:     workspace.CWD,
@@ -2585,6 +2745,30 @@ func waitForTaskStatus(t *testing.T, store eventstore.Store, taskID string, stat
 	}
 	snapshot, _ := store.Snapshot(context.Background())
 	t.Fatalf("task %s did not reach %s; snapshot = %+v", taskID, status, snapshot.Tasks)
+	return core.Snapshot{}
+}
+
+func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, count int) core.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, pr := range snapshot.PullRequests {
+			if pr.TaskID == taskID {
+				found++
+			}
+		}
+		if found >= count {
+			return snapshot
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot, _ := store.Snapshot(context.Background())
+	t.Fatalf("task %s did not publish %d pull requests; pull requests = %+v", taskID, count, snapshot.PullRequests)
 	return core.Snapshot{}
 }
 

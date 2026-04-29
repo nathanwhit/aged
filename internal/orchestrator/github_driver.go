@@ -191,6 +191,9 @@ func (d *GitHubDriver) publishCompletedIssueTasks(ctx context.Context) error {
 		if task.Status != core.TaskSucceeded || publishedByTask[task.ID] {
 			continue
 		}
+		if taskCompletionModeFromTask(task) != "github" {
+			continue
+		}
 		source, _ := taskExternalRef(task)
 		if source != "github-issue" {
 			continue

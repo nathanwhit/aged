@@ -26,7 +26,7 @@ The initial local-first vertical slice is implemented.
 - Worker detail and event views use compact responsive metadata strips, scroll-safe path rows, structured lifecycle cards, and concise timeline summaries instead of wrapping raw JSON/path fields into oversized cards.
 - Workers that emit `needs_input` now create `approval.needed` events. Replanning brains can answer autonomously with a continuation plan; otherwise the task waits, and user/orchestrator feedback through task steering records `approval.decided` and resumes with a continuation worker.
 - External drivers can use `POST /api/tasks` directly with optional `source`, `externalId`, and metadata. `source` plus `externalId` dedupes visible tasks, and `GET /api/tasks/lookup` resolves an external item back to its aged task.
-- Built-in GitHub driver support is available with `-github-driver` / `AGED_GITHUB_DRIVER`. It polls configured GitHub issues through `gh`, creates idempotent `github-issue` tasks, auto-publishes PRs for succeeded GitHub issue tasks, refreshes known PR status, and starts babysitter tasks when checks fail, reviews request changes, or mergeability is blocked/dirty.
+- Built-in GitHub driver support is available with `-github-driver` / `AGED_GITHUB_DRIVER`. It polls configured GitHub issues through `gh`, creates idempotent `github-issue` tasks, auto-publishes PRs for succeeded GitHub issue tasks that opt into GitHub completion mode, refreshes known PR status, and starts babysitter tasks when checks fail, reviews request changes, or mergeability is blocked/dirty.
 - Built-in Discord driver support is available with `-discord-driver` / `AGED_DISCORD_DRIVER`. It polls configured channels with a bot token, ignores startup history by default, answers messages through the configured assistant, supports structured `answer` / `list_projects` / `create_project` / `propose_task` / `create_task` decisions, carries `projectId` / `title` / `prompt` into created tasks, can add persisted projects through chat, runs chat turns in the selected project checkout for read-only code inspection, recovers pending proposals from persisted assistant events, and still supports `task: <prompt>` plus `do it` shortcuts.
 - Worker workspace preparation, local worker cwd, source apply, and PR publishing now resolve through the task's project rather than an implicit daemon-wide checkout.
 - Worker prompts are wrapped by the service with the prepared execution workspace before dispatch. In isolated mode the prompt explicitly tells workers to edit only the isolated workspace and not the source checkout, even if the scheduler's prompt mentions another local path.
@@ -34,7 +34,9 @@ The initial local-first vertical slice is implemented.
 - Assistant conversations persist Codex/Claude provider session ids in assistant events and pass them back on later turns, so headless `codex exec resume` and `claude --resume` can provide real follow-up continuity.
 - Task titles are optional. Blank titles are generated through the configured assistant with a 1-8 word title prompt, with a deterministic prompt-derived fallback if the assistant fails.
 - Pull requests are first-class projected state in snapshots. `pull_request.published`, `pull_request.status_checked`, and `pull_request.babysitter_started` events reconstruct current PR state, including repo, number, branch, CI/check status, review status, merge status, and any babysitter task.
-- Completed tasks can be published as GitHub PRs with `POST /api/tasks/{id}/pull-request` or the dashboard PR panel. If there is exactly one successful unapplied worker candidate, the service applies it first, creates/pushes a branch, opens a PR with `gh`, and records the published PR.
+- Tasks can now complete with a first-class final candidate worker. The orchestrator records `task.final_candidate_selected`, snapshots expose `finalCandidateWorkerId`, and local mode exposes a task-level apply action so users apply the selected task result once instead of applying every worker.
+- Task creation supports `metadata.completionMode`: `local` means review/apply the final candidate through aged, while `github` means completion publishes the final candidate as a PR and the user applies the result by merging the PR.
+- Completed tasks can be published as GitHub PRs with `POST /api/tasks/{id}/pull-request`, GitHub completion mode, or the dashboard PR panel. The service defaults to the final candidate worker, applies it first when needed, creates/pushes a branch, opens a PR with `gh`, and records the published PR.
 - Pull request follow-up can be driven by `POST /api/pull-requests/{id}/refresh`, `POST /api/pull-requests/{id}/babysit`, or the GitHub driver monitor loop.
 - Google OAuth can protect the dashboard/API for public exposure. `-auth google` requires Google client credentials, an allowed-email list, and uses signed HTTP-only session cookies.
 - Built-in Codex/Claude workers no longer hold stdin open for steering, avoiding `codex exec` waiting forever for appended stdin input.
@@ -57,7 +59,8 @@ The initial local-first vertical slice is implemented.
 - Remote worker patches can be reviewed/applied through the normal worker apply endpoint; the current implementation applies the collected `diff.patch` to the task project's local checkout and records `worker.changes_applied`.
 - Target scheduling scores matching targets by labels, capacity, current running workers, worker size, and memory/CPU hints.
 - Retained isolated worker changes can be reviewed and applied through HTTP/UI; jj apply creates a merge revision and records `worker.changes_applied`.
-- Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; multiple competing changed workers produce a `manual_select` recommendation instead of pretending there is a safe automatic merge order.
+- Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; when the orchestrator selected a final candidate, the recommendation is `apply_final` / `already_applied`, with manual selection remaining as a fallback for unresolved competing candidates.
+- Follow-up workers inherit candidate state from the latest changed successful dependency. For jj workspaces this uses the candidate workspace revision; for Git workspaces this copies the base workspace patch into a fresh worktree before running the follow-up worker.
 - Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude exec adapters intentionally do not hold stdin open because those CLIs treat piped stdin as extra prompt input and may wait indefinitely.
 - `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison.
 - Repeated worker apply attempts are blocked in the service and already-applied workers render as disabled `Applied` actions in the dashboard.
@@ -82,7 +85,7 @@ The initial local-first vertical slice is implemented.
 - CLI assistant tests verify Codex JSON and Claude stream output are converted into Ask responses.
 - Title-generation tests verify blank task titles use the generator and fall back locally when generation fails.
 - Pull request tests verify single-worker auto-apply before publish, PR projection, status refresh, and babysitter task scheduling.
-- GitHub driver tests verify issue polling dedupes tasks, succeeded issue tasks are auto-published as PRs, and PRs needing attention are refreshed and babysat.
+- GitHub driver tests verify issue polling dedupes tasks, GitHub-mode succeeded issue tasks are auto-published as PRs, and PRs needing attention are refreshed and babysat.
 - Discord driver tests verify startup history skipping, direct task creation, assistant-suggested `do it` task creation, and fallback task creation when the assistant cannot answer conversationally.
 - Project tests verify SQLite persistence, startup seeding/loading, runtime API creation, explicit `projectId` routing, external repo-to-project mapping, and PR publishing defaults from project repo/base settings.
 - Retry and workspace-guard tests verify failed/canceled tasks rerun from persisted plans and workers receive the prepared workspace path instead of relying on scheduler-generated paths.
@@ -106,7 +109,8 @@ The initial local-first vertical slice is implemented.
   - SSH runner tests verify remote change artifact and patch collection/parsing.
   - Service tests verify remote worker patch artifacts route through the normal apply flow.
   - Service delivers task steering to compatible running workers.
-  - Service recommends manual apply selection when multiple changed worker branches compete.
+  - Service records final task candidates, applies task results through the selected candidate, and publishes GitHub-mode completions through that final candidate.
+  - Service recommends final-candidate apply when one has been selected and falls back to manual apply selection when changed worker branches are unresolved.
   - Unknown brain-selected workers fail the task cleanly.
   - HTTP API rejects user-supplied worker selection.
 - Worker runner integration tests:
@@ -195,6 +199,7 @@ http://127.0.0.1:8787
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
 - SSH target execution exists for pre-provisioned machines and now collects remote VCS summaries/patch artifacts and can apply the patch back locally. Conflict handling is currently delegated to `git apply` errors.
 - GitHub PR publishing and the built-in GitHub driver currently depend on local `gh` authentication and repo remotes being configured.
+- Apply is task-level by default: in local mode the user applies the final selected candidate after the task is terminal; in GitHub mode the task publishes the final candidate as a PR and merge is the apply step.
 - Project creation is DB-backed through the API/UI. Editing, deletion, health checks, path validation, VCS detection, and default-branch discovery are still pending.
 - Assistant Q&A is currently one-shot CLI execution. It records conversation ids, but does not yet resume durable Codex/Claude sessions across asks.
 - Discord conversational quality uses the configured assistant and now benefits from persisted Codex/Claude session resume. MCP remains the cleaner path when an external agent runtime is available.

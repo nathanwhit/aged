@@ -310,6 +310,17 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			task.Status = payload.Status
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
+		case core.EventTaskCandidate:
+			var payload struct {
+				WorkerID string `json:"workerId"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.final_candidate_selected: %w", err)
+			}
+			task := tasks[event.TaskID]
+			task.FinalCandidateWorkerID = payload.WorkerID
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
 		case core.EventTaskCleared:
 			clearedTasks[event.TaskID] = true
 		case core.EventExecutionPlanned:
@@ -433,6 +444,13 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 				node.Status = payload.Status
 				node.UpdatedAt = event.At
 				nodes[nodeID] = node
+			}
+		case core.EventWorkerApplied:
+			task := tasks[event.TaskID]
+			if task.ID != "" {
+				task.AppliedWorkerID = event.WorkerID
+				task.UpdatedAt = event.At
+				tasks[event.TaskID] = task
 			}
 		case core.EventPRPublished:
 			var payload struct {

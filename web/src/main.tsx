@@ -23,7 +23,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
@@ -43,6 +43,7 @@ type TaskStartInput = {
   projectId?: string;
   title: string;
   prompt: string;
+  metadata?: Record<string, unknown>;
 };
 
 const emptySnapshot: AppSnapshot = {
@@ -184,7 +185,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} onCancel={cancelTask} onRetry={handleRetryTask} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} onCancel={cancelTask} onRetry={handleRetryTask} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -248,6 +249,7 @@ function App() {
           element: (
             <WorkerList
               workers={selectedWorkers}
+              task={selectedTask}
               events={selectedEvents}
               selectedWorkerId={selectedWorkerId}
               onSelect={setSelectedWorkerId}
@@ -356,7 +358,7 @@ function App() {
                     <Status value={task.status} />
                   </button>
                   <div className="task-row-actions">
-                    {task.status === "failed" && (
+                    {isRetryableTask(task) && (
                       <button className="icon-button ghost task-action" disabled={retryingTaskId === task.id} onClick={() => handleRetryTask(task.id)} title="Retry task">
                         <RefreshCw size={16} />
                       </button>
@@ -659,6 +661,10 @@ function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
 }
 
+function isRetryableTask(task: Task): boolean {
+  return task.status === "failed" || task.status === "canceled";
+}
+
 function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[] }) {
   const activeNodes = nodes.filter((node) => node.status === "running" || node.status === "queued" || node.status === "waiting");
   const activeWorkers = workers.filter((worker) => worker.status === "running" || worker.status === "queued" || worker.status === "waiting");
@@ -716,17 +722,19 @@ function TaskComposer({
   const [projectId, setProjectId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [completionMode, setCompletionMode] = useState<"local" | "github">("local");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const input = { projectId: projectId || undefined, title, prompt };
+    const input = { projectId: projectId || undefined, title, prompt, metadata: { completionMode } };
     setBusy(true);
     onStartPending(input);
     try {
       await onCreate(input);
       setTitle("");
       setPrompt("");
+      setCompletionMode("local");
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -760,6 +768,13 @@ function TaskComposer({
       <label>
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
+      </label>
+      <label>
+        Completion
+        <select value={completionMode} onChange={(event) => setCompletionMode(event.target.value as "local" | "github")}>
+          <option value="local">Local: review diff here and apply result</option>
+          <option value="github">GitHub: open PR when complete</option>
+        </select>
       </label>
       <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>
         {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
@@ -956,6 +971,8 @@ function TaskDetail({
   task,
   onCancel,
   onRetry,
+  onApply,
+  onApplied,
   onSteer,
   retrying,
   onError,
@@ -963,11 +980,16 @@ function TaskDetail({
   task: Task;
   onCancel: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
+  onApply: (id: string) => Promise<void>;
+  onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
   retrying: boolean;
   onError: (message: string) => void;
 }) {
   const [message, setMessage] = useState("");
+  const [applying, setApplying] = useState(false);
+  const completionMode = String(task.metadata?.completionMode ?? "local");
+  const canApplyResult = completionMode !== "github" && isTerminalTask(task) && Boolean(task.finalCandidateWorkerId) && task.appliedWorkerId !== task.finalCandidateWorkerId;
 
   async function steer(event: React.FormEvent) {
     event.preventDefault();
@@ -976,6 +998,18 @@ function TaskDetail({
       setMessage("");
     } catch (err) {
       onError((err as Error).message);
+    }
+  }
+
+  async function applyResult() {
+    setApplying(true);
+    try {
+      await onApply(task.id);
+      await onApplied();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setApplying(false);
     }
   }
 
@@ -989,7 +1023,15 @@ function TaskDetail({
         </div>
         <div className="detail-actions">
           <Status value={task.status} />
-          {task.status === "failed" && (
+          {completionMode === "github" && <span className="pill">GitHub mode</span>}
+          {canApplyResult && (
+            <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
+              <Check size={16} />
+              {applying ? "Applying" : "Apply Result"}
+            </button>
+          )}
+          {task.appliedWorkerId && <span className="pill">Applied</span>}
+          {isRetryableTask(task) && (
             <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
               <RefreshCw size={18} />
             </button>
@@ -1090,6 +1132,7 @@ function PullRequestPanel({
 }
 
 function WorkerList({
+  task,
   workers,
   events,
   selectedWorkerId,
@@ -1100,6 +1143,7 @@ function WorkerList({
   onCancel,
   onError,
 }: {
+  task: Task;
   workers: Worker[];
   events: EventRecord[];
   selectedWorkerId: string;
@@ -1172,6 +1216,7 @@ function WorkerList({
             const completion = latestWorkerCompletion(events, worker.id);
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
             const applied = workerChangesApplied(events, worker.id);
+            const isFinalCandidate = task.finalCandidateWorkerId === worker.id;
             const workerEvents = events.filter((event) => event.workerId === worker.id);
             const latestEvent = latestInspectableWorkerEvent(workerEvents);
             const diff = diffs[worker.id];
@@ -1211,9 +1256,9 @@ function WorkerList({
                         <FileText size={16} />
                         {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
                       </button>
-                      <button className="primary compact" disabled={applied || applying === worker.id} onClick={() => apply(worker.id)} title={applied ? "Worker changes already applied" : "Apply worker changes"}>
+                      <button className="secondary compact" disabled={applied || applying === worker.id || isFinalCandidate} onClick={() => apply(worker.id)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
                         <Check size={16} />
-                        {applied ? "Applied" : applying === worker.id ? "Applying" : "Apply"}
+                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === worker.id ? "Applying" : "Manual Apply"}
                       </button>
                     </div>
                     {diff?.open && <DiffViewer state={diff} />}
@@ -2310,6 +2355,12 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         tasks.set(event.taskId, { ...task, status: String(payload.status) as Task["status"], updatedAt: event.at });
       }
     }
+    if (event.type === "task.final_candidate_selected" && event.taskId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        tasks.set(event.taskId, { ...task, finalCandidateWorkerId: String(payload.workerId ?? "") || undefined, updatedAt: event.at });
+      }
+    }
     if (event.type === "task.cleared" && event.taskId) {
       clearedTasks.add(event.taskId);
     }
@@ -2354,6 +2405,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         command: Array.isArray(payload.command) ? payload.command.map(String) : undefined,
         createdAt: event.at,
         updatedAt: event.at,
+        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
       });
     }
     if (event.type === "worker.started" && event.workerId) {
@@ -2367,6 +2419,12 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       if (worker) workers.set(event.workerId, { ...worker, status: String(payload.status) as Worker["status"], updatedAt: event.at });
       const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
       if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+    }
+    if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        tasks.set(event.taskId, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at });
+      }
     }
     if (event.type === "pull_request.published" && event.taskId) {
       const prId = String(payload.id ?? "");

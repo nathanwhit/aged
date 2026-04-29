@@ -33,6 +33,8 @@ export type Task = {
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
+  finalCandidateWorkerId?: string;
+  appliedWorkerId?: string;
 };
 
 export type Project = {
@@ -68,6 +70,7 @@ export type Worker = {
   command?: string[];
   createdAt: string;
   updatedAt: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type WorkspaceChangedFile = {

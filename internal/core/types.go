@@ -36,6 +36,7 @@ const (
 	EventTaskPlanned       EventType = "task.planned"
 	EventTaskReplanned     EventType = "task.replanned"
 	EventTaskSteered       EventType = "task.steered"
+	EventTaskCandidate     EventType = "task.final_candidate_selected"
 	EventTaskCleared       EventType = "task.cleared"
 	EventExecutionPlanned  EventType = "execution.node_planned"
 	EventExecutionStatus   EventType = "execution.node_status"
@@ -66,14 +67,16 @@ type Event struct {
 }
 
 type Task struct {
-	ID        string          `json:"id"`
-	ProjectID string          `json:"projectId,omitempty"`
-	Title     string          `json:"title"`
-	Prompt    string          `json:"prompt"`
-	Status    TaskStatus      `json:"status"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	ID                     string          `json:"id"`
+	ProjectID              string          `json:"projectId,omitempty"`
+	Title                  string          `json:"title"`
+	Prompt                 string          `json:"prompt"`
+	Status                 TaskStatus      `json:"status"`
+	CreatedAt              time.Time       `json:"createdAt"`
+	UpdatedAt              time.Time       `json:"updatedAt"`
+	Metadata               json.RawMessage `json:"metadata,omitempty"`
+	FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
+	AppliedWorkerID        string          `json:"appliedWorkerId,omitempty"`
 }
 
 type Worker struct {

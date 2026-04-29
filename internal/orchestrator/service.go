@@ -599,17 +599,21 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	project := s.projectForTask(task)
 	sourceRoot := project.LocalPath
 	if workerID == "" {
-		candidates := applyCandidates(snapshot, taskID)
-		unapplied := unappliedCandidates(candidates)
-		switch len(unapplied) {
-		case 0:
-			if latest := latestAppliedWorker(snapshot, taskID); latest != "" {
-				workerID = latest
+		if task.FinalCandidateWorkerID != "" {
+			workerID = task.FinalCandidateWorkerID
+		} else {
+			candidates := applyCandidates(snapshot, taskID)
+			unapplied := unappliedCandidates(candidates)
+			switch len(unapplied) {
+			case 0:
+				if latest := latestAppliedWorker(snapshot, taskID); latest != "" {
+					workerID = latest
+				}
+			case 1:
+				workerID = unapplied[0].WorkerID
+			default:
+				return core.PullRequest{}, errors.New("multiple unapplied worker changes exist; provide workerId")
 			}
-		case 1:
-			workerID = unapplied[0].WorkerID
-		default:
-			return core.PullRequest{}, errors.New("multiple unapplied worker changes exist; provide workerId")
 		}
 	}
 	if workerID != "" {
@@ -1033,6 +1037,24 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	return result, err
 }
 
+func (s *Service) ApplyTaskResult(ctx context.Context, taskID string) (WorkerApplyResult, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return WorkerApplyResult{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return WorkerApplyResult{}, eventstore.ErrNotFound
+	}
+	if !isTerminalTaskStatus(task.Status) {
+		return WorkerApplyResult{}, errors.New("can only apply terminal task results")
+	}
+	if task.FinalCandidateWorkerID == "" {
+		return WorkerApplyResult{}, errors.New("task has no final candidate to apply")
+	}
+	return s.ApplyWorkerChanges(ctx, task.FinalCandidateWorkerID)
+}
+
 func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (ApplyPolicyRecommendation, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -1044,6 +1066,20 @@ func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (Appl
 		Strategy:   "none",
 		Reason:     "no unapplied successful workers with source changes",
 		Candidates: candidates,
+	}
+	if task, ok := findTask(snapshot, taskID); ok && task.FinalCandidateWorkerID != "" {
+		for _, candidate := range candidates {
+			if candidate.WorkerID == task.FinalCandidateWorkerID {
+				if candidate.Applied {
+					recommendation.Strategy = "already_applied"
+					recommendation.Reason = "final task candidate has already been applied"
+				} else {
+					recommendation.Strategy = "apply_final"
+					recommendation.Reason = "orchestrator selected a final task candidate"
+				}
+				return s.recordApplyPolicy(ctx, taskID, recommendation)
+			}
+		}
 	}
 	unapplied := 0
 	for _, candidate := range candidates {
@@ -1059,7 +1095,11 @@ func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (Appl
 		recommendation.Strategy = "manual_select"
 		recommendation.Reason = "multiple unapplied successful workers have source changes; select one or schedule a review/benchmark comparison before applying"
 	}
-	_, err = s.append(ctx, core.Event{
+	return s.recordApplyPolicy(ctx, taskID, recommendation)
+}
+
+func (s *Service) recordApplyPolicy(ctx context.Context, taskID string, recommendation ApplyPolicyRecommendation) (ApplyPolicyRecommendation, error) {
+	_, err := s.append(ctx, core.Event{
 		Type:    core.EventApplyPolicy,
 		TaskID:  taskID,
 		Payload: core.MustJSON(recommendation),
@@ -1248,7 +1288,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 
-	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+	_ = s.completeTask(ctx, task.ID, results)
 }
 
 func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
@@ -1299,6 +1339,11 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		}
 		decision.Plan.Metadata["parentNodeID"] = waiting.NodeID
 		decision.Plan.Metadata["questionWorkerID"] = waiting.WorkerID
+		if stringMetadata(decision.Plan.Metadata, "baseWorkerID") == "" {
+			if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
+				decision.Plan.Metadata["baseWorkerID"] = baseWorkerID
+			}
+		}
 		_, _ = s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
 			TaskID: task.ID,
@@ -1319,12 +1364,12 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		} else if result.Status == core.WorkerWaiting {
 			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
 		} else if s.finishOrContinueTask(ctx, task.ID, result) {
-			_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+			_ = s.completeTask(ctx, task.ID, append(results, result))
 		}
 	case "wait":
 		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "complete":
-		_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+		_ = s.completeTask(ctx, task.ID, results)
 	case "fail":
 		_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "worker question could not be answered")))
 	}
@@ -1387,7 +1432,7 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		return
 	}
 	if s.finishOrContinueTask(ctx, taskID, result) {
-		_ = s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+		_ = s.completeTask(ctx, taskID, []WorkerTurnResult{result})
 	}
 }
 
@@ -1424,7 +1469,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	if !s.replanLoop(ctx, task, plan, results) {
 		return
 	}
-	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+	_ = s.completeTask(ctx, task.ID, results)
 }
 
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
@@ -1483,6 +1528,23 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	} else if retryFromWorkerID != "" {
 		plan.Metadata["retryWorkspaceReused"] = false
 	}
+	workspaceSpec := WorkspaceSpec{
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		WorkDir:  project.LocalPath,
+	}
+	if !reusedWorkspace {
+		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
+			baseSpec, err := s.baseWorkspaceSpec(ctx, workspaceSpec, baseWorkerID)
+			if err != nil {
+				_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+				return WorkerTurnResult{}, err
+			}
+			workspaceSpec = baseSpec
+			plan.Metadata["baseWorkspaceCWD"] = workspaceSpec.BaseWorkDir
+			plan.Metadata["baseRevision"] = workspaceSpec.BaseRevision
+		}
+	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventExecutionPlanned,
 		TaskID:   task.ID,
@@ -1506,9 +1568,11 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	if !reusedWorkspace {
 		workspace, err = s.workspaces.Prepare(ctx, WorkspaceSpec{
-			TaskID:   task.ID,
-			WorkerID: workerID,
-			WorkDir:  project.LocalPath,
+			TaskID:       workspaceSpec.TaskID,
+			WorkerID:     workspaceSpec.WorkerID,
+			WorkDir:      workspaceSpec.WorkDir,
+			BaseWorkDir:  workspaceSpec.BaseWorkDir,
+			BaseRevision: workspaceSpec.BaseRevision,
 		})
 		if err != nil {
 			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -1666,6 +1730,13 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			plan.Metadata["retryWorkspaceReused"] = true
 			plan.Metadata["retryWorkspaceCWD"] = remoteWorkDir
 		}
+	} else if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
+		if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err != nil {
+			return WorkerTurnResult{}, err
+		} else {
+			remoteWorkDir = baseWorkDir
+			plan.Metadata["baseWorkspaceCWD"] = remoteWorkDir
+		}
 	}
 	workspace := PreparedWorkspace{
 		Root:       remoteWorkDir,
@@ -1812,6 +1883,71 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 	return false
 }
 
+func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult) error {
+	candidateWorkerID := latestCandidateWorkerID(results)
+	if candidateWorkerID != "" {
+		if _, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskCandidate,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId": candidateWorkerID,
+				"reason":   "latest successful worker with candidate changes",
+			}),
+		}); err != nil {
+			return err
+		}
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskSucceeded); err != nil {
+		return err
+	}
+	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
+		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
+			_ = s.failTask(ctx, taskID, fmt.Errorf("publish completion pull request: %w", err))
+			return err
+		}
+	}
+	return nil
+}
+
+func latestCandidateWorkerID(results []WorkerTurnResult) string {
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
+			return result.WorkerID
+		}
+	}
+	return ""
+}
+
+func resultHasCandidateChanges(result WorkerTurnResult) bool {
+	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
+}
+
+func (s *Service) taskCompletionMode(ctx context.Context, taskID string) string {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return "local"
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return "local"
+	}
+	return taskCompletionModeFromTask(task)
+}
+
+func taskCompletionModeFromTask(task core.Task) string {
+	var metadata map[string]any
+	if len(task.Metadata) > 0 {
+		_ = json.Unmarshal(task.Metadata, &metadata)
+	}
+	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["completionMode"]))) {
+	case "github":
+		return "github"
+	default:
+		return "local"
+	}
+}
+
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) bool {
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
@@ -1857,6 +1993,11 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
+			if stringMetadata(next.Metadata, "baseWorkerID") == "" {
+				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
+					next.Metadata["baseWorkerID"] = baseWorkerID
+				}
+			}
 			normalizePlanReasoning(&next)
 			if _, err := s.append(ctx, core.Event{
 				Type:    core.EventTaskPlanned,
@@ -2039,6 +2180,7 @@ func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest,
 	workerKind := s.workerKindForSpawn(spawn, initial.WorkerKind)
 	prompt := buildFollowUpPrompt(task, spawn, results)
 	reasoningEffort := normalizeReasoningEffort(nonEmpty(spawn.ReasoningEffort, initial.ReasoningEffort))
+	baseWorkerID := latestCandidateWorkerID(results)
 	plan := Plan{
 		WorkerKind:      workerKind,
 		Prompt:          prompt,
@@ -2061,6 +2203,9 @@ func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest,
 			"parentNodeID":    parentNodeID,
 			"parentRationale": initial.Rationale,
 		},
+	}
+	if baseWorkerID != "" {
+		plan.Metadata["baseWorkerID"] = baseWorkerID
 	}
 	if reasoningEffort != "" {
 		plan.Metadata["reasoningEffort"] = reasoningEffort
@@ -2468,6 +2613,26 @@ func (s *Service) retryWorkspace(ctx context.Context, taskID string, newWorkerID
 	return workspace, true, nil
 }
 
+func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, baseWorkerID string) (WorkspaceSpec, error) {
+	base, err := s.workspaceForWorker(ctx, baseWorkerID)
+	if err != nil {
+		return spec, fmt.Errorf("load base workspace for %s: %w", baseWorkerID, err)
+	}
+	if strings.TrimSpace(base.CWD) == "" {
+		return spec, fmt.Errorf("base workspace for %s has no cwd", baseWorkerID)
+	}
+	spec.BaseWorkDir = base.CWD
+	switch base.VCSType {
+	case "jj":
+		if strings.TrimSpace(base.WorkspaceName) != "" {
+			spec.BaseRevision = base.WorkspaceName + "@"
+		}
+	case "git":
+		spec.BaseRevision = ""
+	}
+	return spec, nil
+}
+
 func (s *Service) remoteRetryWorkDir(ctx context.Context, target TargetConfig, previousWorkerID string) (string, error) {
 	workspace, err := s.workspaceForWorker(ctx, previousWorkerID)
 	if err != nil {
@@ -2624,6 +2789,9 @@ func planMetadata(plan Plan) map[string]any {
 		"fallbackReason",
 		"parentRationale",
 		"dependsOn",
+		"baseWorkerID",
+		"baseWorkspaceCWD",
+		"baseRevision",
 		"nodeID",
 		"parentNodeID",
 		"planID",

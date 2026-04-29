@@ -20,9 +20,11 @@ type WorkspaceManager interface {
 }
 
 type WorkspaceSpec struct {
-	TaskID   string
-	WorkerID string
-	WorkDir  string
+	TaskID       string
+	WorkerID     string
+	WorkDir      string
+	BaseWorkDir  string
+	BaseRevision string
 }
 
 type PreparedWorkspace struct {
@@ -251,6 +253,24 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 		return PreparedWorkspace{}, fmt.Errorf("read jj working copy change: %w", err)
 	}
 	baseChange = strings.TrimSpace(baseChange)
+	baseRevision := strings.TrimSpace(spec.BaseRevision)
+	if baseRevision == "" {
+		baseRevision = "@"
+	}
+	if spec.BaseWorkDir != "" && spec.BaseRevision == "" {
+		baseRevision = "@"
+		baseChange, err = runJJ(ctx, spec.BaseWorkDir, "log", "-r", baseRevision, "--no-graph")
+		if err != nil {
+			return PreparedWorkspace{}, fmt.Errorf("read jj base workspace change: %w", err)
+		}
+		baseChange = strings.TrimSpace(baseChange)
+	} else if baseRevision != "@" {
+		baseChange, err = runJJ(ctx, root, "log", "-r", baseRevision, "--no-graph")
+		if err != nil {
+			return PreparedWorkspace{}, fmt.Errorf("read jj base revision: %w", err)
+		}
+		baseChange = strings.TrimSpace(baseChange)
+	}
 
 	sourceStatus, err := runJJ(ctx, root, "status")
 	if err != nil {
@@ -292,7 +312,11 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 	}
 
 	workerMessage := "Worker " + shortID(spec.WorkerID)
-	if _, err := runJJ(ctx, root, "workspace", "add", "--name", workspaceName, "--revision", "@", "--message", workerMessage, "--sparse-patterns", "copy", destination); err != nil {
+	addDir := root
+	if spec.BaseWorkDir != "" && spec.BaseRevision == "" {
+		addDir = spec.BaseWorkDir
+	}
+	if _, err := runJJ(ctx, addDir, "workspace", "add", "--name", workspaceName, "--revision", baseRevision, "--message", workerMessage, "--sparse-patterns", "copy", destination); err != nil {
 		return PreparedWorkspace{}, fmt.Errorf("create isolated jj workspace: %w", err)
 	}
 
@@ -526,6 +550,17 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 		return PreparedWorkspace{}, fmt.Errorf("read git HEAD: %w", err)
 	}
 	baseChange = strings.TrimSpace(baseChange)
+	baseRef := strings.TrimSpace(spec.BaseRevision)
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	if baseRef != "HEAD" {
+		baseChange, err = runGit(ctx, root, "rev-parse", baseRef)
+		if err != nil {
+			return PreparedWorkspace{}, fmt.Errorf("read git base revision: %w", err)
+		}
+		baseChange = strings.TrimSpace(baseChange)
+	}
 
 	sourceStatus, err := runGit(ctx, root, "status", "--short", "--branch")
 	if err != nil {
@@ -565,8 +600,13 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return PreparedWorkspace{}, err
 	}
-	if _, err := runGit(ctx, root, "worktree", "add", "--detach", destination, "HEAD"); err != nil {
+	if _, err := runGit(ctx, root, "worktree", "add", "--detach", destination, baseRef); err != nil {
 		return PreparedWorkspace{}, fmt.Errorf("create isolated git worktree: %w", err)
+	}
+	if strings.TrimSpace(spec.BaseWorkDir) != "" {
+		if err := copyGitWorkspaceChanges(ctx, spec.BaseWorkDir, destination); err != nil {
+			return PreparedWorkspace{}, err
+		}
 	}
 
 	change, err := runGit(ctx, destination, "rev-parse", "HEAD")
@@ -713,6 +753,35 @@ func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepare
 		return result, fmt.Errorf("merge git worker commit: %w", err)
 	}
 	return result, nil
+}
+
+func copyGitWorkspaceChanges(ctx context.Context, source string, destination string) error {
+	diff, err := runGit(ctx, source, "diff", "--binary", "HEAD", "--")
+	if err != nil {
+		return fmt.Errorf("read git base workspace diff: %w", err)
+	}
+	if strings.TrimSpace(diff) == "" {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn")
+	cmd.Dir = destination
+	cmd.Stdin = strings.NewReader(diff)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("apply git base workspace diff: %w: %s", err, detail)
+		}
+		return fmt.Errorf("apply git base workspace diff: %w", err)
+	}
+	if _, err := runGit(ctx, destination, "add", "-A"); err != nil {
+		return fmt.Errorf("stage git base workspace diff: %w", err)
+	}
+	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "commit", "-m", "Base worker candidate"); err != nil {
+		return fmt.Errorf("commit git base workspace diff: %w", err)
+	}
+	return nil
 }
 
 func cleanupDecision(workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, bool) {
