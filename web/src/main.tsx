@@ -16,7 +16,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
+import type { EventRecord, ExecutionNode, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -24,6 +24,7 @@ type AppSnapshot = {
   workers: Worker[];
   executionNodes: ExecutionNode[];
   targets: TargetState[];
+  projects: Project[];
   pullRequests: PullRequestState[];
   events: EventRecord[];
 };
@@ -33,6 +34,7 @@ const emptySnapshot: AppSnapshot = {
   workers: [],
   executionNodes: [],
   targets: [],
+  projects: [],
   pullRequests: [],
   events: [],
 };
@@ -130,6 +132,7 @@ function App() {
             setSelectedTaskId(task.id);
           }}
           onError={setError}
+          projects={snapshot.projects}
         />
         <AssistantPanel onError={setError} />
 
@@ -282,10 +285,13 @@ function Metric({ label, value }: { label: string; value: string }) {
 function TaskComposer({
   onCreate,
   onError,
+  projects,
 }: {
-  onCreate: (input: { title: string; prompt: string }) => Promise<void>;
+  onCreate: (input: { projectId?: string; title: string; prompt: string }) => Promise<void>;
   onError: (message: string) => void;
+  projects: Project[];
 }) {
+  const [projectId, setProjectId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState(false);
@@ -294,7 +300,7 @@ function TaskComposer({
     event.preventDefault();
     setBusy(true);
     try {
-      await onCreate({ title, prompt });
+      await onCreate({ projectId: projectId || undefined, title, prompt });
       setTitle("");
       setPrompt("");
     } catch (err) {
@@ -311,8 +317,20 @@ function TaskComposer({
         <h2>Start Work</h2>
       </div>
       <label>
+        Project
+        <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+          <option value="">Default project</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+              {project.repo ? ` (${project.repo})` : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
         Title
-        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Implement parser retry path" required />
+        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Auto-generated if blank" />
       </label>
       <label>
         Prompt
@@ -391,6 +409,7 @@ function TaskDetail({
       <div className="detail-heading">
         <div>
           <h2>{task.title}</h2>
+          {task.projectId && <small>Project {task.projectId}</small>}
           <p>{task.prompt}</p>
         </div>
         <div className="detail-actions">
@@ -1172,6 +1191,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     workers: snapshot.workers ?? [],
     executionNodes: snapshot.executionNodes ?? [],
     targets: snapshot.targets ?? [],
+    projects: snapshot.projects ?? [],
     pullRequests: snapshot.pullRequests ?? [],
     events: snapshot.events ?? [],
   };
@@ -1196,6 +1216,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     if (event.type === "task.created" && event.taskId) {
       tasks.set(event.taskId, {
         id: event.taskId,
+        projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
         title: String(payload.title ?? "Untitled task"),
         prompt: String(payload.prompt ?? ""),
         status: "queued",
@@ -1324,6 +1345,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
     workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
     executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    projects: snapshot.projects,
     pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
     targets: snapshot.targets,
     events: snapshot.events,

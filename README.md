@@ -26,6 +26,18 @@ Useful flags:
 go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker mock -workdir .
 ```
 
+The interactive Ask panel is separate from the scheduler brain. Configure it with `-assistant` / `AGED_ASSISTANT`:
+
+- `auto`: use `codex` or `claude` when the default worker is one of those CLIs.
+- `codex`: run `codex exec --json` for direct answers.
+- `claude`: run `claude --print --output-format stream-json` for direct answers.
+- `brain`: fall back to the configured brain provider if it implements Q&A.
+- `none`: no CLI assistant.
+
+The dev-control server defaults to `-assistant auto`, so a `-worker codex` dev daemon uses Codex for Ask even when scheduling still uses `-brain prompt`.
+
+Task titles are optional. When `title` is omitted or blank, aged asks the configured assistant for a short 1-8 word title and falls back to a local prompt-derived title if the assistant is unavailable.
+
 Remote execution targets are configured with `-targets` / `AGED_TARGETS` using JSON:
 
 ```json
@@ -49,10 +61,31 @@ Remote execution targets are configured with `-targets` / `AGED_TARGETS` using J
 
 SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
 
+Projects are configured with `-projects` / `AGED_PROJECTS` using JSON. If omitted, aged creates a single default project from `-workdir`.
+
+```json
+{
+  "defaultProjectId": "aged",
+  "projects": [
+    {
+      "id": "aged",
+      "name": "aged",
+      "localPath": "/Users/me/Documents/Code/aged",
+      "repo": "owner/aged",
+      "defaultBase": "main",
+      "targetLabels": { "role": "default" }
+    }
+  ]
+}
+```
+
+Tasks may include `projectId`. External drivers can also include metadata such as `"repo": "owner/repo"`; if that repo matches a configured project, the task is routed there. Worker workspaces, worker cwd, apply, and PR publishing all resolve through the task's project.
+
 Scheduler behavior:
 
 - `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
 - Users do not choose workers per task; task creation only supplies the work request.
+- Users or external drivers may choose a project per task with `projectId`; worker selection still belongs to the orchestrator.
 - Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
 - Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
@@ -60,7 +93,7 @@ Scheduler behavior:
 - The scheduler is expected to support long-lived work by planning bounded worker turns, then using later turns for review, validation, feedback incorporation, or follow-up implementation.
 - `spawns` from initial and dynamically replanned plans are executed as a dependency graph after the plan's primary worker succeeds. Independent spawns run in parallel; spawns with `dependsOn` wait for their prerequisite spawn ids. Follow-up prompts include the original request plus prior worker summaries, errors, and changed files.
 - Brains that implement dynamic replanning can inspect completed worker turns after follow-ups and return `continue`, `complete`, `wait`, or `fail`. `continue` schedules another worker turn, runs that plan's follow-up graph, and records `task.replanned`.
-- Before a worker is created, the orchestrator records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
+- Before a worker is created, the orchestrator resolves the task project and records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
 - Workspace backends are selected with `-workspace-vcs auto|jj|git`; `auto` prefers `jj` when `.jj` is present and otherwise supports Git repos.
 - Isolated mode is the default. Jujutsu repos use `jj workspace add -r @`; Git repos use `git worktree add --detach HEAD` and require a clean source working tree.
 - Workspace cleanup is selected with `-workspace-cleanup retain|delete_on_success|delete_on_terminal`. Cleanup emits `worker.workspace_cleaned` and does not hide the worker's terminal status.
@@ -117,6 +150,9 @@ Useful flags and env vars:
 - `-auth-allowed-emails` / `AGED_AUTH_ALLOWED_EMAILS`: comma-separated allowlist
 - `-auth-session-key` / `AGED_AUTH_SESSION_KEY`: stable random key, at least 32 bytes
 - `-auth-redirect-url` / `AGED_AUTH_REDIRECT_URL`: public callback URL when running behind a tunnel or reverse proxy
+- `-assistant` / `AGED_ASSISTANT`: interactive assistant provider, `auto`, `brain`, `none`, `codex`, or `claude`
+- `-codex-path` / `AGED_CODEX_PATH`
+- `-claude-path` / `AGED_CLAUDE_PATH`
 
 When auth is enabled, `/api/health`, `/auth/login`, `/auth/callback`, `/auth/logout`, and `/api/auth/me` remain public enough to complete login/logout. Dashboard pages and operational APIs require a signed session cookie. If `AGED_AUTH_SESSION_KEY` is omitted, the daemon generates an ephemeral key and existing sessions are invalidated on restart.
 
@@ -168,6 +204,7 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `GET /api/health`
 - `GET /api/auth/me`
 - `GET /api/snapshot`
+- `GET /api/projects`
 - `GET /api/events?after=<id>`
 - `GET /api/events/stream?after=<id>`
 - `POST /api/assistant`
@@ -190,6 +227,7 @@ External drivers can create tasks through the same endpoint as the UI. Include `
 curl -X POST http://127.0.0.1:8787/api/tasks \
   -H 'content-type: application/json' \
   -d '{
+    "projectId": "aged",
     "title": "GitHub issue owner/repo#123",
     "prompt": "Fix the issue described at owner/repo#123...",
     "source": "github",

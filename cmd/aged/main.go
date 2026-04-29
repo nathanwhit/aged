@@ -24,7 +24,9 @@ func main() {
 		addr             = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
 		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
 		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
+		projectsPath     = flag.String("projects", envOr("AGED_PROJECTS", ""), "JSON project registry config")
 		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
+		assistantMode    = flag.String("assistant", envOr("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
 		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
 		promptPath       = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
 		schedulerPrompt  = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
@@ -32,6 +34,7 @@ func main() {
 		brainAPIKey      = flag.String("brain-api-key", envFirst("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
 		brainModel       = flag.String("brain-model", envOr("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
 		codexPath        = flag.String("codex-path", envOr("AGED_CODEX_PATH", "codex"), "Codex CLI path for the codex brain")
+		claudePath       = flag.String("claude-path", envOr("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for the assistant")
 		workspaceVCS     = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
 		workspaceMode    = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
 		workspaceRoot    = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "directory for isolated worker workspaces")
@@ -109,6 +112,11 @@ func main() {
 		slog.Error("load execution targets", "error", err)
 		os.Exit(1)
 	}
+	projects, err := orchestrator.LoadProjectRegistry(*projectsPath, absWorkDir)
+	if err != nil {
+		slog.Error("load projects", "error", err)
+		os.Exit(1)
+	}
 
 	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
 		store,
@@ -119,6 +127,19 @@ func main() {
 		targets,
 		orchestrator.NewSSHRunner(),
 	)
+	service.SetProjects(projects)
+	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
+		CodexPath:  *codexPath,
+		ClaudePath: *claudePath,
+		WorkDir:    absWorkDir,
+	})
+	if err != nil {
+		slog.Error("configure assistant", "error", err)
+		os.Exit(1)
+	}
+	if assistant != nil {
+		service.SetAssistant(assistant)
+	}
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		slog.Warn("recover workers", "error", err)
 	}
@@ -156,6 +177,28 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown", "error", err)
 	}
+}
+
+func configureAssistant(mode string, workerKind string, brainMode string, config orchestrator.CLIAssistantConfig) (orchestrator.AssistantProvider, error) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" || mode == "auto" {
+		switch workerKind {
+		case "codex", "claude":
+			mode = workerKind
+		case "codex-cli":
+			mode = "codex"
+		default:
+			if brainMode == "codex" || brainMode == "api" {
+				return nil, nil
+			}
+			mode = "none"
+		}
+	}
+	if mode == "brain" || mode == "none" {
+		return nil, nil
+	}
+	config.Kind = mode
+	return orchestrator.NewCLIAssistant(config)
 }
 
 func envOr(key string, fallback string) string {

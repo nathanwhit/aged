@@ -130,6 +130,61 @@ func TestServiceAssistantRecordsQuestionAndAnswer(t *testing.T) {
 	}
 }
 
+func TestServiceGeneratesMissingTaskTitle(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetTitleGenerator(fakeTitleGenerator{title: "Generated Parser Title"})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Prompt: "implement parser retries when the upstream endpoint times out",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Title != "Generated Parser Title" {
+		t.Fatalf("title = %q", task.Title)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].Title != "Generated Parser Title" {
+		t.Fatalf("snapshot title = %q", snapshot.Tasks[0].Title)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(snapshot.Tasks[0].Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["titleGenerated"] != true {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+}
+
+func TestServiceFallsBackWhenTitleGeneratorFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetTitleGenerator(fakeTitleGenerator{err: errors.New("model unavailable")})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Prompt: "implement parser retries when upstream endpoint times out",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Title != "implement parser retries when upstream endpoint" {
+		t.Fatalf("title = %q", task.Title)
+	}
+}
+
 func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -188,6 +243,141 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	}
 	if !hasEvent(snapshot.Events, core.EventPRPublished, task.ID, "") {
 		t.Fatalf("missing pr published event")
+	}
+}
+
+func TestServiceRoutesTaskToConfiguredProject(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "a", Name: "A", LocalPath: projectA, Repo: "owner/a", DefaultBase: "main"},
+		{ID: "b", Name: "B", LocalPath: projectB, Repo: "owner/b", DefaultBase: "trunk"},
+	}, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	runner := &recordingRunner{kind: "chosen"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "chosen",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"chosen": runner}, projectA, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		ProjectID: "b",
+		Title:     "Project routed",
+		Prompt:    "Run in project B.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ProjectID != "b" {
+		t.Fatalf("task project = %q, want b", task.ProjectID)
+	}
+	if workspace.workDir != projectB {
+		t.Fatalf("workspace workDir = %q, want %q", workspace.workDir, projectB)
+	}
+	if runner.workDir != projectB {
+		t.Fatalf("runner workDir = %q, want %q", runner.workDir, projectB)
+	}
+	if snapshot.Tasks[0].ProjectID == "" {
+		t.Fatalf("snapshot task missing project id: %+v", snapshot.Tasks[0])
+	}
+}
+
+func TestServiceMapsExternalRepoToProject(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectA := t.TempDir()
+	projectB := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "a", Name: "A", LocalPath: projectA, Repo: "owner/a"},
+		{ID: "b", Name: "B", LocalPath: projectB, Repo: "owner/b"},
+	}, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, projectA, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "GitHub issue owner/b#1",
+		Prompt:   "Fix it.",
+		Metadata: core.MustJSON(map[string]any{"repo": "owner/b"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ProjectID != "b" {
+		t.Fatalf("task project = %q, want b", task.ProjectID)
+	}
+	if workspace.workDir != projectB {
+		t.Fatalf("workspace workDir = %q, want %q", workspace.workDir, projectB)
+	}
+}
+
+func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectRoot := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:          "repo",
+		Name:        "Repo",
+		LocalPath:   projectRoot,
+		Repo:        "owner/repo",
+		DefaultBase: "trunk",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, projectRoot, fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: projectRoot,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "repo", Title: "Implement feature", Prompt: "Do it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if _, err := service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.published.Repo != "owner/repo" {
+		t.Fatalf("published repo = %q", publisher.published.Repo)
+	}
+	if publisher.published.Base != "trunk" {
+		t.Fatalf("published base = %q", publisher.published.Base)
+	}
+	if publisher.published.WorkDir != projectRoot {
+		t.Fatalf("published workDir = %q, want %q", publisher.published.WorkDir, projectRoot)
 	}
 }
 
@@ -1246,6 +1436,15 @@ type fakePullRequestPublisher struct {
 	status    core.PullRequest
 }
 
+type fakeTitleGenerator struct {
+	title string
+	err   error
+}
+
+func (g fakeTitleGenerator) GenerateTitle(context.Context, string) (string, error) {
+	return g.title, g.err
+}
+
 func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
 	p.published = spec
 	return core.PullRequest{
@@ -1522,6 +1721,56 @@ type fakeWorkspaceManager struct {
 	diff       string
 	applyCalls *int
 	diffCalls  *int
+}
+
+type recordingWorkspaceManager struct {
+	workDir string
+}
+
+func (m *recordingWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
+	m.workDir = spec.WorkDir
+	return PreparedWorkspace{
+		Root:       spec.WorkDir,
+		CWD:        spec.WorkDir,
+		SourceRoot: spec.WorkDir,
+		Change:     "@ fake",
+		Status:     "The working copy has no changes.",
+		Mode:       string(WorkspaceModeShared),
+		VCSType:    "jj",
+		WorkerID:   spec.WorkerID,
+		TaskID:     spec.TaskID,
+	}, nil
+}
+
+func (m *recordingWorkspaceManager) Cleanup(_ context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
+	return WorkspaceCleanup{
+		Root:    workspace.Root,
+		CWD:     workspace.CWD,
+		Mode:    workspace.Mode,
+		VCSType: workspace.VCSType,
+		Policy:  workspace.CleanupPolicy,
+		Result:  result,
+		Reason:  "fake cleanup retained workspace",
+	}, nil
+}
+
+func (m *recordingWorkspaceManager) DescribeChanges(_ context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	return WorkspaceChanges{
+		Root:    workspace.Root,
+		CWD:     workspace.CWD,
+		Mode:    workspace.Mode,
+		VCSType: workspace.VCSType,
+		Status:  workspace.Status,
+	}, nil
+}
+
+func (m *recordingWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	return WorkerApplyResult{
+		SourceRoot:    workspace.SourceRoot,
+		WorkspaceRoot: workspace.Root,
+		Method:        "fake_merge",
+		AppliedFiles:  changes.ChangedFiles,
+	}, nil
 }
 
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {

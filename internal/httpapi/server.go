@@ -34,6 +34,7 @@ func (s *Server) Routes() http.Handler {
 		s.auth.RegisterRoutes(mux)
 	}
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
+	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
 	mux.HandleFunc("POST /api/assistant", s.assistant)
@@ -71,6 +72,15 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.service.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot.Projects)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
@@ -290,7 +300,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	} else if strings.Contains(err.Error(), "oauth") || strings.Contains(err.Error(), "id token") || strings.Contains(err.Error(), "email is not verified") {
 		status = http.StatusUnauthorized
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "unknown projectId") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})

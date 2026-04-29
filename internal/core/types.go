@@ -67,6 +67,7 @@ type Event struct {
 
 type Task struct {
 	ID        string          `json:"id"`
+	ProjectID string          `json:"projectId,omitempty"`
 	Title     string          `json:"title"`
 	Prompt    string          `json:"prompt"`
 	Status    TaskStatus      `json:"status"`
@@ -123,6 +124,17 @@ type TargetState struct {
 	Available bool              `json:"available"`
 }
 
+type Project struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	LocalPath     string            `json:"localPath"`
+	Repo          string            `json:"repo,omitempty"`
+	VCS           string            `json:"vcs,omitempty"`
+	DefaultBase   string            `json:"defaultBase,omitempty"`
+	WorkspaceRoot string            `json:"workspaceRoot,omitempty"`
+	TargetLabels  map[string]string `json:"targetLabels,omitempty"`
+}
+
 type PullRequest struct {
 	ID               string          `json:"id"`
 	TaskID           string          `json:"taskId"`
@@ -144,6 +156,7 @@ type PullRequest struct {
 }
 
 type CreateTaskRequest struct {
+	ProjectID  string          `json:"projectId,omitempty"`
 	Title      string          `json:"title"`
 	Prompt     string          `json:"prompt"`
 	Source     string          `json:"source,omitempty"`
@@ -187,6 +200,7 @@ type Snapshot struct {
 	Workers        []Worker        `json:"workers"`
 	ExecutionNodes []ExecutionNode `json:"executionNodes"`
 	Targets        []TargetState   `json:"targets,omitempty"`
+	Projects       []Project       `json:"projects,omitempty"`
 	PullRequests   []PullRequest   `json:"pullRequests,omitempty"`
 	Events         []Event         `json:"events"`
 }

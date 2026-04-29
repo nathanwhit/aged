@@ -26,12 +26,24 @@ export type EventRecord = {
 
 export type Task = {
   id: string;
+  projectId?: string;
   title: string;
   prompt: string;
   status: TaskStatus;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
+};
+
+export type Project = {
+  id: string;
+  name: string;
+  localPath: string;
+  repo?: string;
+  vcs?: string;
+  defaultBase?: string;
+  workspaceRoot?: string;
+  targetLabels?: Record<string, string>;
 };
 
 export type Worker = {
@@ -135,6 +147,7 @@ export type Snapshot = {
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;
   targets?: TargetState[] | null;
+  projects?: Project[] | null;
   pullRequests?: PullRequestState[] | null;
   events: EventRecord[] | null;
 };

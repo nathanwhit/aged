@@ -12,6 +12,7 @@ The initial local-first vertical slice is implemented.
 - HTTP API for health, snapshots, event history, task creation, steering, and cancellation.
 - SSE event stream for live dashboard updates.
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
+- Project registry support for managing multiple local repositories from one daemon. If `-projects` / `AGED_PROJECTS` is omitted, the daemon creates a default project from `-workdir`; tasks can carry `projectId`, and external task metadata can map a `repo` to a configured project.
 - Worker runners for `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - React/Vite dashboard for creating tasks, assistant Q&A, PR publishing, viewing state/logs, steering, and cancellation.
 - Dashboard has a phone-friendly responsive layout and a current-state summary with progress, active work, worker counts, target state, execution nodes, and timeline.
@@ -19,7 +20,9 @@ The initial local-first vertical slice is implemented.
 - Worker cards show live activity from events: latest event text, command summary, and expandable recent worker logs/results/errors. Workers can be selected to drill into a detailed worker-scoped view with command, workspace, completion, target/node, and full worker event history.
 - Workers that emit `needs_input` now create `approval.needed` events. Replanning brains can answer autonomously with a continuation plan; otherwise the task waits, and user/orchestrator feedback through task steering records `approval.decided` and resumes with a continuation worker.
 - External drivers can use `POST /api/tasks` directly with optional `source`, `externalId`, and metadata. `source` plus `externalId` dedupes visible tasks, and `GET /api/tasks/lookup` resolves an external item back to its aged task.
-- Lightweight assistant Q&A is available through `POST /api/assistant` and the dashboard Ask panel. Codex/API brains answer directly; prompt/static brains return a configured fallback answer instead of scheduling worker execution.
+- Worker workspace preparation, local worker cwd, source apply, and PR publishing now resolve through the task's project rather than an implicit daemon-wide checkout.
+- Lightweight assistant Q&A is available through `POST /api/assistant` and the dashboard Ask panel. It is now separate from the scheduler brain: `-assistant auto|codex|claude|brain|none` can use Codex or Claude directly even when scheduling runs with the prompt brain.
+- Task titles are optional. Blank titles are generated through the configured assistant with a 1-8 word title prompt, with a deterministic prompt-derived fallback if the assistant fails.
 - Pull requests are first-class projected state in snapshots. `pull_request.published`, `pull_request.status_checked`, and `pull_request.babysitter_started` events reconstruct current PR state, including repo, number, branch, CI/check status, review status, merge status, and any babysitter task.
 - Completed tasks can be published as GitHub PRs with `POST /api/tasks/{id}/pull-request` or the dashboard PR panel. If there is exactly one successful unapplied worker candidate, the service applies it first, creates/pushes a branch, opens a PR with `gh`, and records the published PR.
 - Pull request follow-up can be driven by `POST /api/pull-requests/{id}/refresh` to inspect current GitHub status and `POST /api/pull-requests/{id}/babysit` to schedule a normal orchestrated worker task to monitor checks/comments and make follow-up fixes.
@@ -58,7 +61,10 @@ The initial local-first vertical slice is implemented.
 - Worker tests verify the default Codex runner does not advertise stdin steering; recovery tests verify stale local workers become canceled on daemon startup.
 - Worker-question tests verify autonomous replanning answers and user feedback both resume waiting tasks.
 - Assistant tests verify Q&A records durable question/answer events.
+- CLI assistant tests verify Codex JSON and Claude stream output are converted into Ask responses.
+- Title-generation tests verify blank task titles use the generator and fall back locally when generation fails.
 - Pull request tests verify single-worker auto-apply before publish, PR projection, status refresh, and babysitter task scheduling.
+- Project tests verify explicit `projectId` routing, external repo-to-project mapping, and PR publishing defaults from project repo/base settings.
 - `npm ls vite @vitejs/plugin-react`
 - Scheduler tests:
   - Codex brain parses Codex `agent_message` plans.
@@ -164,6 +170,8 @@ http://127.0.0.1:8787
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
 - SSH target execution exists for pre-provisioned machines; richer remote workspace synchronization and patch collection are still open.
 - GitHub PR publishing currently depends on local `gh` authentication and repo remotes being configured. The built-in status refresh is an explicit endpoint, not a background poller yet.
+- Project configuration is file-backed at startup. There is not yet UI/API CRUD for adding, editing, or probing projects while the daemon is running.
+- Assistant Q&A is currently one-shot CLI execution. It records conversation ids, but does not yet resume durable Codex/Claude sessions across asks.
 
 ## Next Work
 
@@ -181,3 +189,4 @@ http://127.0.0.1:8787
 - Add live SSH resource probes for CPU/memory/load rather than relying only on configured capacity and assigned worker count.
 - Add a real GitHub driver/monitor process that polls issues/PRs, posts tasks, refreshes PR status on an interval, ingests review comments/check logs, and decides when a babysitter task should continue or stop.
 - Add configurable PR publish policy for branch naming, base branch detection, draft-vs-ready default, repo selection, merge permissions, and whether aged should ever merge automatically.
+- Add project CRUD and health checks in the UI/API, including repo path validation, VCS detection, default branch discovery, and per-project runner/target policy.

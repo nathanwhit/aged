@@ -204,9 +204,10 @@ func (b *APIBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.Ass
 func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
 	payload := map[string]any{
 		"task": map[string]any{
-			"id":     task.ID,
-			"title":  task.Title,
-			"prompt": task.Prompt,
+			"id":        task.ID,
+			"projectId": task.ProjectID,
+			"title":     task.Title,
+			"prompt":    task.Prompt,
 		},
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},

@@ -53,7 +53,9 @@ func main() {
 		daemonAddr       = flag.String("daemon-addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "aged daemon listen address")
 		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "aged daemon SQLite database path")
 		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "aged daemon worker directory")
+		projectsPath     = flag.String("projects", envOr("AGED_PROJECTS", ""), "aged daemon project registry config")
 		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "codex"), "aged daemon fallback worker kind")
+		assistantMode    = flag.String("assistant", envOr("AGED_ASSISTANT", "auto"), "aged daemon assistant provider")
 		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
 		workspaceVCS     = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "aged daemon workspace VCS")
 		workspaceMode    = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
@@ -83,8 +85,10 @@ func main() {
 			"-addr", *daemonAddr,
 			"-db", *dbPath,
 			"-worker", *workerKind,
+			"-assistant", *assistantMode,
 			"-brain", *brainMode,
 			"-workdir", *workDir,
+			"-projects", *projectsPath,
 			"-workspace-vcs", *workspaceVCS,
 			"-workspace-mode", *workspaceMode,
 			"-workspace-root", *workspaceRoot,

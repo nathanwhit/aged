@@ -125,15 +125,21 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		switch event.Type {
 		case core.EventTaskCreated:
 			var payload struct {
-				Title    string          `json:"title"`
-				Prompt   string          `json:"prompt"`
-				Metadata json.RawMessage `json:"metadata,omitempty"`
+				ProjectID string          `json:"projectId,omitempty"`
+				Title     string          `json:"title"`
+				Prompt    string          `json:"prompt"`
+				Metadata  json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode task.created: %w", err)
 			}
+			projectID := payload.ProjectID
+			if projectID == "" {
+				projectID = projectIDFromMetadata(payload.Metadata)
+			}
 			tasks[event.TaskID] = core.Task{
 				ID:        event.TaskID,
+				ProjectID: projectID,
 				Title:     payload.Title,
 				Prompt:    payload.Prompt,
 				Status:    core.TaskQueued,
@@ -441,6 +447,20 @@ func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMess
 		out["workspace"] = workspacePayload
 	}
 	return core.MustJSON(out)
+}
+
+func projectIDFromMetadata(metadata json.RawMessage) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	var values map[string]any
+	if err := json.Unmarshal(metadata, &values); err != nil {
+		return ""
+	}
+	if value, ok := values["projectId"].(string); ok {
+		return value
+	}
+	return ""
 }
 
 func (s *SQLiteStore) Close() error {

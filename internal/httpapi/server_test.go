@@ -65,6 +65,61 @@ func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 	}
 }
 
+func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
+		"prompt": "Implement parser retry path"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
+func TestProjectsEndpointReturnsConfiguredProjects(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	projects, err := orchestrator.NewProjectRegistry([]core.Project{{
+		ID:        "repo",
+		Name:      "Repo",
+		LocalPath: t.TempDir(),
+		Repo:      "owner/repo",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/projects")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
 func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {

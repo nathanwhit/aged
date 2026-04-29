@@ -9,6 +9,7 @@ export async function getSnapshot(): Promise<Snapshot> {
 }
 
 export async function createTask(input: {
+  projectId?: string;
   title: string;
   prompt: string;
   source?: string;

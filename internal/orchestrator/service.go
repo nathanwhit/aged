@@ -56,8 +56,11 @@ type Service struct {
 	store       eventstore.Store
 	broker      *Broker
 	brain       BrainProvider
+	assistant   AssistantProvider
+	titles      TitleGenerator
 	runners     map[string]worker.Runner
 	workDir     string
+	projects    *ProjectRegistry
 	workspaces  WorkspaceManager
 	targets     *TargetRegistry
 	sshRunner   SSHRunner
@@ -98,12 +101,23 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 	if targets == nil {
 		targets = NewLocalTargetRegistry()
 	}
+	projects, err := NewDefaultProjectRegistry(workDir)
+	if err != nil {
+		projects, _ = NewProjectRegistry([]core.Project{{
+			ID:          "default",
+			Name:        "default",
+			LocalPath:   workDir,
+			VCS:         "auto",
+			DefaultBase: "main",
+		}}, "default")
+	}
 	return &Service{
 		store:       store,
 		broker:      NewBroker(),
 		brain:       brain,
 		runners:     runners,
 		workDir:     workDir,
+		projects:    projects,
 		workspaces:  workspaces,
 		targets:     targets,
 		sshRunner:   sshRunner,
@@ -112,6 +126,24 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		tasks:       map[string]string{},
 		steering:    map[string]chan string{},
 		remoteRuns:  map[string]remoteRun{},
+	}
+}
+
+func (s *Service) SetAssistant(assistant AssistantProvider) {
+	s.assistant = assistant
+	if assistant != nil && s.titles == nil {
+		s.titles = AssistantTitleGenerator{Assistant: assistant}
+	}
+}
+
+func (s *Service) SetTitleGenerator(generator TitleGenerator) {
+	s.titles = generator
+}
+
+func (s *Service) SetProjects(projects *ProjectRegistry) {
+	if projects != nil {
+		s.projects = projects
+		s.workDir = projects.Default().LocalPath
 	}
 }
 
@@ -126,6 +158,9 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	}
 	if s.targets != nil {
 		snapshot.Targets = s.targets.Snapshot()
+	}
+	if s.projects != nil {
+		snapshot.Projects = s.projects.Snapshot()
 	}
 	return snapshot, nil
 }
@@ -249,16 +284,23 @@ func (s *Service) Unsubscribe(id int) {
 }
 
 func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (core.Task, error) {
-	if req.Title == "" {
-		return core.Task{}, errors.New("title is required")
-	}
 	if req.Prompt == "" {
 		return core.Task{}, errors.New("prompt is required")
 	}
+	title := strings.TrimSpace(req.Title)
 	metadata, err := createTaskMetadata(req)
 	if err != nil {
 		return core.Task{}, err
 	}
+	if title == "" {
+		title = s.generateTaskTitle(ctx, req.Prompt)
+		metadata["titleGenerated"] = true
+	}
+	project, err := s.projects.Resolve(req)
+	if err != nil {
+		return core.Task{}, err
+	}
+	metadata["projectId"] = project.ID
 	if req.Source != "" || req.ExternalID != "" {
 		if req.Source == "" || req.ExternalID == "" {
 			return core.Task{}, errors.New("source and externalId must be provided together")
@@ -275,9 +317,10 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
-			"title":    req.Title,
-			"prompt":   req.Prompt,
-			"metadata": metadata,
+			"projectId": project.ID,
+			"title":     title,
+			"prompt":    req.Prompt,
+			"metadata":  metadata,
 		}),
 	})
 	if err != nil {
@@ -286,7 +329,8 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 
 	task := core.Task{
 		ID:        taskID,
-		Title:     req.Title,
+		ProjectID: project.ID,
+		Title:     title,
 		Prompt:    req.Prompt,
 		Status:    core.TaskQueued,
 		CreatedAt: created.At,
@@ -296,6 +340,15 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 
 	go s.runTask(context.Background(), task)
 	return task, nil
+}
+
+func (s *Service) generateTaskTitle(ctx context.Context, prompt string) string {
+	if s.titles != nil {
+		if title, err := s.titles.GenerateTitle(ctx, prompt); err == nil && strings.TrimSpace(title) != "" {
+			return title
+		}
+	}
+	return fallbackTaskTitle(prompt)
 }
 
 func (s *Service) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
@@ -316,9 +369,13 @@ func (s *Service) Ask(ctx context.Context, req core.AssistantRequest) (core.Assi
 	}); err != nil {
 		return core.AssistantResponse{}, err
 	}
-	assistant, ok := s.brain.(AssistantProvider)
-	if !ok {
-		return core.AssistantResponse{}, errors.New("assistant brain is not configured")
+	assistant := s.assistant
+	if assistant == nil {
+		var ok bool
+		assistant, ok = s.brain.(AssistantProvider)
+		if !ok {
+			return core.AssistantResponse{}, errors.New("assistant brain is not configured")
+		}
 	}
 	response, err := assistant.Ask(ctx, req)
 	if err != nil {
@@ -356,7 +413,8 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, errors.New("can only publish pull requests for terminal tasks")
 	}
 	workerID := strings.TrimSpace(req.WorkerID)
-	sourceRoot := s.workDir
+	project := s.projectForTask(task)
+	sourceRoot := project.LocalPath
 	if workerID == "" {
 		candidates := applyCandidates(snapshot, taskID)
 		unapplied := unappliedCandidates(candidates)
@@ -400,15 +458,16 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		TaskID:   taskID,
 		WorkerID: workerID,
 		WorkDir:  sourceRoot,
-		Repo:     req.Repo,
-		Base:     req.Base,
+		Repo:     nonEmpty(req.Repo, project.Repo),
+		Base:     nonEmpty(req.Base, project.DefaultBase),
 		Branch:   req.Branch,
 		Title:    title,
 		Body:     body,
 		Draft:    req.Draft,
 		Metadata: map[string]any{
-			"workerId": workerID,
-			"workDir":  sourceRoot,
+			"workerId":  workerID,
+			"workDir":   sourceRoot,
+			"projectId": project.ID,
 		},
 	})
 	if err != nil {
@@ -1068,6 +1127,11 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
+	project := s.projectForTask(task)
+	plan.Metadata["projectId"] = project.ID
+	if plan.Metadata["targetLabels"] == nil && len(project.TargetLabels) > 0 {
+		plan.Metadata["targetLabels"] = project.TargetLabels
+	}
 	target, err := s.targets.Select(plan)
 	if err != nil {
 		return WorkerTurnResult{}, err
@@ -1115,7 +1179,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	workspace, err := s.workspaces.Prepare(ctx, WorkspaceSpec{
 		TaskID:   task.ID,
 		WorkerID: workerID,
-		WorkDir:  s.workDir,
+		WorkDir:  project.LocalPath,
 	})
 	if err != nil {
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -1239,13 +1303,14 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		planID = uuid.NewString()
 		plan.Metadata["planID"] = planID
 	}
+	project := s.projectForTask(task)
 	steering := make(chan string, 16)
 	spec := worker.Spec{
 		ID:       workerID,
 		TaskID:   task.ID,
 		Kind:     plan.WorkerKind,
 		Prompt:   plan.Prompt,
-		WorkDir:  nonEmpty(target.WorkDir, s.workDir),
+		WorkDir:  nonEmpty(target.WorkDir, project.LocalPath),
 		Steering: steering,
 	}
 	command := runner.BuildCommand(spec)
@@ -1724,6 +1789,33 @@ func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {
 	return task.Status
 }
 
+func (s *Service) projectForTask(task core.Task) core.Project {
+	if s.projects == nil {
+		return core.Project{ID: "default", Name: "default", LocalPath: s.workDir, VCS: "auto", DefaultBase: "main"}
+	}
+	if task.ProjectID != "" {
+		if project, ok := s.projects.Get(task.ProjectID); ok {
+			return project
+		}
+	}
+	if len(task.Metadata) > 0 {
+		var metadata map[string]any
+		if err := json.Unmarshal(task.Metadata, &metadata); err == nil {
+			if projectID := stringMetadataValue(metadata["projectId"]); projectID != "" {
+				if project, ok := s.projects.Get(projectID); ok {
+					return project
+				}
+			}
+			if repo := stringMetadataValue(metadata["repo"]); repo != "" {
+				if project, ok := s.projects.FindByRepo(repo); ok {
+					return project
+				}
+			}
+		}
+	}
+	return s.projects.Default()
+}
+
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 	metadata := map[string]any{}
 	if len(req.Metadata) > 0 {
@@ -1739,6 +1831,9 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 	}
 	if req.ExternalID != "" {
 		metadata["externalId"] = strings.TrimSpace(req.ExternalID)
+	}
+	if req.ProjectID != "" {
+		metadata["projectId"] = strings.TrimSpace(req.ProjectID)
 	}
 	return metadata, nil
 }
