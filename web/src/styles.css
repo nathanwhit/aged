@@ -446,23 +446,128 @@ small {
 }
 
 .worker-event-line {
-  align-items: start;
+  background: #fbfaf6;
+  border: 1px solid #e9e5dd;
+  border-radius: 8px;
   display: grid;
-  gap: 8px;
-  grid-template-columns: 78px 84px minmax(0, 1fr);
+  gap: 10px;
+  grid-template-columns: 118px minmax(0, 1fr);
   min-width: 0;
+  padding: 10px;
 }
 
-.worker-event-line time,
-.worker-event-line code {
+.worker-event-meta {
+  display: grid;
+  gap: 5px;
+}
+
+.worker-event-meta time,
+.worker-event-meta code {
   color: #767b84;
   font-size: 12px;
 }
 
-.worker-event-line span {
+.worker-event-meta code {
+  overflow-wrap: anywhere;
+}
+
+.event-payload {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.event-payload p {
   font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.event-fields {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin: 0;
+}
+
+.event-fields div,
+.event-command {
+  background: #ffffff;
+  border: 1px solid #e0ddd5;
+  border-radius: 6px;
+  min-width: 0;
+  padding: 7px 8px;
+}
+
+.event-fields dt,
+.event-command span {
+  color: #767b84;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.event-fields dd {
+  color: #343741;
+  font-size: 12px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.event-command {
+  display: grid;
+  gap: 4px;
+}
+
+.event-command code {
+  color: #343741;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.event-files summary,
+.event-raw summary {
+  color: #4b4f58;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.event-files ul {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 8px 0 0;
+  max-height: 150px;
+  overflow: auto;
+  padding: 0;
+}
+
+.event-files li {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+
+.event-files li code,
+.event-files li span {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.event-raw pre {
+  background: #202124;
+  border-radius: 6px;
+  color: #f5f3ee;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre;
 }
 
 .worker-detail-panel {
@@ -703,12 +808,13 @@ small {
   }
 
   .worker-event-line {
-    gap: 5px;
-    grid-template-columns: 68px minmax(0, 1fr);
+    grid-template-columns: 1fr;
   }
 
-  .worker-event-line code {
-    display: none;
+  .worker-event-meta {
+    align-items: center;
+    display: flex;
+    justify-content: space-between;
   }
 
   .worker-review {

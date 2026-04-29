@@ -575,9 +575,11 @@ function CompletionSummary({ event }: { event: EventRecord }) {
 function WorkerEventLine({ event }: { event: EventRecord }) {
   return (
     <div className="worker-event-line">
-      <time>{new Date(event.at).toLocaleTimeString()}</time>
-      <code>{workerEventLabel(event)}</code>
-      <span>{eventDisplayText(event)}</span>
+      <div className="worker-event-meta">
+        <time>{new Date(event.at).toLocaleTimeString()}</time>
+        <code>{workerEventLabel(event)}</code>
+      </div>
+      <EventPayload event={event} />
     </div>
   );
 }
@@ -671,19 +673,38 @@ type WorkerCompletionPayload = {
 type DisplayPayload = {
   text?: string;
   stream?: string;
+  kind?: string;
   status?: string;
   message?: string;
   error?: string;
   summary?: string;
   reason?: string;
   cleaned?: boolean;
+  logCount?: number;
+  needsInput?: boolean;
   root?: string;
   cwd?: string;
+  sourceRoot?: string;
+  workspaceName?: string;
+  change?: string;
+  baseChange?: string;
   mode?: string;
   vcsType?: string;
   dirty?: boolean;
+  sourceDirty?: boolean;
+  cleanupPolicy?: string;
+  policy?: string;
+  result?: string;
+  command?: string[];
+  raw?: unknown;
+  rawResult?: unknown;
   changedFiles?: { path: string; status?: string }[];
   workspaceChanges?: { changedFiles?: { path: string; status?: string }[]; dirty?: boolean; diffStat?: string };
+};
+
+type DetailField = {
+  label: string;
+  value: string;
 };
 
 function latestWorkerCompletion(events: EventRecord[], workerId: string): WorkerCompletionPayload {
@@ -728,6 +749,56 @@ function EventLine({ event }: { event: EventRecord }) {
   );
 }
 
+function EventPayload({ event }: { event: EventRecord }) {
+  const payload = asRecord(event.payload);
+  const display = eventDisplayText(event);
+  const fields = eventDetailFields(payload);
+  const command = Array.isArray(payload.command) ? payload.command.map(String) : [];
+  const changedFiles = eventChangedFiles(payload);
+  const rawPayload = payload.raw ?? payload.rawResult;
+
+  return (
+    <div className="event-payload">
+      {display && <p>{display}</p>}
+      {fields.length > 0 && (
+        <dl className="event-fields">
+          {fields.map((field) => (
+            <div key={field.label}>
+              <dt>{field.label}</dt>
+              <dd>{field.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {command.length > 0 && (
+        <div className="event-command">
+          <span>Command</span>
+          <code>{command.join(" ")}</code>
+        </div>
+      )}
+      {changedFiles.length > 0 && (
+        <details className="event-files">
+          <summary>{changedFiles.length} changed files</summary>
+          <ul>
+            {changedFiles.map((file) => (
+              <li key={`${file.status ?? "changed"}-${file.path}`}>
+                <code>{file.status ?? "changed"}</code>
+                <span>{file.path}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {rawPayload !== undefined && (
+        <details className="event-raw">
+          <summary>Raw payload</summary>
+          <pre>{prettyPayload(rawPayload)}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function eventDisplayText(event: EventRecord): string {
   const payload = event.payload as DisplayPayload;
   const changedFiles = payload.changedFiles ?? payload.workspaceChanges?.changedFiles ?? [];
@@ -753,7 +824,98 @@ function eventDisplayText(event: EventRecord): string {
     ? changeText
       ? `${primaryText} | ${changeText}`
       : primaryText
-    : (changeText ?? JSON.stringify(event.payload));
+    : (changeText ?? payloadSummary(event.payload));
+}
+
+function eventDetailFields(payload: Record<string, unknown>): DetailField[] {
+  const fieldKeys: [string, string][] = [
+    ["Kind", "kind"],
+    ["Stream", "stream"],
+    ["Status", "status"],
+    ["Log count", "logCount"],
+    ["Needs input", "needsInput"],
+    ["Mode", "mode"],
+    ["VCS", "vcsType"],
+    ["Workspace", "workspaceName"],
+    ["CWD", "cwd"],
+    ["Root", "root"],
+    ["Source", "sourceRoot"],
+    ["Change", "change"],
+    ["Base change", "baseChange"],
+    ["Dirty", "dirty"],
+    ["Source dirty", "sourceDirty"],
+    ["Cleanup policy", "cleanupPolicy"],
+    ["Policy", "policy"],
+    ["Result", "result"],
+    ["Cleaned", "cleaned"],
+    ["Reason", "reason"],
+  ];
+  return fieldKeys
+    .map(([label, key]) => ({ label, value: payloadValue(payload[key]) }))
+    .filter((field) => field.value !== "");
+}
+
+function eventChangedFiles(payload: Record<string, unknown>): { path: string; status?: string }[] {
+  const direct = changedFileList(payload.changedFiles);
+  if (direct.length > 0) return direct;
+  const workspaceChanges = asRecord(payload.workspaceChanges);
+  return changedFileList(workspaceChanges.changedFiles);
+}
+
+function changedFileList(value: unknown): { path: string; status?: string }[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const file = asRecord(item);
+    const path = payloadValue(file.path);
+    if (!path) return [];
+    const status = payloadValue(file.status) || undefined;
+    return [{ path, status }];
+  });
+}
+
+function payloadSummary(value: unknown): string {
+  const payload = asRecord(value);
+  const entries = Object.entries(payload)
+    .filter(([key]) => !["raw", "rawResult", "command", "changedFiles", "workspaceChanges"].includes(key))
+    .map(([key, item]) => `${humanizeKey(key)}: ${payloadValue(item)}`)
+    .filter((item) => !item.endsWith(": "))
+    .slice(0, 5);
+  if (entries.length > 0) return entries.join(" | ");
+  return prettyPayload(value);
+}
+
+function payloadValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(payloadValue).filter(Boolean).join(", ");
+  if (typeof value === "object") return prettyPayload(value);
+  return String(value);
+}
+
+function prettyPayload(value: unknown): string {
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+function humanizeKey(key: string): string {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/^./, (char) => char.toUpperCase());
 }
 
 function Status({ value }: { value: string }) {
