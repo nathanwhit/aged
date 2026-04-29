@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+
 type Spec struct {
 	ID       string
 	TaskID   string
@@ -205,7 +207,7 @@ func DefaultRunners() map[string]Runner {
 		MockRunner{},
 		BenchmarkCompareRunner{},
 		NewCommandRunner("codex", func(spec Spec) []string {
-			return []string{"codex", "exec", "--json", "--cd", spec.WorkDir, spec.Prompt}
+			return []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir, spec.Prompt}
 		}),
 		NewCommandRunner("claude", func(spec Spec) []string {
 			return []string{"claude", "--print", "--output-format", "stream-json", spec.Prompt}

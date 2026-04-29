@@ -33,6 +33,22 @@ func TestCodexBrainPlansFromAgentMessage(t *testing.T) {
 	}
 }
 
+func TestCodexBrainExecArgsUseYoloPermissions(t *testing.T) {
+	brain := &CodexBrain{workDir: "/tmp/aged-work"}
+	got := brain.execArgs("schedule this")
+	want := []string{
+		"exec",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"--cd",
+		"/tmp/aged-work",
+		"schedule this",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
 func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	brain := newTestCodexBrain(t, "invalid", StaticBrain{WorkerKind: "mock"})
 	plan, err := brain.Plan(context.Background(), core.Task{
@@ -157,7 +173,10 @@ func newTestCodexBrain(t *testing.T, mode string, fallback BrainProvider) *Codex
 		t.Fatal(err)
 	}
 	codexPath := filepath.Join(dir, "codex")
-	if err := os.WriteFile(codexPath, []byte("#!/bin/sh\nprintf '%s\\n' "+strconv.Quote(testCodexBrainOutput(t, mode))+"\n"), 0o755); err != nil {
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in *\" --dangerously-bypass-approvals-and-sandbox \"*) ;; *) echo missing yolo permissions >&2; exit 42;; esac\n" +
+		"printf '%s\\n' " + strconv.Quote(testCodexBrainOutput(t, mode)) + "\n"
+	if err := os.WriteFile(codexPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	brain, err := NewCodexBrain(CodexBrainConfig{

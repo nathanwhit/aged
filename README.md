@@ -85,7 +85,7 @@ Codex-backed scheduling can be enabled with:
 AGED_BRAIN=codex go run ./cmd/aged
 ```
 
-The Codex brain runs `codex exec --json` against `prompts/scheduler.md`, extracts the final agent message as the scheduler plan JSON, validates it, and falls back to the local prompt brain on command or validation failures. Override the binary with `AGED_CODEX_PATH` or `-codex-path`.
+The Codex brain runs `codex exec --dangerously-bypass-approvals-and-sandbox --json` against `prompts/scheduler.md`, extracts the final agent message as the scheduler plan JSON, validates it, and falls back to the local prompt brain on command or validation failures. Override the binary with `AGED_CODEX_PATH` or `-codex-path`.
 
 ## Google authentication
 
