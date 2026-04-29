@@ -5,6 +5,7 @@ import {
   Bot,
   Check,
   CircleStop,
+  Eye,
   MessageSquarePlus,
   Play,
   RefreshCw,
@@ -35,6 +36,7 @@ const emptySnapshot: AppSnapshot = {
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string>("");
+  const [selectedWorkerId, setSelectedWorkerId] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [connected, setConnected] = useState(false);
 
@@ -67,6 +69,9 @@ function App() {
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
+  const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
+  const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
+  const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
 
@@ -164,7 +169,17 @@ function App() {
               <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />
               <TargetPanel targets={snapshot.targets} />
               <ExecutionGraph nodes={selectedNodes} />
-              <WorkerList workers={selectedWorkers} events={selectedEvents} onApply={applyWorkerChanges} onApplied={refresh} onCancel={cancelWorker} onError={setError} />
+              <WorkerList
+                workers={selectedWorkers}
+                events={selectedEvents}
+                selectedWorkerId={selectedWorkerId}
+                onSelect={setSelectedWorkerId}
+                onApply={applyWorkerChanges}
+                onApplied={refresh}
+                onCancel={cancelWorker}
+                onError={setError}
+              />
+              {selectedWorker && <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />}
               <EventLog events={selectedEvents} />
             </>
           ) : (
@@ -345,6 +360,8 @@ function TaskDetail({
 function WorkerList({
   workers,
   events,
+  selectedWorkerId,
+  onSelect,
   onApply,
   onApplied,
   onCancel,
@@ -352,6 +369,8 @@ function WorkerList({
 }: {
   workers: Worker[];
   events: EventRecord[];
+  selectedWorkerId: string;
+  onSelect: (id: string) => void;
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onCancel: (id: string) => Promise<void>;
@@ -385,16 +404,26 @@ function WorkerList({
             const completion = latestWorkerCompletion(events, worker.id);
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
             const applied = workerChangesApplied(events, worker.id);
+            const workerEvents = events.filter((event) => event.workerId === worker.id);
+            const latestEvent = latestInspectableWorkerEvent(workerEvents);
             return (
-              <article key={worker.id} className="worker-card">
+              <article key={worker.id} className={worker.id === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
                   <strong>{worker.kind}</strong>
                   <small>{worker.id.slice(0, 8)}</small>
                 </div>
                 <Status value={worker.status} />
+                <button className="icon-button ghost" onClick={() => onSelect(worker.id)} title="Inspect worker">
+                  <Eye size={16} />
+                </button>
                 <button className="icon-button danger" onClick={() => onCancel(worker.id).catch((err: Error) => onError(err.message))} title="Cancel worker">
                   <CircleStop size={16} />
                 </button>
+                <div className="worker-current">
+                  <span>Latest</span>
+                  <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
+                </div>
+                <WorkerActivity events={workerEvents} defaultOpen={worker.status === "running" || worker.status === "waiting"} />
                 {changes.length > 0 && (
                   <div className="worker-review">
                     <details>
@@ -421,6 +450,157 @@ function WorkerList({
       )}
     </section>
   );
+}
+
+function WorkerDetail({ worker, node, events }: { worker: Worker; node: ExecutionNode | undefined; events: EventRecord[] }) {
+  const created = events.find((event) => event.type === "worker.created");
+  const workspace = events.find((event) => event.type === "worker.workspace_prepared");
+  const completed = [...events].reverse().find((event) => event.type === "worker.completed");
+  return (
+    <section className="panel worker-detail-panel">
+      <div className="panel-title split-title">
+        <span>
+          <Eye size={18} />
+          <h2>Worker Detail</h2>
+        </span>
+        <Status value={worker.status} />
+      </div>
+      <div className="worker-detail-grid">
+        <DetailItem label="Worker" value={`${worker.kind} ${worker.id.slice(0, 8)}`} />
+        <DetailItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
+        <DetailItem label="Target" value={node?.targetId ? `${node.targetKind ?? "target"}:${node.targetId}` : "local"} />
+        <DetailItem label="Updated" value={new Date(worker.updatedAt).toLocaleString()} />
+      </div>
+      {created && <FullCommand event={created} />}
+      {workspace && <WorkspaceSummary event={workspace} />}
+      {completed && <CompletionSummary event={completed} />}
+      <div className="worker-detail-events">
+        <h3>Worker Events</h3>
+        <div className="worker-event-list full">
+          {events.filter(isInspectableWorkerEvent).length === 0 ? (
+            <p className="empty">No worker events yet.</p>
+          ) : (
+            events.filter(isInspectableWorkerEvent).slice().reverse().map((event) => <WorkerEventLine key={event.id} event={event} />)
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-item">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function WorkerActivity({ events, defaultOpen }: { events: EventRecord[]; defaultOpen: boolean }) {
+  const inspectable = events.filter(isInspectableWorkerEvent);
+  const recent = inspectable.slice(-8).reverse();
+  const command = events.find((event) => event.type === "worker.created");
+  return (
+    <details className="worker-activity" open={defaultOpen}>
+      <summary>{inspectable.length} events</summary>
+      {command && <CommandLine event={command} />}
+      <div className="worker-event-list">
+        {recent.length === 0 ? (
+          <p className="empty">No worker activity yet.</p>
+        ) : (
+          recent.map((event) => <WorkerEventLine key={event.id} event={event} />)
+        )}
+      </div>
+    </details>
+  );
+}
+
+function FullCommand({ event }: { event: EventRecord }) {
+  const payload = event.payload as { command?: string[] };
+  if (!Array.isArray(payload.command) || payload.command.length === 0) {
+    return null;
+  }
+  return (
+    <details className="worker-detail-section">
+      <summary>Command</summary>
+      <pre>{payload.command.join(" ")}</pre>
+    </details>
+  );
+}
+
+function CommandLine({ event }: { event: EventRecord }) {
+  const payload = event.payload as { command?: string[] };
+  if (!Array.isArray(payload.command) || payload.command.length === 0) {
+    return null;
+  }
+  const command = payload.command
+    .slice(0, 5)
+    .map((part) => (part.length > 80 ? `${part.slice(0, 80)}...` : part))
+    .join(" ");
+  return (
+    <div className="worker-command">
+      <span>Command</span>
+      <code>{command}</code>
+    </div>
+  );
+}
+
+function WorkspaceSummary({ event }: { event: EventRecord }) {
+  const payload = event.payload as DisplayPayload;
+  return (
+    <details className="worker-detail-section" open>
+      <summary>Workspace</summary>
+      <div className="worker-detail-grid">
+        <DetailItem label="Mode" value={payload.mode ?? "unknown"} />
+        <DetailItem label="VCS" value={payload.vcsType ?? "unknown"} />
+        <DetailItem label="CWD" value={payload.cwd ?? payload.root ?? "unknown"} />
+        <DetailItem label="Dirty" value={String(Boolean(payload.dirty ?? payload.workspaceChanges?.dirty ?? false))} />
+      </div>
+      {payload.root && <pre>{payload.root}</pre>}
+    </details>
+  );
+}
+
+function CompletionSummary({ event }: { event: EventRecord }) {
+  const text = eventDisplayText(event);
+  return (
+    <details className="worker-detail-section" open>
+      <summary>Completion</summary>
+      <pre>{text}</pre>
+    </details>
+  );
+}
+
+function WorkerEventLine({ event }: { event: EventRecord }) {
+  return (
+    <div className="worker-event-line">
+      <time>{new Date(event.at).toLocaleTimeString()}</time>
+      <code>{workerEventLabel(event)}</code>
+      <span>{eventDisplayText(event)}</span>
+    </div>
+  );
+}
+
+function latestInspectableWorkerEvent(events: EventRecord[]): EventRecord | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (isInspectableWorkerEvent(events[index])) {
+      return events[index];
+    }
+  }
+  return undefined;
+}
+
+function isInspectableWorkerEvent(event: EventRecord): boolean {
+  return event.type !== "worker.started";
+}
+
+function workerEventLabel(event: EventRecord): string {
+  if (event.type === "worker.output") {
+    const payload = event.payload as { kind?: string; stream?: string };
+    return [payload.kind, payload.stream].filter(Boolean).join(":") || "output";
+  }
+  return event.type.replace("worker.", "");
 }
 
 function ExecutionGraph({ nodes }: { nodes: ExecutionNode[] }) {
@@ -488,6 +668,24 @@ type WorkerCompletionPayload = {
   workspaceChanges?: { changedFiles?: { path: string; status?: string }[] };
 };
 
+type DisplayPayload = {
+  text?: string;
+  stream?: string;
+  status?: string;
+  message?: string;
+  error?: string;
+  summary?: string;
+  reason?: string;
+  cleaned?: boolean;
+  root?: string;
+  cwd?: string;
+  mode?: string;
+  vcsType?: string;
+  dirty?: boolean;
+  changedFiles?: { path: string; status?: string }[];
+  workspaceChanges?: { changedFiles?: { path: string; status?: string }[]; dirty?: boolean; diffStat?: string };
+};
+
 function latestWorkerCompletion(events: EventRecord[], workerId: string): WorkerCompletionPayload {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
@@ -521,18 +719,17 @@ function EventLog({ events }: { events: EventRecord[] }) {
 }
 
 function EventLine({ event }: { event: EventRecord }) {
-  const payload = event.payload as {
-    text?: string;
-    stream?: string;
-    status?: string;
-    message?: string;
-    error?: string;
-    summary?: string;
-    reason?: string;
-    cleaned?: boolean;
-    changedFiles?: { path: string; status?: string }[];
-    workspaceChanges?: { changedFiles?: { path: string; status?: string }[]; dirty?: boolean };
-  };
+  return (
+    <div className="event-line">
+      <time>{new Date(event.at).toLocaleTimeString()}</time>
+      <code>{event.type}</code>
+      <span>{eventDisplayText(event)}</span>
+    </div>
+  );
+}
+
+function eventDisplayText(event: EventRecord): string {
+  const payload = event.payload as DisplayPayload;
   const changedFiles = payload.changedFiles ?? payload.workspaceChanges?.changedFiles ?? [];
   const changeText =
     changedFiles.length > 0
@@ -541,26 +738,22 @@ function EventLine({ event }: { event: EventRecord }) {
           .map((file) => file.path)
           .join(", ")}${changedFiles.length > 4 ? "..." : ""}`
       : undefined;
+  const workspaceText = payload.cwd || payload.root ? `${payload.mode ?? "workspace"} ${payload.cwd ?? payload.root}` : undefined;
   const primaryText =
     payload.text ??
     payload.summary ??
     payload.message ??
     payload.error ??
     payload.reason ??
+    payload.workspaceChanges?.diffStat ??
+    workspaceText ??
     payload.status ??
     (typeof payload.cleaned === "boolean" ? `cleaned: ${payload.cleaned}` : undefined);
-  const text = primaryText
+  return primaryText
     ? changeText
       ? `${primaryText} | ${changeText}`
       : primaryText
     : (changeText ?? JSON.stringify(event.payload));
-  return (
-    <div className="event-line">
-      <time>{new Date(event.at).toLocaleTimeString()}</time>
-      <code>{event.type}</code>
-      <span>{text}</span>
-    </div>
-  );
 }
 
 function Status({ value }: { value: string }) {

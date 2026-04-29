@@ -129,6 +129,9 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.cancelStaleLocalWorkers(ctx, snapshot); err != nil {
+		return err
+	}
 	completed := map[string]bool{}
 	for _, event := range snapshot.Events {
 		if event.Type == core.EventWorkerCompleted {
@@ -156,6 +159,51 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 		go s.recoverRemoteWorker(context.Background(), node, run)
 	}
 	return nil
+}
+
+func (s *Service) cancelStaleLocalWorkers(ctx context.Context, snapshot core.Snapshot) error {
+	nodesByWorker := map[string]core.ExecutionNode{}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID != "" {
+			nodesByWorker[node.WorkerID] = node
+		}
+	}
+	for _, worker := range snapshot.Workers {
+		if isTerminalWorkerStatus(worker.Status) {
+			continue
+		}
+		node := nodesByWorker[worker.ID]
+		if node.TargetKind == string(TargetKindSSH) {
+			continue
+		}
+		_, err := s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   worker.TaskID,
+			WorkerID: worker.ID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerCanceled,
+				"summary": "Local worker was marked canceled during daemon startup recovery.",
+				"error":   "local worker did not have a recoverable process handle after daemon restart",
+			}),
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: worker.TaskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskCanceled,
+			}),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isTerminalWorkerStatus(status core.WorkerStatus) bool {
+	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
 }
 
 func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNode, run remoteRun) {

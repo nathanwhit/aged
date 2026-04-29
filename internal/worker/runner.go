@@ -204,12 +204,12 @@ func DefaultRunners() map[string]Runner {
 	runners := []Runner{
 		MockRunner{},
 		BenchmarkCompareRunner{},
-		NewSteerableCommandRunner("codex", func(spec Spec) []string {
+		NewCommandRunner("codex", func(spec Spec) []string {
 			return []string{"codex", "exec", "--json", "--cd", spec.WorkDir, spec.Prompt}
-		}, defaultSteeringFormatter),
-		NewSteerableCommandRunner("claude", func(spec Spec) []string {
+		}),
+		NewCommandRunner("claude", func(spec Spec) []string {
 			return []string{"claude", "--print", "--output-format", "stream-json", spec.Prompt}
-		}, defaultSteeringFormatter),
+		}),
 		NewCommandRunner("shell", func(spec Spec) []string {
 			return spec.Command
 		}),

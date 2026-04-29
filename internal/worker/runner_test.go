@@ -169,6 +169,13 @@ func TestSteerableCommandRunnerForwardsSteeringToStdin(t *testing.T) {
 	}
 }
 
+func TestDefaultCodexRunnerDoesNotAdvertiseStdinSteering(t *testing.T) {
+	runner := DefaultRunners()["codex"]
+	if steering, ok := runner.(SteeringSupport); ok && steering.SupportsSteering() {
+		t.Fatal("default codex runner must not hold stdin open for steering")
+	}
+}
+
 func TestParserClassifiesNeedsInput(t *testing.T) {
 	event := ParserForKind("codex").ParseLine("stdout", `{"type":"approval_request","message":"approve?"}`)
 	if event.Kind != EventNeedsInput {

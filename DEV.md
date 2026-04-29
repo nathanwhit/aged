@@ -16,7 +16,10 @@ The initial local-first vertical slice is implemented.
 - React/Vite dashboard for creating tasks, viewing state/logs, steering, and cancellation.
 - Dashboard has a phone-friendly responsive layout and a current-state summary with progress, active work, worker counts, target state, execution nodes, and timeline.
 - Dashboard can clear finished tasks individually or in bulk. Clearing records `task.cleared` and hides the task, workers, and execution nodes from snapshots/UI without deleting event history.
+- Worker cards show live activity from events: latest event text, command summary, and expandable recent worker logs/results/errors. Workers can be selected to drill into a detailed worker-scoped view with command, workspace, completion, target/node, and full worker event history.
 - Google OAuth can protect the dashboard/API for public exposure. `-auth google` requires Google client credentials, an allowed-email list, and uses signed HTTP-only session cookies.
+- Built-in Codex/Claude workers no longer hold stdin open for steering, avoiding `codex exec` waiting forever for appended stdin input.
+- Daemon startup recovery marks stale local nonterminal workers as canceled when their process handles are no longer recoverable.
 - Built dashboard can be served directly by the Go daemon from `web/dist`.
 - Dev control server in `cmd/aged-dev` can rebuild the daemon, rebuild the UI, and restart the managed daemon through a local HTTP trigger.
 - Dev control can be launched with `-daemon-addr 0.0.0.0:8787` so the dashboard is reachable from other devices on the local network.
@@ -32,7 +35,7 @@ The initial local-first vertical slice is implemented.
 - Target scheduling scores matching targets by labels, capacity, current running workers, worker size, and memory/CPU hints.
 - Retained isolated worker changes can be reviewed and applied through HTTP/UI; jj apply creates a merge revision and records `worker.changes_applied`.
 - Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; multiple competing changed workers produce a `manual_select` recommendation instead of pretending there is a safe automatic merge order.
-- Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude command adapters now forward steering messages to subprocess stdin and record delivery log events.
+- Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude exec adapters intentionally do not hold stdin open because those CLIs treat piped stdin as extra prompt input and may wait indefinitely.
 - `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison.
 - Repeated worker apply attempts are blocked in the service and already-applied workers render as disabled `Applied` actions in the dashboard.
 - Scheduler `spawns` now run as dependency-aware follow-up worker turns after the plan's primary worker succeeds; independent spawns run in parallel and dependent spawns wait for prerequisite spawn ids. This applies to both initial plans and dynamic `continue` replans.
@@ -46,6 +49,7 @@ The initial local-first vertical slice is implemented.
 - `npm run build`
 - Clear-task tests verify `task.cleared` hides tasks/workers/execution nodes while preserving events, and the bulk clear HTTP endpoint hides terminal tasks.
 - Auth tests verify Google auth protects API/static routes, leaves health public, and creates a session through a fake OAuth callback for an allowed Google account.
+- Worker tests verify the default Codex runner does not advertise stdin steering; recovery tests verify stale local workers become canceled on daemon startup.
 - `npm ls vite @vitejs/plugin-react`
 - Scheduler tests:
   - Codex brain parses Codex `agent_message` plans.
@@ -147,7 +151,7 @@ http://127.0.0.1:8787
 - Jujutsu isolated workspaces are created with `jj workspace add -r @`.
 - Git isolated workspaces are implemented with `git worktree add --detach HEAD`, but require a clean source working tree because Git worktrees cannot safely carry uncommitted source changes.
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
-- User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude subprocess adapters forward steering to stdin, but behavior still depends on whether the underlying CLI reads stdin during that run.
+- User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude exec adapters need an out-of-band resume/session mechanism before they can support mid-run steering safely.
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
 - SSH target execution exists for pre-provisioned machines; richer remote workspace synchronization and patch collection are still open.
 

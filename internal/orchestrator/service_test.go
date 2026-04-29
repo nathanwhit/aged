@@ -83,6 +83,84 @@ func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkersCancelsStaleLocalWorkers(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-1"
+	workerID := "worker-1"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Stale task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   workerID,
+			"workerKind": "codex",
+			"targetId":   "local",
+			"targetKind": "local",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[0].Status != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", snapshot.Tasks[0].Status)
+	}
+	if snapshot.Workers[0].Status != core.WorkerCanceled {
+		t.Fatalf("worker status = %q, want canceled", snapshot.Workers[0].Status)
+	}
+	if snapshot.ExecutionNodes[0].Status != core.WorkerCanceled {
+		t.Fatalf("node status = %q, want canceled", snapshot.ExecutionNodes[0].Status)
+	}
+}
+
 func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

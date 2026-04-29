@@ -120,7 +120,7 @@ func main() {
 		orchestrator.NewSSHRunner(),
 	)
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
-		slog.Warn("recover remote workers", "error", err)
+		slog.Warn("recover workers", "error", err)
 	}
 	auth, err := configureAuth(*authMode, httpapi.GoogleAuthConfig{
 		ClientID:     *googleClientID,
