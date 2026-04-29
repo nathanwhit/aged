@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"aged/internal/core"
 )
 
 type ProjectRegistry struct {
+	mu        sync.RWMutex
 	projects  map[string]core.Project
 	defaultID string
 }
@@ -83,6 +85,8 @@ func (r *ProjectRegistry) Snapshot() []core.Project {
 	if r == nil {
 		return nil
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]core.Project, 0, len(r.projects))
 	for _, project := range r.projects {
 		out = append(out, project)
@@ -101,6 +105,8 @@ func (r *ProjectRegistry) Default() core.Project {
 	if r == nil {
 		return core.Project{}
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.projects[r.defaultID]
 }
 
@@ -108,8 +114,30 @@ func (r *ProjectRegistry) Get(id string) (core.Project, bool) {
 	if r == nil {
 		return core.Project{}, false
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	project, ok := r.projects[strings.TrimSpace(id)]
 	return project, ok
+}
+
+func (r *ProjectRegistry) Add(project core.Project) (core.Project, error) {
+	normalized, err := normalizeProject(project)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if r == nil {
+		return core.Project{}, errors.New("project registry is not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.projects[normalized.ID]; exists {
+		return core.Project{}, fmt.Errorf("project %q already exists", normalized.ID)
+	}
+	r.projects[normalized.ID] = normalized
+	if r.defaultID == "" {
+		r.defaultID = normalized.ID
+	}
+	return normalized, nil
 }
 
 func (r *ProjectRegistry) Resolve(req core.CreateTaskRequest) (core.Project, error) {
@@ -148,6 +176,8 @@ func (r *ProjectRegistry) FindByRepo(repo string) (core.Project, bool) {
 	if repo == "" || r == nil {
 		return core.Project{}, false
 	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for _, project := range r.projects {
 		if strings.ToLower(project.Repo) == repo {
 			return project, true

@@ -81,20 +81,38 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 		TaskID:   "task-1",
 		WorkerID: "worker-1",
 		Payload: core.MustJSON(map[string]any{
-			"nodeId":        "node-1",
+			"nodeId":        "node-0",
 			"workerId":      "worker-1",
 			"workerKind":    "codex",
 			"planId":        "plan-1",
-			"spawnId":       "review",
-			"role":          "reviewer",
-			"reason":        "Review the implementation.",
+			"spawnId":       "implementation",
+			"role":          "implementer",
+			"reason":        "Implement the change.",
 			"targetId":      "vm-1",
 			"targetKind":    "ssh",
 			"remoteSession": "aged-worker",
 			"remoteRunDir":  "/runs/worker-1",
 			"remoteWorkDir": "/repo",
-			"dependsOn":     []string{"implementation"},
-			"parentNodeId":  "node-0",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-1",
+		WorkerID: "worker-2",
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":       "node-1",
+			"workerId":     "worker-2",
+			"workerKind":   "claude",
+			"planId":       "plan-1",
+			"spawnId":      "review",
+			"role":         "reviewer",
+			"reason":       "Review the implementation.",
+			"targetId":     "vm-1",
+			"targetKind":   "ssh",
+			"dependsOn":    []string{"implementation"},
+			"parentNodeId": "node-0",
 		}),
 	}); err != nil {
 		t.Fatal(err)
@@ -112,12 +130,64 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.ExecutionNodes) != 1 {
-		t.Fatalf("execution nodes = %d, want 1", len(snapshot.ExecutionNodes))
+	if len(snapshot.ExecutionNodes) != 2 {
+		t.Fatalf("execution nodes = %d, want 2", len(snapshot.ExecutionNodes))
 	}
 	node := snapshot.ExecutionNodes[0]
-	if node.ID != "node-1" || node.Status != core.WorkerRunning || node.Role != "reviewer" || node.DependsOn[0] != "implementation" || node.TargetID != "vm-1" || node.RemoteSession != "aged-worker" {
+	if node.ID != "node-0" || node.Status != core.WorkerRunning || node.Role != "implementer" || node.TargetID != "vm-1" || node.RemoteSession != "aged-worker" {
 		t.Fatalf("node = %+v", node)
+	}
+	if len(snapshot.OrchestrationGraphs) != 1 {
+		t.Fatalf("graphs = %d, want 1", len(snapshot.OrchestrationGraphs))
+	}
+	graph := snapshot.OrchestrationGraphs[0]
+	if graph.TaskID != "task-1" || graph.Summary.Total != 2 || graph.Summary.Running != 1 {
+		t.Fatalf("graph = %+v", graph)
+	}
+	if len(graph.Edges) != 2 {
+		t.Fatalf("graph edges = %+v, want parent and dependency edges", graph.Edges)
+	}
+}
+
+func TestProjectsPersistInSQLite(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aged.db")
+	store, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := core.Project{
+		ID:            "aged",
+		Name:          "aged",
+		LocalPath:     "/tmp/aged",
+		Repo:          "owner/aged",
+		VCS:           "jj",
+		DefaultBase:   "main",
+		WorkspaceRoot: ".aged/workspaces",
+		TargetLabels:  map[string]string{"pool": "local"},
+	}
+	if _, err := store.SaveProject(ctx, project, true); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	reopened, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	projects, defaultID, err := reopened.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultID != "aged" {
+		t.Fatalf("default project = %q, want aged", defaultID)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("projects = %d, want 1", len(projects))
+	}
+	if projects[0].Repo != "owner/aged" || projects[0].TargetLabels["pool"] != "local" {
+		t.Fatalf("project = %+v", projects[0])
 	}
 }
 

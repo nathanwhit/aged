@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -7,17 +7,23 @@ import {
   CircleStop,
   Eye,
   FileText,
+  FolderPlus,
   GitPullRequest,
+  GripVertical,
+  LoaderCircle,
+  Maximize2,
+  Minimize2,
   Network,
   MessageSquarePlus,
   Play,
   Puzzle,
   RefreshCw,
+  RotateCcw,
   Send,
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, steerTask } from "./api";
+import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
@@ -33,6 +39,12 @@ type AppSnapshot = {
   events: EventRecord[];
 };
 
+type TaskStartInput = {
+  projectId?: string;
+  title: string;
+  prompt: string;
+};
+
 const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
@@ -45,12 +57,57 @@ const emptySnapshot: AppSnapshot = {
   events: [],
 };
 
+type DashboardPaneId =
+  | "task-detail"
+  | "pull-requests"
+  | "current-state"
+  | "targets"
+  | "plugins"
+  | "orchestration-graph"
+  | "execution"
+  | "workers"
+  | "worker-detail"
+  | "timeline";
+
+type DashboardPaneLayout = {
+  id: DashboardPaneId;
+  span: number;
+  minHeight: number;
+};
+
+type DashboardPane = {
+  id: DashboardPaneId;
+  title: string;
+  element: React.ReactNode;
+};
+
+const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v1";
+const DASHBOARD_MIN_SPAN = 4;
+const DASHBOARD_MAX_SPAN = 12;
+const DASHBOARD_MIN_HEIGHT = 0;
+const DASHBOARD_MAX_HEIGHT = 900;
+const DASHBOARD_HEIGHT_STEP = 48;
+const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
+  { id: "task-detail", span: 12, minHeight: 0 },
+  { id: "pull-requests", span: 6, minHeight: 0 },
+  { id: "current-state", span: 6, minHeight: 0 },
+  { id: "workers", span: 12, minHeight: 0 },
+  { id: "worker-detail", span: 8, minHeight: 0 },
+  { id: "orchestration-graph", span: 6, minHeight: 0 },
+  { id: "execution", span: 6, minHeight: 0 },
+  { id: "targets", span: 4, minHeight: 0 },
+  { id: "plugins", span: 4, minHeight: 0 },
+  { id: "timeline", span: 12, minHeight: 360 },
+];
+
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string>("");
   const [selectedWorkerId, setSelectedWorkerId] = useState<string>("");
+  const [pendingTask, setPendingTask] = useState<TaskStartInput | null>(null);
   const [error, setError] = useState<string>("");
   const [connected, setConnected] = useState(false);
+  const [retryingTaskId, setRetryingTaskId] = useState("");
 
   async function refresh() {
     const next = normalizeSnapshot(await getSnapshot());
@@ -109,6 +166,116 @@ function App() {
     }
   }
 
+  async function handleRetryTask(taskId: string) {
+    setRetryingTaskId(taskId);
+    try {
+      setError("");
+      await retryTask(taskId);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRetryingTaskId("");
+    }
+  }
+
+  const dashboardPanes: DashboardPane[] = selectedTask
+    ? [
+        {
+          id: "task-detail",
+          title: "Task",
+          element: <TaskDetail task={selectedTask} onCancel={cancelTask} onRetry={handleRetryTask} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+        },
+        {
+          id: "pull-requests",
+          title: "Pull Requests",
+          element: (
+            <PullRequestPanel
+              task={selectedTask}
+              pullRequests={selectedPullRequests}
+              onPublish={publishTaskPullRequest}
+              onRefresh={refreshPullRequest}
+              onBabysit={babysitPullRequest}
+              onDone={refresh}
+              onError={setError}
+            />
+          ),
+        },
+        {
+          id: "current-state",
+          title: "Current State",
+          element: <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />,
+        },
+        ...(snapshot.targets.length > 0
+          ? [
+              {
+                id: "targets" as const,
+                title: "Targets",
+                element: <TargetPanel targets={snapshot.targets} />,
+              },
+            ]
+          : []),
+        ...(snapshot.plugins.length > 0
+          ? [
+              {
+                id: "plugins" as const,
+                title: "Plugins",
+                element: <PluginPanel plugins={snapshot.plugins} />,
+              },
+            ]
+          : []),
+        ...(selectedGraph && selectedGraph.nodes.length > 0
+          ? [
+              {
+                id: "orchestration-graph" as const,
+                title: "Orchestration Graph",
+                element: <OrchestrationGraphPanel graph={selectedGraph} />,
+              },
+            ]
+          : []),
+        ...(selectedNodes.length > 0
+          ? [
+              {
+                id: "execution" as const,
+                title: "Execution",
+                element: <ExecutionGraph nodes={selectedNodes} />,
+              },
+            ]
+          : []),
+        {
+          id: "workers",
+          title: "Workers",
+          element: (
+            <WorkerList
+              workers={selectedWorkers}
+              events={selectedEvents}
+              selectedWorkerId={selectedWorkerId}
+              onSelect={setSelectedWorkerId}
+              onReview={getWorkerChanges}
+              onApply={applyWorkerChanges}
+              onApplied={refresh}
+              onCancel={cancelWorker}
+              onError={setError}
+            />
+          ),
+        },
+        ...(selectedWorker
+          ? [
+              {
+                id: "worker-detail" as const,
+                title: "Worker Detail",
+                element: <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />,
+              },
+            ]
+          : []),
+        {
+          id: "timeline",
+          title: "Timeline",
+          element: <EventLog events={selectedEvents} />,
+        },
+      ]
+    : [];
+
   return (
     <main className="app">
       <header className="topbar">
@@ -137,10 +304,27 @@ function App() {
             onCreate={async (input) => {
               setError("");
               const task = await createTask(input);
+              setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
+              refresh().catch((err: Error) => setError(err.message));
+              return task;
             }}
+            onStartPending={(input) => {
+              setError("");
+              setPendingTask(input);
+            }}
+            onStartSettled={() => setPendingTask(null)}
             onError={setError}
             projects={snapshot.projects}
+          />
+          <ProjectPanel
+            projects={snapshot.projects}
+            onCreate={async (input) => {
+              setError("");
+              await createProject(input);
+              await refresh();
+            }}
+            onError={setError}
           />
           <AssistantPanel onError={setError} />
         </section>
@@ -155,70 +339,293 @@ function App() {
               <Trash2 size={16} />
             </button>
           </div>
-          {snapshot.tasks.length === 0 ? (
+          {snapshot.tasks.length === 0 && !pendingTask ? (
             <p className="empty">No tasks yet.</p>
           ) : (
-            snapshot.tasks.map((task) => (
-              <div
-                key={task.id}
-                className={task.id === selectedTask?.id ? "task-row selected" : "task-row"}
-              >
-                <button className="task-row-main" onClick={() => setSelectedTaskId(task.id)}>
-                  <span>
-                    <strong>{task.title}</strong>
-                    <small>{task.id.slice(0, 8)}</small>
-                  </span>
-                  <Status value={task.status} />
-                </button>
-                {isTerminalTask(task) && (
-                  <button className="icon-button ghost danger-text task-clear" onClick={() => handleClearTask(task.id)} title="Clear task">
-                    <Trash2 size={16} />
+            <>
+              {snapshot.tasks.map((task) => (
+                <div
+                  key={task.id}
+                  className={task.id === selectedTask?.id ? "task-row selected" : "task-row"}
+                >
+                  <button className="task-row-main" onClick={() => setSelectedTaskId(task.id)}>
+                    <span>
+                      <strong>{task.title}</strong>
+                      <small>{task.id.slice(0, 8)}</small>
+                    </span>
+                    <Status value={task.status} />
                   </button>
-                )}
-              </div>
-            ))
+                  <div className="task-row-actions">
+                    {task.status === "failed" && (
+                      <button className="icon-button ghost task-action" disabled={retryingTaskId === task.id} onClick={() => handleRetryTask(task.id)} title="Retry task">
+                        <RefreshCw size={16} />
+                      </button>
+                    )}
+                    {isTerminalTask(task) && (
+                      <button className="icon-button ghost danger-text task-action" onClick={() => handleClearTask(task.id)} title="Clear task">
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {pendingTask && <PendingTaskRow task={pendingTask} />}
+            </>
           )}
         </section>
 
-        <section className="workspace">
-          {selectedTask ? (
-            <>
-              <TaskDetail task={selectedTask} onCancel={cancelTask} onSteer={steerTask} onError={setError} />
-              <PullRequestPanel
-                task={selectedTask}
-                pullRequests={selectedPullRequests}
-                onPublish={publishTaskPullRequest}
-                onRefresh={refreshPullRequest}
-                onBabysit={babysitPullRequest}
-                onDone={refresh}
-                onError={setError}
-              />
-              <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />
-              <TargetPanel targets={snapshot.targets} />
-              <PluginPanel plugins={snapshot.plugins} />
-              <OrchestrationGraphPanel graph={selectedGraph} />
-              <ExecutionGraph nodes={selectedNodes} />
-              <WorkerList
-                workers={selectedWorkers}
-                events={selectedEvents}
-                selectedWorkerId={selectedWorkerId}
-                onSelect={setSelectedWorkerId}
-                onReview={getWorkerChanges}
-                onApply={applyWorkerChanges}
-                onApplied={refresh}
-                onCancel={cancelWorker}
-                onError={setError}
-              />
-              {selectedWorker && <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />}
-              <EventLog events={selectedEvents} />
-            </>
-          ) : (
+        {selectedTask ? (
+          <DashboardGrid panes={dashboardPanes} />
+        ) : (
+          <section className="workspace">
             <div className="panel empty-state">Create a task to start orchestration.</div>
-          )}
-        </section>
+          </section>
+        )}
       </section>
     </main>
   );
+}
+
+function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
+  const [layout, setLayout] = useDashboardLayout();
+  const [draggingId, setDraggingId] = useState<DashboardPaneId | null>(null);
+  const [dragOverId, setDragOverId] = useState<DashboardPaneId | null>(null);
+  const [resizing, setResizing] = useState<{
+    id: DashboardPaneId;
+    startX: number;
+    startY: number;
+    startSpan: number;
+    startMinHeight: number;
+  } | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const paneById = useMemo(() => new Map(panes.map((pane) => [pane.id, pane])), [panes]);
+
+  const orderedPanes = useMemo(() => {
+    const ordered = layout.map((item) => paneById.get(item.id)).filter((pane): pane is DashboardPane => Boolean(pane));
+    const orderedIds = new Set(ordered.map((pane) => pane.id));
+    return [...ordered, ...panes.filter((pane) => !orderedIds.has(pane.id))];
+  }, [layout, paneById, panes]);
+
+  useEffect(() => {
+    if (!resizing) return;
+    const activeResize = resizing;
+    function handlePointerMove(event: PointerEvent) {
+      const gridWidth = gridRef.current?.getBoundingClientRect().width ?? 1200;
+      const columnWidth = Math.max(64, gridWidth / DASHBOARD_MAX_SPAN);
+      const nextSpan = clamp(activeResize.startSpan + Math.round((event.clientX - activeResize.startX) / columnWidth), DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN);
+      const nextMinHeight = clamp(activeResize.startMinHeight + Math.round((event.clientY - activeResize.startY) / DASHBOARD_HEIGHT_STEP) * DASHBOARD_HEIGHT_STEP, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT);
+      updatePaneLayout(setLayout, activeResize.id, { span: nextSpan, minHeight: nextMinHeight });
+    }
+    function handlePointerUp() {
+      setResizing(null);
+    }
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [resizing, setLayout]);
+
+  function movePane(sourceId: DashboardPaneId, targetId: DashboardPaneId) {
+    if (sourceId === targetId) return;
+    setLayout((current) => {
+      const next = [...current];
+      const from = next.findIndex((item) => item.id === sourceId);
+      const to = next.findIndex((item) => item.id === targetId);
+      if (from === -1 || to === -1) return current;
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      return next;
+    });
+  }
+
+  function movePaneByOffset(sourceId: DashboardPaneId, offset: number) {
+    setLayout((current) => {
+      const next = [...current];
+      const from = next.findIndex((item) => item.id === sourceId);
+      if (from === -1) return current;
+      const to = clamp(from + offset, 0, next.length - 1);
+      if (from === to) return current;
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      return next;
+    });
+  }
+
+  function paneLayout(id: DashboardPaneId): DashboardPaneLayout {
+    return layout.find((item) => item.id === id) ?? DEFAULT_DASHBOARD_LAYOUT.find((item) => item.id === id)!;
+  }
+
+  return (
+    <section className="workspace" aria-label="Dashboard panes">
+      <div className="dashboard-toolbar">
+        <span>{orderedPanes.length} panes</span>
+        <button className="icon-button ghost" onClick={() => setLayout(defaultDashboardLayout())} title="Reset dashboard layout">
+          <RotateCcw size={16} />
+        </button>
+      </div>
+      <div className="dashboard-grid" ref={gridRef}>
+        {orderedPanes.map((pane) => {
+          const item = paneLayout(pane.id);
+          return (
+            <div
+              key={pane.id}
+              className={[
+                "dashboard-pane",
+                draggingId === pane.id ? "dragging" : "",
+                dragOverId === pane.id && draggingId !== pane.id ? "drag-over" : "",
+                resizing?.id === pane.id ? "resizing" : "",
+              ].filter(Boolean).join(" ")}
+              style={
+                {
+                  "--pane-span": item.span,
+                  "--pane-min-height": `${item.minHeight}px`,
+                } as React.CSSProperties
+              }
+              onDragOver={(event) => {
+                event.preventDefault();
+                setDragOverId(pane.id);
+              }}
+              onDragLeave={() => setDragOverId((current) => (current === pane.id ? null : current))}
+              onDrop={(event) => {
+                event.preventDefault();
+                const sourceId = event.dataTransfer.getData("text/plain") as DashboardPaneId;
+                movePane(sourceId, pane.id);
+                setDraggingId(null);
+                setDragOverId(null);
+              }}
+            >
+              <div className="dashboard-pane-chrome">
+                <div
+                  className="dashboard-pane-grip"
+                  draggable
+                  title={`Drag ${pane.title}`}
+                  aria-label={`Drag ${pane.title}`}
+                  role="button"
+                  tabIndex={0}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", pane.id);
+                    setDraggingId(pane.id);
+                  }}
+                  onDragEnd={() => {
+                    setDraggingId(null);
+                    setDragOverId(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+                      event.preventDefault();
+                      movePaneByOffset(pane.id, -1);
+                    }
+                    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+                      event.preventDefault();
+                      movePaneByOffset(pane.id, 1);
+                    }
+                  }}
+                >
+                  <GripVertical size={16} />
+                  <span>{pane.title}</span>
+                </div>
+                <div className="dashboard-pane-actions">
+                  <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span - 2 })} disabled={item.span <= DASHBOARD_MIN_SPAN} title={`Make ${pane.title} narrower`}>
+                    <Minimize2 size={14} />
+                  </button>
+                  <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span + 2 })} disabled={item.span >= DASHBOARD_MAX_SPAN} title={`Make ${pane.title} wider`}>
+                    <Maximize2 size={14} />
+                  </button>
+                </div>
+              </div>
+              {pane.element}
+              <button
+                className="dashboard-pane-resize"
+                aria-label={`Resize ${pane.title}`}
+                title={`Resize ${pane.title}`}
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  setResizing({
+                    id: pane.id,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    startSpan: item.span,
+                    startMinHeight: item.minHeight,
+                  });
+                }}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function useDashboardLayout() {
+  const [layout, setLayout] = useState<DashboardPaneLayout[]>(() => {
+    if (typeof window === "undefined") return defaultDashboardLayout();
+    try {
+      return normalizeDashboardLayout(JSON.parse(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY) || "null"));
+    } catch {
+      return defaultDashboardLayout();
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DASHBOARD_LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+    } catch {
+      // Browsers can reject storage in privacy modes; layout customization still works for the session.
+    }
+  }, [layout]);
+
+  return [layout, setLayout] as const;
+}
+
+function normalizeDashboardLayout(value: unknown): DashboardPaneLayout[] {
+  if (!Array.isArray(value)) return defaultDashboardLayout();
+  const defaults = new Map(defaultDashboardLayout().map((item) => [item.id, item]));
+  const normalized: DashboardPaneLayout[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.id !== "string" || !defaults.has(entry.id as DashboardPaneId)) continue;
+    const defaultsForPane = defaults.get(entry.id as DashboardPaneId)!;
+    normalized.push({
+      id: entry.id as DashboardPaneId,
+      span: clampNumber(entry.span, defaultsForPane.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
+      minHeight: clampNumber(entry.minHeight, defaultsForPane.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
+    });
+    defaults.delete(entry.id as DashboardPaneId);
+  }
+  return [...normalized, ...defaults.values()];
+}
+
+function updatePaneLayout(
+  setLayout: React.Dispatch<React.SetStateAction<DashboardPaneLayout[]>>,
+  id: DashboardPaneId,
+  values: Partial<Pick<DashboardPaneLayout, "span" | "minHeight">>,
+) {
+  setLayout((current) =>
+    current.map((item) =>
+      item.id === id
+        ? {
+            ...item,
+            span: values.span === undefined ? item.span : clamp(values.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
+            minHeight: values.minHeight === undefined ? item.minHeight : clamp(values.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
+          }
+        : item,
+    ),
+  );
+}
+
+function defaultDashboardLayout(): DashboardPaneLayout[] {
+  return DEFAULT_DASHBOARD_LAYOUT.map((item) => ({ ...item }));
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 type WorkProgress = {
@@ -295,10 +702,14 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function TaskComposer({
   onCreate,
+  onStartPending,
+  onStartSettled,
   onError,
   projects,
 }: {
-  onCreate: (input: { projectId?: string; title: string; prompt: string }) => Promise<void>;
+  onCreate: (input: TaskStartInput) => Promise<Task>;
+  onStartPending: (input: TaskStartInput) => void;
+  onStartSettled: () => void;
   onError: (message: string) => void;
   projects: Project[];
 }) {
@@ -309,15 +720,18 @@ function TaskComposer({
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    const input = { projectId: projectId || undefined, title, prompt };
     setBusy(true);
+    onStartPending(input);
     try {
-      await onCreate({ projectId: projectId || undefined, title, prompt });
+      await onCreate(input);
       setTitle("");
       setPrompt("");
     } catch (err) {
       onError((err as Error).message);
     } finally {
       setBusy(false);
+      onStartSettled();
     }
   }
 
@@ -347,11 +761,120 @@ function TaskComposer({
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
       </label>
-      <button className="primary" disabled={busy}>
-        <Play size={16} />
-        {busy ? "Starting" : "Start"}
+      <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>
+        {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
+        {busy ? "Starting task" : "Start"}
       </button>
+      {busy && (
+        <div className="task-start-progress" role="status" aria-live="polite">
+          <LoaderCircle className="spin" size={16} />
+          <span>Scheduling task and waiting for the first status event...</span>
+        </div>
+      )}
     </form>
+  );
+}
+
+function PendingTaskRow({ task }: { task: TaskStartInput }) {
+  const title = task.title.trim() || "Generating task title...";
+  return (
+    <div className="task-row pending-start" aria-busy="true" aria-live="polite">
+      <div className="task-row-main pending-task-main">
+        <span>
+          <strong>{title}</strong>
+          <small>Start request in progress</small>
+        </span>
+        <span className="status starting">
+          <LoaderCircle className="spin" size={12} />
+          Starting
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ProjectPanel({
+  projects,
+  onCreate,
+  onError,
+}: {
+  projects: Project[];
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [localPath, setLocalPath] = useState("");
+  const [repo, setRepo] = useState("");
+  const [defaultBase, setDefaultBase] = useState("main");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await onCreate({
+        id,
+        name: name || undefined,
+        localPath,
+        repo: repo || undefined,
+        vcs: "auto",
+        defaultBase: defaultBase || undefined,
+      });
+      setId("");
+      setName("");
+      setLocalPath("");
+      setRepo("");
+      setDefaultBase("main");
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel project-panel">
+      <div className="panel-title">
+        <FolderPlus size={18} />
+        <h2>Projects</h2>
+      </div>
+      <div className="project-list">
+        {projects.map((project) => (
+          <div className="project-chip" key={project.id}>
+            <strong>{project.name}</strong>
+            <span>{project.id}</span>
+            <small>{project.localPath}</small>
+          </div>
+        ))}
+      </div>
+      <form className="project-form" onSubmit={submit}>
+        <label>
+          ID
+          <input value={id} onChange={(event) => setId(event.target.value)} placeholder="nodejs" required />
+        </label>
+        <label>
+          Name
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Node.js" />
+        </label>
+        <label>
+          Local path
+          <input value={localPath} onChange={(event) => setLocalPath(event.target.value)} placeholder="/Users/nathanwhit/Documents/Code/node" required />
+        </label>
+        <label>
+          Repo
+          <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="owner/repo" />
+        </label>
+        <label>
+          Base
+          <input value={defaultBase} onChange={(event) => setDefaultBase(event.target.value)} placeholder="main" />
+        </label>
+        <button disabled={busy}>
+          <FolderPlus size={16} />
+          {busy ? "Adding" : "Add Project"}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -360,9 +883,24 @@ function AssistantPanel({ onError }: { onError: (message: string) => void }) {
   const [conversationId, setConversationId] = useState("");
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!busy) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.max(1, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    setAnswer("");
+    onError("");
     setBusy(true);
     try {
       const response = await askAssistant({ conversationId: conversationId || undefined, message });
@@ -377,30 +915,56 @@ function AssistantPanel({ onError }: { onError: (message: string) => void }) {
   }
 
   return (
-    <form className="panel assistant-panel" onSubmit={submit}>
+    <form className="panel assistant-panel" onSubmit={submit} aria-busy={busy}>
       <div className="panel-title">
         <Bot size={18} />
         <h2>Ask</h2>
       </div>
-      <textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Ask about the system or repo..." required />
+      <textarea
+        value={message}
+        onChange={(event) => setMessage(event.target.value)}
+        placeholder="Ask about the system or repo..."
+        disabled={busy}
+        aria-describedby={busy ? "assistant-progress" : undefined}
+        required
+      />
       <button className="secondary" disabled={busy}>
-        <Send size={16} />
+        {busy ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
         {busy ? "Asking" : "Ask"}
       </button>
+      {busy && (
+        <div className="assistant-progress">
+          <div id="assistant-progress" className="assistant-progress-status" role="status" aria-live="polite">
+            <LoaderCircle className="spin" size={16} aria-hidden="true" />
+            <span>{assistantProgressLabel(elapsedSeconds)}</span>
+          </div>
+          {elapsedSeconds > 0 && <small aria-hidden="true">{elapsedSeconds}s elapsed</small>}
+        </div>
+      )}
       {answer && <pre className="assistant-answer">{answer}</pre>}
     </form>
   );
 }
 
+function assistantProgressLabel(elapsedSeconds: number): string {
+  if (elapsedSeconds < 2) return "Sending question...";
+  if (elapsedSeconds < 8) return "Waiting for assistant response...";
+  return "Still working on the answer...";
+}
+
 function TaskDetail({
   task,
   onCancel,
+  onRetry,
   onSteer,
+  retrying,
   onError,
 }: {
   task: Task;
   onCancel: (id: string) => Promise<void>;
+  onRetry: (id: string) => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
+  retrying: boolean;
   onError: (message: string) => void;
 }) {
   const [message, setMessage] = useState("");
@@ -425,6 +989,11 @@ function TaskDetail({
         </div>
         <div className="detail-actions">
           <Status value={task.status} />
+          {task.status === "failed" && (
+            <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
+              <RefreshCw size={18} />
+            </button>
+          )}
           <button className="icon-button danger" onClick={() => onCancel(task.id).catch((err: Error) => onError(err.message))} title="Cancel task">
             <CircleStop size={18} />
           </button>
@@ -964,7 +1533,10 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
               <strong>{plugin.name}</strong>
               <small>{plugin.id}</small>
             </div>
-            <span className={plugin.enabled ? "tool-status" : "tool-status neutral"}>{plugin.kind}</span>
+            <div className="plugin-status-row">
+              <span className={plugin.enabled ? "tool-status" : "tool-status neutral"}>{plugin.kind}</span>
+              {plugin.status && <span className={plugin.status === "error" ? "tool-status failed" : "tool-status neutral"}>{plugin.status}</span>}
+            </div>
             {plugin.capabilities && plugin.capabilities.length > 0 && (
               <div className="plugin-capabilities">
                 {plugin.capabilities.slice(0, 5).map((capability) => (
@@ -972,6 +1544,7 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
                 ))}
               </div>
             )}
+            {plugin.error && <p className="plugin-error">{plugin.error}</p>}
           </article>
         ))}
       </div>
@@ -1694,6 +2267,13 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
     events: snapshot.events ?? [],
   };
+}
+
+function upsertTask(snapshot: AppSnapshot, task: Task): AppSnapshot {
+  const tasks = snapshot.tasks.some((candidate) => candidate.id === task.id)
+    ? snapshot.tasks.map((candidate) => (candidate.id === task.id ? task : candidate))
+    : [...snapshot.tasks, task];
+  return { ...snapshot, tasks };
 }
 
 function reduceEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {

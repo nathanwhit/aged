@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +68,7 @@ type Service struct {
 	targets     *TargetRegistry
 	sshRunner   SSHRunner
 	prPublisher PullRequestPublisher
+	remoteApply func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
 
 	mu         sync.Mutex
 	cancels    map[string]context.CancelFunc
@@ -75,6 +78,32 @@ type Service struct {
 }
 
 const maxDynamicReplanTurns = 4
+
+func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
+	cwd := strings.TrimSpace(workspace.CWD)
+	sourceRoot := strings.TrimSpace(workspace.SourceRoot)
+	if cwd == "" {
+		return prompt
+	}
+
+	var b strings.Builder
+	b.WriteString("# Execution Workspace\n\n")
+	b.WriteString("Run every command from this execution workspace:\n")
+	b.WriteString(cwd)
+	b.WriteString("\n\n")
+	b.WriteString("Edit only files under the execution workspace. ")
+	if sourceRoot != "" && sourceRoot != cwd {
+		b.WriteString("Do not edit the source checkout directly:\n")
+		b.WriteString(sourceRoot)
+		b.WriteString("\n\n")
+		b.WriteString("If the worker task below names the source checkout or another local checkout path, treat that path as context only and translate the work to the execution workspace.\n\n")
+	} else {
+		b.WriteString("Use the current working directory as the repository root.\n\n")
+	}
+	b.WriteString("# Worker Task\n\n")
+	b.WriteString(strings.TrimSpace(prompt))
+	return b.String()
+}
 
 type WorkerTurnResult struct {
 	WorkerID string            `json:"workerId"`
@@ -124,6 +153,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		targets:     targets,
 		sshRunner:   sshRunner,
 		prPublisher: NewLocalPullRequestPublisher(),
+		remoteApply: applyRemotePatch,
 		cancels:     map[string]context.CancelFunc{},
 		tasks:       map[string]string{},
 		steering:    map[string]chan string{},
@@ -149,6 +179,62 @@ func (s *Service) SetProjects(projects *ProjectRegistry) {
 	}
 }
 
+func (s *Service) LoadProjects(ctx context.Context, seed *ProjectRegistry) error {
+	if seed == nil {
+		return errors.New("project seed registry is not configured")
+	}
+	projects, defaultID, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	if len(projects) == 0 {
+		defaultProject := seed.Default()
+		for _, project := range seed.Snapshot() {
+			if _, err := s.store.SaveProject(ctx, project, project.ID == defaultProject.ID); err != nil {
+				return err
+			}
+		}
+		projects, defaultID, err = s.store.ListProjects(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	registry, err := NewProjectRegistry(projects, defaultID)
+	if err != nil {
+		return err
+	}
+	s.SetProjects(registry)
+	return nil
+}
+
+func (s *Service) CreateProject(ctx context.Context, project core.Project) (core.Project, error) {
+	normalized, err := normalizeProject(project)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if s.projects != nil {
+		if _, exists := s.projects.Get(normalized.ID); exists {
+			return core.Project{}, fmt.Errorf("project %q already exists", normalized.ID)
+		}
+	}
+	saved, err := s.store.CreateProject(ctx, normalized)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if s.projects == nil {
+		registry, err := NewProjectRegistry([]core.Project{saved}, saved.ID)
+		if err != nil {
+			return core.Project{}, err
+		}
+		s.SetProjects(registry)
+		return saved, nil
+	}
+	if _, err := s.projects.Add(saved); err != nil {
+		return core.Project{}, err
+	}
+	return saved, nil
+}
+
 func (s *Service) SetPlugins(plugins *PluginRegistry) {
 	if plugins != nil {
 		s.plugins = plugins
@@ -157,6 +243,12 @@ func (s *Service) SetPlugins(plugins *PluginRegistry) {
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
 	s.prPublisher = publisher
+}
+
+func (s *Service) SetRemotePatchApplier(applier func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)) {
+	if applier != nil {
+		s.remoteApply = applier
+	}
 }
 
 func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
@@ -639,6 +731,30 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	return err
 }
 
+func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Task{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return core.Task{}, eventstore.ErrNotFound
+	}
+	if task.Status != core.TaskFailed {
+		return core.Task{}, errors.New("can only retry failed tasks")
+	}
+	plan, err := retryPlanForTask(snapshot, taskID)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return core.Task{}, err
+	}
+	task.Status = core.TaskPlanning
+	go s.retryTask(context.Background(), task, plan)
+	return task, nil
+}
+
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	s.mu.Lock()
 	cancel := s.cancels[workerID]
@@ -734,6 +850,17 @@ func (s *Service) reviewWorkerChanges(ctx context.Context, workerID string, incl
 	if err != nil {
 		return WorkerChangesReview{}, err
 	}
+	if workspace.VCSType == "ssh" {
+		changes, err := s.completedWorkspaceChanges(ctx, workerID)
+		if err != nil {
+			return WorkerChangesReview{}, err
+		}
+		return WorkerChangesReview{
+			WorkerID:  workerID,
+			Workspace: workspace,
+			Changes:   changes,
+		}, nil
+	}
 	changes := s.describeWorkspaceChanges(ctx, workspace)
 	if includeDiff && changes.Error == "" {
 		if diff, err := s.describeWorkspaceDiff(ctx, workspace); err != nil {
@@ -759,9 +886,21 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	if err != nil {
 		return WorkerApplyResult{}, err
 	}
-	result, err := s.workspaces.ApplyChanges(ctx, review.Workspace, review.Changes)
-	if err != nil {
-		return WorkerApplyResult{}, err
+	var result WorkerApplyResult
+	if review.Workspace.VCSType == "ssh" {
+		project, err := s.projectForTaskID(ctx, review.Workspace.TaskID)
+		if err != nil {
+			return WorkerApplyResult{}, err
+		}
+		result, err = s.remoteApply(ctx, project, review.Workspace, review.Changes)
+		if err != nil {
+			return WorkerApplyResult{}, err
+		}
+	} else {
+		result, err = s.workspaces.ApplyChanges(ctx, review.Workspace, review.Changes)
+		if err != nil {
+			return WorkerApplyResult{}, err
+		}
 	}
 	result.WorkerID = workerID
 	_, err = s.append(ctx, core.Event{
@@ -1130,6 +1269,42 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	}
 }
 
+func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(ctx, task, plan, []WorkerTurnResult{result}, result)
+		return
+	}
+	if !s.finishOrContinueTask(ctx, task.ID, result) {
+		return
+	}
+	results := []WorkerTurnResult{result}
+	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if !s.replanLoop(ctx, task, plan, results) {
+		return
+	}
+	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
 	runner := s.runners[plan.WorkerKind]
 	if runner == nil {
@@ -1140,8 +1315,17 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	project := s.projectForTask(task)
 	plan.Metadata["projectId"] = project.ID
-	if plan.Metadata["targetLabels"] == nil && len(project.TargetLabels) > 0 {
+	if requested := targetLabels(plan.Metadata); len(requested) > 0 {
+		plan.Metadata["ignoredTargetLabels"] = requested
+		plan.Metadata["targetSelectionPolicy"] = "scheduler target labels are ignored; placement is selected by task or project policy"
+		delete(plan.Metadata, "targetLabels")
+	}
+	if labels := taskTargetLabels(task); len(labels) > 0 {
+		plan.Metadata["targetLabels"] = labels
+		plan.Metadata["targetSelectionSource"] = "task"
+	} else if len(project.TargetLabels) > 0 {
 		plan.Metadata["targetLabels"] = project.TargetLabels
+		plan.Metadata["targetSelectionSource"] = "project"
 	}
 	target, err := s.targets.Select(plan)
 	if err != nil {
@@ -1213,7 +1397,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		ID:       workerID,
 		TaskID:   task.ID,
 		Kind:     plan.WorkerKind,
-		Prompt:   plan.Prompt,
+		Prompt:   workerExecutionPrompt(plan.Prompt, workspace),
 		WorkDir:  workspace.CWD,
 		Steering: steering,
 	}
@@ -1315,17 +1499,31 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		plan.Metadata["planID"] = planID
 	}
 	project := s.projectForTask(task)
+	remoteWorkDir := nonEmpty(target.WorkDir, project.LocalPath)
+	workspace := PreparedWorkspace{
+		Root:       remoteWorkDir,
+		CWD:        remoteWorkDir,
+		SourceRoot: remoteWorkDir,
+		Mode:       "remote",
+		VCSType:    "ssh",
+		WorkerID:   workerID,
+		TaskID:     task.ID,
+	}
 	steering := make(chan string, 16)
 	spec := worker.Spec{
 		ID:       workerID,
 		TaskID:   task.ID,
 		Kind:     plan.WorkerKind,
-		Prompt:   plan.Prompt,
-		WorkDir:  nonEmpty(target.WorkDir, project.LocalPath),
+		Prompt:   workerExecutionPrompt(plan.Prompt, workspace),
+		WorkDir:  remoteWorkDir,
 		Steering: steering,
 	}
 	command := runner.BuildCommand(spec)
 	remoteRun := NewRemoteRun(target, spec)
+	workspace.Root = remoteRun.RunDir
+	workspace.CWD = remoteRun.WorkDir
+	workspace.SourceRoot = remoteRun.WorkDir
+	workspace.WorkspaceName = remoteRun.Session
 	plan.Metadata["remoteSession"] = remoteRun.Session
 	plan.Metadata["remoteRunDir"] = remoteRun.RunDir
 	plan.Metadata["remoteWorkDir"] = remoteRun.WorkDir
@@ -1358,16 +1556,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		Type:     core.EventWorkerWorkspace,
 		TaskID:   task.ID,
 		WorkerID: workerID,
-		Payload: core.MustJSON(PreparedWorkspace{
-			Root:          remoteRun.RunDir,
-			CWD:           remoteRun.WorkDir,
-			SourceRoot:    remoteRun.WorkDir,
-			WorkspaceName: remoteRun.Session,
-			Mode:          "remote",
-			VCSType:       "ssh",
-			WorkerID:      workerID,
-			TaskID:        task.ID,
-		}),
+		Payload:  core.MustJSON(workspace),
 	}); err != nil {
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
@@ -1842,6 +2031,17 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 	return metadata, nil
 }
 
+func taskTargetLabels(task core.Task) map[string]string {
+	if len(task.Metadata) == 0 {
+		return nil
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return nil
+	}
+	return targetLabels(metadata)
+}
+
 func taskExternalRef(task core.Task) (string, string) {
 	if len(task.Metadata) == 0 {
 		return "", ""
@@ -1887,6 +2087,54 @@ func taskSteering(snapshot core.Snapshot, taskID string) []string {
 		}
 	}
 	return out
+}
+
+func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
+	var plans []Plan
+	var workerIDs []string
+	failedWorkerID := ""
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskPlanned:
+			var plan Plan
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				return Plan{}, fmt.Errorf("decode task plan: %w", err)
+			}
+			plans = append(plans, plan)
+		case core.EventExecutionPlanned:
+			var payload struct {
+				WorkerID string `json:"workerId"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return Plan{}, fmt.Errorf("decode execution plan: %w", err)
+			}
+			workerIDs = append(workerIDs, nonEmpty(payload.WorkerID, event.WorkerID))
+		case core.EventWorkerCompleted:
+			var payload struct {
+				Status core.WorkerStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return Plan{}, fmt.Errorf("decode worker completion: %w", err)
+			}
+			if payload.Status == core.WorkerFailed {
+				failedWorkerID = event.WorkerID
+			}
+		}
+	}
+	if len(plans) == 0 {
+		return Plan{}, errors.New("failed task has no persisted plan to retry")
+	}
+	if failedWorkerID != "" {
+		for i := len(workerIDs) - 1; i >= 0; i-- {
+			if workerIDs[i] == failedWorkerID && i < len(plans) {
+				return plans[i], nil
+			}
+		}
+	}
+	return plans[len(plans)-1], nil
 }
 
 func latestWorkerQuestion(snapshot core.Snapshot, taskID string) (string, string) {
@@ -1956,6 +2204,63 @@ func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (Prep
 	return PreparedWorkspace{}, eventstore.ErrNotFound
 }
 
+func (s *Service) completedWorkspaceChanges(ctx context.Context, workerID string) (WorkspaceChanges, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return WorkspaceChanges{}, err
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventWorkerCompleted || event.WorkerID != workerID {
+			continue
+		}
+		var payload struct {
+			WorkspaceChanges WorkspaceChanges `json:"workspaceChanges"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return WorkspaceChanges{}, fmt.Errorf("decode worker completion: %w", err)
+		}
+		if payload.WorkspaceChanges.Root == "" && payload.WorkspaceChanges.CWD == "" {
+			return WorkspaceChanges{}, eventstore.ErrNotFound
+		}
+		return payload.WorkspaceChanges, nil
+	}
+	return WorkspaceChanges{}, eventstore.ErrNotFound
+}
+
+func (s *Service) projectForTaskID(ctx context.Context, taskID string) (core.Project, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Project{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return core.Project{}, eventstore.ErrNotFound
+	}
+	return s.projectForTask(task), nil
+}
+
+func applyRemotePatch(ctx context.Context, project core.Project, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+	result := baseWorkerApplyResult(workspace, "remote_patch_apply")
+	result.SourceRoot = project.LocalPath
+	result.AppliedFiles = changes.ChangedFiles
+	if strings.TrimSpace(changes.Diff) == "" {
+		if len(changes.ChangedFiles) == 0 && !changes.Dirty {
+			return result, nil
+		}
+		return result, errors.New("remote worker changes did not include diff.patch")
+	}
+	patchFile := filepath.Join(os.TempDir(), "aged-remote-"+shortID(workspace.WorkerID)+".patch")
+	if err := os.WriteFile(patchFile, []byte(changes.Diff), 0o600); err != nil {
+		return result, err
+	}
+	defer os.Remove(patchFile)
+	if _, err := runCommand(ctx, project.LocalPath, "git", "apply", "--whitespace=nowarn", patchFile); err != nil {
+		return result, fmt.Errorf("apply remote patch: %w", err)
+	}
+	return result, nil
+}
+
 func (s *Service) cleanupWorkspace(ctx context.Context, taskID string, workerID string, workspace PreparedWorkspace, result WorkspaceResult) error {
 	cleanup, err := s.workspaces.Cleanup(ctx, workspace, result)
 	if err != nil && cleanup.Error == "" {
@@ -2022,6 +2327,10 @@ func planMetadata(plan Plan) map[string]any {
 		"planID",
 		"targetID",
 		"targetKind",
+		"targetLabels",
+		"ignoredTargetLabels",
+		"targetSelectionPolicy",
+		"targetSelectionSource",
 		"remoteSession",
 		"remoteRunDir",
 		"remoteWorkDir",

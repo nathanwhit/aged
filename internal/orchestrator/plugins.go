@@ -1,16 +1,21 @@
 package orchestrator
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"aged/internal/core"
 )
 
 type PluginRegistry struct {
-	plugins []core.Plugin
+	plugins      []core.Plugin
+	probeCommand func(context.Context, []string) ([]byte, error)
 }
 
 type PluginsConfig struct {
@@ -46,6 +51,16 @@ func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 		if plugin.Kind == "" {
 			plugin.Kind = "external"
 		}
+		if plugin.Protocol == "" && len(plugin.Command) > 0 {
+			plugin.Protocol = "aged-plugin-v1"
+		}
+		if plugin.Status == "" {
+			if plugin.Enabled {
+				plugin.Status = "ready"
+			} else {
+				plugin.Status = "disabled"
+			}
+		}
 		byID[plugin.ID] = plugin
 	}
 	out := make([]core.Plugin, 0, len(byID))
@@ -58,7 +73,7 @@ func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 		}
 		return out[i].Kind < out[j].Kind
 	})
-	return &PluginRegistry{plugins: out}
+	return &PluginRegistry{plugins: out, probeCommand: runPluginCommand}
 }
 
 func (r *PluginRegistry) Snapshot() []core.Plugin {
@@ -68,6 +83,65 @@ func (r *PluginRegistry) Snapshot() []core.Plugin {
 	out := make([]core.Plugin, len(r.plugins))
 	copy(out, r.plugins)
 	return out
+}
+
+func (r *PluginRegistry) Probe(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	for index, plugin := range r.plugins {
+		if !plugin.Enabled || len(plugin.Command) == 0 || plugin.Protocol != "aged-plugin-v1" {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		out, err := r.probeCommand(probeCtx, append(append([]string{}, plugin.Command...), "describe"))
+		cancel()
+		if err != nil {
+			plugin.Status = "error"
+			plugin.Error = strings.TrimSpace(err.Error())
+			r.plugins[index] = plugin
+			continue
+		}
+		var described core.Plugin
+		if err := json.Unmarshal(bytes.TrimSpace(out), &described); err != nil {
+			plugin.Status = "error"
+			plugin.Error = "decode plugin describe: " + err.Error()
+			r.plugins[index] = plugin
+			continue
+		}
+		if described.ID != "" && described.ID != plugin.ID {
+			plugin.Status = "error"
+			plugin.Error = "plugin described mismatched id " + described.ID
+			r.plugins[index] = plugin
+			continue
+		}
+		plugin.Status = "ready"
+		plugin.Error = ""
+		if described.Name != "" {
+			plugin.Name = described.Name
+		}
+		if described.Kind != "" {
+			plugin.Kind = described.Kind
+		}
+		if described.Protocol != "" {
+			plugin.Protocol = described.Protocol
+		}
+		if len(described.Capabilities) > 0 {
+			plugin.Capabilities = described.Capabilities
+		}
+		if described.Endpoint != "" {
+			plugin.Endpoint = described.Endpoint
+		}
+		if len(described.Config) > 0 {
+			plugin.Config = described.Config
+		}
+		r.plugins[index] = plugin
+	}
+}
+
+func runPluginCommand(ctx context.Context, argv []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	return cmd.Output()
 }
 
 func builtinPlugins() []core.Plugin {

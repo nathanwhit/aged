@@ -60,8 +60,28 @@ Remote execution targets are configured with `-targets` / `AGED_TARGETS` using J
 ```
 
 SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
+Remote workers also write VCS change summaries and `diff.patch` into the run directory. When the remote workdir is a `jj` or Git checkout, aged reads those artifacts back into the normal `worker.completed.workspaceChanges` projection.
+Remote worker patches can be reviewed and applied through the normal worker apply endpoint. The current remote apply path applies `diff.patch` to the task project's local checkout with `git apply`, then records `worker.changes_applied`.
 
-Projects are configured with `-projects` / `AGED_PROJECTS` using JSON. If omitted, aged creates a single default project from `-workdir`.
+Plugins and external integration descriptors are configured with `-plugins` / `AGED_PLUGINS` using JSON. Enabled plugins with `protocol: "aged-plugin-v1"` and a `command` are probed at daemon startup by running `command... describe`; the command must print a JSON plugin descriptor. This gives external drivers/runners a narrow process lifecycle without loading code into the daemon.
+
+```json
+{
+  "plugins": [
+    {
+      "id": "driver:github-issues",
+      "name": "GitHub Issue Driver",
+      "kind": "driver",
+      "protocol": "aged-plugin-v1",
+      "enabled": true,
+      "command": ["aged-github-driver"],
+      "capabilities": ["issues", "pull-requests"]
+    }
+  ]
+}
+```
+
+Projects are persisted in SQLite. On first startup with an empty database, aged seeds projects from `-projects` / `AGED_PROJECTS`; if omitted, it creates a single default project from `-workdir`.
 
 ```json
 {
@@ -81,6 +101,21 @@ Projects are configured with `-projects` / `AGED_PROJECTS` using JSON. If omitte
 
 Tasks may include `projectId`. External drivers can also include metadata such as `"repo": "owner/repo"`; if that repo matches a configured project, the task is routed there. Worker workspaces, worker cwd, apply, and PR publishing all resolve through the task's project.
 
+New projects can also be added while the daemon is running:
+
+```sh
+curl -X POST http://127.0.0.1:8787/api/projects \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "node",
+    "name": "Node.js",
+    "localPath": "/Users/me/Documents/Code/node",
+    "repo": "nodejs/node",
+    "vcs": "auto",
+    "defaultBase": "main"
+  }'
+```
+
 Scheduler behavior:
 
 - `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
@@ -89,11 +124,13 @@ Scheduler behavior:
 - Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
 - Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
 - Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
-- The orchestrator chooses an execution target for each worker. Plans can request labels through `metadata.targetLabels`, and the target registry scores matching VMs by capacity, current running workers, worker size, and target labels.
+- Snapshots include a derived per-task orchestration graph with node summaries and parent/dependency edges, so clients do not need to reconstruct the work graph from raw events.
+- The service chooses an execution target for each worker. Target labels come from task metadata or project policy, not from the scheduler brain; scheduler-provided `metadata.targetLabels` are ignored and recorded as such. The target registry scores matching VMs by capacity, current running workers, worker size, and target labels.
 - The scheduler is expected to support long-lived work by planning bounded worker turns, then using later turns for review, validation, feedback incorporation, or follow-up implementation.
 - `spawns` from initial and dynamically replanned plans are executed as a dependency graph after the plan's primary worker succeeds. Independent spawns run in parallel; spawns with `dependsOn` wait for their prerequisite spawn ids. Follow-up prompts include the original request plus prior worker summaries, errors, and changed files.
 - Brains that implement dynamic replanning can inspect completed worker turns after follow-ups and return `continue`, `complete`, `wait`, or `fail`. `continue` schedules another worker turn, runs that plan's follow-up graph, and records `task.replanned`.
 - Before a worker is created, the orchestrator resolves the task project and records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
+- Worker prompts are wrapped with the prepared execution workspace before dispatch. In isolated mode workers are told to edit only that workspace and not the source checkout, even if the scheduler prompt mentions another local path.
 - Workspace backends are selected with `-workspace-vcs auto|jj|git`; `auto` prefers `jj` when `.jj` is present and otherwise supports Git repos.
 - Isolated mode is the default. Jujutsu repos use `jj workspace add -r @`; Git repos use `git worktree add --detach HEAD` and require a clean source working tree.
 - Workspace cleanup is selected with `-workspace-cleanup retain|delete_on_success|delete_on_terminal`. Cleanup emits `worker.workspace_cleaned` and does not hide the worker's terminal status.
@@ -104,6 +141,7 @@ Scheduler behavior:
 - Applied task changes can be published as GitHub pull requests with `POST /api/tasks/{id}/pull-request`. If exactly one successful worker has unapplied changes, the service applies it first, creates/pushes a branch from the source checkout, opens the PR with `gh`, and records `pull_request.published`.
 - Pull request state is first-class snapshot data. `POST /api/pull-requests/{id}/refresh` re-inspects CI/review/merge state, and `POST /api/pull-requests/{id}/babysit` schedules a normal orchestrated task to monitor the PR and address failing checks or review comments.
 - Running workers receive task steering through `worker.Spec.Steering` when a runner supports it. The built-in Codex and Claude exec adapters do not hold stdin open for steering because those CLIs treat piped stdin as extra initial prompt input and may wait indefinitely.
+- Failed tasks can be retried with `POST /api/tasks/{id}/retry`; retry reuses the persisted failed plan on the same task id and runs the normal follow-up/replan flow again.
 - `benchmark_compare` compares explicit `baseline`, `candidate`, `threshold_percent`, and `higher_is_better` prompt fields and emits a benchmark comparison report.
 
 API-backed scheduling can be enabled with:
@@ -205,6 +243,8 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `GET /api/auth/me`
 - `GET /api/snapshot`
 - `GET /api/projects`
+- `POST /api/projects`
+- `GET /api/plugins`
 - `GET /api/events?after=<id>`
 - `GET /api/events/stream?after=<id>`
 - `POST /api/assistant`

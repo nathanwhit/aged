@@ -1,4 +1,4 @@
-import type { PullRequestState, Snapshot, WorkerChangesReview } from "./types";
+import type { Project, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -15,8 +15,29 @@ export async function createTask(input: {
   source?: string;
   externalId?: string;
   metadata?: Record<string, unknown>;
-}) {
+}): Promise<Task> {
   const response = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function createProject(input: {
+  id: string;
+  name?: string;
+  localPath: string;
+  repo?: string;
+  vcs?: string;
+  defaultBase?: string;
+  workspaceRoot?: string;
+  targetLabels?: Record<string, string>;
+}): Promise<Project> {
+  const response = await fetch("/api/projects", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
@@ -52,6 +73,16 @@ export async function steerTask(taskId: string, message: string) {
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }
+}
+
+export async function retryTask(taskId: string) {
+  const response = await fetch(`/api/tasks/${taskId}/retry`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
 }
 
 export async function cancelTask(taskId: string) {

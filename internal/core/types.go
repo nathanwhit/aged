@@ -128,7 +128,10 @@ type Plugin struct {
 	ID           string            `json:"id"`
 	Name         string            `json:"name"`
 	Kind         string            `json:"kind"`
+	Protocol     string            `json:"protocol,omitempty"`
 	Enabled      bool              `json:"enabled"`
+	Status       string            `json:"status,omitempty"`
+	Error        string            `json:"error,omitempty"`
 	Command      []string          `json:"command,omitempty"`
 	Endpoint     string            `json:"endpoint,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
