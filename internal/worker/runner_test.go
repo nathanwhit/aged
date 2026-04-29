@@ -179,7 +179,7 @@ func TestDefaultCodexRunnerDoesNotAdvertiseStdinSteering(t *testing.T) {
 
 func TestDefaultCodexRunnerUsesYoloPermissions(t *testing.T) {
 	runner := DefaultRunners()["codex"]
-	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work"})
+	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "low"})
 	want := []string{
 		"codex",
 		"exec",
@@ -187,8 +187,27 @@ func TestDefaultCodexRunnerUsesYoloPermissions(t *testing.T) {
 		"--json",
 		"--cd",
 		"/tmp/aged-work",
+		"-c",
+		"model_reasoning_effort=\"low\"",
 		"do the work",
 	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+}
+
+func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
+	runner := DefaultRunners()["codex"]
+	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "max"})
+	if !reflect.DeepEqual(got[len(got)-3:], []string{"-c", "model_reasoning_effort=\"xhigh\"", "do the work"}) {
+		t.Fatalf("command = %#v", got)
+	}
+}
+
+func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
+	runner := DefaultRunners()["claude"]
+	got := runner.BuildCommand(Spec{Prompt: "review this", ReasoningEffort: "xhigh"})
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--effort", "xhigh", "review this"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}

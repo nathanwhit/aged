@@ -49,21 +49,23 @@ type runResult struct {
 
 func main() {
 	var (
-		addr             = flag.String("addr", envOr("AGED_DEV_ADDR", "127.0.0.1:8790"), "dev control server listen address")
-		daemonAddr       = flag.String("daemon-addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "aged daemon listen address")
-		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "aged daemon SQLite database path")
-		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "aged daemon worker directory")
-		projectsPath     = flag.String("projects", envOr("AGED_PROJECTS", ""), "aged daemon project registry config")
-		pluginsPath      = flag.String("plugins", envOr("AGED_PLUGINS", ""), "aged daemon plugin manifest config")
-		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "codex"), "aged daemon fallback worker kind")
-		assistantMode    = flag.String("assistant", envOr("AGED_ASSISTANT", "auto"), "aged daemon assistant provider")
-		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
-		workspaceVCS     = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "aged daemon workspace VCS")
-		workspaceMode    = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
-		workspaceRoot    = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "aged daemon workspace root")
-		workspaceCleanup = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "aged daemon workspace cleanup policy")
-		webDistPath      = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "aged dashboard dist directory")
-		start            = flag.Bool("start", true, "build and start aged immediately")
+		addr              = flag.String("addr", envOr("AGED_DEV_ADDR", "127.0.0.1:8790"), "dev control server listen address")
+		daemonAddr        = flag.String("daemon-addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "aged daemon listen address")
+		dbPath            = flag.String("db", envOr("AGED_DB", "aged.db"), "aged daemon SQLite database path")
+		workDir           = flag.String("workdir", envOr("AGED_WORKDIR", "."), "aged daemon worker directory")
+		projectsPath      = flag.String("projects", envOr("AGED_PROJECTS", ""), "aged daemon project registry config")
+		pluginsPath       = flag.String("plugins", envOr("AGED_PLUGINS", ""), "aged daemon plugin manifest config")
+		workerKind        = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "codex"), "aged daemon fallback worker kind")
+		assistantMode     = flag.String("assistant", envOr("AGED_ASSISTANT", "auto"), "aged daemon assistant provider")
+		brainMode         = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
+		workspaceVCS      = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "aged daemon workspace VCS")
+		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
+		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "aged daemon workspace root")
+		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "aged daemon workspace cleanup policy")
+		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "aged daemon GitHub driver config JSON path or inline JSON")
+		discordDriverPath = flag.String("discord-driver", envOr("AGED_DISCORD_DRIVER", ""), "aged daemon Discord driver config JSON path or inline JSON")
+		webDistPath       = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "aged dashboard dist directory")
+		start             = flag.Bool("start", true, "build and start aged immediately")
 	)
 	flag.Parse()
 
@@ -95,6 +97,8 @@ func main() {
 			"-workspace-mode", *workspaceMode,
 			"-workspace-root", *workspaceRoot,
 			"-workspace-cleanup", *workspaceCleanup,
+			"-github-driver", *githubDriverPath,
+			"-discord-driver", *discordDriverPath,
 			"-web", *webDistPath,
 		},
 		daemonEnv: os.Environ(),

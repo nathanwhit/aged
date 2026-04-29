@@ -215,15 +215,20 @@ type CreateTaskRequest struct {
 }
 
 type AssistantRequest struct {
-	ConversationID string          `json:"conversationId,omitempty"`
-	Message        string          `json:"message"`
-	Context        json.RawMessage `json:"context,omitempty"`
+	ConversationID    string          `json:"conversationId,omitempty"`
+	Message           string          `json:"message"`
+	Context           json.RawMessage `json:"context,omitempty"`
+	WorkDir           string          `json:"workDir,omitempty"`
+	Provider          string          `json:"provider,omitempty"`
+	ProviderSessionID string          `json:"providerSessionId,omitempty"`
 }
 
 type AssistantResponse struct {
-	ConversationID string          `json:"conversationId"`
-	Message        string          `json:"message"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	ConversationID    string          `json:"conversationId"`
+	Message           string          `json:"message"`
+	Provider          string          `json:"provider,omitempty"`
+	ProviderSessionID string          `json:"providerSessionId,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
 type PublishPullRequestRequest struct {

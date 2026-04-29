@@ -14,13 +14,14 @@ import (
 const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
 
 type Spec struct {
-	ID       string
-	TaskID   string
-	Kind     string
-	Prompt   string
-	WorkDir  string
-	Command  []string
-	Steering <-chan string
+	ID              string
+	TaskID          string
+	Kind            string
+	Prompt          string
+	WorkDir         string
+	Command         []string
+	ReasoningEffort string
+	Steering        <-chan string
 }
 
 type Sink interface {
@@ -207,10 +208,18 @@ func DefaultRunners() map[string]Runner {
 		MockRunner{},
 		BenchmarkCompareRunner{},
 		NewCommandRunner("codex", func(spec Spec) []string {
-			return []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir, spec.Prompt}
+			args := []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir}
+			if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
+				args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
+			}
+			return append(args, spec.Prompt)
 		}),
 		NewCommandRunner("claude", func(spec Spec) []string {
-			return []string{"claude", "--print", "--output-format", "stream-json", spec.Prompt}
+			args := []string{"claude", "--print", "--output-format", "stream-json"}
+			if effort := ReasoningEffort(spec.ReasoningEffort); effort != "" {
+				args = append(args, "--effort", effort)
+			}
+			return append(args, spec.Prompt)
 		}),
 		NewCommandRunner("shell", func(spec Spec) []string {
 			return spec.Command
@@ -222,6 +231,23 @@ func DefaultRunners() map[string]Runner {
 		out[runner.Kind()] = runner
 	}
 	return out
+}
+
+func ReasoningEffort(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func CodexReasoningEffort(value string) string {
+	effort := ReasoningEffort(value)
+	if effort == "max" {
+		return "xhigh"
+	}
+	return effort
 }
 
 type Parser interface {

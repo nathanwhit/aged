@@ -8,3 +8,4 @@ web/dist/
 web/vite.config.d.ts
 web/vite.config.js
 .env
+.config

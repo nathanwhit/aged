@@ -25,6 +25,7 @@ type AssistantProvider interface {
 type Plan struct {
 	WorkerKind        string            `json:"workerKind"`
 	Prompt            string            `json:"workerPrompt"`
+	ReasoningEffort   string            `json:"reasoningEffort,omitempty"`
 	Rationale         string            `json:"rationale,omitempty"`
 	Steps             []PlanStep        `json:"steps,omitempty"`
 	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
@@ -43,11 +44,12 @@ type ApprovalRequest struct {
 }
 
 type SpawnRequest struct {
-	ID         string   `json:"id,omitempty"`
-	Role       string   `json:"role"`
-	Reason     string   `json:"reason"`
-	WorkerKind string   `json:"workerKind,omitempty"`
-	DependsOn  []string `json:"dependsOn,omitempty"`
+	ID              string   `json:"id,omitempty"`
+	Role            string   `json:"role"`
+	Reason          string   `json:"reason"`
+	WorkerKind      string   `json:"workerKind,omitempty"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	DependsOn       []string `json:"dependsOn,omitempty"`
 }
 
 type OrchestrationState struct {

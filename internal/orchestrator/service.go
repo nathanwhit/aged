@@ -462,12 +462,19 @@ func (s *Service) Ask(ctx context.Context, req core.AssistantRequest) (core.Assi
 	if strings.TrimSpace(req.ConversationID) == "" {
 		req.ConversationID = uuid.NewString()
 	}
+	if session := s.assistantSession(ctx, req.ConversationID); session.ProviderSessionID != "" {
+		req.Provider = session.Provider
+		req.ProviderSessionID = session.ProviderSessionID
+	}
 	if _, err := s.append(ctx, core.Event{
 		Type: core.EventAssistantAsked,
 		Payload: core.MustJSON(map[string]any{
-			"conversationId": req.ConversationID,
-			"message":        req.Message,
-			"context":        req.Context,
+			"conversationId":    req.ConversationID,
+			"message":           req.Message,
+			"context":           req.Context,
+			"workDir":           req.WorkDir,
+			"provider":          req.Provider,
+			"providerSessionId": req.ProviderSessionID,
 		}),
 	}); err != nil {
 		return core.AssistantResponse{}, err
@@ -487,17 +494,75 @@ func (s *Service) Ask(ctx context.Context, req core.AssistantRequest) (core.Assi
 	if strings.TrimSpace(response.ConversationID) == "" {
 		response.ConversationID = req.ConversationID
 	}
+	metadata := assistantResponseMetadata(response)
 	if _, err := s.append(ctx, core.Event{
 		Type: core.EventAssistantAnswered,
 		Payload: core.MustJSON(map[string]any{
-			"conversationId": response.ConversationID,
-			"message":        response.Message,
-			"metadata":       response.Metadata,
+			"conversationId":    response.ConversationID,
+			"message":           response.Message,
+			"provider":          response.Provider,
+			"providerSessionId": response.ProviderSessionID,
+			"metadata":          metadata,
 		}),
 	}); err != nil {
 		return core.AssistantResponse{}, err
 	}
+	response.Metadata = metadata
 	return response, nil
+}
+
+type assistantSession struct {
+	Provider          string
+	ProviderSessionID string
+}
+
+func (s *Service) assistantSession(ctx context.Context, conversationID string) assistantSession {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return assistantSession{}
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventAssistantAnswered {
+			continue
+		}
+		var payload struct {
+			ConversationID    string          `json:"conversationId"`
+			Provider          string          `json:"provider"`
+			ProviderSessionID string          `json:"providerSessionId"`
+			Metadata          json.RawMessage `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.ConversationID != conversationID {
+			continue
+		}
+		provider := payload.Provider
+		sessionID := payload.ProviderSessionID
+		if sessionID == "" && len(payload.Metadata) > 0 {
+			var metadata map[string]any
+			if err := json.Unmarshal(payload.Metadata, &metadata); err == nil {
+				provider = nonEmpty(provider, stringMetadataValue(metadata["assistant"]), stringMetadataValue(metadata["brain"]))
+				sessionID = stringMetadataValue(metadata["providerSessionId"])
+			}
+		}
+		if sessionID != "" {
+			return assistantSession{Provider: provider, ProviderSessionID: sessionID}
+		}
+	}
+	return assistantSession{}
+}
+
+func assistantResponseMetadata(response core.AssistantResponse) json.RawMessage {
+	metadata := map[string]any{}
+	if len(response.Metadata) > 0 && string(response.Metadata) != "null" {
+		_ = json.Unmarshal(response.Metadata, &metadata)
+	}
+	if response.Provider != "" {
+		metadata["assistant"] = response.Provider
+	}
+	if response.ProviderSessionID != "" {
+		metadata["providerSessionId"] = response.ProviderSessionID
+	}
+	return core.MustJSON(metadata)
 }
 
 func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req core.PublishPullRequestRequest) (core.PullRequest, error) {
@@ -645,23 +710,37 @@ func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.Pul
 }
 
 func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (core.Task, error) {
-	pr, ok, err := s.findPullRequest(ctx, prID)
+	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return core.Task{}, err
+	}
+	var pr core.PullRequest
+	var ok bool
+	for _, candidate := range snapshot.PullRequests {
+		if candidate.ID == prID {
+			pr = candidate
+			ok = true
+			break
+		}
 	}
 	if !ok {
 		return core.Task{}, eventstore.ErrNotFound
 	}
+	if active := activePullRequestBabysitter(snapshot, pr); active.ID != "" {
+		return active, nil
+	}
+	attempt := pullRequestBabysitterAttempt(snapshot, pr.ID) + 1
 	task, err := s.CreateTask(ctx, core.CreateTaskRequest{
 		Title:      fmt.Sprintf("Babysit PR %s#%d", pr.Repo, pr.Number),
 		Prompt:     pullRequestBabysitterPrompt(pr),
 		Source:     "github-pr-babysitter",
-		ExternalID: pr.ID,
+		ExternalID: fmt.Sprintf("%s:%d", pr.ID, attempt),
 		Metadata: core.MustJSON(map[string]any{
 			"pullRequestId": pr.ID,
 			"repo":          pr.Repo,
 			"number":        pr.Number,
 			"url":           pr.URL,
+			"attempt":       attempt,
 		}),
 	})
 	if err != nil {
@@ -678,6 +757,33 @@ func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (
 		return core.Task{}, err
 	}
 	return task, nil
+}
+
+func activePullRequestBabysitter(snapshot core.Snapshot, pr core.PullRequest) core.Task {
+	if pr.BabysitterTaskID == "" {
+		return core.Task{}
+	}
+	task, ok := findTask(snapshot, pr.BabysitterTaskID)
+	if !ok || isTerminalTaskStatus(task.Status) {
+		return core.Task{}
+	}
+	return task
+}
+
+func pullRequestBabysitterAttempt(snapshot core.Snapshot, prID string) int {
+	attempt := 0
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventPRBabysitter {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.ID == prID {
+			attempt++
+		}
+	}
+	return attempt
 }
 
 func (s *Service) FindTaskByExternalID(ctx context.Context, source string, externalID string) (core.Task, bool, error) {
@@ -1313,6 +1419,10 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
+	plan.ReasoningEffort = normalizeReasoningEffort(nonEmpty(plan.ReasoningEffort, stringMetadata(plan.Metadata, "reasoningEffort"), stringMetadata(plan.Metadata, "thinkingLevel"), stringMetadata(plan.Metadata, "effort")))
+	if plan.ReasoningEffort != "" {
+		plan.Metadata["reasoningEffort"] = plan.ReasoningEffort
+	}
 	project := s.projectForTask(task)
 	plan.Metadata["projectId"] = project.ID
 	if requested := targetLabels(plan.Metadata); len(requested) > 0 {
@@ -1394,12 +1504,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		steering = make(chan string, 16)
 	}
 	spec := worker.Spec{
-		ID:       workerID,
-		TaskID:   task.ID,
-		Kind:     plan.WorkerKind,
-		Prompt:   workerExecutionPrompt(plan.Prompt, workspace),
-		WorkDir:  workspace.CWD,
-		Steering: steering,
+		ID:              workerID,
+		TaskID:          task.ID,
+		Kind:            plan.WorkerKind,
+		Prompt:          workerExecutionPrompt(plan.Prompt, workspace),
+		WorkDir:         workspace.CWD,
+		ReasoningEffort: plan.ReasoningEffort,
+		Steering:        steering,
 	}
 	command := runner.BuildCommand(spec)
 	if _, err := s.append(ctx, core.Event{
@@ -1511,12 +1622,13 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	steering := make(chan string, 16)
 	spec := worker.Spec{
-		ID:       workerID,
-		TaskID:   task.ID,
-		Kind:     plan.WorkerKind,
-		Prompt:   workerExecutionPrompt(plan.Prompt, workspace),
-		WorkDir:  remoteWorkDir,
-		Steering: steering,
+		ID:              workerID,
+		TaskID:          task.ID,
+		Kind:            plan.WorkerKind,
+		Prompt:          workerExecutionPrompt(plan.Prompt, workspace),
+		WorkDir:         remoteWorkDir,
+		ReasoningEffort: plan.ReasoningEffort,
+		Steering:        steering,
 	}
 	command := runner.BuildCommand(spec)
 	remoteRun := NewRemoteRun(target, spec)
@@ -1865,10 +1977,12 @@ func (s *Service) runFollowUpWave(ctx context.Context, task core.Task, initial P
 func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest, results []WorkerTurnResult, turn int, spawnID string, dependsOn []string, parentNodeID string) Plan {
 	workerKind := s.workerKindForSpawn(spawn, initial.WorkerKind)
 	prompt := buildFollowUpPrompt(task, spawn, results)
-	return Plan{
-		WorkerKind: workerKind,
-		Prompt:     prompt,
-		Rationale:  "follow-up worker scheduled from initial plan: " + spawn.Reason,
+	reasoningEffort := normalizeReasoningEffort(nonEmpty(spawn.ReasoningEffort, initial.ReasoningEffort))
+	plan := Plan{
+		WorkerKind:      workerKind,
+		Prompt:          prompt,
+		ReasoningEffort: reasoningEffort,
+		Rationale:       "follow-up worker scheduled from initial plan: " + spawn.Reason,
 		Steps: []PlanStep{{
 			Title:       "Run " + spawn.Role,
 			Description: spawn.Reason,
@@ -1887,6 +2001,10 @@ func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest,
 			"parentRationale": initial.Rationale,
 		},
 	}
+	if reasoningEffort != "" {
+		plan.Metadata["reasoningEffort"] = reasoningEffort
+	}
+	return plan
 }
 
 func (s *Service) workerKindForSpawn(spawn SpawnRequest, fallback string) string {
@@ -2339,6 +2457,7 @@ func planMetadata(plan Plan) map[string]any {
 		"spawnRole",
 		"turn",
 		"dynamicReplanTurn",
+		"reasoningEffort",
 	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
 			metadata[key] = value
@@ -2357,6 +2476,17 @@ func planMetadata(plan Plan) map[string]any {
 		metadata["spawns"] = plan.Spawns
 	}
 	return metadata
+}
+
+func normalizeReasoningEffort(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "default", "":
+		return ""
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return ""
+	}
 }
 
 func stringMetadata(metadata map[string]any, key string) string {

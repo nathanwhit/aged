@@ -133,6 +133,41 @@ func TestServiceAssistantRecordsQuestionAndAnswer(t *testing.T) {
 	}
 }
 
+func TestServiceResumesAssistantProviderSession(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	assistant := &recordingAssistant{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "unused"}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetAssistant(assistant)
+
+	first, err := service.Ask(ctx, core.AssistantRequest{ConversationID: "c1", Message: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ProviderSessionID != "session-1" {
+		t.Fatalf("first session = %q", first.ProviderSessionID)
+	}
+	second, err := service.Ask(ctx, core.AssistantRequest{ConversationID: "c1", Message: "again"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ProviderSessionID != "session-1" {
+		t.Fatalf("second session = %q", second.ProviderSessionID)
+	}
+	if len(assistant.requests) != 2 || assistant.requests[1].ProviderSessionID != "session-1" {
+		t.Fatalf("assistant requests = %+v", assistant.requests)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventAssistantAnswered, "") != 2 {
+		t.Fatalf("assistant.answered count = %d, want 2", countEvents(snapshot.Events, core.EventAssistantAnswered, ""))
+	}
+}
+
 func TestServiceGeneratesMissingTaskTitle(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1706,6 +1741,22 @@ func (b fixedAssistantBrain) Ask(_ context.Context, req core.AssistantRequest) (
 	}, nil
 }
 
+type recordingAssistant struct {
+	requests []core.AssistantRequest
+}
+
+func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	a.requests = append(a.requests, req)
+	sessionID := nonEmpty(req.ProviderSessionID, "session-1")
+	return core.AssistantResponse{
+		ConversationID:    req.ConversationID,
+		Message:           "answer",
+		Provider:          "codex",
+		ProviderSessionID: sessionID,
+		Metadata:          core.MustJSON(map[string]any{"assistant": "codex", "providerSessionId": sessionID}),
+	}, nil
+}
+
 type fakePullRequestPublisher struct {
 	published PullRequestPublishSpec
 	status    core.PullRequest
@@ -1807,9 +1858,10 @@ func (b *sequenceBrain) Plan(_ context.Context, _ core.Task, steering []string) 
 }
 
 type recordingRunner struct {
-	kind    string
-	prompt  string
-	workDir string
+	kind            string
+	prompt          string
+	workDir         string
+	reasoningEffort string
 }
 
 type eventRunner struct {
@@ -2017,6 +2069,7 @@ func (r *recordingRunner) BuildCommand(worker.Spec) []string {
 func (r *recordingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink) error {
 	r.prompt = spec.Prompt
 	r.workDir = spec.WorkDir
+	r.reasoningEffort = spec.ReasoningEffort
 	return nil
 }
 

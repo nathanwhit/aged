@@ -269,7 +269,7 @@ func planResponseFormat() map[string]any {
 			"schema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"workerKind", "workerPrompt", "rationale", "steps", "requiredApprovals", "spawns"},
+				"required":             []string{"workerKind", "workerPrompt", "reasoningEffort", "rationale", "steps", "requiredApprovals", "spawns"},
 				"properties": map[string]any{
 					"workerKind": map[string]any{
 						"type": "string",
@@ -278,6 +278,10 @@ func planResponseFormat() map[string]any {
 					"workerPrompt": map[string]any{
 						"type":      "string",
 						"minLength": 1,
+					},
+					"reasoningEffort": map[string]any{
+						"type": "string",
+						"enum": []string{"default", "low", "medium", "high", "xhigh", "max"},
 					},
 					"rationale": map[string]any{
 						"type": "string",
@@ -320,7 +324,8 @@ func planResponseFormat() map[string]any {
 								"id":         map[string]any{"type": "string"},
 								"role":       map[string]any{"type": "string"},
 								"reason":     map[string]any{"type": "string"},
-								"workerKind": map[string]any{"type": "string", "enum": []string{"codex", "claude", "mock", "benchmark_compare"}},
+								"workerKind":      map[string]any{"type": "string", "enum": []string{"codex", "claude", "mock", "benchmark_compare"}},
+								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
 								"dependsOn": map[string]any{
 									"type":  "array",
 									"items": map[string]any{"type": "string"},

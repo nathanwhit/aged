@@ -81,6 +81,57 @@ Plugins and external integration descriptors are configured with `-plugins` / `A
 }
 ```
 
+The built-in GitHub driver is enabled separately with `-github-driver` / `AGED_GITHUB_DRIVER`, which accepts either a JSON file path or inline JSON. It uses the local `gh` identity, so a VM bot setup should authenticate `gh` as that bot user before starting aged.
+
+```json
+{
+  "enabled": true,
+  "intervalSeconds": 60,
+  "issueLimit": 20,
+  "issues": [
+    {
+      "repo": "nathanwhit/aged",
+      "labels": ["aged"],
+      "projectId": "aged"
+    }
+  ],
+  "pullRequests": {
+    "enabled": true,
+    "repos": ["nathanwhit/aged"],
+    "autoPublish": true,
+    "autoBabysit": true,
+    "draft": false
+  }
+}
+```
+
+On each poll, the driver creates idempotent tasks for matching GitHub issues, publishes PRs for succeeded GitHub issue tasks that do not already have a PR, refreshes known PR status, and starts a PR babysitter task when checks fail, reviews request changes, or mergeability is blocked/dirty. It does not merge PRs automatically.
+
+The built-in Discord driver is enabled with `-discord-driver` / `AGED_DISCORD_DRIVER`, which accepts a JSON file path or inline JSON. It polls configured channels with a Discord bot token, answers normal messages through the configured aged assistant, and can either answer, propose a task for later confirmation, or directly create a task when the conversation clearly asks aged to start work. `task: <prompt>` and a later `do it` reply remain supported shortcuts. If the assistant is not configured for useful conversational answers, the driver still lets `do it` create a task from the prior Discord message.
+
+```json
+{
+  "enabled": true,
+  "token": "optional; defaults to DISCORD_BOT_TOKEN",
+  "intervalSeconds": 5,
+  "messageLimit": 20,
+  "processHistory": false,
+  "channels": [
+    {
+      "id": "123456789012345678",
+      "defaultProjectId": "aged",
+      "allowedUserIds": ["234567890123456789"],
+      "requireMention": true,
+      "taskPrefix": "task:"
+    }
+  ]
+}
+```
+
+The Discord assistant is prompted to return a structured decision: `answer`, `propose_task`, or `create_task`. Proposed/created tasks include `projectId`, `title`, and `prompt`; the project id must match a configured project, with `defaultProjectId` used as the channel fallback. Chat turns run with the selected project's checkout as the assistant working directory and instruct the assistant to inspect code read-only; code changes should be scheduled as tasks. If the daemon restarts after a proposal, a later confirmation can recover the pending task from persisted assistant events.
+
+This is a daemon-hosted Discord transport, not a replacement for a full interactive Codex/Claude agent. The configured aged assistant persists Codex/Claude provider session ids and resumes headless sessions on follow-up messages, so Discord can support continuous conversation when `-assistant codex` or `-assistant claude` is configured. MCP remains the cleaner path when an external agent runtime is available.
+
 Projects are persisted in SQLite. On first startup with an empty database, aged seeds projects from `-projects` / `AGED_PROJECTS`; if omitted, it creates a single default project from `-workdir`.
 
 ```json
@@ -115,6 +166,8 @@ curl -X POST http://127.0.0.1:8787/api/projects \
     "defaultBase": "main"
   }'
 ```
+
+The daemon also exposes a streamable HTTP MCP endpoint at `POST /mcp`. It is protected by the same Google auth middleware when auth is enabled. MCP clients can use aged as a durable orchestration backend while natural-language interaction stays in Codex, Claude, or another agent runtime. Exposed tools include `aged_snapshot`, `aged_create_task`, `aged_create_project`, `aged_publish_pr`, `aged_refresh_pr`, `aged_babysit_pr`, `aged_retry_task`, `aged_steer_task`, and `aged_cancel_task`. MCP resources include `aged://snapshot`, `aged://tasks/{id}`, `aged://workers/{id}`, and `aged://pull-requests/{id}`. The HTTP assistant endpoint and Discord driver also persist provider session ids for resumable Codex/Claude headless conversations.
 
 Scheduler behavior:
 
@@ -261,7 +314,7 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `POST /api/workers/{id}/apply`
 - `POST /api/workers/{id}/cancel`
 
-External drivers can create tasks through the same endpoint as the UI. Include `source` and `externalId` to make creation idempotent across poller restarts:
+External drivers can create tasks through the same endpoint as the UI. Include `source` and `externalId` to make creation idempotent across poller restarts. The built-in GitHub driver uses `source: "github-issue"` and `externalId: "owner/repo#123"`:
 
 ```sh
 curl -X POST http://127.0.0.1:8787/api/tasks \

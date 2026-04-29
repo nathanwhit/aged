@@ -112,7 +112,13 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.assistantPrompt(req))...)
+	prompt := b.assistantPrompt(req)
+	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), b.workDir)
+	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, prompt}
+	if strings.TrimSpace(req.ProviderSessionID) != "" {
+		args = []string{"exec", "resume", "--json", req.ProviderSessionID, prompt}
+	}
+	cmd := exec.CommandContext(runCtx, b.codexPath, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -120,15 +126,20 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 	if err := cmd.Run(); err != nil {
 		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	content, sessionID, err := extractCodexAssistantOutput(stdout.Bytes())
 	if err != nil {
 		return core.AssistantResponse{}, err
 	}
+	sessionID = nonEmpty(sessionID, req.ProviderSessionID)
 	return core.AssistantResponse{
-		ConversationID: req.ConversationID,
-		Message:        strings.TrimSpace(content),
+		ConversationID:    req.ConversationID,
+		Message:           strings.TrimSpace(content),
+		Provider:          "codex",
+		ProviderSessionID: sessionID,
 		Metadata: core.MustJSON(map[string]any{
-			"brain": "codex",
+			"brain":             "codex",
+			"providerSessionId": sessionID,
+			"resumed":           req.ProviderSessionID != "",
 		}),
 	}, nil
 }
@@ -169,7 +180,12 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 func (b *CodexBrain) assistantPrompt(req core.AssistantRequest) string {
 	var builder strings.Builder
 	builder.WriteString("You are the interactive assistant for aged, a local autonomous development orchestrator.\n")
-	builder.WriteString("Answer the user's question directly. If the request needs code execution or a long-running task, say what task should be started.\n\n")
+	builder.WriteString("Answer the user's question directly. You may inspect files in the current project checkout to answer questions, but do not edit files or run mutating commands. If the request needs code execution or a long-running task, say what task should be started.\n\n")
+	if strings.TrimSpace(req.WorkDir) != "" {
+		builder.WriteString("Current read-only project checkout:\n")
+		builder.WriteString(req.WorkDir)
+		builder.WriteString("\n\n")
+	}
 	if len(req.Context) > 0 {
 		builder.WriteString("Context JSON:\n")
 		builder.Write(req.Context)
@@ -215,6 +231,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 	var raw struct {
 		WorkerKind        string          `json:"workerKind"`
 		Prompt            string          `json:"workerPrompt"`
+		ReasoningEffort   string          `json:"reasoningEffort,omitempty"`
 		Rationale         string          `json:"rationale,omitempty"`
 		Steps             json.RawMessage `json:"steps,omitempty"`
 		RequiredApprovals json.RawMessage `json:"requiredApprovals,omitempty"`
@@ -239,6 +256,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 	return Plan{
 		WorkerKind:        raw.WorkerKind,
 		Prompt:            raw.Prompt,
+		ReasoningEffort:   raw.ReasoningEffort,
 		Rationale:         raw.Rationale,
 		Steps:             steps,
 		RequiredApprovals: approvals,

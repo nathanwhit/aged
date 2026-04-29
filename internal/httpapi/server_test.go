@@ -16,6 +16,29 @@ import (
 	"aged/internal/worker"
 )
 
+func postMCP(t *testing.T, serverURL string, body string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Method", "test")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("mcp status = %d", res.StatusCode)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
 func TestCreateTaskRejectsUserWorkerSelection(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
@@ -106,6 +129,102 @@ func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
 
 	if res.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
+func TestMCPEndpointInitializesAndListsTools(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	init := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "initialize",
+		"params": {
+			"protocolVersion": "2025-11-25",
+			"capabilities": {},
+			"clientInfo": {"name": "test", "version": "1"}
+		}
+	}`)
+	result := init["result"].(map[string]any)
+	if result["protocolVersion"] != mcpProtocolVersion {
+		t.Fatalf("initialize result = %+v", result)
+	}
+
+	tools := postMCP(t, server.URL, `{"jsonrpc":"2.0","id":"tools","method":"tools/list"}`)
+	list := tools["result"].(map[string]any)["tools"].([]any)
+	var found bool
+	for _, item := range list {
+		tool := item.(map[string]any)
+		if tool["name"] == "aged_create_task" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("aged_create_task missing from tools: %+v", list)
+	}
+}
+
+func TestMCPCreateTaskAndReadResources(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	created := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_create_task",
+			"arguments": {
+				"title": "MCP task",
+				"prompt": "Run through MCP"
+			}
+		}
+	}`)
+	content := created["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var task core.Task
+	if err := json.Unmarshal([]byte(content["text"].(string)), &task); err != nil {
+		t.Fatal(err)
+	}
+
+	resources := postMCP(t, server.URL, `{"jsonrpc":"2.0","id":2,"method":"resources/list"}`)
+	list := resources["result"].(map[string]any)["resources"].([]any)
+	var foundTaskResource bool
+	for _, item := range list {
+		resource := item.(map[string]any)
+		if resource["uri"] == "aged://tasks/"+task.ID {
+			foundTaskResource = true
+		}
+	}
+	if !foundTaskResource {
+		t.Fatalf("task resource missing: %+v", list)
+	}
+
+	read := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 3,
+		"method": "resources/read",
+		"params": {"uri": "aged://tasks/`+task.ID+`"}
+	}`)
+	contents := read["result"].(map[string]any)["contents"].([]any)
+	text := contents[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "MCP task") {
+		t.Fatalf("resource text = %s", text)
 	}
 }
 

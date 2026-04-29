@@ -37,6 +37,15 @@ func TestGoogleAuthProtectsAPIAndRedirectsPages(t *testing.T) {
 		t.Fatalf("api status = %d, want 401", apiRes.StatusCode)
 	}
 
+	mcpRes, err := client.Post(server.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mcpRes.Body.Close()
+	if mcpRes.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("mcp status = %d, want 401", mcpRes.StatusCode)
+	}
+
 	pageRes, err := client.Get(server.URL + "/")
 	if err != nil {
 		t.Fatal(err)

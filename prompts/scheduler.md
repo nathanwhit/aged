@@ -23,6 +23,7 @@ The JSON object must have exactly these top-level fields:
 {
   "workerKind": "codex",
   "workerPrompt": "string",
+  "reasoningEffort": "medium",
   "rationale": "string",
   "steps": [
     {
@@ -45,6 +46,7 @@ The JSON object must have exactly these top-level fields:
       "role": "string",
       "reason": "string",
       "workerKind": "codex",
+      "reasoningEffort": "low",
       "dependsOn": ["string"]
     }
   ]
@@ -55,17 +57,18 @@ Field rules:
 
 - `workerKind` must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`.
 - `workerPrompt` must be the exact prompt to send to the selected worker.
+- `reasoningEffort` must be exactly one of `"default"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"`. Use `"low"` for cheap/simple edits, formatting, focused lookups, and straightforward reviews. Use `"medium"` for normal implementation. Use `"high"` or `"xhigh"` for complex architecture, debugging, concurrency, data-loss, security, or multi-file refactors. Use `"max"` only when the worker really needs the strongest available thinking. Use `"default"` only when you intentionally want the runner's configured default.
 - Do not include absolute local checkout paths in `workerPrompt`. The executor prepends the actual execution workspace. Refer to "the current working directory", "the repository", or "the execution workspace" instead.
 - `rationale` must be a concise reason for the scheduling choice.
 - `steps` must be an array of objects. Each object must have string fields `title` and `description`.
 - `requiredApprovals` must be an array of objects. Each object must have string fields `title` and `reason`. Use `[]` when no approval is needed.
 - `metadata` is optional. Do not use `metadata.targetLabels`; placement is selected by the orchestrator service from task or project policy, not by the scheduler brain. Use `metadata.workerSize` as `"small"`, `"medium"`, or `"large"` to help load balancing.
 - `spawns` must be an array of objects. Each object must have string fields `role` and `reason`. Use `[]` when no additional future workers are useful.
-- Each spawn may include `id`, `workerKind`, and `dependsOn`. Use `id` when another spawn depends on it. `workerKind`, when present, must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`. `dependsOn` must contain spawn ids from the same `spawns` array.
+- Each spawn may include `id`, `workerKind`, `reasoningEffort`, and `dependsOn`. Use `id` when another spawn depends on it. `workerKind`, when present, must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`. `reasoningEffort`, when present, must use the same values as the top-level field. `dependsOn` must contain spawn ids from the same `spawns` array.
 - Spawns with no `dependsOn` can run in parallel after the initial worker succeeds. Spawns with dependencies wait until all dependency workers succeed.
 
 Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`.
-Never omit `requiredApprovals` or `spawns`; use empty arrays when appropriate.
+Never omit `reasoningEffort`, `requiredApprovals`, or `spawns`; use empty arrays when appropriate.
 Never include comments, trailing commas, markdown fences, or explanatory prose outside the JSON object.
 
 Prefer `codex` for codebase edits and repo-aware engineering tasks. Prefer `claude` when broad explanation, review, or product reasoning is primary. Prefer `benchmark_compare` only when the prompt contains explicit baseline and candidate numeric values to compare. Prefer `mock` only for smoke tests, examples, or when no real worker should run.

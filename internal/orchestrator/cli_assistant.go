@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -77,7 +78,12 @@ func (a *CLIAssistant) Ask(ctx context.Context, req core.AssistantRequest) (core
 }
 
 func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
-	cmd := exec.CommandContext(ctx, a.codexPath, "exec", codexYoloFlag, "--json", "--cd", a.workDir, prompt)
+	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
+	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, prompt}
+	if strings.TrimSpace(req.ProviderSessionID) != "" {
+		args = []string{"exec", "resume", "--json", req.ProviderSessionID, prompt}
+	}
+	cmd := exec.CommandContext(ctx, a.codexPath, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -85,22 +91,32 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 	if err := cmd.Run(); err != nil {
 		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	content, sessionID, err := extractCodexAssistantOutput(stdout.Bytes())
 	if err != nil {
 		return core.AssistantResponse{}, err
 	}
+	sessionID = nonEmpty(sessionID, req.ProviderSessionID)
 	return core.AssistantResponse{
-		ConversationID: req.ConversationID,
-		Message:        strings.TrimSpace(content),
+		ConversationID:    req.ConversationID,
+		Message:           strings.TrimSpace(content),
+		Provider:          "codex",
+		ProviderSessionID: sessionID,
 		Metadata: core.MustJSON(map[string]any{
-			"assistant": "codex",
+			"assistant":         "codex",
+			"providerSessionId": sessionID,
+			"resumed":           req.ProviderSessionID != "",
 		}),
 	}, nil
 }
 
 func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
-	cmd := exec.CommandContext(ctx, a.claudePath, "--print", "--output-format", "stream-json", prompt)
-	cmd.Dir = a.workDir
+	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
+	args := []string{"--print", "--output-format", "stream-json", prompt}
+	if strings.TrimSpace(req.ProviderSessionID) != "" {
+		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", prompt}
+	}
+	cmd := exec.CommandContext(ctx, a.claudePath, args...)
+	cmd.Dir = workDir
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -108,15 +124,21 @@ func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest,
 	if err := cmd.Run(); err != nil {
 		return core.AssistantResponse{}, fmt.Errorf("claude assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	message := extractLastParsedResult("claude", stdout.String())
+	output := stdout.String()
+	message := extractLastParsedResult("claude", output)
 	if message == "" {
-		message = strings.TrimSpace(stdout.String())
+		message = strings.TrimSpace(output)
 	}
+	sessionID := nonEmpty(extractClaudeSessionID(output), req.ProviderSessionID)
 	return core.AssistantResponse{
-		ConversationID: req.ConversationID,
-		Message:        message,
+		ConversationID:    req.ConversationID,
+		Message:           message,
+		Provider:          "claude",
+		ProviderSessionID: sessionID,
 		Metadata: core.MustJSON(map[string]any{
-			"assistant": "claude",
+			"assistant":         "claude",
+			"providerSessionId": sessionID,
+			"resumed":           req.ProviderSessionID != "",
 		}),
 	}, nil
 }
@@ -124,7 +146,12 @@ func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest,
 func interactiveAssistantPrompt(req core.AssistantRequest) string {
 	var builder strings.Builder
 	builder.WriteString("You are the interactive assistant for aged, a local autonomous development orchestrator.\n")
-	builder.WriteString("Answer the user directly and concisely. If the request should become long-running code work, say what task should be started. Do not invent execution results.\n\n")
+	builder.WriteString("Answer the user directly and concisely. You may inspect files in the current project checkout to answer questions, but do not edit files or run mutating commands. If the request should become long-running code work, say what task should be started. Do not invent execution results.\n\n")
+	if strings.TrimSpace(req.WorkDir) != "" {
+		builder.WriteString("Current read-only project checkout:\n")
+		builder.WriteString(req.WorkDir)
+		builder.WriteString("\n\n")
+	}
 	if len(req.Context) > 0 {
 		builder.WriteString("Context JSON:\n")
 		builder.Write(req.Context)
@@ -153,4 +180,44 @@ func extractLastParsedResult(kind string, output string) string {
 		}
 	}
 	return strings.TrimSpace(last)
+}
+
+func extractCodexAssistantOutput(data []byte) (string, string, error) {
+	content, err := extractCodexAgentMessage(data)
+	if err != nil {
+		return "", "", err
+	}
+	return content, extractCodexThreadID(data), nil
+}
+
+func extractCodexThreadID(data []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		var payload map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &payload); err != nil {
+			continue
+		}
+		if payload["type"] == "thread.started" {
+			return stringMetadataValue(payload["thread_id"])
+		}
+	}
+	return ""
+}
+
+func extractClaudeSessionID(output string) string {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(scanner.Text()), &payload); err != nil {
+			continue
+		}
+		if payload["type"] == "system" && payload["subtype"] == "init" {
+			return stringMetadataValue(payload["session_id"])
+		}
+	}
+	return ""
 }

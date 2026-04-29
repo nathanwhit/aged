@@ -33,6 +33,8 @@ func (s *Server) Routes() http.Handler {
 	if s.auth != nil {
 		s.auth.RegisterRoutes(mux)
 	}
+	mux.HandleFunc("POST /mcp", s.mcp)
+	mux.HandleFunc("GET /mcp", s.mcpInfo)
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
@@ -363,7 +365,7 @@ func parseInt64(value string) int64 {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "content-type")
+		w.Header().Set("Access-Control-Allow-Headers", "content-type, mcp-session-id, mcp-method, mcp-name, mcp-protocol-version")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
