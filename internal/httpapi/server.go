@@ -36,6 +36,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
+	mux.HandleFunc("GET /api/tasks/lookup", s.lookupTask)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
@@ -91,6 +92,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, task)
+}
+
+func (s *Server) lookupTask(w http.ResponseWriter, r *http.Request) {
+	task, ok, err := s.service.FindTaskByExternalID(r.Context(), r.URL.Query().Get("source"), r.URL.Query().Get("externalId"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !ok {
+		writeError(w, eventstore.ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 
 func (s *Server) steerTask(w http.ResponseWriter, r *http.Request) {

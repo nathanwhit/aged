@@ -59,6 +59,47 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestServiceDedupesExternalSourceTasks(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	req := core.CreateTaskRequest{
+		Title:      "GitHub issue owner/repo#123",
+		Prompt:     "Fix the issue.",
+		Source:     "github",
+		ExternalID: "owner/repo#123",
+		Metadata:   core.MustJSON(map[string]any{"repo": "owner/repo", "issue": 123}),
+	}
+	first, err := service.CreateTask(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateTask(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate task id = %s, want %s", second.ID, first.ID)
+	}
+	snapshot := waitForTaskStatus(t, store, first.ID, core.TaskSucceeded)
+	if countEvents(snapshot.Events, core.EventTaskCreated, first.ID) != 1 {
+		t.Fatalf("task.created count = %d, want 1", countEvents(snapshot.Events, core.EventTaskCreated, first.ID))
+	}
+	found, ok, err := service.FindTaskByExternalID(ctx, "github", "owner/repo#123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || found.ID != first.ID {
+		t.Fatalf("lookup = %+v ok=%v", found, ok)
+	}
+}
+
 func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

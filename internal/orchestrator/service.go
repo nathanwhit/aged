@@ -249,6 +249,20 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	if req.Prompt == "" {
 		return core.Task{}, errors.New("prompt is required")
 	}
+	metadata, err := createTaskMetadata(req)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if req.Source != "" || req.ExternalID != "" {
+		if req.Source == "" || req.ExternalID == "" {
+			return core.Task{}, errors.New("source and externalId must be provided together")
+		}
+		if existing, ok, err := s.FindTaskByExternalID(ctx, req.Source, req.ExternalID); err != nil {
+			return core.Task{}, err
+		} else if ok {
+			return existing, nil
+		}
+	}
 
 	taskID := uuid.NewString()
 	created, err := s.append(ctx, core.Event{
@@ -257,7 +271,7 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Payload: core.MustJSON(map[string]any{
 			"title":    req.Title,
 			"prompt":   req.Prompt,
-			"metadata": map[string]any{},
+			"metadata": metadata,
 		}),
 	})
 	if err != nil {
@@ -271,10 +285,30 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Status:    core.TaskQueued,
 		CreatedAt: created.At,
 		UpdatedAt: created.At,
+		Metadata:  core.MustJSON(metadata),
 	}
 
 	go s.runTask(context.Background(), task)
 	return task, nil
+}
+
+func (s *Service) FindTaskByExternalID(ctx context.Context, source string, externalID string) (core.Task, bool, error) {
+	source = strings.TrimSpace(source)
+	externalID = strings.TrimSpace(externalID)
+	if source == "" || externalID == "" {
+		return core.Task{}, false, errors.New("source and externalId are required")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Task{}, false, err
+	}
+	for _, task := range snapshot.Tasks {
+		taskSource, taskExternalID := taskExternalRef(task)
+		if taskSource == source && taskExternalID == externalID {
+			return task, true, nil
+		}
+	}
+	return core.Task{}, false, nil
 }
 
 func (s *Service) SteerTask(ctx context.Context, taskID string, req core.SteeringRequest) error {
@@ -1402,6 +1436,47 @@ func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {
 		return ""
 	}
 	return task.Status
+}
+
+func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
+	metadata := map[string]any{}
+	if len(req.Metadata) > 0 {
+		if err := json.Unmarshal(req.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("metadata must be a JSON object: %w", err)
+		}
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+	}
+	if req.Source != "" {
+		metadata["source"] = strings.TrimSpace(req.Source)
+	}
+	if req.ExternalID != "" {
+		metadata["externalId"] = strings.TrimSpace(req.ExternalID)
+	}
+	return metadata, nil
+}
+
+func taskExternalRef(task core.Task) (string, string) {
+	if len(task.Metadata) == 0 {
+		return "", ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return "", ""
+	}
+	return stringMetadataValue(metadata["source"]), stringMetadataValue(metadata["externalId"])
+}
+
+func stringMetadataValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return ""
+	}
 }
 
 func findTask(snapshot core.Snapshot, taskID string) (core.Task, bool) {

@@ -119,8 +119,11 @@ type TargetState struct {
 }
 
 type CreateTaskRequest struct {
-	Title  string `json:"title"`
-	Prompt string `json:"prompt"`
+	Title      string          `json:"title"`
+	Prompt     string          `json:"prompt"`
+	Source     string          `json:"source,omitempty"`
+	ExternalID string          `json:"externalId,omitempty"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 
 type SteeringRequest struct {

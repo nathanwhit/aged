@@ -31,6 +31,7 @@ export type Task = {
   status: TaskStatus;
   createdAt: string;
   updatedAt: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type Worker = {

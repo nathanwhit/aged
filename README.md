@@ -168,6 +168,7 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `GET /api/snapshot`
 - `GET /api/events?after=<id>`
 - `GET /api/events/stream?after=<id>`
+- `GET /api/tasks/lookup?source=<source>&externalId=<id>`
 - `POST /api/tasks`
 - `POST /api/tasks/clear-terminal`
 - `POST /api/tasks/{id}/clear`
@@ -176,3 +177,23 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `GET /api/workers/{id}/changes`
 - `POST /api/workers/{id}/apply`
 - `POST /api/workers/{id}/cancel`
+
+External drivers can create tasks through the same endpoint as the UI. Include `source` and `externalId` to make creation idempotent across poller restarts:
+
+```sh
+curl -X POST http://127.0.0.1:8787/api/tasks \
+  -H 'content-type: application/json' \
+  -d '{
+    "title": "GitHub issue owner/repo#123",
+    "prompt": "Fix the issue described at owner/repo#123...",
+    "source": "github",
+    "externalId": "owner/repo#123",
+    "metadata": {
+      "repo": "owner/repo",
+      "issue": 123,
+      "url": "https://github.com/owner/repo/issues/123"
+    }
+  }'
+```
+
+Posting the same `source` and `externalId` again returns the existing visible task instead of scheduling duplicate work.

@@ -1044,6 +1044,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         status: "queued",
         createdAt: event.at,
         updatedAt: event.at,
+        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
       });
     }
     if (event.type === "task.status" && event.taskId) {
@@ -1119,6 +1120,10 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     targets: snapshot.targets,
     events: snapshot.events,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 createRoot(document.getElementById("root")!).render(

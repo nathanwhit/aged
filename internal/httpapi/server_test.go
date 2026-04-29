@@ -65,6 +65,42 @@ func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 	}
 }
 
+func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
+		"title": "GitHub issue",
+		"prompt": "Fix it",
+		"source": "github",
+		"externalId": "owner/repo#123",
+		"metadata": { "repo": "owner/repo", "issue": 123 }
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("create status = %d", res.StatusCode)
+	}
+
+	lookup, err := http.Get(server.URL + "/api/tasks/lookup?source=github&externalId=owner%2Frepo%23123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lookup.Body.Close()
+	if lookup.StatusCode != http.StatusOK {
+		t.Fatalf("lookup status = %d", lookup.StatusCode)
+	}
+}
+
 func TestClearTerminalTasksEndpointHidesFinishedTask(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

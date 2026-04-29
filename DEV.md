@@ -18,6 +18,7 @@ The initial local-first vertical slice is implemented.
 - Dashboard can clear finished tasks individually or in bulk. Clearing records `task.cleared` and hides the task, workers, and execution nodes from snapshots/UI without deleting event history.
 - Worker cards show live activity from events: latest event text, command summary, and expandable recent worker logs/results/errors. Workers can be selected to drill into a detailed worker-scoped view with command, workspace, completion, target/node, and full worker event history.
 - Workers that emit `needs_input` now create `approval.needed` events. Replanning brains can answer autonomously with a continuation plan; otherwise the task waits, and user/orchestrator feedback through task steering records `approval.decided` and resumes with a continuation worker.
+- External drivers can use `POST /api/tasks` directly with optional `source`, `externalId`, and metadata. `source` plus `externalId` dedupes visible tasks, and `GET /api/tasks/lookup` resolves an external item back to its aged task.
 - Google OAuth can protect the dashboard/API for public exposure. `-auth google` requires Google client credentials, an allowed-email list, and uses signed HTTP-only session cookies.
 - Built-in Codex/Claude workers no longer hold stdin open for steering, avoiding `codex exec` waiting forever for appended stdin input.
 - Daemon startup recovery marks stale local nonterminal workers as canceled when their process handles are no longer recoverable.
