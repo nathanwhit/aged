@@ -19,6 +19,7 @@ The initial local-first vertical slice is implemented.
 - Dashboard can clear finished tasks individually or in bulk. Clearing records `task.cleared` and hides the task, workers, and execution nodes from snapshots/UI without deleting event history.
 - Worker cards show live activity from events: latest event text, command summary, and expandable recent worker logs/results/errors. Workers can be selected to drill into a detailed worker-scoped view with command, workspace, completion, target/node, and full worker event history.
 - Worker event rendering recognizes Codex/Claude JSON stream shapes from persisted SQLite history: command executions render as shell cards with highlighted command/script, exit status, and truncated output; agent messages, file changes, usage, lifecycle, and completion events get dedicated compact views with raw JSON behind details.
+- Worker detail and event views use compact responsive metadata strips, scroll-safe path rows, structured lifecycle cards, and concise timeline summaries instead of wrapping raw JSON/path fields into oversized cards.
 - Workers that emit `needs_input` now create `approval.needed` events. Replanning brains can answer autonomously with a continuation plan; otherwise the task waits, and user/orchestrator feedback through task steering records `approval.decided` and resumes with a continuation worker.
 - External drivers can use `POST /api/tasks` directly with optional `source`, `externalId`, and metadata. `source` plus `externalId` dedupes visible tasks, and `GET /api/tasks/lookup` resolves an external item back to its aged task.
 - Worker workspace preparation, local worker cwd, source apply, and PR publishing now resolve through the task's project rather than an implicit daemon-wide checkout.
@@ -57,6 +58,7 @@ The initial local-first vertical slice is implemented.
 
 - `go test ./...`
 - `npm run build`
+- Rebuild endpoint smoke: `GET /rebuild` successfully rebuilt daemon/UI and restarted the managed daemon on `0.0.0.0:8787`; `GET /api/health` returned ok.
 - SQLite event history inspection against `aged.db` confirmed existing worker output shapes are mostly `command_execution`, `agent_message`, `file_change`, lifecycle, and usage events.
 - Clear-task tests verify `task.cleared` hides tasks/workers/execution nodes while preserving events, and the bulk clear HTTP endpoint hides terminal tasks.
 - Auth tests verify Google auth protects API/static routes, leaves health public, and creates a session through a fake OAuth callback for an allowed Google account.

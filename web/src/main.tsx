@@ -125,16 +125,18 @@ function App() {
       )}
 
       <section className="layout">
-        <TaskComposer
-          onCreate={async (input) => {
-            setError("");
-            const task = await createTask(input);
-            setSelectedTaskId(task.id);
-          }}
-          onError={setError}
-          projects={snapshot.projects}
-        />
-        <AssistantPanel onError={setError} />
+        <section className="left-stack">
+          <TaskComposer
+            onCreate={async (input) => {
+              setError("");
+              const task = await createTask(input);
+              setSelectedTaskId(task.id);
+            }}
+            onError={setError}
+            projects={snapshot.projects}
+          />
+          <AssistantPanel onError={setError} />
+        </section>
 
         <section className="panel task-list">
           <div className="panel-title split-title">
@@ -689,20 +691,25 @@ function WorkerDetail({ worker, node, events }: { worker: Worker; node: Executio
   const created = events.find((event) => event.type === "worker.created");
   const workspace = events.find((event) => event.type === "worker.workspace_prepared");
   const completed = [...events].reverse().find((event) => event.type === "worker.completed");
+  const target = node?.targetId ? `${node.targetKind ?? "target"}:${node.targetId}` : "local";
   return (
     <section className="panel worker-detail-panel">
-      <div className="panel-title split-title">
-        <span>
+      <div className="worker-detail-hero">
+        <div className="worker-detail-title">
           <Eye size={18} />
-          <h2>Worker Detail</h2>
-        </span>
+          <div>
+            <h2>{worker.kind} worker</h2>
+            <p>{worker.id}</p>
+          </div>
+        </div>
         <Status value={worker.status} />
       </div>
-      <div className="worker-detail-grid">
-        <DetailItem label="Worker" value={`${worker.kind} ${worker.id.slice(0, 8)}`} />
-        <DetailItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
-        <DetailItem label="Target" value={node?.targetId ? `${node.targetKind ?? "target"}:${node.targetId}` : "local"} />
-        <DetailItem label="Updated" value={new Date(worker.updatedAt).toLocaleString()} />
+      <div className="worker-meta-strip">
+        <WorkerMetaItem label="Kind" value={worker.kind} />
+        <WorkerMetaItem label="Worker" value={worker.id.slice(0, 8)} />
+        <WorkerMetaItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
+        <WorkerMetaItem label="Target" value={target} />
+        <WorkerMetaItem label="Updated" value={new Date(worker.updatedAt).toLocaleString()} />
       </div>
       {created && <FullCommand event={created} />}
       {workspace && <WorkspaceSummary event={workspace} />}
@@ -721,9 +728,9 @@ function WorkerDetail({ worker, node, events }: { worker: Worker; node: Executio
   );
 }
 
-function DetailItem({ label, value }: { label: string; value: string }) {
+function WorkerMetaItem({ label, value }: { label: string; value: string }) {
   return (
-    <div className="detail-item">
+    <div className="worker-meta-item">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -755,10 +762,13 @@ function FullCommand({ event }: { event: EventRecord }) {
     return null;
   }
   return (
-    <details className="worker-detail-section">
-      <summary>Command</summary>
-      <pre>{payload.command.join(" ")}</pre>
-    </details>
+    <section className="worker-section-card">
+      <div className="section-title-row">
+        <strong>Command</strong>
+        <span className="tool-status neutral">{payload.command.length} parts</span>
+      </div>
+      <CodeBlock label="command" value={payload.command.join(" ")} className="shell-script" />
+    </section>
   );
 }
 
@@ -781,27 +791,47 @@ function CommandLine({ event }: { event: EventRecord }) {
 
 function WorkspaceSummary({ event }: { event: EventRecord }) {
   const payload = event.payload as DisplayPayload;
+  const dirty = Boolean(payload.dirty ?? payload.workspaceChanges?.dirty ?? false);
   return (
-    <details className="worker-detail-section" open>
-      <summary>Workspace</summary>
-      <div className="worker-detail-grid">
-        <DetailItem label="Mode" value={payload.mode ?? "unknown"} />
-        <DetailItem label="VCS" value={payload.vcsType ?? "unknown"} />
-        <DetailItem label="CWD" value={payload.cwd ?? payload.root ?? "unknown"} />
-        <DetailItem label="Dirty" value={String(Boolean(payload.dirty ?? payload.workspaceChanges?.dirty ?? false))} />
+    <section className="worker-section-card">
+      <div className="section-title-row">
+        <strong>Workspace</strong>
+        <span className="tool-status neutral">{payload.mode ?? "unknown"}</span>
+        <span className="tool-status neutral">{payload.vcsType ?? "vcs unknown"}</span>
+        <span className={dirty ? "tool-status warning" : "tool-status"}>{dirty ? "dirty" : "clean"}</span>
       </div>
-      {payload.root && <pre>{payload.root}</pre>}
-    </details>
+      <div className="path-list">
+        <PathRow label="CWD" value={payload.cwd ?? payload.root ?? "unknown"} />
+        {payload.root && payload.root !== payload.cwd && <PathRow label="Root" value={payload.root} />}
+        {payload.sourceRoot && <PathRow label="Source" value={payload.sourceRoot} />}
+        {payload.workspaceName && <PathRow label="Workspace" value={payload.workspaceName} />}
+      </div>
+    </section>
   );
 }
 
 function CompletionSummary({ event }: { event: EventRecord }) {
   const text = eventDisplayText(event);
+  const payload = asRecord(event.payload);
+  const changedFiles = eventChangedFiles(payload);
   return (
-    <details className="worker-detail-section" open>
-      <summary>Completion</summary>
-      <pre>{text}</pre>
-    </details>
+    <section className="worker-section-card">
+      <div className="section-title-row">
+        <strong>Completion</strong>
+        {payloadValue(payload.status) && <span className={payload.status === "succeeded" ? "tool-status" : "tool-status failed"}>{payloadValue(payload.status)}</span>}
+      </div>
+      {text && <TruncatedBlock label="Summary" value={text} className="agent-message-body" limit={1000} />}
+      {changedFiles.length > 0 && <ChangedFilesList files={changedFiles} />}
+    </section>
+  );
+}
+
+function PathRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="path-row">
+      <span>{label}</span>
+      <code title={value}>{value}</code>
+    </div>
   );
 }
 
@@ -827,7 +857,7 @@ function latestInspectableWorkerEvent(events: EventRecord[]): EventRecord | unde
 }
 
 function isInspectableWorkerEvent(event: EventRecord): boolean {
-  return event.type !== "worker.started";
+  return event.type.startsWith("worker.");
 }
 
 function workerEventLabel(event: EventRecord): string {
@@ -1060,15 +1090,30 @@ function EventPayload({ event }: { event: EventRecord }) {
 }
 
 function structuredWorkerEvent(event: EventRecord): React.ReactNode {
-  if (event.type !== "worker.output" && event.type !== "worker.completed") {
+  if (!event.type.startsWith("worker.")) {
     return null;
   }
   const payload = asRecord(event.payload);
   const raw = asRecord(payload.raw ?? payload.rawResult);
   const item = asRecord(raw.item);
 
+  if (event.type === "worker.created") {
+    return <WorkerCreatedCard payload={payload} />;
+  }
+  if (event.type === "worker.started") {
+    return <WorkerLifecycleCard title="Started" subtitle="Worker process is running" />;
+  }
+  if (event.type === "worker.workspace_prepared") {
+    return <WorkerWorkspaceCard payload={payload} />;
+  }
+  if (event.type === "worker.workspace_cleaned") {
+    return <WorkerCleanupCard payload={payload} />;
+  }
   if (event.type === "worker.completed") {
     return <WorkerCompletedCard payload={payload} />;
+  }
+  if (event.type !== "worker.output") {
+    return null;
   }
   if (item.type === "command_execution") {
     return <CommandExecutionCard payload={payload} item={item} raw={raw} />;
@@ -1086,6 +1131,92 @@ function structuredWorkerEvent(event: EventRecord): React.ReactNode {
     return <LifecycleCard raw={raw} />;
   }
   return null;
+}
+
+function WorkerCreatedCard({ payload }: { payload: Record<string, unknown> }) {
+  const metadata = asRecord(payload.metadata);
+  const steps = Array.isArray(metadata.steps) ? metadata.steps : [];
+  const command = Array.isArray(payload.command) ? payload.command.map(String) : [];
+  return (
+    <div className="lifecycle-card">
+      <div className="tool-card-header">
+        <strong>Worker Created</strong>
+        {payloadValue(payload.kind) && <span className="tool-status neutral">{payloadValue(payload.kind)}</span>}
+        {payloadValue(metadata.brain) && <span className="tool-status neutral">{payloadValue(metadata.brain)}</span>}
+        {steps.length > 0 && <span className="tool-status neutral">{steps.length} steps</span>}
+      </div>
+      {payloadValue(metadata.rationale) && <p>{payloadValue(metadata.rationale)}</p>}
+      {command.length > 0 && <CodeBlock label="command" value={command.join(" ")} className="shell-script" />}
+      <MetadataPreview metadata={metadata} />
+    </div>
+  );
+}
+
+function WorkerLifecycleCard({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="lifecycle-card compact-card">
+      <div className="tool-card-header">
+        <strong>{title}</strong>
+        <span className="tool-status">running</span>
+      </div>
+      <p>{subtitle}</p>
+    </div>
+  );
+}
+
+function WorkerWorkspaceCard({ payload }: { payload: Record<string, unknown> }) {
+  const dirty = payload.dirty === true || asRecord(payload.workspaceChanges).dirty === true;
+  return (
+    <div className="lifecycle-card">
+      <div className="tool-card-header">
+        <strong>Workspace Ready</strong>
+        {payloadValue(payload.mode) && <span className="tool-status neutral">{payloadValue(payload.mode)}</span>}
+        {payloadValue(payload.vcsType) && <span className="tool-status neutral">{payloadValue(payload.vcsType)}</span>}
+        <span className={dirty ? "tool-status warning" : "tool-status"}>{dirty ? "dirty" : "clean"}</span>
+      </div>
+      <div className="path-list">
+        <PathRow label="CWD" value={payloadValue(payload.cwd || payload.root) || "unknown"} />
+        {payloadValue(payload.root) && payload.root !== payload.cwd && <PathRow label="Root" value={payloadValue(payload.root)} />}
+        {payloadValue(payload.sourceRoot) && <PathRow label="Source" value={payloadValue(payload.sourceRoot)} />}
+        {payloadValue(payload.workspaceName) && <PathRow label="Workspace" value={payloadValue(payload.workspaceName)} />}
+      </div>
+    </div>
+  );
+}
+
+function WorkerCleanupCard({ payload }: { payload: Record<string, unknown> }) {
+  const cleaned = payload.cleaned === true;
+  return (
+    <div className="lifecycle-card compact-card">
+      <div className="tool-card-header">
+        <strong>Workspace Cleanup</strong>
+        {payloadValue(payload.cleanupPolicy || payload.policy) && <span className="tool-status neutral">{payloadValue(payload.cleanupPolicy || payload.policy)}</span>}
+        <span className={cleaned ? "tool-status" : "tool-status neutral"}>{cleaned ? "cleaned" : "retained"}</span>
+      </div>
+      {payloadValue(payload.result) && <p>{payloadValue(payload.result)}</p>}
+      {payloadValue(payload.root) && <PathRow label="Root" value={payloadValue(payload.root)} />}
+    </div>
+  );
+}
+
+function MetadataPreview({ metadata }: { metadata: Record<string, unknown> }) {
+  const steps = Array.isArray(metadata.steps) ? metadata.steps.map(asRecord).slice(0, 4) : [];
+  if (steps.length === 0) {
+    return <RawPayloadDetails value={metadata} />;
+  }
+  return (
+    <details className="event-files metadata-preview">
+      <summary>Plan steps</summary>
+      <ul>
+        {steps.map((step, index) => (
+          <li key={index}>
+            <code>{payloadValue(step.workerKind || step.kind || index + 1)}</code>
+            <span>{payloadValue(step.title || step.description || step.prompt)}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
 }
 
 function CommandExecutionCard({ payload, item, raw }: { payload: Record<string, unknown>; item: Record<string, unknown>; raw: Record<string, unknown> }) {
@@ -1273,6 +1404,9 @@ function shellTokenClass(token: string): string {
 }
 
 function eventDisplayText(event: EventRecord): string {
+  const compact = compactEventDisplay(event);
+  if (compact) return compact;
+
   const payload = event.payload as DisplayPayload;
   const changedFiles = payload.changedFiles ?? payload.workspaceChanges?.changedFiles ?? [];
   const changeText =
@@ -1303,6 +1437,62 @@ function eventDisplayText(event: EventRecord): string {
       ? `${primaryText} | ${changeText}`
       : primaryText
     : (changeText ?? payloadSummary(event.payload));
+}
+
+function compactEventDisplay(event: EventRecord): string {
+  const payload = asRecord(event.payload);
+  const metadata = asRecord(payload.metadata);
+  if (event.type === "task.created") {
+    return payloadValue(payload.title || payload.prompt) || "Task created";
+  }
+  if (event.type === "task.planned") {
+    const worker = payloadValue(payload.workerKind) || "worker";
+    const rationale = payloadValue(payload.rationale || metadata.rationale);
+    return rationale ? `Planned ${worker}: ${rationale}` : `Planned ${worker}`;
+  }
+  if (event.type === "execution.node_planned") {
+    const worker = payloadValue(payload.workerKind) || "worker";
+    const node = payloadValue(payload.nodeId || metadata.nodeID);
+    const target = payloadValue(payload.targetId || metadata.targetID);
+    const targetKind = payloadValue(payload.targetKind || metadata.targetKind) || "target";
+    return [`${worker} node`, node ? node.slice(0, 8) : "", target ? `on ${targetKind}:${target}` : ""].filter(Boolean).join(" ");
+  }
+  if (event.type === "execution.node_status") {
+    return payloadValue(payload.status) || "Node status changed";
+  }
+  if (event.type === "worker.created") {
+    const brain = payloadValue(metadata.brain);
+    const kind = payloadValue(payload.kind) || "worker";
+    return brain ? `${kind} worker created by ${brain}` : `${kind} worker created`;
+  }
+  if (event.type === "worker.started") {
+    return "Worker started";
+  }
+  if (event.type === "worker.workspace_prepared") {
+    const mode = payloadValue(payload.mode) || "workspace";
+    const vcs = payloadValue(payload.vcsType);
+    return [mode, vcs, "workspace ready"].filter(Boolean).join(" ");
+  }
+  if (event.type === "worker.workspace_cleaned") {
+    return payloadValue(payload.result) || payloadValue(payload.cleanupPolicy || payload.policy) || "Workspace cleanup recorded";
+  }
+  if (event.type === "worker.output") {
+    const raw = asRecord(payload.raw ?? payload.rawResult);
+    const item = asRecord(raw.item);
+    if (item.type === "command_execution") {
+      return `Shell ${payloadValue(item.status || payload.kind) || "event"}`;
+    }
+    if (item.type === "agent_message") {
+      return payloadValue(item.text || payload.text) || "Agent message";
+    }
+    if (item.type === "file_change") {
+      return payloadValue(item.path || item.file || payload.text) || "File changed";
+    }
+    if (raw.type === "thread.started") return "Thread started";
+    if (raw.type === "turn.started") return "Turn started";
+    if (raw.type === "turn.completed") return "Turn completed";
+  }
+  return "";
 }
 
 function eventDetailFields(payload: Record<string, unknown>): DetailField[] {
