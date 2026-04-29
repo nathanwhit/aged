@@ -832,7 +832,15 @@ function isInspectableWorkerEvent(event: EventRecord): boolean {
 
 function workerEventLabel(event: EventRecord): string {
   if (event.type === "worker.output") {
-    const payload = event.payload as { kind?: string; stream?: string };
+    const payload = event.payload as { kind?: string; stream?: string; raw?: unknown };
+    const raw = asRecord(payload.raw);
+    const item = asRecord(raw.item);
+    if (item.type === "command_execution") return `command:${payload.kind ?? "log"}`;
+    if (item.type === "agent_message") return `message:${payload.kind ?? "result"}`;
+    if (item.type === "file_change") return `file:${String(item.status ?? payload.kind ?? "log")}`;
+    if (raw.type === "turn.completed") return "usage";
+    if (raw.type === "thread.started") return "thread";
+    if (raw.type === "turn.started") return "turn";
     return [payload.kind, payload.stream].filter(Boolean).join(":") || "output";
   }
   return event.type.replace("worker.", "");
@@ -999,6 +1007,9 @@ function EventLine({ event }: { event: EventRecord }) {
 }
 
 function EventPayload({ event }: { event: EventRecord }) {
+  const structured = structuredWorkerEvent(event);
+  if (structured) return structured;
+
   const payload = asRecord(event.payload);
   const display = eventDisplayText(event);
   const fields = eventDetailFields(payload);
@@ -1046,6 +1057,219 @@ function EventPayload({ event }: { event: EventRecord }) {
       )}
     </div>
   );
+}
+
+function structuredWorkerEvent(event: EventRecord): React.ReactNode {
+  if (event.type !== "worker.output" && event.type !== "worker.completed") {
+    return null;
+  }
+  const payload = asRecord(event.payload);
+  const raw = asRecord(payload.raw ?? payload.rawResult);
+  const item = asRecord(raw.item);
+
+  if (event.type === "worker.completed") {
+    return <WorkerCompletedCard payload={payload} />;
+  }
+  if (item.type === "command_execution") {
+    return <CommandExecutionCard payload={payload} item={item} raw={raw} />;
+  }
+  if (item.type === "agent_message") {
+    return <AgentMessageCard payload={payload} item={item} raw={raw} />;
+  }
+  if (item.type === "file_change") {
+    return <FileChangeCard payload={payload} item={item} raw={raw} />;
+  }
+  if (raw.type === "turn.completed") {
+    return <UsageCard raw={raw} />;
+  }
+  if (raw.type === "thread.started" || raw.type === "turn.started") {
+    return <LifecycleCard raw={raw} />;
+  }
+  return null;
+}
+
+function CommandExecutionCard({ payload, item, raw }: { payload: Record<string, unknown>; item: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const command = payloadValue(item.command);
+  const script = shellScriptFromCommand(command);
+  const output = payloadValue(item.aggregated_output);
+  const status = payloadValue(item.status) || payloadValue(payload.kind);
+  const exitCode = payloadValue(item.exit_code);
+  const failed = status === "failed" || (exitCode !== "" && exitCode !== "0");
+  return (
+    <div className={failed ? "tool-card failed" : "tool-card"}>
+      <div className="tool-card-header">
+        <strong>Shell</strong>
+        <span className={failed ? "tool-status failed" : "tool-status"}>{status || "running"}</span>
+        {exitCode && <span className={failed ? "tool-status failed" : "tool-status"}>exit {exitCode}</span>}
+      </div>
+      {script ? (
+        <CodeBlock label="bash" value={script} className="shell-script" />
+      ) : (
+        <CodeBlock label="command" value={command} className="shell-script" />
+      )}
+      {output ? <TruncatedBlock label="Output" value={output} className={failed ? "tool-output failed" : "tool-output"} /> : <p className="empty">No output yet.</p>}
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function AgentMessageCard({ payload, item, raw }: { payload: Record<string, unknown>; item: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const text = payloadValue(item.text) || payloadValue(payload.text);
+  return (
+    <div className="agent-message-card">
+      <div className="tool-card-header">
+        <strong>Agent Message</strong>
+        <span className="tool-status">{payloadValue(payload.kind) || "result"}</span>
+      </div>
+      <TruncatedBlock label="Message" value={text} className="agent-message-body" limit={1600} />
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function FileChangeCard({ payload, item, raw }: { payload: Record<string, unknown>; item: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const path = payloadValue(item.path) || payloadValue(item.file) || payloadValue(payload.text);
+  return (
+    <div className="file-change-card">
+      <div className="tool-card-header">
+        <strong>File Change</strong>
+        <span className="tool-status">{payloadValue(item.status) || payloadValue(payload.kind) || "changed"}</span>
+      </div>
+      <code>{path || eventDisplayText({ id: 0, at: "", type: "worker.output", payload })}</code>
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function UsageCard({ raw }: { raw: Record<string, unknown> }) {
+  const usage = asRecord(raw.usage);
+  return (
+    <div className="usage-card">
+      <div className="tool-card-header">
+        <strong>Usage</strong>
+        <span className="tool-status">turn completed</span>
+      </div>
+      <dl className="event-fields">
+        {Object.entries(usage).map(([key, value]) => (
+          <div key={key}>
+            <dt>{humanizeKey(key)}</dt>
+            <dd>{payloadValue(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function LifecycleCard({ raw }: { raw: Record<string, unknown> }) {
+  return (
+    <div className="lifecycle-card">
+      <strong>{payloadValue(raw.type)}</strong>
+      {payloadValue(raw.thread_id) && <code>{payloadValue(raw.thread_id)}</code>}
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function WorkerCompletedCard({ payload }: { payload: Record<string, unknown> }) {
+  const changedFiles = eventChangedFiles(payload);
+  return (
+    <div className="completion-card">
+      <div className="tool-card-header">
+        <strong>Completed</strong>
+        <span className={payload.status === "succeeded" ? "tool-status" : "tool-status failed"}>{payloadValue(payload.status)}</span>
+        {payloadValue(payload.logCount) && <span className="tool-status">{payloadValue(payload.logCount)} logs</span>}
+      </div>
+      {payloadValue(payload.summary) && <TruncatedBlock label="Summary" value={payloadValue(payload.summary)} className="agent-message-body" limit={1600} />}
+      {payloadValue(payload.error) && <TruncatedBlock label="Error" value={payloadValue(payload.error)} className="tool-output failed" limit={1000} />}
+      {changedFiles.length > 0 && <ChangedFilesList files={changedFiles} />}
+      <RawPayloadDetails value={payload.rawResult ?? payload.workspaceChanges} />
+    </div>
+  );
+}
+
+function ChangedFilesList({ files }: { files: { path: string; status?: string }[] }) {
+  return (
+    <details className="event-files" open>
+      <summary>{files.length} changed files</summary>
+      <ul>
+        {files.map((file) => (
+          <li key={`${file.status ?? "changed"}-${file.path}`}>
+            <code>{file.status ?? "changed"}</code>
+            <span>{file.path}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function CodeBlock({ label, value, className }: { label: string; value: string; className?: string }) {
+  return (
+    <div className="code-block">
+      <span>{label}</span>
+      <pre className={className}>{highlightShell(value)}</pre>
+    </div>
+  );
+}
+
+function TruncatedBlock({ label, value, className, limit = 2400 }: { label: string; value: string; className?: string; limit?: number }) {
+  const truncated = value.length > limit;
+  const visible = truncated ? `${value.slice(0, limit).trimEnd()}\n... truncated ${value.length - limit} chars` : value;
+  return (
+    <div className="truncated-block">
+      <span>{label}</span>
+      <pre className={className}>{visible || " "}</pre>
+      {truncated && (
+        <details>
+          <summary>Full output</summary>
+          <pre className={className}>{value}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function RawPayloadDetails({ value }: { value: unknown }) {
+  if (value === undefined || value === null || prettyPayload(value) === "{}") return null;
+  return (
+    <details className="event-raw compact">
+      <summary>Raw payload</summary>
+      <pre>{prettyPayload(value)}</pre>
+    </details>
+  );
+}
+
+function shellScriptFromCommand(command: string): string {
+  const marker = " -lc ";
+  const index = command.indexOf(marker);
+  if (index < 0) return "";
+  const script = command.slice(index + marker.length).trim();
+  if ((script.startsWith("'") && script.endsWith("'")) || (script.startsWith('"') && script.endsWith('"'))) {
+    return script.slice(1, -1);
+  }
+  return script;
+}
+
+function highlightShell(value: string): React.ReactNode {
+  const lines = value.split("\n");
+  return lines.map((line, lineIndex) => (
+    <React.Fragment key={lineIndex}>
+      {line.split(/(\s+|&&|\|\||;)/).map((part, index) => {
+        const cls = shellTokenClass(part);
+        return cls ? <span key={index} className={cls}>{part}</span> : <React.Fragment key={index}>{part}</React.Fragment>;
+      })}
+      {lineIndex < lines.length - 1 ? "\n" : ""}
+    </React.Fragment>
+  ));
+}
+
+function shellTokenClass(token: string): string {
+  if (/^(jj|git|npm|go|curl|sqlite3|sed|rg|cat|ls|cd|mkdir|rm|cp|mv|test)$/.test(token)) return "shell-command-token";
+  if (/^(-{1,2}[\w-]+)/.test(token)) return "shell-flag-token";
+  if (/^(&&|\|\||;)$/.test(token)) return "shell-operator-token";
+  return "";
 }
 
 function eventDisplayText(event: EventRecord): string {

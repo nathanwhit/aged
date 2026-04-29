@@ -602,6 +602,138 @@ small {
   white-space: pre-wrap;
 }
 
+.tool-card,
+.agent-message-card,
+.file-change-card,
+.usage-card,
+.lifecycle-card,
+.completion-card {
+  background: #fbfaf6;
+  border: 1px solid #e0ddd5;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.tool-card.failed {
+  border-color: #e4aaa4;
+}
+
+.tool-card-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tool-card-header strong,
+.lifecycle-card strong {
+  font-size: 13px;
+}
+
+.tool-status {
+  background: #e7f4ea;
+  border: 1px solid #9bc7a6;
+  border-radius: 999px;
+  color: #1d6b34;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 7px;
+}
+
+.tool-status.failed {
+  background: #fde8e7;
+  border-color: #eeaaa5;
+  color: #9a2d25;
+}
+
+.code-block,
+.truncated-block {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.code-block > span,
+.truncated-block > span {
+  color: #767b84;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.shell-script,
+.tool-output,
+.agent-message-body {
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.shell-script {
+  background: #17202a;
+  color: #e8edf2;
+}
+
+.tool-output {
+  background: #202124;
+  color: #eceff1;
+  max-height: 340px;
+}
+
+.tool-output.failed {
+  background: #451a1a;
+  color: #ffd7d3;
+}
+
+.agent-message-body {
+  background: #f7f5ef;
+  border: 1px solid #e0ddd5;
+  color: #343741;
+  max-height: 340px;
+}
+
+.truncated-block details {
+  margin-top: 4px;
+}
+
+.truncated-block summary {
+  color: #4b4f58;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.shell-command-token {
+  color: #9cdcfe;
+  font-weight: 700;
+}
+
+.shell-flag-token {
+  color: #c3e88d;
+}
+
+.shell-operator-token {
+  color: #ffcb6b;
+  font-weight: 700;
+}
+
+.file-change-card code,
+.lifecycle-card code {
+  background: #f7f5ef;
+  border: 1px solid #e0ddd5;
+  border-radius: 6px;
+  color: #343741;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: 8px;
+}
+
 .event-files summary,
 .event-raw summary {
   color: #4b4f58;
@@ -642,6 +774,10 @@ small {
   overflow: auto;
   padding: 10px;
   white-space: pre;
+}
+
+.event-raw.compact pre {
+  max-height: 180px;
 }
 
 .worker-detail-panel {
