@@ -261,6 +261,7 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	changed := WorkspaceChangedFile{Path: "internal/example.txt", Status: "modified"}
 	applyCalls := 0
+	diffCalls := 0
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "writer",
 		Prompt:     "worker prompt",
@@ -276,6 +277,8 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 			ChangedFiles: []WorkspaceChangedFile{changed},
 		},
 		applyCalls: &applyCalls,
+		diff:       "diff --git a/internal/example.txt b/internal/example.txt\n",
+		diffCalls:  &diffCalls,
 	})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -289,6 +292,16 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if len(snapshot.Workers) != 1 {
 		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	review, err := service.ReviewWorkerChanges(ctx, snapshot.Workers[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Changes.Diff == "" {
+		t.Fatal("review diff is empty")
+	}
+	if diffCalls != 1 {
+		t.Fatalf("diff calls = %d, want 1", diffCalls)
 	}
 	result, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID)
 	if err != nil {
@@ -309,6 +322,9 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if applyCalls != 1 {
 		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+	if diffCalls != 1 {
+		t.Fatalf("apply should not reread diff; diff calls = %d, want 1", diffCalls)
 	}
 	if _, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID); err == nil {
 		t.Fatal("second apply succeeded, want error")
@@ -1083,7 +1099,9 @@ type fakeWorkspaceManager struct {
 	cwd        string
 	sourceRoot string
 	changes    WorkspaceChanges
+	diff       string
 	applyCalls *int
+	diffCalls  *int
 }
 
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
@@ -1139,6 +1157,13 @@ func (m fakeWorkspaceManager) DescribeChanges(_ context.Context, workspace Prepa
 		changes.VCSType = workspace.VCSType
 	}
 	return changes, nil
+}
+
+func (m fakeWorkspaceManager) DescribeDiff(context.Context, PreparedWorkspace) (string, error) {
+	if m.diffCalls != nil {
+		*m.diffCalls = *m.diffCalls + 1
+	}
+	return m.diff, nil
 }
 
 func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {

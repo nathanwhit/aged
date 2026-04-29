@@ -392,14 +392,26 @@ func isTerminalTaskStatus(status core.TaskStatus) bool {
 }
 
 func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
+	return s.reviewWorkerChanges(ctx, workerID, true)
+}
+
+func (s *Service) reviewWorkerChanges(ctx context.Context, workerID string, includeDiff bool) (WorkerChangesReview, error) {
 	workspace, err := s.workspaceForWorker(ctx, workerID)
 	if err != nil {
 		return WorkerChangesReview{}, err
 	}
+	changes := s.describeWorkspaceChanges(ctx, workspace)
+	if includeDiff && changes.Error == "" {
+		if diff, err := s.describeWorkspaceDiff(ctx, workspace); err != nil {
+			changes.Error = err.Error()
+		} else {
+			changes.Diff = strings.TrimSpace(diff)
+		}
+	}
 	return WorkerChangesReview{
 		WorkerID:  workerID,
 		Workspace: workspace,
-		Changes:   s.describeWorkspaceChanges(ctx, workspace),
+		Changes:   changes,
 	}, nil
 }
 
@@ -409,7 +421,7 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	} else if applied {
 		return WorkerApplyResult{}, fmt.Errorf("worker changes already applied: %s", workerID)
 	}
-	review, err := s.ReviewWorkerChanges(ctx, workerID)
+	review, err := s.reviewWorkerChanges(ctx, workerID, false)
 	if err != nil {
 		return WorkerApplyResult{}, err
 	}
@@ -1242,6 +1254,17 @@ func (s *Service) describeWorkspaceChanges(ctx context.Context, workspace Prepar
 		changes.Error = err.Error()
 	}
 	return changes
+}
+
+func (s *Service) describeWorkspaceDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
+	type workspaceDiffer interface {
+		DescribeDiff(context.Context, PreparedWorkspace) (string, error)
+	}
+	differ, ok := s.workspaces.(workspaceDiffer)
+	if !ok {
+		return "", nil
+	}
+	return differ.DescribeDiff(ctx, workspace)
 }
 
 func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (PreparedWorkspace, error) {

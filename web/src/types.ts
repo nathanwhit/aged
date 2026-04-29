@@ -43,6 +43,38 @@ export type Worker = {
   updatedAt: string;
 };
 
+export type WorkspaceChangedFile = {
+  path: string;
+  status: string;
+};
+
+export type WorkspaceChanges = {
+  root: string;
+  cwd: string;
+  workspaceName: string;
+  mode: string;
+  vcsType: string;
+  status: string;
+  diffStat: string;
+  diff?: string;
+  changedFiles: WorkspaceChangedFile[];
+  dirty: boolean;
+  error?: string;
+};
+
+export type WorkerChangesReview = {
+  workerId: string;
+  workspace: {
+    root: string;
+    cwd: string;
+    sourceRoot: string;
+    workspaceName: string;
+    mode: string;
+    vcsType: string;
+  };
+  changes: WorkspaceChanges;
+};
+
 export type ExecutionNode = {
   id: string;
   taskId: string;

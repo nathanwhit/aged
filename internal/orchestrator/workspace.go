@@ -56,6 +56,7 @@ type WorkspaceChanges struct {
 	VCSType       string                 `json:"vcsType"`
 	Status        string                 `json:"status"`
 	DiffStat      string                 `json:"diffStat"`
+	Diff          string                 `json:"diff,omitempty"`
 	ChangedFiles  []WorkspaceChangedFile `json:"changedFiles"`
 	Dirty         bool                   `json:"dirty"`
 	Error         string                 `json:"error,omitempty"`
@@ -168,6 +169,19 @@ func (m AutoWorkspaceManager) DescribeChanges(ctx context.Context, workspace Pre
 		changes := baseWorkspaceChanges(workspace)
 		changes.Error = "unsupported VCS type"
 		return changes, nil
+	}
+}
+
+func (m AutoWorkspaceManager) DescribeDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
+	switch workspace.VCSType {
+	case "jj":
+		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.DescribeDiff(ctx, workspace)
+	case "git":
+		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
+		return manager.DescribeDiff(ctx, workspace)
+	default:
+		return "", fmt.Errorf("unsupported VCS type %q", workspace.VCSType)
 	}
 }
 
@@ -385,6 +399,13 @@ func (m JJWorkspaceManager) DescribeChanges(ctx context.Context, workspace Prepa
 	}
 	changes.ChangedFiles = parseJJDiffSummary(summary)
 	return changes, nil
+}
+
+func (m JJWorkspaceManager) DescribeDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
+	if workspace.CWD == "" {
+		return "", errors.New("workspace cwd is required")
+	}
+	return runJJRefreshingStale(ctx, workspace.CWD, "diff", "--git")
 }
 
 func (m JJWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
@@ -622,6 +643,34 @@ func (m GitWorkspaceManager) DescribeChanges(ctx context.Context, workspace Prep
 	return changes, nil
 }
 
+func (m GitWorkspaceManager) DescribeDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
+	if workspace.CWD == "" {
+		return "", errors.New("workspace cwd is required")
+	}
+	diff, err := runGit(ctx, workspace.CWD, "diff", "--binary", "HEAD", "--")
+	if err != nil {
+		return "", err
+	}
+	untracked, err := runGit(ctx, workspace.CWD, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return "", err
+	}
+	var builder strings.Builder
+	builder.WriteString(diff)
+	for _, path := range strings.Split(untracked, "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		fileDiff, err := runGitNoIndexDiff(ctx, workspace.CWD, os.DevNull, path)
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(fileDiff)
+	}
+	return builder.String(), nil
+}
+
 func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
 	result := baseWorkerApplyResult(workspace, "git_commit_merge")
 	result.AppliedFiles = changes.ChangedFiles
@@ -788,6 +837,30 @@ func gitStatusDirty(status string) bool {
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 	return runCommand(ctx, dir, "git", args...)
+}
+
+func runGitNoIndexDiff(ctx context.Context, dir string, before string, after string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "diff", "--no-index", "--", before, after)
+	cmd.Dir = dir
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return stdout.String(), nil
+		}
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = strings.TrimSpace(stdout.String())
+		}
+		if detail != "" {
+			return "", fmt.Errorf("%w: %s", err, detail)
+		}
+		return "", err
+	}
+	return stdout.String(), nil
 }
 
 func runCommand(ctx context.Context, dir string, name string, args ...string) (string, error) {
