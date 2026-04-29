@@ -283,12 +283,15 @@ small {
 
 .status,
 .pill {
+  align-items: center;
   border: 1px solid #c4c7cc;
   border-radius: 999px;
   color: #4b4f58;
   display: inline-flex;
+  flex-shrink: 0;
   font-size: 12px;
   line-height: 1;
+  min-width: max-content;
   padding: 6px 8px;
   text-transform: capitalize;
   white-space: nowrap;
