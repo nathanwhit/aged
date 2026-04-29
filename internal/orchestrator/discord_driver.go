@@ -80,6 +80,7 @@ type DiscordAssistantDecision struct {
 	Action   string
 	Reply    string
 	Proposal DiscordTaskProposal
+	Project  core.Project
 }
 
 func LoadDiscordDriverConfig(value string) (DiscordDriverConfig, error) {
@@ -299,6 +300,12 @@ func (d *DiscordDriver) answerDiscordMessage(ctx context.Context, channel Discor
 		return d.client.SendMessage(ctx, channel.ID, "I can hand this to aged as a task, but the interactive assistant is not configured well enough to answer conversationally right now. Reply `do it` to create a task from your message, or use `task: <prompt>`.")
 	}
 	decision := parseDiscordAssistantResponse(response.Message)
+	switch decision.Action {
+	case "list_projects":
+		return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(discordProjectList(snapshot.Projects)))
+	case "create_project":
+		return d.createDiscordProject(ctx, channel, message, decision.Project)
+	}
 	if strings.TrimSpace(decision.Proposal.Prompt) != "" {
 		if strings.TrimSpace(decision.Proposal.ProjectID) == "" {
 			decision.Proposal.ProjectID = project.ID
@@ -310,6 +317,24 @@ func (d *DiscordDriver) answerDiscordMessage(ctx context.Context, channel Discor
 		d.saveTaskProposal(channel.ID, message.Author.ID, decision.Proposal)
 	}
 	return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(decision.Reply))
+}
+
+func (d *DiscordDriver) createDiscordProject(ctx context.Context, channel DiscordChannelConfig, message DiscordMessage, project core.Project) error {
+	project.ID = strings.TrimSpace(project.ID)
+	project.Name = strings.TrimSpace(project.Name)
+	project.LocalPath = strings.TrimSpace(project.LocalPath)
+	project.Repo = strings.TrimSpace(project.Repo)
+	project.VCS = strings.TrimSpace(project.VCS)
+	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
+	if project.ID == "" || project.LocalPath == "" {
+		return d.client.SendMessage(ctx, channel.ID, "Project create error: project id and localPath are required.")
+	}
+	created, err := d.service.CreateProject(ctx, project)
+	if err != nil {
+		return d.client.SendMessage(ctx, channel.ID, "Project create error: "+err.Error())
+	}
+	d.saveLastProject(channel.ID, message.Author.ID, created.ID)
+	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Created project `%s` (%s)\n%s", created.ID, nonEmpty(created.Name, created.ID), created.LocalPath))
 }
 
 func (d *DiscordDriver) createDiscordTask(ctx context.Context, channel DiscordChannelConfig, message DiscordMessage, proposal DiscordTaskProposal) error {
@@ -346,8 +371,18 @@ Answer the user's question using the provided aged snapshot context and, when us
 Return exactly one JSON object with this schema and no Markdown fence:
 
 {
-  "action": "answer | propose_task | create_task",
+  "action": "answer | list_projects | create_project | propose_task | create_task",
   "reply": "short Discord-ready message to send to the user",
+  "project": {
+    "id": "short stable project id",
+    "name": "human project name",
+    "localPath": "/absolute/path/to/local/checkout",
+    "repo": "optional owner/repo",
+    "vcs": "optional auto | jj | git",
+    "defaultBase": "optional default branch",
+    "workspaceRoot": "optional workspace root override",
+    "targetLabels": {}
+  },
   "proposedTask": {
     "projectId": "one configured project id, or omit when the default project is correct",
     "title": "optional short task title",
@@ -355,7 +390,7 @@ Return exactly one JSON object with this schema and no Markdown fence:
   }
 }
 
-Use "answer" for questions and discussion. Use "propose_task" when a task is plausible but the user has not clearly decided to run it. Use "create_task" when the conversation clearly asks aged to start doing work, even if the user does not literally say "create a task". Set "proposedTask" to null when no task should be proposed or created. If the user asks for work in a repo/project and multiple projects could match, ask a concise follow-up in "reply", set "action" to "answer", and set "proposedTask" to null. Only use a projectId that appears in the provided project list.
+Use "answer" for questions and discussion. Use "list_projects" when the user asks what projects are configured. Use "create_project" when the user clearly asks to add/register a project and provides at least an id or name plus a local checkout path; otherwise ask a follow-up for the missing fields. Use "propose_task" when a task is plausible but the user has not clearly decided to run it. Use "create_task" when the conversation clearly asks aged to start doing work, even if the user does not literally say "create a task". Set "project" to null unless creating a project. Set "proposedTask" to null when no task should be proposed or created. If the user asks for work in a repo/project and multiple projects could match, ask a concise follow-up in "reply", set "action" to "answer", and set "proposedTask" to null. Only use a projectId that appears in the provided project list for tasks.
 
 User message:
 %s`, content)
@@ -396,6 +431,7 @@ func parseDiscordAssistantJSON(message string) (DiscordAssistantDecision, bool) 
 	var payload struct {
 		Action       string               `json:"action"`
 		Reply        string               `json:"reply"`
+		Project      *core.Project        `json:"project"`
 		ProposedTask *DiscordTaskProposal `json:"proposedTask"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
@@ -423,11 +459,43 @@ func parseDiscordAssistantJSON(message string) (DiscordAssistantDecision, bool) 
 		}
 	}
 	switch action {
-	case "answer", "propose_task", "create_task":
+	case "answer", "list_projects", "create_project", "propose_task", "create_task":
 	default:
 		action = "answer"
 	}
-	return DiscordAssistantDecision{Action: action, Reply: reply, Proposal: proposal}, true
+	var project core.Project
+	if payload.Project != nil {
+		project = *payload.Project
+	}
+	return DiscordAssistantDecision{Action: action, Reply: reply, Proposal: proposal, Project: project}, true
+}
+
+func discordProjectList(projects []core.Project) string {
+	if len(projects) == 0 {
+		return "No projects are configured."
+	}
+	var builder strings.Builder
+	builder.WriteString("Configured projects:\n")
+	for _, project := range projects {
+		builder.WriteString("- `")
+		builder.WriteString(project.ID)
+		builder.WriteString("`")
+		if strings.TrimSpace(project.Name) != "" && project.Name != project.ID {
+			builder.WriteString(" - ")
+			builder.WriteString(project.Name)
+		}
+		if strings.TrimSpace(project.Repo) != "" {
+			builder.WriteString(" (")
+			builder.WriteString(project.Repo)
+			builder.WriteString(")")
+		}
+		if strings.TrimSpace(project.LocalPath) != "" {
+			builder.WriteString("\n  ")
+			builder.WriteString(project.LocalPath)
+		}
+		builder.WriteString("\n")
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func isDiscordDoIt(content string) bool {

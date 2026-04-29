@@ -128,7 +128,7 @@ The built-in Discord driver is enabled with `-discord-driver` / `AGED_DISCORD_DR
 }
 ```
 
-The Discord assistant is prompted to return a structured decision: `answer`, `propose_task`, or `create_task`. Proposed/created tasks include `projectId`, `title`, and `prompt`; the project id must match a configured project, with `defaultProjectId` used as the channel fallback. Chat turns run with the selected project's checkout as the assistant working directory and instruct the assistant to inspect code read-only; code changes should be scheduled as tasks. If the daemon restarts after a proposal, a later confirmation can recover the pending task from persisted assistant events.
+The Discord assistant is prompted to return a structured decision: `answer`, `list_projects`, `create_project`, `propose_task`, or `create_task`. Proposed/created tasks include `projectId`, `title`, and `prompt`; the project id must match a configured project, with `defaultProjectId` used as the channel fallback. Project creation uses the same persisted registry as `POST /api/projects`, so Discord can add local checkouts when the user provides an id/name and absolute path. Chat turns run with the selected project's checkout as the assistant working directory and instruct the assistant to inspect code read-only; code changes should be scheduled as tasks. If the daemon restarts after a proposal, a later confirmation can recover the pending task from persisted assistant events.
 
 This is a daemon-hosted Discord transport, not a replacement for a full interactive Codex/Claude agent. The configured aged assistant persists Codex/Claude provider session ids and resumes headless sessions on follow-up messages, so Discord can support continuous conversation when `-assistant codex` or `-assistant claude` is configured. MCP remains the cleaner path when an external agent runtime is available.
 
@@ -167,7 +167,7 @@ curl -X POST http://127.0.0.1:8787/api/projects \
   }'
 ```
 
-The daemon also exposes a streamable HTTP MCP endpoint at `POST /mcp`. It is protected by the same Google auth middleware when auth is enabled. MCP clients can use aged as a durable orchestration backend while natural-language interaction stays in Codex, Claude, or another agent runtime. Exposed tools include `aged_snapshot`, `aged_create_task`, `aged_create_project`, `aged_publish_pr`, `aged_refresh_pr`, `aged_babysit_pr`, `aged_retry_task`, `aged_steer_task`, and `aged_cancel_task`. MCP resources include `aged://snapshot`, `aged://tasks/{id}`, `aged://workers/{id}`, and `aged://pull-requests/{id}`. The HTTP assistant endpoint and Discord driver also persist provider session ids for resumable Codex/Claude headless conversations.
+The daemon also exposes a streamable HTTP MCP endpoint at `POST /mcp`. It is protected by the same Google auth middleware when auth is enabled. MCP clients can use aged as a durable orchestration backend while natural-language interaction stays in Codex, Claude, or another agent runtime. Exposed tools include `aged_snapshot`, `aged_create_task`, `aged_list_projects`, `aged_create_project`, `aged_publish_pr`, `aged_refresh_pr`, `aged_babysit_pr`, `aged_retry_task`, `aged_steer_task`, and `aged_cancel_task`. MCP resources include `aged://snapshot`, `aged://tasks/{id}`, `aged://workers/{id}`, and `aged://pull-requests/{id}`. The HTTP assistant endpoint and Discord driver also persist provider session ids for resumable Codex/Claude headless conversations.
 
 Scheduler behavior:
 
@@ -175,7 +175,7 @@ Scheduler behavior:
 - Users do not choose workers per task; task creation only supplies the work request.
 - Users or external drivers may choose a project per task with `projectId`; worker selection still belongs to the orchestrator.
 - Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
-- Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, rationale, steps, approvals, and future spawn hints.
+- Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, `reasoningEffort`, rationale, steps, approvals, and future spawn hints. Codex workers receive `reasoningEffort` through `model_reasoning_effort`; Claude workers receive it through `--effort`.
 - Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
 - Snapshots include a derived per-task orchestration graph with node summaries and parent/dependency edges, so clients do not need to reconstruct the work graph from raw events.
 - The service chooses an execution target for each worker. Target labels come from task metadata or project policy, not from the scheduler brain; scheduler-provided `metadata.targetLabels` are ignored and recorded as such. The target registry scores matching VMs by capacity, current running workers, worker size, and target labels.

@@ -228,6 +228,68 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	}
 }
 
+func TestMCPProjectTools(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	created := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_create_project",
+			"arguments": {
+				"id": "node",
+				"name": "Node.js",
+				"localPath": "/tmp/node",
+				"repo": "nodejs/node",
+				"vcs": "auto",
+				"defaultBase": "main"
+			}
+		}
+	}`)
+	content := created["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var project core.Project
+	if err := json.Unmarshal([]byte(content["text"].(string)), &project); err != nil {
+		t.Fatal(err)
+	}
+	if project.ID != "node" {
+		t.Fatalf("create project result = %+v", project)
+	}
+
+	listed := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_list_projects",
+			"arguments": {}
+		}
+	}`)
+	listContent := listed["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var projects []core.Project
+	if err := json.Unmarshal([]byte(listContent["text"].(string)), &projects); err != nil {
+		t.Fatal(err)
+	}
+	var foundNode bool
+	for _, project := range projects {
+		if project.ID == "node" {
+			foundNode = true
+		}
+	}
+	if !foundNode {
+		t.Fatalf("list projects result = %+v", projects)
+	}
+}
+
 func TestRetryTaskEndpointRetriesFailedTask(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

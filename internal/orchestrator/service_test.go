@@ -62,6 +62,34 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestServicePassesReasoningEffortToWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &recordingRunner{kind: "codex"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind:      "codex",
+		Prompt:          "worker prompt",
+		ReasoningEffort: "low",
+	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Cheap worker",
+		Prompt: "Use a cheap effort level.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if runner.reasoningEffort != "low" {
+		t.Fatalf("reasoning effort = %q, want low", runner.reasoningEffort)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "reasoningEffort", "low") {
+		t.Fatalf("missing reasoning effort metadata in worker.created")
+	}
+}
+
 func TestServiceDedupesExternalSourceTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2252,6 +2280,25 @@ func countEvents(events []core.Event, eventType core.EventType, taskID string) i
 		}
 	}
 	return count
+}
+
+func hasEventPayloadValue(events []core.Event, eventType core.EventType, taskID string, key string, want string) bool {
+	for _, event := range events {
+		if event.Type != eventType || event.TaskID != taskID {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if stringMetadataValue(payload[key]) == want {
+			return true
+		}
+		if metadata, ok := payload["metadata"].(map[string]any); ok && stringMetadataValue(metadata[key]) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func hasWorkerCreated(events []core.Event, taskID string, kind string) bool {

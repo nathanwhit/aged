@@ -145,6 +145,12 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 	switch params.Name {
 	case "aged_snapshot":
 		result, err = s.service.Snapshot(r.Context())
+	case "aged_list_projects":
+		var snapshot core.Snapshot
+		snapshot, err = s.service.Snapshot(r.Context())
+		if err == nil {
+			result = snapshot.Projects
+		}
 	case "aged_create_task":
 		var req core.CreateTaskRequest
 		err = decodeMCPArgs(params.Arguments, &req)
@@ -363,6 +369,12 @@ func mcpTools() []mcpTool {
 				"externalId": stringSchema("Optional external id paired with source."),
 				"metadata":   objectUntypedSchema("Optional structured metadata."),
 			}, []string{"prompt"}),
+		},
+		{
+			Name:        "aged_list_projects",
+			Title:       "List aged projects",
+			Description: "Return configured projects/repositories known to the daemon.",
+			InputSchema: objectSchema(nil, nil),
 		},
 		{
 			Name:        "aged_create_project",

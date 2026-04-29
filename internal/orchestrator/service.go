@@ -1195,6 +1195,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
+	normalizePlanReasoning(&plan)
 	if _, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskPlanned,
 		TaskID:  task.ID,
@@ -1416,13 +1417,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if runner == nil {
 		return WorkerTurnResult{}, fmt.Errorf("unknown worker kind %q", plan.WorkerKind)
 	}
-	if plan.Metadata == nil {
-		plan.Metadata = map[string]any{}
-	}
-	plan.ReasoningEffort = normalizeReasoningEffort(nonEmpty(plan.ReasoningEffort, stringMetadata(plan.Metadata, "reasoningEffort"), stringMetadata(plan.Metadata, "thinkingLevel"), stringMetadata(plan.Metadata, "effort")))
-	if plan.ReasoningEffort != "" {
-		plan.Metadata["reasoningEffort"] = plan.ReasoningEffort
-	}
+	normalizePlanReasoning(&plan)
 	project := s.projectForTask(task)
 	plan.Metadata["projectId"] = project.ID
 	if requested := targetLabels(plan.Metadata); len(requested) > 0 {
@@ -1797,6 +1792,7 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
+			normalizePlanReasoning(&next)
 			if _, err := s.append(ctx, core.Event{
 				Type:    core.EventTaskPlanned,
 				TaskID:  task.ID,
@@ -2486,6 +2482,19 @@ func normalizeReasoningEffort(value string) string {
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return ""
+	}
+}
+
+func normalizePlanReasoning(plan *Plan) {
+	if plan == nil {
+		return
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.ReasoningEffort = normalizeReasoningEffort(nonEmpty(plan.ReasoningEffort, stringMetadata(plan.Metadata, "reasoningEffort"), stringMetadata(plan.Metadata, "thinkingLevel"), stringMetadata(plan.Metadata, "effort")))
+	if plan.ReasoningEffort != "" {
+		plan.Metadata["reasoningEffort"] = plan.ReasoningEffort
 	}
 }
 

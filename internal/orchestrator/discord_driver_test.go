@@ -320,6 +320,106 @@ func TestDiscordDriverAsksAssistantInSelectedProjectWorkDir(t *testing.T) {
 	}
 }
 
+func TestDiscordDriverListsProjects(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := fixedAssistantBrain{
+		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		answer:     `{"action":"list_projects","reply":"Listing projects.","project":null,"proposedTask":null}`,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "aged", Name: "aged", LocalPath: "/repo/aged", Repo: "nathanwhit/aged"},
+		{ID: "node", Name: "Node.js", LocalPath: "/repo/node", Repo: "nodejs/node"},
+	}, "aged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+	client := &fakeDiscordClient{
+		me: DiscordUser{ID: "bot", Bot: true},
+		messages: map[string][]DiscordMessage{
+			"chan": {{ID: "1", ChannelID: "chan", Content: "list projects", Author: DiscordUser{ID: "user"}}},
+		},
+	}
+	driver := NewDiscordDriver(service, DiscordDriverConfig{
+		Enabled:        true,
+		ProcessHistory: true,
+		Channels:       []DiscordChannelConfig{{ID: "chan", DefaultProjectID: "aged"}},
+	}, client)
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reply := client.sent[len(client.sent)-1]
+	if !strings.Contains(reply, "`aged`") || !strings.Contains(reply, "`node`") {
+		t.Fatalf("reply = %q", reply)
+	}
+}
+
+func TestDiscordDriverCreatesProject(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectDir := t.TempDir()
+	brain := fixedAssistantBrain{
+		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		answer: `{
+			"action": "create_project",
+			"reply": "Creating the project.",
+			"project": {
+				"id": "node",
+				"name": "Node.js",
+				"localPath": "` + projectDir + `",
+				"repo": "nodejs/node",
+				"vcs": "auto",
+				"defaultBase": "main"
+			},
+			"proposedTask": null
+		}`,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "aged", Name: "aged", LocalPath: t.TempDir(), Repo: "nathanwhit/aged"},
+	}, "aged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+	client := &fakeDiscordClient{
+		me: DiscordUser{ID: "bot", Bot: true},
+		messages: map[string][]DiscordMessage{
+			"chan": {{ID: "1", ChannelID: "chan", Content: "add node project", Author: DiscordUser{ID: "user"}}},
+		},
+	}
+	driver := NewDiscordDriver(service, DiscordDriverConfig{
+		Enabled:        true,
+		ProcessHistory: true,
+		Channels:       []DiscordChannelConfig{{ID: "chan", DefaultProjectID: "aged"}},
+	}, client)
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := projectByID(snapshot.Projects, "node"); !ok {
+		t.Fatalf("projects = %+v", snapshot.Projects)
+	}
+	if !strings.Contains(client.sent[len(client.sent)-1], "Created project `node`") {
+		t.Fatalf("sent = %+v", client.sent)
+	}
+}
+
 func TestDiscordDriverAssistantFallbackStillAllowsDoIt(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

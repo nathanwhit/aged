@@ -399,10 +399,11 @@ Field rules:
 - Use "continue" when another worker turn is needed.
 - Use "wait" when user input or approval is needed.
 - Use "fail" when the task cannot continue.
-- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, rationale, steps, requiredApprovals, spawns.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
 - Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
 - When action is not "continue", "plan" must be null or omitted.
+- "reasoningEffort" inside plan must be one of "default", "low", "medium", "high", "xhigh", or "max".
 - "steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects, never arrays of strings.
 
 Dynamic replanning input:
