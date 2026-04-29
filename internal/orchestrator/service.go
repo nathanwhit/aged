@@ -302,6 +302,10 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		}
 	}
 	s.mu.Unlock()
+	snapshot, snapshotErr := s.store.Snapshot(ctx)
+	if snapshotErr == nil && taskStatus(snapshot, taskID) == core.TaskWaiting {
+		go s.resumeWaitingTask(context.Background(), taskID, req.Message)
+	}
 	return err
 }
 
@@ -392,14 +396,26 @@ func isTerminalTaskStatus(status core.TaskStatus) bool {
 }
 
 func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
+	return s.reviewWorkerChanges(ctx, workerID, true)
+}
+
+func (s *Service) reviewWorkerChanges(ctx context.Context, workerID string, includeDiff bool) (WorkerChangesReview, error) {
 	workspace, err := s.workspaceForWorker(ctx, workerID)
 	if err != nil {
 		return WorkerChangesReview{}, err
 	}
+	changes := s.describeWorkspaceChanges(ctx, workspace)
+	if includeDiff && changes.Error == "" {
+		if diff, err := s.describeWorkspaceDiff(ctx, workspace); err != nil {
+			changes.Error = err.Error()
+		} else {
+			changes.Diff = strings.TrimSpace(diff)
+		}
+	}
 	return WorkerChangesReview{
 		WorkerID:  workerID,
 		Workspace: workspace,
-		Changes:   s.describeWorkspaceChanges(ctx, workspace),
+		Changes:   changes,
 	}, nil
 }
 
@@ -409,7 +425,7 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	} else if applied {
 		return WorkerApplyResult{}, fmt.Errorf("worker changes already applied: %s", workerID)
 	}
-	review, err := s.ReviewWorkerChanges(ctx, workerID)
+	review, err := s.reviewWorkerChanges(ctx, workerID, false)
 	if err != nil {
 		return WorkerApplyResult{}, err
 	}
@@ -560,6 +576,10 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 	results = append(results, result)
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(ctx, task, plan, results, result)
+		return
+	}
 	if !s.finishOrContinueTask(ctx, task.ID, result) {
 		return
 	}
@@ -578,6 +598,146 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	}
 
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
+	question := nonEmpty(waiting.Summary, waiting.Error, "worker requested orchestrator input")
+	_, _ = s.append(ctx, core.Event{
+		Type:     core.EventApprovalNeeded,
+		TaskID:   task.ID,
+		WorkerID: waiting.WorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"question": question,
+			"summary":  waiting.Summary,
+			"error":    waiting.Error,
+			"reason":   "worker_needs_input",
+		}),
+	})
+	replanner, ok := s.brain.(ReplanProvider)
+	if !ok {
+		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		return
+	}
+	decision, err := replanner.Replan(ctx, task, OrchestrationState{
+		InitialPlan: initial,
+		Results:     results,
+		Turn:        1,
+	})
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, fmt.Errorf("question replan failed: %w", err))
+		return
+	}
+	if err := decision.Validate(); err != nil {
+		_ = s.failTask(ctx, task.ID, fmt.Errorf("invalid question replan decision: %w", err))
+		return
+	}
+	switch decision.Action {
+	case "continue":
+		_, _ = s.append(ctx, core.Event{
+			Type:   core.EventApprovalDecided,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"approved": true,
+				"answer":   nonEmpty(decision.Message, decision.Rationale),
+				"reason":   "autonomous_replan",
+				"workerId": waiting.WorkerID,
+			}),
+		})
+		if decision.Plan.Metadata == nil {
+			decision.Plan.Metadata = map[string]any{}
+		}
+		decision.Plan.Metadata["parentNodeID"] = waiting.NodeID
+		decision.Plan.Metadata["questionWorkerID"] = waiting.WorkerID
+		_, _ = s.append(ctx, core.Event{
+			Type:   core.EventTaskReplanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"action":    decision.Action,
+				"rationale": decision.Rationale,
+				"message":   decision.Message,
+				"turn":      1,
+			}),
+		})
+		_, _ = s.append(ctx, core.Event{
+			Type:    core.EventTaskPlanned,
+			TaskID:  task.ID,
+			Payload: core.MustJSON(decision.Plan),
+		})
+		if result, err := s.runPlannedWorker(ctx, task, *decision.Plan); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+		} else if result.Status == core.WorkerWaiting {
+			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
+		} else if s.finishOrContinueTask(ctx, task.ID, result) {
+			_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+		}
+	case "wait":
+		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+	case "complete":
+		_ = s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+	case "fail":
+		_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "worker question could not be answered")))
+	}
+}
+
+func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || task.Status != core.TaskWaiting {
+		return
+	}
+	waitingWorkerID, question := latestWorkerQuestion(snapshot, taskID)
+	_, _ = s.append(ctx, core.Event{
+		Type:     core.EventApprovalDecided,
+		TaskID:   taskID,
+		WorkerID: waitingWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"approved": true,
+			"answer":   feedback,
+			"question": question,
+			"reason":   "user_feedback",
+		}),
+	})
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return
+	}
+	steering := taskSteering(snapshot, taskID)
+	steering = append(steering, fmt.Sprintf("Worker question: %s\nFeedback: %s", question, feedback))
+	plan, err := s.brain.Plan(ctx, task, steering)
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if err := plan.Validate(); err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["questionWorkerID"] = waitingWorkerID
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(ctx, task, plan, []WorkerTurnResult{result}, result)
+		return
+	}
+	if s.finishOrContinueTask(ctx, taskID, result) {
+		_ = s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+	}
 }
 
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
@@ -1236,12 +1396,85 @@ func nonEmpty(values ...string) string {
 	return ""
 }
 
+func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return ""
+	}
+	return task.Status
+}
+
+func findTask(snapshot core.Snapshot, taskID string) (core.Task, bool) {
+	for _, task := range snapshot.Tasks {
+		if task.ID == taskID {
+			return task, true
+		}
+	}
+	return core.Task{}, false
+}
+
+func taskSteering(snapshot core.Snapshot, taskID string) []string {
+	var out []string
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventTaskSteered {
+			continue
+		}
+		var payload struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && strings.TrimSpace(payload.Message) != "" {
+			out = append(out, payload.Message)
+		}
+	}
+	return out
+}
+
+func latestWorkerQuestion(snapshot core.Snapshot, taskID string) (string, string) {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventWorkerCompleted:
+			var payload struct {
+				NeedsInput bool   `json:"needsInput"`
+				Summary    string `json:"summary"`
+				Error      string `json:"error"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.NeedsInput {
+				return event.WorkerID, nonEmpty(payload.Summary, payload.Error, "worker requested orchestrator input")
+			}
+		case core.EventWorkerOutput:
+			var payload struct {
+				Kind string `json:"kind"`
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Kind == string(worker.EventNeedsInput) {
+				return event.WorkerID, nonEmpty(payload.Text, "worker requested orchestrator input")
+			}
+		}
+	}
+	return "", "worker requested orchestrator input"
+}
+
 func (s *Service) describeWorkspaceChanges(ctx context.Context, workspace PreparedWorkspace) WorkspaceChanges {
 	changes, err := s.workspaces.DescribeChanges(ctx, workspace)
 	if err != nil && changes.Error == "" {
 		changes.Error = err.Error()
 	}
 	return changes
+}
+
+func (s *Service) describeWorkspaceDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
+	type workspaceDiffer interface {
+		DescribeDiff(context.Context, PreparedWorkspace) (string, error)
+	}
+	differ, ok := s.workspaces.(workspaceDiffer)
+	if !ok {
+		return "", nil
+	}
+	return differ.DescribeDiff(ctx, workspace)
 }
 
 func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (PreparedWorkspace, error) {

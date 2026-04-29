@@ -1,4 +1,4 @@
-import type { Snapshot } from "./types";
+import type { Snapshot, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -69,6 +69,14 @@ export async function cancelWorker(workerId: string) {
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }
+}
+
+export async function getWorkerChanges(workerId: string): Promise<WorkerChangesReview> {
+  const response = await fetch(`/api/workers/${workerId}/changes`);
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
 }
 
 export async function applyWorkerChanges(workerId: string) {

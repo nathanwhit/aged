@@ -6,6 +6,7 @@ import {
   Check,
   CircleStop,
   Eye,
+  FileText,
   MessageSquarePlus,
   Play,
   RefreshCw,
@@ -13,8 +14,8 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, Snapshot, TargetState, Task, Worker } from "./types";
+import { applyWorkerChanges, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, steerTask } from "./api";
+import type { EventRecord, ExecutionNode, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -174,6 +175,7 @@ function App() {
                 events={selectedEvents}
                 selectedWorkerId={selectedWorkerId}
                 onSelect={setSelectedWorkerId}
+                onReview={getWorkerChanges}
                 onApply={applyWorkerChanges}
                 onApplied={refresh}
                 onCancel={cancelWorker}
@@ -362,6 +364,7 @@ function WorkerList({
   events,
   selectedWorkerId,
   onSelect,
+  onReview,
   onApply,
   onApplied,
   onCancel,
@@ -371,12 +374,14 @@ function WorkerList({
   events: EventRecord[];
   selectedWorkerId: string;
   onSelect: (id: string) => void;
+  onReview: (id: string) => Promise<WorkerChangesReview>;
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onCancel: (id: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [applying, setApplying] = useState<string>("");
+  const [diffs, setDiffs] = useState<Record<string, DiffReviewState>>({});
 
   async function apply(workerId: string) {
     setApplying(workerId);
@@ -387,6 +392,39 @@ function WorkerList({
       onError((err as Error).message);
     } finally {
       setApplying("");
+    }
+  }
+
+  async function toggleDiff(workerId: string) {
+    const current = diffs[workerId];
+    if (current?.open) {
+      setDiffs((items) => ({ ...items, [workerId]: { ...current, open: false } }));
+      return;
+    }
+    if (current?.loaded) {
+      setDiffs((items) => ({ ...items, [workerId]: { ...current, open: true } }));
+      return;
+    }
+    setDiffs((items) => ({ ...items, [workerId]: { open: true, loading: true, loaded: false, diff: "" } }));
+    try {
+      const review = await onReview(workerId);
+      setDiffs((items) => ({
+        ...items,
+        [workerId]: {
+          open: true,
+          loading: false,
+          loaded: true,
+          diff: review.changes.diff ?? "",
+          error: review.changes.error,
+        },
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      setDiffs((items) => ({
+        ...items,
+        [workerId]: { open: true, loading: false, loaded: true, diff: "", error: message },
+      }));
+      onError(message);
     }
   }
 
@@ -406,6 +444,7 @@ function WorkerList({
             const applied = workerChangesApplied(events, worker.id);
             const workerEvents = events.filter((event) => event.workerId === worker.id);
             const latestEvent = latestInspectableWorkerEvent(workerEvents);
+            const diff = diffs[worker.id];
             return (
               <article key={worker.id} className={worker.id === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
@@ -437,10 +476,17 @@ function WorkerList({
                         ))}
                       </ul>
                     </details>
-                    <button className="primary compact" disabled={applied || applying === worker.id} onClick={() => apply(worker.id)} title={applied ? "Worker changes already applied" : "Apply worker changes"}>
-                      <Check size={16} />
-                      {applied ? "Applied" : applying === worker.id ? "Applying" : "Apply"}
-                    </button>
+                    <div className="worker-review-actions">
+                      <button className="secondary compact" disabled={diff?.loading} onClick={() => toggleDiff(worker.id)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
+                        <FileText size={16} />
+                        {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
+                      </button>
+                      <button className="primary compact" disabled={applied || applying === worker.id} onClick={() => apply(worker.id)} title={applied ? "Worker changes already applied" : "Apply worker changes"}>
+                        <Check size={16} />
+                        {applied ? "Applied" : applying === worker.id ? "Applying" : "Apply"}
+                      </button>
+                    </div>
+                    {diff?.open && <DiffViewer state={diff} />}
                   </div>
                 )}
               </article>
@@ -450,6 +496,43 @@ function WorkerList({
       )}
     </section>
   );
+}
+
+type DiffReviewState = {
+  open: boolean;
+  loading: boolean;
+  loaded: boolean;
+  diff: string;
+  error?: string;
+};
+
+function DiffViewer({ state }: { state: DiffReviewState }) {
+  if (state.loading) {
+    return <div className="worker-diff loading">Loading diff...</div>;
+  }
+  if (state.error) {
+    return <div className="worker-diff error">{state.error}</div>;
+  }
+  if (!state.diff) {
+    return <div className="worker-diff empty">No diff content available.</div>;
+  }
+  return (
+    <pre className="worker-diff" aria-label="Worker diff">
+      {state.diff.split("\n").map((line, index) => (
+        <span key={index} className={diffLineClass(line)}>
+          {line || " "}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("+") && !line.startsWith("+++")) return "diff-add";
+  if (line.startsWith("-") && !line.startsWith("---")) return "diff-remove";
+  if (line.startsWith("@@")) return "diff-hunk";
+  if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("+++ ") || line.startsWith("--- ")) return "diff-meta";
+  return "diff-context";
 }
 
 function WorkerDetail({ worker, node, events }: { worker: Worker; node: ExecutionNode | undefined; events: EventRecord[] }) {
@@ -679,6 +762,9 @@ type DisplayPayload = {
   error?: string;
   summary?: string;
   reason?: string;
+  question?: string;
+  answer?: string;
+  approved?: boolean;
   cleaned?: boolean;
   logCount?: number;
   needsInput?: boolean;
@@ -816,9 +902,12 @@ function eventDisplayText(event: EventRecord): string {
     payload.message ??
     payload.error ??
     payload.reason ??
+    payload.question ??
+    payload.answer ??
     payload.workspaceChanges?.diffStat ??
     workspaceText ??
     payload.status ??
+    (typeof payload.approved === "boolean" ? `approved: ${payload.approved}` : undefined) ??
     (typeof payload.cleaned === "boolean" ? `cleaned: ${payload.cleaned}` : undefined);
   return primaryText
     ? changeText

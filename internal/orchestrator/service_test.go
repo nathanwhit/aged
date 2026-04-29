@@ -253,6 +253,92 @@ func TestServiceMovesTaskToWaitingWhenWorkerNeedsInput(t *testing.T) {
 	}
 }
 
+func TestServiceAutonomouslyContinuesWhenReplannerAnswersWorkerQuestion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "ask",
+			Prompt:     "ask for input",
+		},
+		decisions: []ReplanDecision{{
+			Action:  "continue",
+			Message: "Use the existing dependency.",
+			Plan: &Plan{
+				WorkerKind: "answer",
+				Prompt:     "continue with autonomous answer",
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "Which dependency should I use?",
+		}}},
+		"answer": eventRunner{kind: "answer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "continued after orchestrator answer",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing approval.needed event")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalDecided, task.ID, "") {
+		t.Fatalf("missing approval.decided event")
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "answer") {
+		t.Fatalf("missing continuation worker")
+	}
+}
+
+func TestServiceResumesWaitingTaskWhenSteered(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &sequenceBrain{plans: []Plan{
+		{WorkerKind: "ask", Prompt: "ask for input"},
+		{WorkerKind: "answer", Prompt: "continue after feedback"},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "Should I install a dependency?",
+		}}},
+		"answer": eventRunner{kind: "answer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "continued after user feedback",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "Use the existing package only."}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasEvent(snapshot.Events, core.EventApprovalDecided, task.ID, "") {
+		t.Fatalf("missing approval.decided event")
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "answer") {
+		t.Fatalf("missing resumed worker")
+	}
+	if got := strings.Join(brain.steering, "\n"); !strings.Contains(got, "Should I install a dependency?") || !strings.Contains(got, "Use the existing package only.") {
+		t.Fatalf("resume steering = %q", got)
+	}
+}
+
 func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -261,6 +347,7 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	workspaceRoot := t.TempDir()
 	changed := WorkspaceChangedFile{Path: "internal/example.txt", Status: "modified"}
 	applyCalls := 0
+	diffCalls := 0
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "writer",
 		Prompt:     "worker prompt",
@@ -276,6 +363,8 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 			ChangedFiles: []WorkspaceChangedFile{changed},
 		},
 		applyCalls: &applyCalls,
+		diff:       "diff --git a/internal/example.txt b/internal/example.txt\n",
+		diffCalls:  &diffCalls,
 	})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -289,6 +378,16 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if len(snapshot.Workers) != 1 {
 		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	review, err := service.ReviewWorkerChanges(ctx, snapshot.Workers[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Changes.Diff == "" {
+		t.Fatal("review diff is empty")
+	}
+	if diffCalls != 1 {
+		t.Fatalf("diff calls = %d, want 1", diffCalls)
 	}
 	result, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID)
 	if err != nil {
@@ -309,6 +408,9 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if applyCalls != 1 {
 		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+	if diffCalls != 1 {
+		t.Fatalf("apply should not reread diff; diff calls = %d, want 1", diffCalls)
 	}
 	if _, err := service.ApplyWorkerChanges(ctx, snapshot.Workers[0].ID); err == nil {
 		t.Fatal("second apply succeeded, want error")
@@ -896,6 +998,24 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	return decision, nil
 }
 
+type sequenceBrain struct {
+	mu       sync.Mutex
+	plans    []Plan
+	steering []string
+}
+
+func (b *sequenceBrain) Plan(_ context.Context, _ core.Task, steering []string) (Plan, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.steering = append(b.steering[:0], steering...)
+	if len(b.plans) == 0 {
+		return Plan{}, errors.New("no plans left")
+	}
+	plan := b.plans[0]
+	b.plans = b.plans[1:]
+	return plan, nil
+}
+
 type recordingRunner struct {
 	kind    string
 	prompt  string
@@ -1083,7 +1203,9 @@ type fakeWorkspaceManager struct {
 	cwd        string
 	sourceRoot string
 	changes    WorkspaceChanges
+	diff       string
 	applyCalls *int
+	diffCalls  *int
 }
 
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
@@ -1139,6 +1261,13 @@ func (m fakeWorkspaceManager) DescribeChanges(_ context.Context, workspace Prepa
 		changes.VCSType = workspace.VCSType
 	}
 	return changes, nil
+}
+
+func (m fakeWorkspaceManager) DescribeDiff(context.Context, PreparedWorkspace) (string, error) {
+	if m.diffCalls != nil {
+		*m.diffCalls = *m.diffCalls + 1
+	}
+	return m.diff, nil
 }
 
 func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
