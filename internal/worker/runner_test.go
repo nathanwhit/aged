@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +174,23 @@ func TestDefaultCodexRunnerDoesNotAdvertiseStdinSteering(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	if steering, ok := runner.(SteeringSupport); ok && steering.SupportsSteering() {
 		t.Fatal("default codex runner must not hold stdin open for steering")
+	}
+}
+
+func TestDefaultCodexRunnerUsesYoloPermissions(t *testing.T) {
+	runner := DefaultRunners()["codex"]
+	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work"})
+	want := []string{
+		"codex",
+		"exec",
+		"--dangerously-bypass-approvals-and-sandbox",
+		"--json",
+		"--cd",
+		"/tmp/aged-work",
+		"do the work",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
 	}
 }
 

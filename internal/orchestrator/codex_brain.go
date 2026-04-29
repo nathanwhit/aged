@@ -15,6 +15,8 @@ import (
 	"aged/internal/core"
 )
 
+const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+
 type CodexBrainConfig struct {
 	CodexPath    string
 	TemplatePath string
@@ -77,7 +79,7 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, "exec", "--json", "--cd", b.workDir, b.replanPrompt(task, state))
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.replanPrompt(task, state))...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -110,7 +112,7 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, "exec", "--json", "--cd", b.workDir, b.prompt(task, steering))
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.prompt(task, steering))...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -137,6 +139,10 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	plan.Metadata["brain"] = "codex"
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
+}
+
+func (b *CodexBrain) execArgs(prompt string) []string {
+	return []string{"exec", codexYoloFlag, "--json", "--cd", b.workDir, prompt}
 }
 
 func decodeReplanDecision(data []byte) (ReplanDecision, error) {
