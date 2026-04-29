@@ -283,12 +283,15 @@ small {
 
 .status,
 .pill {
+  align-items: center;
   border: 1px solid #c4c7cc;
   border-radius: 999px;
   color: #4b4f58;
   display: inline-flex;
+  flex-shrink: 0;
   font-size: 12px;
   line-height: 1;
+  min-width: max-content;
   padding: 6px 8px;
   text-transform: capitalize;
   white-space: nowrap;
@@ -997,6 +1000,62 @@ small {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.plugin-grid,
+.graph-node-list {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.plugin-card,
+.graph-node {
+  background: #ffffff;
+  border: 1px solid #e3e7ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.plugin-card.disabled {
+  opacity: 0.62;
+}
+
+.plugin-card strong,
+.graph-node strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plugin-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.plugin-capabilities span {
+  background: #f8fafc;
+  border: 1px solid #e3e7ee;
+  border-radius: 999px;
+  color: #536070;
+  font-size: 11px;
+  padding: 4px 7px;
+}
+
+.graph-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.graph-summary {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .node-card {
   border: 1px solid #e0ddd5;
   border-radius: 8px;
@@ -1193,6 +1252,10 @@ small {
   .summary-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .graph-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 620px) {
@@ -1228,6 +1291,10 @@ small {
   }
 
   .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .graph-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

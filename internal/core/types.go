@@ -124,6 +124,17 @@ type TargetState struct {
 	Available bool              `json:"available"`
 }
 
+type Plugin struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Kind         string            `json:"kind"`
+	Enabled      bool              `json:"enabled"`
+	Command      []string          `json:"command,omitempty"`
+	Endpoint     string            `json:"endpoint,omitempty"`
+	Capabilities []string          `json:"capabilities,omitempty"`
+	Config       map[string]string `json:"config,omitempty"`
+}
+
 type Project struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
@@ -153,6 +164,42 @@ type PullRequest struct {
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
+}
+
+type OrchestrationGraph struct {
+	TaskID    string                    `json:"taskId"`
+	Status    TaskStatus                `json:"status"`
+	Nodes     []OrchestrationGraphNode  `json:"nodes"`
+	Edges     []OrchestrationGraphEdge  `json:"edges"`
+	Summary   OrchestrationGraphSummary `json:"summary"`
+	UpdatedAt time.Time                 `json:"updatedAt"`
+}
+
+type OrchestrationGraphNode struct {
+	ID         string       `json:"id"`
+	WorkerID   string       `json:"workerId,omitempty"`
+	WorkerKind string       `json:"workerKind"`
+	Status     WorkerStatus `json:"status"`
+	Role       string       `json:"role,omitempty"`
+	Reason     string       `json:"reason,omitempty"`
+	SpawnID    string       `json:"spawnId,omitempty"`
+	TargetID   string       `json:"targetId,omitempty"`
+	TargetKind string       `json:"targetKind,omitempty"`
+}
+
+type OrchestrationGraphEdge struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type OrchestrationGraphSummary struct {
+	Total    int `json:"total"`
+	Running  int `json:"running"`
+	Waiting  int `json:"waiting"`
+	Done     int `json:"done"`
+	Failed   int `json:"failed"`
+	Canceled int `json:"canceled"`
 }
 
 type CreateTaskRequest struct {
@@ -196,13 +243,15 @@ type ApprovalDecision struct {
 }
 
 type Snapshot struct {
-	Tasks          []Task          `json:"tasks"`
-	Workers        []Worker        `json:"workers"`
-	ExecutionNodes []ExecutionNode `json:"executionNodes"`
-	Targets        []TargetState   `json:"targets,omitempty"`
-	Projects       []Project       `json:"projects,omitempty"`
-	PullRequests   []PullRequest   `json:"pullRequests,omitempty"`
-	Events         []Event         `json:"events"`
+	Tasks               []Task               `json:"tasks"`
+	Workers             []Worker             `json:"workers"`
+	ExecutionNodes      []ExecutionNode      `json:"executionNodes"`
+	Targets             []TargetState        `json:"targets,omitempty"`
+	Plugins             []Plugin             `json:"plugins,omitempty"`
+	Projects            []Project            `json:"projects,omitempty"`
+	PullRequests        []PullRequest        `json:"pullRequests,omitempty"`
+	OrchestrationGraphs []OrchestrationGraph `json:"orchestrationGraphs,omitempty"`
+	Events              []Event              `json:"events"`
 }
 
 func MustJSON(v any) json.RawMessage {

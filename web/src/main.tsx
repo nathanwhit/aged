@@ -8,15 +8,17 @@ import {
   Eye,
   FileText,
   GitPullRequest,
+  Network,
   MessageSquarePlus,
   Play,
+  Puzzle,
   RefreshCw,
   Send,
   Terminal,
   Trash2,
 } from "lucide-react";
 import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -24,8 +26,10 @@ type AppSnapshot = {
   workers: Worker[];
   executionNodes: ExecutionNode[];
   targets: TargetState[];
+  plugins: Plugin[];
   projects: Project[];
   pullRequests: PullRequestState[];
+  orchestrationGraphs: OrchestrationGraph[];
   events: EventRecord[];
 };
 
@@ -34,8 +38,10 @@ const emptySnapshot: AppSnapshot = {
   workers: [],
   executionNodes: [],
   targets: [],
+  plugins: [],
   projects: [],
   pullRequests: [],
+  orchestrationGraphs: [],
   events: [],
 };
 
@@ -74,6 +80,7 @@ function App() {
   );
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
+  const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
   const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
@@ -188,6 +195,8 @@ function App() {
               />
               <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />
               <TargetPanel targets={snapshot.targets} />
+              <PluginPanel plugins={snapshot.plugins} />
+              <OrchestrationGraphPanel graph={selectedGraph} />
               <ExecutionGraph nodes={selectedNodes} />
               <WorkerList
                 workers={selectedWorkers}
@@ -936,6 +945,78 @@ function TargetPanel({ targets }: { targets: TargetState[] }) {
   );
 }
 
+function PluginPanel({ plugins }: { plugins: Plugin[] }) {
+  if (plugins.length === 0) return null;
+  const enabled = plugins.filter((plugin) => plugin.enabled).length;
+  return (
+    <section className="panel">
+      <div className="panel-title split-title">
+        <span>
+          <Puzzle size={18} />
+          <h2>Plugins</h2>
+        </span>
+        <span className="pill">{enabled}/{plugins.length} enabled</span>
+      </div>
+      <div className="plugin-grid">
+        {plugins.map((plugin) => (
+          <article key={plugin.id} className={plugin.enabled ? "plugin-card" : "plugin-card disabled"}>
+            <div>
+              <strong>{plugin.name}</strong>
+              <small>{plugin.id}</small>
+            </div>
+            <span className={plugin.enabled ? "tool-status" : "tool-status neutral"}>{plugin.kind}</span>
+            {plugin.capabilities && plugin.capabilities.length > 0 && (
+              <div className="plugin-capabilities">
+                {plugin.capabilities.slice(0, 5).map((capability) => (
+                  <span key={capability}>{capability}</span>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OrchestrationGraphPanel({ graph }: { graph: OrchestrationGraph | undefined }) {
+  if (!graph || graph.nodes.length === 0) return null;
+  return (
+    <section className="panel graph-panel">
+      <div className="panel-title split-title">
+        <span>
+          <Network size={18} />
+          <h2>Orchestration Graph</h2>
+        </span>
+        <span className="pill">{graph.edges.length} edges</span>
+      </div>
+      <div className="graph-summary">
+        <Metric label="Nodes" value={String(graph.summary.total)} />
+        <Metric label="Done" value={String(graph.summary.done)} />
+        <Metric label="Running" value={String(graph.summary.running)} />
+        <Metric label="Waiting" value={String(graph.summary.waiting)} />
+        <Metric label="Failed" value={String(graph.summary.failed + graph.summary.canceled)} />
+      </div>
+      <div className="graph-node-list">
+        {graph.nodes.map((node) => {
+          const incoming = graph.edges.filter((edge) => edge.to === node.id);
+          return (
+            <article key={node.id} className="graph-node">
+              <div>
+                <strong>{node.role || node.workerKind}</strong>
+                <small>{node.spawnId || node.id.slice(0, 8)}</small>
+              </div>
+              <Status value={node.status} />
+              {incoming.length > 0 && <small>after {incoming.map((edge) => edge.from.slice(0, 8)).join(", ")}</small>}
+              {node.targetId && <small>{node.targetKind ?? "target"}: {node.targetId}</small>}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 type WorkerCompletionPayload = {
   changedFiles?: { path: string; status?: string }[];
   workspaceChanges?: { changedFiles?: { path: string; status?: string }[] };
@@ -1600,13 +1681,17 @@ function Status({ value }: { value: string }) {
 }
 
 function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
+  const executionNodes = snapshot.executionNodes ?? [];
+  const tasks = snapshot.tasks ?? [];
   return {
-    tasks: snapshot.tasks ?? [],
+    tasks,
     workers: snapshot.workers ?? [],
-    executionNodes: snapshot.executionNodes ?? [],
+    executionNodes,
     targets: snapshot.targets ?? [],
+    plugins: snapshot.plugins ?? [],
     projects: snapshot.projects ?? [],
     pullRequests: snapshot.pullRequests ?? [],
+    orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
     events: snapshot.events ?? [],
   };
 }
@@ -1759,11 +1844,62 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
     workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
     executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    orchestrationGraphs: deriveOrchestrationGraphs(
+      [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
+      [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    ),
     projects: snapshot.projects,
+    plugins: snapshot.plugins,
     pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
     targets: snapshot.targets,
     events: snapshot.events,
   };
+}
+
+function deriveOrchestrationGraphs(tasks: Task[], nodes: ExecutionNode[]): OrchestrationGraph[] {
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const byTask = new Map<string, ExecutionNode[]>();
+  for (const node of nodes) {
+    byTask.set(node.taskId, [...(byTask.get(node.taskId) ?? []), node]);
+  }
+  return [...byTask.entries()].map(([taskId, taskNodes]) => {
+    const spawnToNode = new Map(taskNodes.filter((node) => node.spawnId).map((node) => [node.spawnId!, node.id]));
+    const edges = taskNodes.flatMap((node) => {
+      const items = [];
+      if (node.parentNodeId) items.push({ from: node.parentNodeId, to: node.id, reason: "parent" });
+      for (const dep of node.dependsOn ?? []) {
+        const from = spawnToNode.get(dep);
+        if (from) items.push({ from, to: node.id, reason: `depends_on:${dep}` });
+      }
+      return items;
+    });
+    const summary = {
+      total: taskNodes.length,
+      running: taskNodes.filter((node) => node.status === "running").length,
+      waiting: taskNodes.filter((node) => node.status === "waiting" || node.status === "queued").length,
+      done: taskNodes.filter((node) => node.status === "succeeded").length,
+      failed: taskNodes.filter((node) => node.status === "failed").length,
+      canceled: taskNodes.filter((node) => node.status === "canceled").length,
+    };
+    return {
+      taskId,
+      status: tasksById.get(taskId)?.status ?? "queued",
+      nodes: taskNodes.map((node) => ({
+        id: node.id,
+        workerId: node.workerId,
+        workerKind: node.workerKind,
+        status: node.status,
+        role: node.role,
+        reason: node.reason,
+        spawnId: node.spawnId,
+        targetId: node.targetId,
+        targetKind: node.targetKind,
+      })),
+      edges,
+      summary,
+      updatedAt: taskNodes.map((node) => node.updatedAt).sort().at(-1) ?? "",
+    };
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

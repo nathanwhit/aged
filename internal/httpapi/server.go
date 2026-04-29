@@ -35,6 +35,7 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/projects", s.projects)
+	mux.HandleFunc("GET /api/plugins", s.plugins)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
 	mux.HandleFunc("POST /api/assistant", s.assistant)
@@ -81,6 +82,15 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot.Projects)
+}
+
+func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.service.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot.Plugins)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {

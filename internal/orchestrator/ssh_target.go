@@ -125,6 +125,37 @@ func (r SSHRunner) Cancel(ctx context.Context, run remoteRun) error {
 	return err
 }
 
+func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) WorkspaceChanges {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	read := func(name string) string {
+		out, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true"))
+		return strings.TrimSpace(out)
+	}
+	vcs := read("vcs.txt")
+	root := nonEmpty(read("root.txt"), run.WorkDir)
+	status := read("changes.txt")
+	diffStat := read("diffstat.txt")
+	changes := WorkspaceChanges{
+		Root:          root,
+		CWD:           run.WorkDir,
+		WorkspaceName: run.Session,
+		Mode:          "remote",
+		VCSType:       nonEmpty(vcs, "ssh"),
+		Status:        status,
+		DiffStat:      nonEmpty(diffStat, status),
+		Dirty:         strings.TrimSpace(status) != "",
+	}
+	switch vcs {
+	case "jj":
+		changes.ChangedFiles = parseJJDiffSummary(status)
+	case "git":
+		changes.ChangedFiles = parseGitPorcelain(status)
+	}
+	return changes
+}
+
 func remoteStartScript(run remoteRun, argv []string) string {
 	command := shellJoin(argv)
 	statusRunning := shellQuote(`{"status":"running"}`)
@@ -133,15 +164,21 @@ func remoteStartScript(run remoteRun, argv []string) string {
 		shellQuote(run.RunDir),
 		statusRunning,
 		shellQuote(run.Session),
-		shellQuote(fmt.Sprintf(`cd %s && (%s) > %s/stdout.log 2> %s/stderr.log; code=$?; if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
+		shellQuote(fmt.Sprintf(`cd %s && (%s) > %s/stdout.log 2> %s/stderr.log; code=$?; %s; if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
 			shellQuote(run.WorkDir),
 			command,
 			shellQuote(run.RunDir),
 			shellQuote(run.RunDir),
+			remoteChangeScript(run),
 			shellQuote(run.RunDir),
 			shellQuote(run.RunDir),
 		)),
 	)
+}
+
+func remoteChangeScript(run remoteRun) string {
+	runDir := shellQuote(run.RunDir)
+	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; fi`, runDir)
 }
 
 func sshArgs(target TargetConfig, remoteArgv ...string) []string {

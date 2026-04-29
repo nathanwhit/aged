@@ -61,6 +61,7 @@ type Service struct {
 	runners     map[string]worker.Runner
 	workDir     string
 	projects    *ProjectRegistry
+	plugins     *PluginRegistry
 	workspaces  WorkspaceManager
 	targets     *TargetRegistry
 	sshRunner   SSHRunner
@@ -118,6 +119,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		runners:     runners,
 		workDir:     workDir,
 		projects:    projects,
+		plugins:     NewPluginRegistry(builtinPlugins()),
 		workspaces:  workspaces,
 		targets:     targets,
 		sshRunner:   sshRunner,
@@ -147,6 +149,12 @@ func (s *Service) SetProjects(projects *ProjectRegistry) {
 	}
 }
 
+func (s *Service) SetPlugins(plugins *PluginRegistry) {
+	if plugins != nil {
+		s.plugins = plugins
+	}
+}
+
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
 	s.prPublisher = publisher
 }
@@ -161,6 +169,9 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	}
 	if s.projects != nil {
 		snapshot.Projects = s.projects.Snapshot()
+	}
+	if s.plugins != nil {
+		snapshot.Plugins = s.plugins.Snapshot()
 	}
 	return snapshot, nil
 }
@@ -1416,14 +1427,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		workerStatus = core.WorkerCanceled
 		statusErr = context.Canceled
 	}
-	changes := WorkspaceChanges{
-		Root:     remoteRun.RunDir,
-		CWD:      remoteRun.WorkDir,
-		Mode:     "remote",
-		VCSType:  "ssh",
-		Dirty:    false,
-		DiffStat: "remote worker changes are reported through worker output",
-	}
+	changes := s.sshRunner.DescribeChanges(ctx, remoteRun)
 	_, _ = s.append(ctx, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   task.ID,

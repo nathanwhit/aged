@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"aged/internal/core"
@@ -366,12 +367,15 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		}
 	}
 
+	filteredTasks := filterClearedTasks(tasks, clearedTasks)
+	filteredNodes := filterClearedExecutionNodes(nodes, clearedTasks)
 	return core.Snapshot{
-		Tasks:          orderedTasks(filterClearedTasks(tasks, clearedTasks)),
-		Workers:        orderedWorkers(filterClearedWorkers(workers, clearedTasks)),
-		ExecutionNodes: orderedExecutionNodes(filterClearedExecutionNodes(nodes, clearedTasks)),
-		PullRequests:   orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
-		Events:         events,
+		Tasks:               orderedTasks(filteredTasks),
+		Workers:             orderedWorkers(filterClearedWorkers(workers, clearedTasks)),
+		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
+		PullRequests:        orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
+		OrchestrationGraphs: orchestrationGraphs(filteredTasks, filteredNodes),
+		Events:              events,
 	}, nil
 }
 
@@ -413,6 +417,78 @@ func filterClearedPullRequests(values map[string]core.PullRequest, cleared map[s
 		}
 	}
 	return out
+}
+
+func orchestrationGraphs(tasks map[string]core.Task, nodes map[string]core.ExecutionNode) []core.OrchestrationGraph {
+	byTask := map[string][]core.ExecutionNode{}
+	for _, node := range nodes {
+		byTask[node.TaskID] = append(byTask[node.TaskID], node)
+	}
+	graphs := make([]core.OrchestrationGraph, 0, len(byTask))
+	for taskID, taskNodes := range byTask {
+		sort.Slice(taskNodes, func(i, j int) bool {
+			return taskNodes[i].CreatedAt.Before(taskNodes[j].CreatedAt)
+		})
+		spawnToNode := map[string]string{}
+		for _, node := range taskNodes {
+			if node.SpawnID != "" {
+				spawnToNode[node.SpawnID] = node.ID
+			}
+		}
+		graphNodes := make([]core.OrchestrationGraphNode, 0, len(taskNodes))
+		edges := []core.OrchestrationGraphEdge{}
+		summary := core.OrchestrationGraphSummary{Total: len(taskNodes)}
+		var updatedAt time.Time
+		for _, node := range taskNodes {
+			graphNodes = append(graphNodes, core.OrchestrationGraphNode{
+				ID:         node.ID,
+				WorkerID:   node.WorkerID,
+				WorkerKind: node.WorkerKind,
+				Status:     node.Status,
+				Role:       node.Role,
+				Reason:     node.Reason,
+				SpawnID:    node.SpawnID,
+				TargetID:   node.TargetID,
+				TargetKind: node.TargetKind,
+			})
+			if node.ParentNodeID != "" {
+				edges = append(edges, core.OrchestrationGraphEdge{From: node.ParentNodeID, To: node.ID, Reason: "parent"})
+			}
+			for _, dep := range node.DependsOn {
+				if from := spawnToNode[dep]; from != "" {
+					edges = append(edges, core.OrchestrationGraphEdge{From: from, To: node.ID, Reason: "depends_on:" + dep})
+				}
+			}
+			switch node.Status {
+			case core.WorkerRunning:
+				summary.Running++
+			case core.WorkerWaiting, core.WorkerQueued:
+				summary.Waiting++
+			case core.WorkerSucceeded:
+				summary.Done++
+			case core.WorkerFailed:
+				summary.Failed++
+			case core.WorkerCanceled:
+				summary.Canceled++
+			}
+			if node.UpdatedAt.After(updatedAt) {
+				updatedAt = node.UpdatedAt
+			}
+		}
+		task := tasks[taskID]
+		graphs = append(graphs, core.OrchestrationGraph{
+			TaskID:    taskID,
+			Status:    task.Status,
+			Nodes:     graphNodes,
+			Edges:     edges,
+			Summary:   summary,
+			UpdatedAt: updatedAt,
+		})
+	}
+	sort.Slice(graphs, func(i, j int) bool {
+		return graphs[i].UpdatedAt.Before(graphs[j].UpdatedAt)
+	})
+	return graphs
 }
 
 func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {

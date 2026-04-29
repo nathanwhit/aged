@@ -54,6 +54,7 @@ func main() {
 		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "aged daemon SQLite database path")
 		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "aged daemon worker directory")
 		projectsPath     = flag.String("projects", envOr("AGED_PROJECTS", ""), "aged daemon project registry config")
+		pluginsPath      = flag.String("plugins", envOr("AGED_PLUGINS", ""), "aged daemon plugin manifest config")
 		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "codex"), "aged daemon fallback worker kind")
 		assistantMode    = flag.String("assistant", envOr("AGED_ASSISTANT", "auto"), "aged daemon assistant provider")
 		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
@@ -89,6 +90,7 @@ func main() {
 			"-brain", *brainMode,
 			"-workdir", *workDir,
 			"-projects", *projectsPath,
+			"-plugins", *pluginsPath,
 			"-workspace-vcs", *workspaceVCS,
 			"-workspace-mode", *workspaceMode,
 			"-workspace-root", *workspaceRoot,

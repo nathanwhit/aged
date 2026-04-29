@@ -46,6 +46,17 @@ export type Project = {
   targetLabels?: Record<string, string>;
 };
 
+export type Plugin = {
+  id: string;
+  name: string;
+  kind: string;
+  enabled: boolean;
+  command?: string[];
+  endpoint?: string;
+  capabilities?: string[];
+  config?: Record<string, string>;
+};
+
 export type Worker = {
   id: string;
   taskId: string;
@@ -109,6 +120,40 @@ export type ExecutionNode = {
   updatedAt: string;
 };
 
+export type OrchestrationGraph = {
+  taskId: string;
+  status: TaskStatus;
+  nodes: OrchestrationGraphNode[];
+  edges: OrchestrationGraphEdge[];
+  summary: {
+    total: number;
+    running: number;
+    waiting: number;
+    done: number;
+    failed: number;
+    canceled: number;
+  };
+  updatedAt: string;
+};
+
+export type OrchestrationGraphNode = {
+  id: string;
+  workerId?: string;
+  workerKind: string;
+  status: WorkerStatus;
+  role?: string;
+  reason?: string;
+  spawnId?: string;
+  targetId?: string;
+  targetKind?: string;
+};
+
+export type OrchestrationGraphEdge = {
+  from: string;
+  to: string;
+  reason?: string;
+};
+
 export type TargetState = {
   id: string;
   kind: string;
@@ -147,7 +192,9 @@ export type Snapshot = {
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;
   targets?: TargetState[] | null;
+  plugins?: Plugin[] | null;
   projects?: Project[] | null;
   pullRequests?: PullRequestState[] | null;
+  orchestrationGraphs?: OrchestrationGraph[] | null;
   events: EventRecord[] | null;
 };

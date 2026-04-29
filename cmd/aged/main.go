@@ -25,6 +25,7 @@ func main() {
 		dbPath           = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
 		workDir          = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
 		projectsPath     = flag.String("projects", envOr("AGED_PROJECTS", ""), "JSON project registry config")
+		pluginsPath      = flag.String("plugins", envOr("AGED_PLUGINS", ""), "JSON plugin manifest config")
 		workerKind       = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
 		assistantMode    = flag.String("assistant", envOr("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
 		brainMode        = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
@@ -117,6 +118,11 @@ func main() {
 		slog.Error("load projects", "error", err)
 		os.Exit(1)
 	}
+	plugins, err := orchestrator.LoadPluginRegistry(*pluginsPath)
+	if err != nil {
+		slog.Error("load plugins", "error", err)
+		os.Exit(1)
+	}
 
 	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
 		store,
@@ -128,6 +134,7 @@ func main() {
 		orchestrator.NewSSHRunner(),
 	)
 	service.SetProjects(projects)
+	service.SetPlugins(plugins)
 	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
 		CodexPath:  *codexPath,
 		ClaudePath: *claudePath,
