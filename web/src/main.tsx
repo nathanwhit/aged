@@ -356,7 +356,7 @@ function App() {
                     <Status value={task.status} />
                   </button>
                   <div className="task-row-actions">
-                    {task.status === "failed" && (
+                    {isRetryableTask(task) && (
                       <button className="icon-button ghost task-action" disabled={retryingTaskId === task.id} onClick={() => handleRetryTask(task.id)} title="Retry task">
                         <RefreshCw size={16} />
                       </button>
@@ -657,6 +657,10 @@ function workProgress(task: Task | undefined, workers: Worker[], nodes: Executio
 
 function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
+}
+
+function isRetryableTask(task: Task): boolean {
+  return task.status === "failed" || task.status === "canceled";
 }
 
 function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[] }) {
@@ -989,7 +993,7 @@ function TaskDetail({
         </div>
         <div className="detail-actions">
           <Status value={task.status} />
-          {task.status === "failed" && (
+          {isRetryableTask(task) && (
             <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
               <RefreshCw size={18} />
             </button>
