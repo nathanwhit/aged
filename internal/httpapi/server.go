@@ -35,6 +35,7 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/projects", s.projects)
+	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("GET /api/plugins", s.plugins)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
@@ -44,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
+	mux.HandleFunc("POST /api/tasks/{id}/retry", s.retryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/apply-policy", s.recommendApplyPolicy)
 	mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.publishTaskPullRequest)
@@ -82,6 +84,20 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot.Projects)
+}
+
+func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
+	var project core.Project
+	if err := decodeJSON(r, &project); err != nil {
+		writeError(w, err)
+		return
+	}
+	created, err := s.service.CreateProject(r.Context(), project)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +172,15 @@ func (s *Server) steerTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
+	task, err := s.service.RetryTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, task)
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
@@ -306,11 +331,13 @@ func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	if errors.Is(err, eventstore.ErrNotFound) {
 		status = http.StatusNotFound
+	} else if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "constraint failed") {
+		status = http.StatusConflict
 	} else if strings.Contains(err.Error(), "not allowed") {
 		status = http.StatusForbidden
 	} else if strings.Contains(err.Error(), "oauth") || strings.Contains(err.Error(), "id token") || strings.Contains(err.Error(), "email is not verified") {
 		status = http.StatusUnauthorized
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "unknown projectId") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "unknown projectId") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") || strings.Contains(err.Error(), "failed task") || strings.Contains(err.Error(), "failed tasks") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})

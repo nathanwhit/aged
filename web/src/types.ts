@@ -50,7 +50,10 @@ export type Plugin = {
   id: string;
   name: string;
   kind: string;
+  protocol?: string;
   enabled: boolean;
+  status?: string;
+  error?: string;
   command?: string[];
   endpoint?: string;
   capabilities?: string[];

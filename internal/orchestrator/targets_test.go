@@ -59,6 +59,20 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	if !sink.has(worker.EventLog, "stdout", "remote output") {
 		t.Fatalf("missing remote output: %+v", sink.events)
 	}
+	changes := runner.DescribeChanges(context.Background(), run)
+	if changes.VCSType != "git" || !changes.Dirty || len(changes.ChangedFiles) != 1 || changes.ChangedFiles[0].Path != "main.go" || !strings.Contains(changes.Diff, "diff --git") {
+		t.Fatalf("changes = %+v", changes)
+	}
+}
+
+func TestNewRemoteRunUsesSpecWorkDirWhenTargetOmitsWorkDir(t *testing.T) {
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{
+		ID:      "worker-1234567890",
+		WorkDir: "/repo",
+	})
+	if run.WorkDir != "/repo" {
+		t.Fatalf("remote workDir = %q, want /repo", run.WorkDir)
+	}
 }
 
 func TestServiceRunsWorkerOnRealSSHTarget(t *testing.T) {
@@ -135,6 +149,16 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 		return "", nil
 	case strings.Contains(joined, "status.json"):
 		return `{"status":"succeeded","exit":0}`, nil
+	case strings.Contains(joined, "vcs.txt"):
+		return "git\n", nil
+	case strings.Contains(joined, "root.txt"):
+		return "/repo\n", nil
+	case strings.Contains(joined, "changes.txt"):
+		return " M main.go\n", nil
+	case strings.Contains(joined, "diffstat.txt"):
+		return " main.go | 2 +-\n", nil
+	case strings.Contains(joined, "diff.patch"):
+		return "diff --git a/main.go b/main.go\n", nil
 	default:
 		return "", nil
 	}

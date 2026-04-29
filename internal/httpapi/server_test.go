@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"aged/internal/core"
 	"aged/internal/eventstore"
@@ -38,6 +40,24 @@ func TestCreateTaskRejectsUserWorkerSelection(t *testing.T) {
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d", res.StatusCode)
 	}
+}
+
+func waitForHTTPTaskStatus(t *testing.T, store eventstore.Store, taskID string, status core.TaskStatus) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range snapshot.Tasks {
+			if task.ID == taskID && task.Status == status {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach %s", taskID, status)
 }
 
 func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
@@ -89,6 +109,52 @@ func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
 	}
 }
 
+func TestRetryTaskEndpointRetriesFailedTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "missing"}, map[string]worker.Runner{}, t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
+		"title": "Do work",
+		"prompt": "User request"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusAccepted {
+		t.Fatalf("create status = %d", res.StatusCode)
+	}
+	var task core.Task
+	if err := json.NewDecoder(res.Body).Decode(&task); err != nil {
+		t.Fatal(err)
+	}
+	waitForHTTPTaskStatus(t, store, task.ID, core.TaskFailed)
+
+	retry, err := http.Post(server.URL+"/api/tasks/"+task.ID+"/retry", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retry.Body.Close()
+	if retry.StatusCode != http.StatusAccepted {
+		t.Fatalf("retry status = %d", retry.StatusCode)
+	}
+	var retried core.Task
+	if err := json.NewDecoder(retry.Body).Decode(&retried); err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID != task.ID {
+		t.Fatalf("retried task = %q, want %q", retried.ID, task.ID)
+	}
+}
+
 func TestProjectsEndpointReturnsConfiguredProjects(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
@@ -117,6 +183,51 @@ func TestProjectsEndpointReturnsConfiguredProjects(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", res.StatusCode)
+	}
+}
+
+func TestCreateProjectEndpointPersistsProject(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(`{
+		"id": "other",
+		"name": "Other",
+		"localPath": "/tmp/other",
+		"repo": "owner/other",
+		"vcs": "git",
+		"defaultBase": "main"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+
+	var created core.Project
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "other" || created.LocalPath != "/tmp/other" {
+		t.Fatalf("created = %+v", created)
+	}
+
+	projects, _, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].ID != "other" {
+		t.Fatalf("projects = %+v", projects)
 	}
 }
 

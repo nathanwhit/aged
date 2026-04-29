@@ -123,6 +123,7 @@ func main() {
 		slog.Error("load plugins", "error", err)
 		os.Exit(1)
 	}
+	plugins.Probe(ctx)
 
 	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
 		store,
@@ -133,7 +134,10 @@ func main() {
 		targets,
 		orchestrator.NewSSHRunner(),
 	)
-	service.SetProjects(projects)
+	if err := service.LoadProjects(ctx, projects); err != nil {
+		slog.Error("initialize projects", "error", err)
+		os.Exit(1)
+	}
 	service.SetPlugins(plugins)
 	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
 		CodexPath:  *codexPath,

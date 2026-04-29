@@ -291,7 +291,8 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 		return PreparedWorkspace{}, err
 	}
 
-	if _, err := runJJ(ctx, root, "workspace", "add", "--name", workspaceName, "--revision", "@", "--sparse-patterns", "copy", destination); err != nil {
+	workerMessage := "Worker " + shortID(spec.WorkerID)
+	if _, err := runJJ(ctx, root, "workspace", "add", "--name", workspaceName, "--revision", "@", "--message", workerMessage, "--sparse-patterns", "copy", destination); err != nil {
 		return PreparedWorkspace{}, fmt.Errorf("create isolated jj workspace: %w", err)
 	}
 
@@ -425,10 +426,25 @@ func (m JJWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepared
 	if _, err := runJJRefreshingStale(ctx, workspace.CWD, "status"); err != nil {
 		return result, fmt.Errorf("refresh jj worker workspace: %w", err)
 	}
+	if err := ensureJJDescription(ctx, workspace.CWD, "@", "Worker "+shortID(workspace.WorkerID)); err != nil {
+		return result, fmt.Errorf("describe jj worker revision: %w", err)
+	}
 	if _, err := runJJ(ctx, workspace.SourceRoot, "new", "--message", message, "@", workerRevision); err != nil {
 		return result, fmt.Errorf("create jj merge revision: %w", err)
 	}
 	return result, nil
+}
+
+func ensureJJDescription(ctx context.Context, dir string, revision string, message string) error {
+	description, err := runJJ(ctx, dir, "log", "-r", revision, "--no-graph", "-T", "description")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(description) != "" {
+		return nil
+	}
+	_, err = runJJ(ctx, dir, "describe", "--message", message, revision)
+	return err
 }
 
 func isDirty(status string) bool {
@@ -866,6 +882,9 @@ func runGitNoIndexDiff(ctx context.Context, dir string, before string, after str
 func runCommand(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if env := commandEnv(name); env != nil {
+		cmd.Env = env
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -881,4 +900,32 @@ func runCommand(ctx context.Context, dir string, name string, args ...string) (s
 		return "", err
 	}
 	return stdout.String(), nil
+}
+
+func commandEnv(name string) []string {
+	if filepath.Base(name) != "gh" {
+		return nil
+	}
+	return sanitizeGitHubCLIEnv(os.Environ())
+}
+
+func sanitizeGitHubCLIEnv(env []string) []string {
+	drop := map[string]bool{
+		"SSL_CERT_FILE":       true,
+		"SSL_CERT_DIR":        true,
+		"GIT_SSL_CAINFO":      true,
+		"REQUESTS_CA_BUNDLE":  true,
+		"CURL_CA_BUNDLE":      true,
+		"NODE_EXTRA_CA_CERTS": true,
+		"NIX_SSL_CERT_FILE":   true,
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && drop[key] {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }

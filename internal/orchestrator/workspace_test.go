@@ -2,6 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -93,6 +96,63 @@ func TestParseGitPorcelain(t *testing.T) {
 	}
 }
 
+func TestJJWorkspaceManagerDescribesIsolatedWorkerCommit(t *testing.T) {
+	repo := initJJTestRepo(t)
+	manager := NewJJWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	workspace, err := manager.Prepare(context.Background(), WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker-123",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	description := strings.TrimSpace(runTestJJ(t, workspace.CWD, "log", "-r", "@", "--no-graph", "-T", "description"))
+	if description != "Worker worker-123" {
+		t.Fatalf("worker description = %q", description)
+	}
+}
+
+func TestJJWorkspaceManagerApplyBackfillsWorkerDescription(t *testing.T) {
+	ctx := context.Background()
+	repo := initJJTestRepo(t)
+	manager := NewJJWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker1",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.CWD, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestJJ(t, workspace.CWD, "describe", "--message", "")
+
+	changes, err := manager.DescribeChanges(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changes.Dirty {
+		t.Fatal("worker changes should be dirty")
+	}
+	if _, err := manager.ApplyChanges(ctx, workspace, changes); err != nil {
+		t.Fatal(err)
+	}
+
+	workerDescription := strings.TrimSpace(runTestJJ(t, workspace.CWD, "log", "-r", "@", "--no-graph", "-T", "description"))
+	if workerDescription != "Worker worker1" {
+		t.Fatalf("worker description = %q", workerDescription)
+	}
+	sourceDescription := strings.TrimSpace(runTestJJ(t, repo, "log", "-r", "@", "--no-graph", "-T", "description"))
+	if sourceDescription != "Apply worker worker1" {
+		t.Fatalf("source description = %q", sourceDescription)
+	}
+}
+
 func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
 	changedFiles := []WorkspaceChangedFile{
 		{Path: "internal/orchestrator/workspace.go", Status: "modified"},
@@ -151,6 +211,31 @@ func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func initJJTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj is not installed")
+	}
+	repo := t.TempDir()
+	runTestJJ(t, repo, "git", "init", "--colocate")
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestJJ(t, repo, "describe", "--message", "base")
+	return repo
+}
+
+func runTestJJ(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("jj", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jj %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 func TestCleanupDecisionPolicies(t *testing.T) {

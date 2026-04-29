@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_task_idx ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS events_worker_idx ON events(worker_id, id);
+
+CREATE TABLE IF NOT EXISTS projects (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	local_path TEXT NOT NULL,
+	repo TEXT NOT NULL DEFAULT '',
+	vcs TEXT NOT NULL DEFAULT '',
+	default_base TEXT NOT NULL DEFAULT '',
+	workspace_root TEXT NOT NULL DEFAULT '',
+	target_labels TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `)
 	return err
 }
@@ -106,6 +124,139 @@ LIMIT ?`, afterID, limit)
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, name, local_path, repo, vcs, default_base, workspace_root, target_labels
+FROM projects
+ORDER BY id ASC`)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+
+	var projects []core.Project
+	for rows.Next() {
+		project, err := scanProject(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		projects = append(projects, project)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	defaultID, err := s.setting(ctx, "default_project_id")
+	if err != nil {
+		return nil, "", err
+	}
+	if defaultID == "" && len(projects) > 0 {
+		defaultID = projects[0].ID
+	}
+	return projects, defaultID, nil
+}
+
+func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (core.Project, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	labels, err := json.Marshal(project.TargetLabels)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if string(labels) == "null" {
+		labels = []byte("{}")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Project{}, err
+	}
+	defer tx.Rollback()
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&count); err != nil {
+		return core.Project{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO projects (id, name, local_path, repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		project.ID,
+		project.Name,
+		project.LocalPath,
+		project.Repo,
+		project.VCS,
+		project.DefaultBase,
+		project.WorkspaceRoot,
+		string(labels),
+		now,
+		now,
+	); err != nil {
+		return core.Project{}, err
+	}
+	if count == 0 {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO settings (key, value) VALUES ('default_project_id', ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, project.ID); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Project{}, err
+	}
+	return project, nil
+}
+
+func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, makeDefault bool) (core.Project, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	labels, err := json.Marshal(project.TargetLabels)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if string(labels) == "null" {
+		labels = []byte("{}")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Project{}, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO projects (id, name, local_path, repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	name = excluded.name,
+	local_path = excluded.local_path,
+	repo = excluded.repo,
+	vcs = excluded.vcs,
+	default_base = excluded.default_base,
+	workspace_root = excluded.workspace_root,
+	target_labels = excluded.target_labels,
+	updated_at = excluded.updated_at`,
+		project.ID,
+		project.Name,
+		project.LocalPath,
+		project.Repo,
+		project.VCS,
+		project.DefaultBase,
+		project.WorkspaceRoot,
+		string(labels),
+		now,
+		now,
+	); err != nil {
+		return core.Project{}, err
+	}
+	if makeDefault {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO settings (key, value) VALUES ('default_project_id', ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, project.ID); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Project{}, err
+	}
+	return project, nil
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
@@ -510,6 +661,15 @@ func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
 	}
 }
 
+func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return value, err
+}
+
 func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMessage {
 	if len(workspace) == 0 {
 		return base
@@ -545,6 +705,29 @@ func (s *SQLiteStore) Close() error {
 
 type eventScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanProject(scanner eventScanner) (core.Project, error) {
+	var project core.Project
+	var labels string
+	if err := scanner.Scan(
+		&project.ID,
+		&project.Name,
+		&project.LocalPath,
+		&project.Repo,
+		&project.VCS,
+		&project.DefaultBase,
+		&project.WorkspaceRoot,
+		&labels,
+	); err != nil {
+		return core.Project{}, err
+	}
+	if labels != "" {
+		if err := json.Unmarshal([]byte(labels), &project.TargetLabels); err != nil {
+			return core.Project{}, err
+		}
+	}
+	return project, nil
 }
 
 func scanEvent(scanner eventScanner) (core.Event, error) {

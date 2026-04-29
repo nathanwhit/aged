@@ -39,8 +39,11 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
-	if runner.prompt != "worker prompt from brain" {
+	if !strings.Contains(runner.prompt, "worker prompt from brain") {
 		t.Fatalf("runner prompt = %q", runner.prompt)
+	}
+	if !strings.Contains(runner.prompt, "Run every command from this execution workspace:\n"+workspaces.cwd) {
+		t.Fatalf("runner prompt did not include execution workspace: %q", runner.prompt)
 	}
 	if runner.workDir != workspaces.cwd {
 		t.Fatalf("runner workDir = %q, want %q", runner.workDir, workspaces.cwd)
@@ -291,6 +294,42 @@ func TestServiceRoutesTaskToConfiguredProject(t *testing.T) {
 	}
 }
 
+func TestServiceLoadsProjectsFromSQLiteBeforeSeed(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	seedDir := t.TempDir()
+	seed, err := NewProjectRegistry([]core.Project{{ID: "seed", Name: "Seed", LocalPath: seedDir}}, "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), seedDir)
+	if err := service.LoadProjects(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := t.TempDir()
+	if _, err := service.CreateProject(ctx, core.Project{ID: "api", Name: "API", LocalPath: projectDir, Repo: "owner/api"}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), seedDir)
+	if err := restarted.LoadProjects(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := restarted.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Projects) != 2 {
+		t.Fatalf("projects = %+v, want seed and api", snapshot.Projects)
+	}
+	if project, ok := restarted.projects.Get("api"); !ok || project.Repo != "owner/api" {
+		t.Fatalf("loaded project = %+v, ok = %v", project, ok)
+	}
+}
+
 func TestServiceMapsExternalRepoToProject(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -520,6 +559,85 @@ func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
 	if !hasEvent(snapshot.Events, core.EventTaskPlanned, task.ID, "") {
 		t.Fatalf("missing task.planned event before failure")
+	}
+}
+
+func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &flakyRunner{kind: "retryable"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "retryable",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"retryable": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+
+	retried, err := service.RetryTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.ID != task.ID {
+		t.Fatalf("retry returned task %q, want %q", retried.ID, task.ID)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if runner.callsValue() != 2 {
+		t.Fatalf("runner calls = %d, want 2", runner.callsValue())
+	}
+	if countEvents(snapshot.Events, core.EventTaskCreated, task.ID) != 1 {
+		t.Fatalf("retry created a new task")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 2 {
+		t.Fatalf("task.planned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 2 {
+		t.Fatalf("worker.created count = %d, want 2", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+	}
+}
+
+func TestServiceGuardsWorkerPromptWithPreparedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	sourceRoot := filepath.Join(t.TempDir(), "source")
+	workspaceRoot := filepath.Join(t.TempDir(), "workspace")
+	runner := &recordingRunner{kind: "codex"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "Inspect " + sourceRoot + " and make the requested edit.",
+	}}, map[string]worker.Runner{"codex": runner}, sourceRoot, fakeWorkspaceManager{cwd: workspaceRoot, sourceRoot: sourceRoot})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do isolated work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if runner.workDir != workspaceRoot {
+		t.Fatalf("runner workDir = %q, want %q", runner.workDir, workspaceRoot)
+	}
+	if !strings.Contains(runner.prompt, "Run every command from this execution workspace:\n"+workspaceRoot) {
+		t.Fatalf("worker prompt did not name prepared workspace first:\n%s", runner.prompt)
+	}
+	if !strings.Contains(runner.prompt, "Do not edit the source checkout directly:\n"+sourceRoot) {
+		t.Fatalf("worker prompt did not guard source checkout:\n%s", runner.prompt)
+	}
+	if !strings.Contains(runner.prompt, "Inspect "+sourceRoot+" and make the requested edit.") {
+		t.Fatalf("worker prompt dropped original task:\n%s", runner.prompt)
 	}
 }
 
@@ -857,6 +975,104 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if applyCalls != 1 {
 		t.Fatalf("second apply changed apply calls to %d, want 1", applyCalls)
+	}
+}
+
+func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	sourceRoot := t.TempDir()
+	taskID := "task-remote"
+	workerID := "worker-remote"
+	changed := WorkspaceChangedFile{Path: "main.go", Status: "modified"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":    "Remote work",
+			"prompt":   "Apply remote patch",
+			"metadata": map[string]any{},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          "/runs/" + workerID,
+			CWD:           "/repo",
+			SourceRoot:    "/repo",
+			WorkspaceName: "aged-remote",
+			Mode:          "remote",
+			VCSType:       "ssh",
+			TaskID:        taskID,
+			WorkerID:      workerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerSucceeded,
+			"workspaceChanges": WorkspaceChanges{
+				Root:         "/runs/" + workerID,
+				CWD:          "/repo",
+				Mode:         "remote",
+				VCSType:      "git",
+				Dirty:        true,
+				Diff:         "diff --git a/main.go b/main.go\n",
+				ChangedFiles: []WorkspaceChangedFile{changed},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, sourceRoot, fakeWorkspaceManager{})
+	applied := 0
+	service.SetRemotePatchApplier(func(_ context.Context, project core.Project, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+		applied++
+		if project.LocalPath != sourceRoot {
+			t.Fatalf("project local path = %q, want %q", project.LocalPath, sourceRoot)
+		}
+		if workspace.VCSType != "ssh" || changes.Diff == "" || len(changes.ChangedFiles) != 1 {
+			t.Fatalf("workspace=%+v changes=%+v", workspace, changes)
+		}
+		result := baseWorkerApplyResult(workspace, "remote_patch_apply")
+		result.SourceRoot = project.LocalPath
+		result.AppliedFiles = changes.ChangedFiles
+		return result, nil
+	})
+
+	review, err := service.ReviewWorkerChanges(ctx, workerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Changes.Diff == "" || review.Changes.ChangedFiles[0] != changed {
+		t.Fatalf("review changes = %+v", review.Changes)
+	}
+	result, err := service.ApplyWorkerChanges(ctx, workerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Method != "remote_patch_apply" || result.SourceRoot != sourceRoot || len(result.AppliedFiles) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if applied != 1 {
+		t.Fatalf("applied calls = %d, want 1", applied)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerApplied, taskID, workerID) {
+		t.Fatal("missing worker.changes_applied event")
 	}
 }
 
@@ -1409,6 +1625,65 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	}
 }
 
+func TestServiceIgnoresSchedulerTargetLabels(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewLocalTargetRegistry()
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run local work",
+		Metadata: map[string]any{
+			"targetLabels": map[string]any{"role": "frontend"},
+		},
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Local", Prompt: "Run locally."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].TargetID != "local" {
+		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerCreated, "ignoredTargetLabels") {
+		t.Fatalf("missing ignored target label metadata")
+	}
+}
+
+func TestServiceUsesTaskTargetLabels(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Labels: map[string]string{"location": "local"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "frontend", Kind: TargetKindLocal, Labels: map[string]string{"role": "frontend"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run frontend work",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Frontend",
+		Prompt:   "Run on frontend target.",
+		Metadata: core.MustJSON(map[string]any{"targetLabels": map[string]any{"role": "frontend"}}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].TargetID != "frontend" {
+		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
+	}
+}
+
 type fixedBrain struct {
 	plan Plan
 	err  error
@@ -1556,6 +1831,12 @@ type recordingEventRunner struct {
 	workDir string
 }
 
+type flakyRunner struct {
+	mu    sync.Mutex
+	kind  string
+	calls int
+}
+
 type blockingEventRunner struct {
 	mu      sync.Mutex
 	kind    string
@@ -1617,6 +1898,31 @@ func (r *recordingEventRunner) promptValue() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.prompt
+}
+
+func (r *flakyRunner) Kind() string {
+	return r.kind
+}
+
+func (r *flakyRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *flakyRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+	if call == 1 {
+		return errors.New("transient worker failure")
+	}
+	return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: "retry succeeded"})
+}
+
+func (r *flakyRunner) callsValue() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (r *blockingEventRunner) Kind() string {
