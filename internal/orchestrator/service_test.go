@@ -512,6 +512,44 @@ func TestServiceRoutesGitHubIssueToExplicitUpstreamProject(t *testing.T) {
 	}
 }
 
+func TestServiceRoutesGitHubIssueRepoDeterministically(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	firstForkCheckout := t.TempDir()
+	secondForkCheckout := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "z-fork", Name: "Second Fork", LocalPath: secondForkCheckout, Repo: "second/repo", UpstreamRepo: "owner/repo"},
+		{ID: "a-fork", Name: "First Fork", LocalPath: firstForkCheckout, Repo: "first/repo", UpstreamRepo: "owner/repo"},
+	}, "z-fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, secondForkCheckout, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "GitHub issue owner/repo#1",
+		Prompt:   "Fix it.",
+		Metadata: core.MustJSON(map[string]any{"source": "github-issue", "repo": "owner/repo"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ProjectID != "a-fork" {
+		t.Fatalf("task project = %q, want a-fork", task.ProjectID)
+	}
+	if workspace.workDir != firstForkCheckout {
+		t.Fatalf("workspace workDir = %q, want %q", workspace.workDir, firstForkCheckout)
+	}
+}
+
 func TestServiceKeepsLocalRepoLookupWhenNotGitHubIssue(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -599,6 +637,67 @@ func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 	}
 	if publisher.published.WorkDir != projectRoot {
 		t.Fatalf("published workDir = %q, want %q", publisher.published.WorkDir, projectRoot)
+	}
+	if publisher.published.HeadRepoOwner != "" || publisher.published.PushRemote != "" {
+		t.Fatalf("non-fork publish spec had fork fields: %+v", publisher.published)
+	}
+}
+
+func TestServicePublishesForkPullRequestUsingProjectConfig(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectRoot := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:            "fork",
+		Name:          "Fork",
+		LocalPath:     projectRoot,
+		Repo:          "fork-owner/repo",
+		UpstreamRepo:  "owner/repo",
+		HeadRepoOwner: "fork-owner",
+		PushRemote:    "fork",
+		DefaultBase:   "trunk",
+	}}, "fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, projectRoot, fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: projectRoot,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "fork", Title: "Implement feature", Prompt: "Do it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if _, err := service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.published.Repo != "owner/repo" {
+		t.Fatalf("published repo = %q, want owner/repo", publisher.published.Repo)
+	}
+	if publisher.published.HeadRepoOwner != "fork-owner" {
+		t.Fatalf("published head owner = %q, want fork-owner", publisher.published.HeadRepoOwner)
+	}
+	if publisher.published.PushRemote != "fork" {
+		t.Fatalf("published push remote = %q, want fork", publisher.published.PushRemote)
+	}
+	if publisher.published.Base != "trunk" {
+		t.Fatalf("published base = %q, want trunk", publisher.published.Base)
 	}
 }
 

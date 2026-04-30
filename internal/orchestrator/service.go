@@ -644,15 +644,17 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
-		TaskID:   taskID,
-		WorkerID: workerID,
-		WorkDir:  sourceRoot,
-		Repo:     nonEmpty(req.Repo, project.Repo),
-		Base:     nonEmpty(req.Base, project.DefaultBase),
-		Branch:   req.Branch,
-		Title:    title,
-		Body:     body,
-		Draft:    req.Draft,
+		TaskID:        taskID,
+		WorkerID:      workerID,
+		WorkDir:       sourceRoot,
+		Repo:          pullRequestTargetRepo(req, project),
+		Base:          nonEmpty(req.Base, project.DefaultBase),
+		Branch:        req.Branch,
+		HeadRepoOwner: pullRequestHeadRepoOwner(project),
+		PushRemote:    project.PushRemote,
+		Title:         title,
+		Body:          body,
+		Draft:         req.Draft,
 		Metadata: map[string]any{
 			"workerId":  workerID,
 			"workDir":   sourceRoot,
@@ -2484,6 +2486,20 @@ func nonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func pullRequestTargetRepo(req core.PublishPullRequestRequest, project core.Project) string {
+	return nonEmpty(req.Repo, project.UpstreamRepo, project.Repo)
+}
+
+func pullRequestHeadRepoOwner(project core.Project) string {
+	if owner := strings.TrimSpace(project.HeadRepoOwner); owner != "" {
+		return owner
+	}
+	if strings.TrimSpace(project.UpstreamRepo) == "" || strings.EqualFold(strings.TrimSpace(project.UpstreamRepo), strings.TrimSpace(project.Repo)) {
+		return ""
+	}
+	return repoOwner(project.Repo)
 }
 
 func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {

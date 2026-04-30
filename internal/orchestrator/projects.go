@@ -231,6 +231,8 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	project.LocalPath = strings.TrimSpace(project.LocalPath)
 	project.Repo = strings.TrimSpace(project.Repo)
 	project.UpstreamRepo = strings.TrimSpace(project.UpstreamRepo)
+	project.HeadRepoOwner = strings.TrimSpace(project.HeadRepoOwner)
+	project.PushRemote = strings.TrimSpace(project.PushRemote)
 	project.VCS = strings.TrimSpace(project.VCS)
 	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
 	project.WorkspaceRoot = strings.TrimSpace(project.WorkspaceRoot)
@@ -255,6 +257,14 @@ func normalizeProject(project core.Project) (core.Project, error) {
 		project.DefaultBase = "main"
 	}
 	return project, nil
+}
+
+func repoOwner(repo string) string {
+	owner, _, ok := strings.Cut(strings.TrimSpace(repo), "/")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(owner)
 }
 
 func detectGitHubRepo(ctx context.Context, dir string) string {

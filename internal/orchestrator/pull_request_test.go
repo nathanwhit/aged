@@ -90,3 +90,77 @@ func TestFindExistingPullRequestKeepsHeadForLocalBranch(t *testing.T) {
 	}
 	t.Fatalf("missing --head feature in args %v", gotArgs)
 }
+
+func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *testing.T) {
+	var calls [][]string
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			call := append([]string{name}, args...)
+			calls = append(calls, call)
+			switch {
+			case name == "jj" && len(args) >= 1 && args[0] == "root":
+				return "", nil
+			case name == "jj" && len(args) >= 2 && args[0] == "bookmark":
+				return "", nil
+			case name == "jj" && len(args) >= 2 && args[0] == "git":
+				return "", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/upstream/repo/pull/9", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":9,"url":"https://github.com/upstream/repo/pull/9","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"trunk","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"REVIEW_REQUIRED"}`, nil
+			default:
+				t.Fatalf("unexpected command %s %v", name, args)
+				return "", nil
+			}
+		},
+	}
+
+	pr, err := publisher.Publish(context.Background(), PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkDir:       "/repo",
+		Repo:          "upstream/repo",
+		Base:          "trunk",
+		Branch:        "feature",
+		HeadRepoOwner: "fork-owner",
+		PushRemote:    "fork",
+		Title:         "Fix",
+		Body:          "Body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Repo != "upstream/repo" || pr.Branch != "feature" || pr.Base != "trunk" {
+		t.Fatalf("pr = %+v", pr)
+	}
+	assertCommandContains(t, calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
+	assertCommandContains(t, calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
+}
+
+func assertCommandContains(t *testing.T, calls [][]string, want []string) {
+	t.Helper()
+	for _, call := range calls {
+		if containsSubsequence(call, want) {
+			return
+		}
+	}
+	t.Fatalf("missing command containing %v in calls %v", want, calls)
+}
+
+func containsSubsequence(values []string, want []string) bool {
+	if len(want) > len(values) {
+		return false
+	}
+	for start := 0; start <= len(values)-len(want); start++ {
+		matched := true
+		for i := range want {
+			if values[start+i] != want[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}

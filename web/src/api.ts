@@ -32,6 +32,9 @@ export async function createProject(input: {
   name?: string;
   localPath: string;
   repo?: string;
+  upstreamRepo?: string;
+  headRepoOwner?: string;
+  pushRemote?: string;
   vcs?: string;
   defaultBase?: string;
   workspaceRoot?: string;

@@ -384,6 +384,9 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"name": "Other",
 		"localPath": "/tmp/other",
 		"repo": "owner/other",
+		"upstreamRepo": "upstream/other",
+		"headRepoOwner": "owner",
+		"pushRemote": "fork",
 		"vcs": "git",
 		"defaultBase": "main"
 	}`))
@@ -399,7 +402,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != "/tmp/other" {
+	if created.ID != "other" || created.LocalPath != "/tmp/other" || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -407,7 +410,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" {
 		t.Fatalf("projects = %+v", projects)
 	}
 }

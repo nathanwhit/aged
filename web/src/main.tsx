@@ -844,13 +844,16 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [localPath, setLocalPath] = useState("");
   const [repo, setRepo] = useState("");
+  const [upstreamRepo, setUpstreamRepo] = useState("");
+  const [headRepoOwner, setHeadRepoOwner] = useState("");
+  const [pushRemote, setPushRemote] = useState("");
   const [defaultBase, setDefaultBase] = useState("main");
   const [busy, setBusy] = useState(false);
 
@@ -863,6 +866,9 @@ function ProjectPanel({
         name: name || undefined,
         localPath,
         repo: repo || undefined,
+        upstreamRepo: upstreamRepo || undefined,
+        headRepoOwner: headRepoOwner || undefined,
+        pushRemote: pushRemote || undefined,
         vcs: "auto",
         defaultBase: defaultBase || undefined,
       });
@@ -870,6 +876,9 @@ function ProjectPanel({
       setName("");
       setLocalPath("");
       setRepo("");
+      setUpstreamRepo("");
+      setHeadRepoOwner("");
+      setPushRemote("");
       setDefaultBase("main");
     } catch (err) {
       onError((err as Error).message);
@@ -908,7 +917,19 @@ function ProjectPanel({
         </label>
         <label>
           Repo
-          <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="owner/repo" />
+          <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="fork-owner/repo" />
+        </label>
+        <label>
+          Upstream repo
+          <input value={upstreamRepo} onChange={(event) => setUpstreamRepo(event.target.value)} placeholder="owner/repo" />
+        </label>
+        <label>
+          Head owner
+          <input value={headRepoOwner} onChange={(event) => setHeadRepoOwner(event.target.value)} placeholder="fork-owner" />
+        </label>
+        <label>
+          Push remote
+          <input value={pushRemote} onChange={(event) => setPushRemote(event.target.value)} placeholder="origin" />
         </label>
         <label>
           Base

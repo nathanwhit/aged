@@ -16,16 +16,18 @@ import (
 )
 
 type PullRequestPublishSpec struct {
-	TaskID   string
-	WorkerID string
-	WorkDir  string
-	Repo     string
-	Base     string
-	Branch   string
-	Title    string
-	Body     string
-	Draft    bool
-	Metadata map[string]any
+	TaskID        string
+	WorkerID      string
+	WorkDir       string
+	Repo          string
+	Base          string
+	Branch        string
+	HeadRepoOwner string
+	PushRemote    string
+	Title         string
+	Body          string
+	Draft         bool
+	Metadata      map[string]any
 }
 
 type PullRequestPublisher interface {
@@ -78,17 +80,18 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if body == "" {
 		body = defaultPRBody(spec)
 	}
-	if err := p.pushBranch(ctx, exec, spec.WorkDir, branch); err != nil {
+	if err := p.pushBranch(ctx, exec, spec.WorkDir, branch, spec.PushRemote); err != nil {
 		return core.PullRequest{}, err
 	}
 
-	args := []string{"pr", "create", "--repo", repo, "--base", base, "--head", branch, "--title", title, "--body", body}
+	head := prHeadRef(spec.HeadRepoOwner, branch)
+	args := []string{"pr", "create", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body", body}
 	if spec.Draft {
 		args = append(args, "--draft")
 	}
 	out, err := exec(ctx, spec.WorkDir, "gh", args...)
 	if err != nil {
-		existing, existingErr := p.findExistingPullRequest(ctx, exec, spec.WorkDir, repo, branch)
+		existing, existingErr := p.findExistingPullRequest(ctx, exec, spec.WorkDir, repo, head)
 		if existingErr != nil {
 			return core.PullRequest{}, fmt.Errorf("create GitHub pull request: %w; find existing pull request: %w", err, existingErr)
 		}
@@ -180,14 +183,19 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 	return core.PullRequest{}, errors.New("no existing pull request found for branch")
 }
 
-func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string) error {
+func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string) error {
+	remote = strings.TrimSpace(remote)
 	if _, err := exec(ctx, dir, "jj", "root"); err == nil {
 		if _, err := exec(ctx, dir, "jj", "bookmark", "create", branch, "--revision", "@"); err != nil {
 			if _, setErr := exec(ctx, dir, "jj", "bookmark", "set", branch, "--revision", "@"); setErr != nil {
 				return fmt.Errorf("create jj bookmark: %w; set existing bookmark: %w", err, setErr)
 			}
 		}
-		if _, err := exec(ctx, dir, "jj", "git", "push", "--bookmark", branch); err != nil {
+		args := []string{"git", "push", "--bookmark", branch}
+		if remote != "" {
+			args = append(args, "--remote", remote)
+		}
+		if _, err := exec(ctx, dir, "jj", args...); err != nil {
 			return fmt.Errorf("push jj bookmark: %w", err)
 		}
 		return nil
@@ -196,7 +204,10 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		if _, err := exec(ctx, dir, "git", "branch", "-f", branch, "HEAD"); err != nil {
 			return fmt.Errorf("create git branch: %w", err)
 		}
-		if _, err := exec(ctx, dir, "git", "push", "-u", "origin", branch); err != nil {
+		if remote == "" {
+			remote = "origin"
+		}
+		if _, err := exec(ctx, dir, "git", "push", "-u", remote, branch); err != nil {
 			return fmt.Errorf("push git branch: %w", err)
 		}
 		return nil
@@ -255,6 +266,15 @@ func defaultPRBranch(spec PullRequestPublishSpec) string {
 		suffix = spec.WorkerID
 	}
 	return "codex/aged-" + shortID(suffix)
+}
+
+func prHeadRef(owner string, branch string) string {
+	owner = strings.TrimSpace(owner)
+	branch = strings.TrimSpace(branch)
+	if owner == "" || strings.Contains(branch, ":") {
+		return branch
+	}
+	return owner + ":" + branch
 }
 
 func defaultPRBody(spec PullRequestPublishSpec) string {
