@@ -23,7 +23,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -190,7 +190,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -1000,6 +1000,8 @@ function assistantProgressLabel(elapsedSeconds: number): string {
 
 function TaskDetail({
   task,
+  workers,
+  nodes,
   events,
   onCancel,
   onRetry,
@@ -1011,6 +1013,8 @@ function TaskDetail({
   onError,
 }: {
   task: Task;
+  workers: Worker[];
+  nodes: ExecutionNode[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
@@ -1030,6 +1034,7 @@ function TaskDetail({
   const canApplyResult = completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
+  const workerUpdate = currentWorkerUpdate(workers, nodes, events);
 
   useEffect(() => {
     setDiff(undefined);
@@ -1118,6 +1123,7 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
+      <WorkerProgressSpotlight update={workerUpdate} />
       {finalWorkerId && finalChangedFiles.length > 0 && (
         <div className="worker-review final-result-review">
           <details>
@@ -1140,6 +1146,45 @@ function TaskDetail({
           {diff?.open && <DiffViewer state={diff} />}
         </div>
       )}
+    </section>
+  );
+}
+
+type WorkerProgressUpdate = {
+  workerId: string;
+  title: string;
+  status: WorkerStatus;
+  at?: string;
+  label?: string;
+  text: string;
+  source: "output" | "lifecycle" | "waiting";
+};
+
+function WorkerProgressSpotlight({ update }: { update: WorkerProgressUpdate | undefined }) {
+  if (!update) {
+    return null;
+  }
+  return (
+    <section className={`worker-progress-spotlight ${update.source}`} aria-live="polite">
+      <div className="worker-progress-heading">
+        <div>
+          <span>Active worker update</span>
+          <strong>{update.title}</strong>
+        </div>
+        <div className="worker-progress-meta">
+          <Status value={update.status} />
+          {update.label && <span className="pill">{update.label}</span>}
+          {update.at && <time>{new Date(update.at).toLocaleTimeString()}</time>}
+        </div>
+      </div>
+      <p>{update.text}</p>
+      <small>
+        {update.source === "output"
+          ? "Shown from the worker output event stream; it may be a progress summary, log message, tool event, or final message rather than private model thinking."
+          : update.source === "waiting"
+            ? "Waiting for the worker output stream to report more detail."
+            : "Shown from worker lifecycle events because no richer output update is available."}
+      </small>
     </section>
   );
 }
@@ -1325,7 +1370,7 @@ function WorkerList({
             const applied = workerId ? workerChangesApplied(events, workerId) : false;
             const isFinalCandidate = task.finalCandidateWorkerId === workerId;
             const workerEvents = workerId ? events.filter((event) => event.workerId === workerId) : [];
-            const latestEvent = latestInspectableWorkerEvent(workerEvents);
+            const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
             const diff = workerId ? diffs[workerId] : undefined;
             const dependencies = node?.dependsOn ?? graph?.edges.filter((edge) => edge.to === (graphNode?.id ?? node?.id)).map((edge) => edge.from) ?? [];
             const blockers = dependencies.filter((dependencyId) => {
@@ -1706,8 +1751,34 @@ function latestInspectableWorkerEvent(events: EventRecord[]): EventRecord | unde
   return undefined;
 }
 
+function latestWorkerProgressEvent(events: EventRecord[]): EventRecord | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (isWorkerProgressEvent(events[index])) {
+      return events[index];
+    }
+  }
+  return undefined;
+}
+
 function isInspectableWorkerEvent(event: EventRecord): boolean {
   return event.type.startsWith("worker.");
+}
+
+function isWorkerProgressEvent(event: EventRecord): boolean {
+  if (event.type !== "worker.output") {
+    return false;
+  }
+  const display = eventDisplayText(event).trim();
+  if (!display) {
+    return false;
+  }
+  const payload = asRecord(event.payload);
+  const raw = asRecord(payload.raw ?? payload.rawResult);
+  const item = asRecord(raw.item);
+  if (raw.type === "thread.started" || raw.type === "turn.started" || raw.type === "turn.completed") {
+    return false;
+  }
+  return Boolean(payload.text || item.type === "agent_message" || item.type === "command_execution" || item.type === "file_change");
 }
 
 function workerEventLabel(event: EventRecord): string {
@@ -1861,6 +1932,65 @@ function latestWorkerCompletion(events: EventRecord[], workerId: string): Worker
 
 function workerChangesApplied(events: EventRecord[], workerId: string): boolean {
   return events.some((event) => event.type === "worker.changes_applied" && event.workerId === workerId);
+}
+
+function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: EventRecord[]): WorkerProgressUpdate | undefined {
+  if (workers.length === 0 && nodes.length === 0) {
+    return undefined;
+  }
+
+  const nodesByWorkerId = new Map(nodes.filter((node) => node.workerId).map((node) => [node.workerId!, node]));
+  const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status));
+  const candidates = (activeWorkers.length > 0 ? activeWorkers : [...workers])
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+
+  for (const worker of candidates) {
+    const workerEvents = events.filter((event) => event.workerId === worker.id);
+    const progressEvent = latestWorkerProgressEvent(workerEvents);
+    if (progressEvent) {
+      return {
+        workerId: worker.id,
+        title: workerProgressTitle(worker, nodesByWorkerId.get(worker.id)),
+        status: worker.status,
+        at: progressEvent.at,
+        label: workerEventLabel(progressEvent),
+        text: eventDisplayText(progressEvent),
+        source: "output",
+      };
+    }
+  }
+
+  const activeNodeWithoutWorker = nodes
+    .filter((node) => !node.workerId && !isTerminalWorkerStatus(node.status))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+  if (activeNodeWithoutWorker) {
+    return {
+      workerId: activeNodeWithoutWorker.id,
+      title: activeNodeWithoutWorker.role || activeNodeWithoutWorker.workerKind,
+      status: activeNodeWithoutWorker.status,
+      text: activeNodeWithoutWorker.reason || "Worker is queued or waiting for execution.",
+      source: "waiting",
+    };
+  }
+
+  const latestWorker = candidates[0];
+  if (!latestWorker) {
+    return undefined;
+  }
+  const latestEvent = latestInspectableWorkerEvent(events.filter((event) => event.workerId === latestWorker.id));
+  return {
+    workerId: latestWorker.id,
+    title: workerProgressTitle(latestWorker, nodesByWorkerId.get(latestWorker.id)),
+    status: latestWorker.status,
+    at: latestEvent?.at,
+    label: latestEvent ? workerEventLabel(latestEvent) : undefined,
+    text: latestEvent ? eventDisplayText(latestEvent) : "No worker output has been reported yet.",
+    source: latestEvent ? "lifecycle" : "waiting",
+  };
+}
+
+function workerProgressTitle(worker: Worker, node: ExecutionNode | undefined): string {
+  return `${node?.role || worker.kind} (${worker.id.slice(0, 8)})`;
 }
 
 function EventLog({ events }: { events: EventRecord[] }) {
