@@ -765,6 +765,87 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesDynamicReplanFailureFromCompletedGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-graph"
+	workerID := "worker-done"
+	initial := Plan{WorkerKind: "codex", Prompt: "implement the change"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Graph retry",
+			"prompt": "Retry only replan.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(initial),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+			"metadata": map[string]any{
+				"nodeID": "node-1",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "implemented",
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+			"error":  "dynamic replan failed: decode codex replan decision: invalid character '}' after top-level value",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	retried, err := service.RetryTask(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != core.TaskPlanning {
+		t.Fatalf("retry status = %q", retried.Status)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
+		t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
 func TestServiceRetryReusesCanceledWorkerWorkspaceAndSession(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1762,6 +1843,79 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 }
 
+func TestServiceCompletesWithFallbackWhenReplannerErrorsAfterSingleCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the change",
+		},
+		err: errors.New("decode codex replan decision: invalid character '}' after top-level value"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Fallback complete", Prompt: "Do it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 1 {
+		t.Fatalf("task.replanned count = %d, want 1", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
+	}
+}
+
+func TestServiceWaitsWhenReplannerErrorsWithAmbiguousCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement baseline",
+			Spawns: []SpawnRequest{
+				{ID: "left", Role: "left", Reason: "Try A.", WorkerKind: "left"},
+				{ID: "right", Role: "right", Reason: "Try B.", WorkerKind: "right"},
+			},
+		},
+		err: errors.New("decode codex replan decision: invalid character '}' after top-level value"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
+		"left":  fileWritingRunner{kind: "left", path: "a.txt", body: "a"},
+		"right": fileWritingRunner{kind: "right", path: "b.txt", body: "b"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.txt", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Fallback wait", Prompt: "Try alternatives."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing approval-needed event")
+	}
+}
+
 func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2386,6 +2540,19 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return decision, nil
+}
+
+type errorReplanningBrain struct {
+	plan Plan
+	err  error
+}
+
+func (b *errorReplanningBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return b.plan, nil
+}
+
+func (b *errorReplanningBrain) Replan(context.Context, core.Task, OrchestrationState) (ReplanDecision, error) {
+	return ReplanDecision{}, b.err
 }
 
 type finalSelectingBrain struct {

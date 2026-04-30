@@ -36,6 +36,9 @@ The initial local-first vertical slice is implemented.
 - Pull requests are first-class projected state in snapshots. `pull_request.published`, `pull_request.status_checked`, and `pull_request.babysitter_started` events reconstruct current PR state, including repo, number, branch, CI/check status, review status, merge status, and any babysitter task.
 - Tasks can now complete with a first-class final candidate worker. The orchestrator records `task.final_candidate_selected`, snapshots expose `finalCandidateWorkerId`, and local mode exposes a task-level apply action so users apply the selected task result once instead of applying every worker.
 - Final candidate selection is no longer an unconditional "latest worker wins" heuristic. Completion automatically selects only a single changed candidate or a single candidate leaf in a dependency lineage; if parallel competing candidate leaves remain, the task fails unless the replanning brain explicitly returns `finalCandidateWorkerId` or schedules a consolidation/validation turn.
+- Codex scheduler/replanner prompts now explicitly require a single bare JSON object with `{` as the first non-whitespace character and `}` as the last. The Codex brain also extracts the first balanced JSON object from otherwise-wrapped output, so accidental trailing braces/prose do not automatically fail parsing.
+- Dynamic replan errors now degrade deterministically: if existing worker results have one unambiguous final candidate, aged records a fallback `task.replanned` decision and completes with that candidate; if candidates remain ambiguous, aged moves the task to `waiting` with an approval-needed event instead of failing spuriously.
+- Retry is graph-aware for dynamic replan failures. If a task failed after workers completed because replanning/parsing failed, retry reconstructs the completed worker graph from events and reruns only the orchestration/final-selection step instead of starting the last worker again.
 - Task creation supports `metadata.completionMode`: `local` means review/apply the final candidate through aged, while `github` means completion publishes the final candidate as a PR and the user applies the result by merging the PR.
 - Completed tasks can be published as GitHub PRs with `POST /api/tasks/{id}/pull-request`, GitHub completion mode, or the dashboard PR panel. The service defaults to the final candidate worker, applies it first when needed, creates/pushes a branch, opens a PR with `gh`, and records the published PR.
 - Pull request follow-up can be driven by `POST /api/pull-requests/{id}/refresh`, `POST /api/pull-requests/{id}/babysit`, or the GitHub driver monitor loop.
@@ -112,6 +115,8 @@ The initial local-first vertical slice is implemented.
   - Service delivers task steering to compatible running workers.
   - Service records final task candidates, applies task results through the selected candidate, and publishes GitHub-mode completions through that final candidate.
   - Service rejects ambiguous parallel candidate completion without explicit final selection and accepts replanner-selected `finalCandidateWorkerId`.
+  - Service falls back from malformed replanner output to deterministic final-candidate completion when unambiguous, or waits for steering when ambiguous.
+  - Service retries dynamic-replan failures from completed worker events without creating another worker.
   - Service recommends final-candidate apply when one has been selected and falls back to manual apply selection when changed worker branches are unresolved.
   - Unknown brain-selected workers fail the task cleanly.
   - HTTP API rejects user-supplied worker selection.

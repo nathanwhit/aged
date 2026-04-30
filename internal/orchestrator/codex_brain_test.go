@@ -169,6 +169,39 @@ func TestDecodeReplanDecisionComplete(t *testing.T) {
 	}
 }
 
+func TestDecodeReplanDecisionIgnoresTrailingJunk(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+		"action": "complete",
+		"rationale": "done",
+		"plan": null
+	}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Action != "complete" {
+		t.Fatalf("action = %q", decision.Action)
+	}
+}
+
+func TestDecodeCodexPlanExtractsObjectFromProse(t *testing.T) {
+	plan, err := decodeCodexPlan([]byte(`Here is the plan:
+	{
+		"workerKind": "mock",
+		"workerPrompt": "Run a smoke test.",
+		"rationale": "test",
+		"steps": [],
+		"requiredApprovals": [],
+		"spawns": []
+	}
+	Thanks.`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.WorkerKind != "mock" || plan.Prompt != "Run a smoke test." {
+		t.Fatalf("plan = %+v", plan)
+	}
+}
+
 func newTestCodexBrain(t *testing.T, mode string, fallback BrainProvider) *CodexBrain {
 	t.Helper()
 	dir := t.TempDir()

@@ -870,6 +870,18 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
+	if task.Status == core.TaskFailed && taskFailedDuringDynamicReplan(snapshot, taskID) {
+		initial, results, err := retryGraphStateForTask(snapshot, taskID)
+		if err != nil {
+			return core.Task{}, err
+		}
+		if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+			return core.Task{}, err
+		}
+		task.Status = core.TaskPlanning
+		go s.retryGraphTask(context.Background(), task, initial, results)
+		return task, nil
+	}
 	plan, err := retryPlanForTask(snapshot, taskID)
 	if err != nil {
 		return core.Task{}, err
@@ -1476,6 +1488,14 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
 }
 
+func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) {
+	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, initial, results)
+	if !replanOK {
+		return
+	}
+	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
 	runner := s.runners[plan.WorkerKind]
 	if runner == nil {
@@ -2028,12 +2048,10 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			Turn:        turn,
 		})
 		if err != nil {
-			_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replan failed: %w", err))
-			return false, "", ""
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err))
 		}
 		if err := decision.Validate(); err != nil {
-			_ = s.failTask(ctx, task.ID, fmt.Errorf("invalid dynamic replan decision: %w", err))
-			return false, "", ""
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err))
 		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
@@ -2096,6 +2114,58 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 		}
 	}
 	_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replanning exceeded %d turns", maxDynamicReplanTurns))
+	return false, "", ""
+}
+
+func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error) (bool, string, string) {
+	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
+	if candidateErr == nil {
+		reason := "fallback completion after replanner error: " + replanErr.Error()
+		if candidateReason != "" {
+			reason += "; " + candidateReason
+		}
+		_, _ = s.append(ctx, core.Event{
+			Type:   core.EventTaskReplanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"turn": turn,
+				"decision": ReplanDecision{
+					Action:                 "complete",
+					FinalCandidateWorkerID: candidateWorkerID,
+					Rationale:              reason,
+					Message:                "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
+				},
+				"fallback": true,
+				"error":    replanErr.Error(),
+			}),
+		})
+		return true, candidateWorkerID, reason
+	}
+	_, _ = s.append(ctx, core.Event{
+		Type:   core.EventTaskReplanned,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"turn": turn,
+			"decision": ReplanDecision{
+				Action:    "wait",
+				Rationale: "replanner returned an invalid decision and deterministic final-candidate fallback is ambiguous",
+				Message:   replanErr.Error(),
+			},
+			"fallback":       true,
+			"error":          replanErr.Error(),
+			"candidateError": candidateErr.Error(),
+		}),
+	})
+	_, _ = s.append(ctx, core.Event{
+		Type:   core.EventApprovalNeeded,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"question": "Dynamic replanning failed and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
+			"reason":   "dynamic_replan_error",
+			"error":    replanErr.Error(),
+		}),
+	})
+	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", ""
 }
 
@@ -2527,6 +2597,94 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 		}
 	}
 	return retryPlanWithResume(snapshot, plans[len(plans)-1], terminalWorkerID), nil
+}
+
+func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
+			continue
+		}
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+			Error  string          `json:"error"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false
+		}
+		return payload.Status == core.TaskFailed && strings.Contains(strings.ToLower(payload.Error), "dynamic replan")
+	}
+	return false
+}
+
+func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []WorkerTurnResult, error) {
+	var initial Plan
+	haveInitial := false
+	workerMetadata := map[string]map[string]any{}
+	results := []WorkerTurnResult{}
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskPlanned:
+			var plan Plan
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				return Plan{}, nil, fmt.Errorf("decode task plan: %w", err)
+			}
+			if !haveInitial {
+				initial = plan
+				haveInitial = true
+			}
+		case core.EventWorkerCreated:
+			var payload struct {
+				Kind     string         `json:"kind"`
+				Metadata map[string]any `json:"metadata"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return Plan{}, nil, fmt.Errorf("decode worker created: %w", err)
+			}
+			metadata := map[string]any{}
+			for key, value := range payload.Metadata {
+				metadata[key] = value
+			}
+			if payload.Kind != "" {
+				metadata["workerKind"] = payload.Kind
+			}
+			workerMetadata[event.WorkerID] = metadata
+		case core.EventWorkerCompleted:
+			var payload struct {
+				Status           core.WorkerStatus `json:"status"`
+				Summary          string            `json:"summary"`
+				Error            string            `json:"error"`
+				WorkspaceChanges WorkspaceChanges  `json:"workspaceChanges"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return Plan{}, nil, fmt.Errorf("decode worker completion: %w", err)
+			}
+			metadata := workerMetadata[event.WorkerID]
+			result := WorkerTurnResult{
+				WorkerID: event.WorkerID,
+				Status:   payload.Status,
+				Kind:     stringMetadata(metadata, "workerKind"),
+				Summary:  payload.Summary,
+				Error:    payload.Error,
+				Changes:  payload.WorkspaceChanges,
+			}
+			result.NodeID = stringMetadata(metadata, "nodeID")
+			result.Role = stringMetadata(metadata, "spawnRole")
+			result.SpawnID = stringMetadata(metadata, "spawnID")
+			result.BaseWorkerID = stringMetadata(metadata, "baseWorkerID")
+			results = append(results, result)
+		}
+	}
+	if !haveInitial {
+		return Plan{}, nil, errors.New("task has no persisted initial plan to retry graph")
+	}
+	if len(results) == 0 {
+		return Plan{}, nil, errors.New("task has no completed worker results to retry graph")
+	}
+	return initial, results, nil
 }
 
 func retryPlanWithResume(snapshot core.Snapshot, plan Plan, workerID string) Plan {

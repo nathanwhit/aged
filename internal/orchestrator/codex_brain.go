@@ -209,7 +209,7 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		Message                string          `json:"message,omitempty"`
 		Metadata               map[string]any  `json:"metadata,omitempty"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
 		return ReplanDecision{}, err
 	}
 	decision := ReplanDecision{
@@ -240,7 +240,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Spawns            json.RawMessage `json:"spawns,omitempty"`
 		Metadata          map[string]any  `json:"metadata,omitempty"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
 		return Plan{}, err
 	}
 	steps, err := decodePlanSteps(raw.Steps)
@@ -265,6 +265,63 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Spawns:            spawns,
 		Metadata:          raw.Metadata,
 	}, nil
+}
+
+func unmarshalPossiblyWrappedJSONObject(data []byte, value any) error {
+	trimmed := bytes.TrimSpace(data)
+	if err := json.Unmarshal(trimmed, value); err == nil {
+		return nil
+	} else {
+		object, extractErr := firstJSONObject(trimmed)
+		if extractErr != nil || bytes.Equal(object, trimmed) {
+			return err
+		}
+		if retryErr := json.Unmarshal(object, value); retryErr != nil {
+			return fmt.Errorf("%w; extracted JSON object also failed: %v", err, retryErr)
+		}
+		return nil
+	}
+}
+
+func firstJSONObject(data []byte) ([]byte, error) {
+	start := bytes.IndexByte(data, '{')
+	if start < 0 {
+		return nil, errors.New("no JSON object found")
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for index := start; index < len(data); index++ {
+		ch := data[index]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return data[start : index+1], nil
+			}
+			if depth < 0 {
+				return nil, errors.New("unbalanced JSON object")
+			}
+		}
+	}
+	return nil, errors.New("unterminated JSON object")
 }
 
 func decodePlanSteps(data json.RawMessage) ([]PlanStep, error) {
@@ -385,6 +442,8 @@ func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) stri
 You are making a dynamic replanning decision after one or more worker turns.
 
 Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
+Do not include prose before or after the JSON object. Do not include markdown fences. Do not include comments. Do not emit more than one JSON object. Do not add an extra closing brace after the object.
 
 The JSON object must have exactly these top-level fields:
 

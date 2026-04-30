@@ -18,6 +18,8 @@ For performance-improvement requests, prefer decomposing the work into bounded i
 Use `dependsOn` to make implementation wait for investigation outputs and validation wait for implementation outputs. A worker can run benchmarks and compare results itself; only request new orchestrator primitives when repeatability, auditability, or UI display requires machine-readable benchmark artifacts.
 
 Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be `{`, and the last non-whitespace character must be `}`.
+Do not include prose before or after the JSON object. Do not emit more than one JSON object. Do not add an extra closing brace after the object.
 
 The JSON object must have exactly these top-level fields:
 
