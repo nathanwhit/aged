@@ -1588,7 +1588,8 @@ small {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
-.plugin-register {
+.plugin-register,
+.target-register {
   background: #f8fafc;
   border: 1px solid #e3e7ee;
   border-radius: 8px;
@@ -1600,11 +1601,14 @@ small {
 }
 
 .plugin-command-field,
-.plugin-config-field {
+.plugin-config-field,
+.target-wide-field,
+.target-label-field {
   grid-column: 1 / -1;
 }
 
-.plugin-config-field {
+.plugin-config-field,
+.target-label-field {
   border: 1px solid #d8dee8;
   border-radius: 8px;
   display: grid;
@@ -1613,7 +1617,8 @@ small {
   padding: 10px;
 }
 
-.plugin-config-field legend {
+.plugin-config-field legend,
+.target-label-field legend {
   color: #60646c;
   font-weight: 700;
   padding: 0 4px;
@@ -1808,6 +1813,14 @@ small {
   flex-wrap: wrap;
   font-size: 12px;
   gap: 6px 10px;
+}
+
+.target-location {
+  color: #60646c;
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .health-dot {
@@ -2089,12 +2102,15 @@ small {
     grid-template-columns: 1fr;
   }
 
-  .plugin-register {
+  .plugin-register,
+  .target-register {
     grid-template-columns: 1fr;
   }
 
   .plugin-command-field,
   .plugin-config-field,
+  .target-wide-field,
+  .target-label-field,
   .plugin-form-footer {
     grid-column: auto;
   }

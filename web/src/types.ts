@@ -229,6 +229,13 @@ export type OrchestrationGraphEdge = {
 export type TargetState = {
   id: string;
   kind: string;
+  host?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  insecureIgnoreHostKey?: boolean;
+  workDir?: string;
+  workRoot?: string;
   labels?: Record<string, string>;
   capacity: {
     maxWorkers: number;

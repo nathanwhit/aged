@@ -15,8 +15,8 @@ import (
 
 func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
-		{ID: "small", Kind: TargetKindSSH, Labels: map[string]string{"role": "general"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
-		{ID: "perf", Kind: TargetKindSSH, Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 8, MemoryGB: 64}},
+		{ID: "small", Kind: TargetKindSSH, Host: "small", Labels: map[string]string{"role": "general"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
+		{ID: "perf", Kind: TargetKindSSH, Host: "perf", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 8, MemoryGB: 64}},
 	})
 	plan := Plan{
 		Prompt: "run benchmark",
@@ -36,8 +36,8 @@ func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 
 func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
-		{ID: "bad", Kind: TargetKindSSH, Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},
-		{ID: "good", Kind: TargetKindSSH, Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1, MemoryGB: 16}},
+		{ID: "bad", Kind: TargetKindSSH, Host: "bad", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},
+		{ID: "good", Kind: TargetKindSSH, Host: "good", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1, MemoryGB: 16}},
 	})
 	registry.UpdateHealth("bad", core.TargetHealth{Status: "unhealthy", Reachable: true, Tmux: false, RepoPresent: true}, core.TargetResources{})
 	registry.UpdateHealth("good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.2, MemoryAvailableMB: 8192})

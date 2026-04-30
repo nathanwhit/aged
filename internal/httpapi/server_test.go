@@ -280,6 +280,58 @@ func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
 	}
 }
 
+func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/targets", "application/json", strings.NewReader(`{
+		"id": "vm-1",
+		"kind": "ssh",
+		"host": "vm.local",
+		"user": "aged",
+		"workDir": "/repo",
+		"workRoot": "/runs",
+		"labels": {"location": "remote"},
+		"capacity": {"maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+
+	targets, err := store.ListTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].ID != "vm-1" || targets[0].Labels["location"] != "remote" {
+		t.Fatalf("targets = %+v", targets)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, target := range snapshot.Targets {
+		if target.ID == "vm-1" && target.Host == "vm.local" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("snapshot targets = %+v", snapshot.Targets)
+	}
+}
+
 func TestMCPProjectTools(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

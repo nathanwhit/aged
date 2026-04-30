@@ -350,6 +350,47 @@ func TestPluginsPersistInSQLite(t *testing.T) {
 	}
 }
 
+func TestTargetsPersistInSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	target := core.TargetConfig{
+		ID:           "vm-1",
+		Kind:         "ssh",
+		Host:         "vm.local",
+		User:         "aged",
+		IdentityFile: "/tmp/id",
+		WorkDir:      "/repo",
+		WorkRoot:     "/runs",
+		Labels:       map[string]string{"location": "remote"},
+		Capacity:     core.TargetCapacity{MaxWorkers: 2, CPUWeight: 8, MemoryGB: 32},
+	}
+	if _, err := store.SaveTarget(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := store.ListTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].ID != "vm-1" || targets[0].Host != "vm.local" || targets[0].Labels["location"] != "remote" || targets[0].Capacity.MaxWorkers != 2 {
+		t.Fatalf("targets = %+v", targets)
+	}
+	if err := store.DeleteTarget(ctx, "vm-1"); err != nil {
+		t.Fatal(err)
+	}
+	targets, err = store.ListTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 0 {
+		t.Fatalf("targets after delete = %+v", targets)
+	}
+}
+
 func TestSnapshotHidesClearedTasksAndKeepsEvents(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

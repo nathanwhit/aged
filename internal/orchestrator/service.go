@@ -396,6 +396,52 @@ func (s *Service) SetPluginRuntimeContext(ctx context.Context) {
 	s.pluginCtx = ctx
 }
 
+func (s *Service) LoadRegisteredTargets(ctx context.Context) error {
+	targets, err := s.store.ListTargets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if _, err := s.registerTargetRuntime(targetConfigFromCore(target)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) RegisterTarget(ctx context.Context, target core.TargetConfig) (core.TargetConfig, error) {
+	registered, err := s.registerTargetRuntime(targetConfigFromCore(target))
+	if err != nil {
+		return core.TargetConfig{}, err
+	}
+	out := coreTargetConfig(registered)
+	if _, err := s.store.SaveTarget(ctx, out); err != nil {
+		return core.TargetConfig{}, err
+	}
+	return out, nil
+}
+
+func (s *Service) DeleteTarget(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("target id is required")
+	}
+	if err := s.targets.Delete(id); err != nil {
+		return err
+	}
+	if err := s.store.DeleteTarget(ctx, id); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) registerTargetRuntime(target TargetConfig) (TargetConfig, error) {
+	if s.targets == nil {
+		s.targets = NewLocalTargetRegistry()
+	}
+	return s.targets.Register(target)
+}
+
 func (s *Service) LoadRegisteredPlugins(ctx context.Context) error {
 	plugins, err := s.store.ListPlugins(ctx)
 	if err != nil {

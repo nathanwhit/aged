@@ -38,7 +38,9 @@ The dev-control server defaults to `-assistant auto`, so a `-worker codex` dev d
 
 Task titles are optional. When `title` is omitted or blank, aged asks the configured assistant for a short 1-8 word title and falls back to a local prompt-derived title if the assistant is unavailable.
 
-Remote execution targets are configured with `-targets` / `AGED_TARGETS` using JSON:
+Remote execution targets can be registered dynamically through `POST /api/targets` / `PUT /api/targets/{id}` or through the dashboard Targets pane. They are persisted in SQLite and become available to the live scheduler without restarting the daemon.
+
+`-targets` / `AGED_TARGETS` still accept startup seed JSON:
 
 ```json
 {

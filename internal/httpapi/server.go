@@ -41,6 +41,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 	mux.HandleFunc("GET /api/projects/{id}/health", s.projectHealth)
+	mux.HandleFunc("GET /api/targets", s.targets)
+	mux.HandleFunc("POST /api/targets", s.registerTarget)
+	mux.HandleFunc("PUT /api/targets/{id}", s.updateTarget)
+	mux.HandleFunc("DELETE /api/targets/{id}", s.deleteTarget)
 	mux.HandleFunc("GET /api/plugins", s.plugins)
 	mux.HandleFunc("POST /api/plugins", s.registerPlugin)
 	mux.HandleFunc("PUT /api/plugins/{id}", s.updatePlugin)
@@ -139,6 +143,58 @@ func (s *Server) projectHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.service.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot.Targets)
+}
+
+func (s *Server) registerTarget(w http.ResponseWriter, r *http.Request) {
+	var target core.TargetConfig
+	if err := decodeJSON(r, &target); err != nil {
+		writeError(w, err)
+		return
+	}
+	registered, err := s.service.RegisterTarget(r.Context(), target)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, registered)
+}
+
+func (s *Server) updateTarget(w http.ResponseWriter, r *http.Request) {
+	var target core.TargetConfig
+	if err := decodeJSON(r, &target); err != nil {
+		writeError(w, err)
+		return
+	}
+	if target.ID == "" {
+		target.ID = r.PathValue("id")
+	}
+	if target.ID != r.PathValue("id") {
+		writeError(w, fmt.Errorf("target id mismatch"))
+		return
+	}
+	registered, err := s.service.RegisterTarget(r.Context(), target)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, registered)
+}
+
+func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteTarget(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {

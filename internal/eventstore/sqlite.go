@@ -88,6 +88,22 @@ CREATE TABLE IF NOT EXISTS plugins (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS targets (
+	id TEXT PRIMARY KEY,
+	kind TEXT NOT NULL,
+	host TEXT NOT NULL DEFAULT '',
+	user TEXT NOT NULL DEFAULT '',
+	port INTEGER NOT NULL DEFAULT 0,
+	identity_file TEXT NOT NULL DEFAULT '',
+	insecure_ignore_host_key INTEGER NOT NULL DEFAULT 0,
+	work_dir TEXT NOT NULL DEFAULT '',
+	work_root TEXT NOT NULL DEFAULT '',
+	labels TEXT NOT NULL DEFAULT '{}',
+	capacity TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -218,6 +234,96 @@ func (s *SQLiteStore) DeletePlugin(ctx context.Context, id string) error {
 		return errors.New("plugin id is required")
 	}
 	res, err := s.db.ExecContext(ctx, `DELETE FROM plugins WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListTargets(ctx context.Context) ([]core.TargetConfig, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, kind, host, user, port, identity_file, insecure_ignore_host_key, work_dir, work_root, labels, capacity
+FROM targets
+ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var targets []core.TargetConfig
+	for rows.Next() {
+		target, err := scanTarget(rows)
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, rows.Err()
+}
+
+func (s *SQLiteStore) SaveTarget(ctx context.Context, target core.TargetConfig) (core.TargetConfig, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	labels, err := json.Marshal(target.Labels)
+	if err != nil {
+		return core.TargetConfig{}, err
+	}
+	capacity, err := json.Marshal(target.Capacity)
+	if err != nil {
+		return core.TargetConfig{}, err
+	}
+	if string(labels) == "null" {
+		labels = []byte("{}")
+	}
+	if string(capacity) == "null" {
+		capacity = []byte("{}")
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO targets (id, kind, host, user, port, identity_file, insecure_ignore_host_key, work_dir, work_root, labels, capacity, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	kind = excluded.kind,
+	host = excluded.host,
+	user = excluded.user,
+	port = excluded.port,
+	identity_file = excluded.identity_file,
+	insecure_ignore_host_key = excluded.insecure_ignore_host_key,
+	work_dir = excluded.work_dir,
+	work_root = excluded.work_root,
+	labels = excluded.labels,
+	capacity = excluded.capacity,
+	updated_at = excluded.updated_at`,
+		target.ID,
+		target.Kind,
+		target.Host,
+		target.User,
+		target.Port,
+		target.IdentityFile,
+		boolInt(target.InsecureIgnoreHostKey),
+		target.WorkDir,
+		target.WorkRoot,
+		string(labels),
+		string(capacity),
+		now,
+		now,
+	)
+	if err != nil {
+		return core.TargetConfig{}, err
+	}
+	return target, nil
+}
+
+func (s *SQLiteStore) DeleteTarget(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("target id is required")
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -1159,6 +1265,40 @@ func scanPlugin(scanner eventScanner) (core.Plugin, error) {
 		}
 	}
 	return plugin, nil
+}
+
+func scanTarget(scanner eventScanner) (core.TargetConfig, error) {
+	var target core.TargetConfig
+	var insecure int
+	var labels string
+	var capacity string
+	if err := scanner.Scan(
+		&target.ID,
+		&target.Kind,
+		&target.Host,
+		&target.User,
+		&target.Port,
+		&target.IdentityFile,
+		&insecure,
+		&target.WorkDir,
+		&target.WorkRoot,
+		&labels,
+		&capacity,
+	); err != nil {
+		return core.TargetConfig{}, err
+	}
+	target.InsecureIgnoreHostKey = insecure != 0
+	if labels != "" {
+		if err := json.Unmarshal([]byte(labels), &target.Labels); err != nil {
+			return core.TargetConfig{}, err
+		}
+	}
+	if capacity != "" {
+		if err := json.Unmarshal([]byte(capacity), &target.Capacity); err != nil {
+			return core.TargetConfig{}, err
+		}
+	}
+	return target, nil
 }
 
 func boolInt(value bool) int {

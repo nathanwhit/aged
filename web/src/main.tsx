@@ -22,7 +22,8 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deletePlugin, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
+import type { TargetInput } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
@@ -211,7 +212,31 @@ function App() {
     ),
   };
   const targetPanes: DashboardPane[] = snapshot.targets.length > 0
-    ? [{ id: "targets", title: "Targets", element: <TargetPanel targets={snapshot.targets} /> }]
+    ? [{
+      id: "targets",
+      title: "Targets",
+      element: (
+        <TargetPanel
+          targets={snapshot.targets}
+          onRegister={async (target) => {
+            setError("");
+            await createTarget(target);
+            await refresh();
+          }}
+          onUpdate={async (id, target) => {
+            setError("");
+            await updateTarget(id, target);
+            await refresh();
+          }}
+          onDelete={async (id) => {
+            setError("");
+            await deleteTarget(id);
+            await refresh();
+          }}
+          onError={setError}
+        />
+      ),
+    }]
     : [];
   const taskPanes: DashboardPane[] = selectedTask
     ? [
@@ -2041,14 +2066,201 @@ function workerEventLabel(event: EventRecord): string {
   return event.type.replace("worker.", "");
 }
 
-function TargetPanel({ targets }: { targets: TargetState[] }) {
+function TargetPanel({
+  targets,
+  onRegister,
+  onUpdate,
+  onDelete,
+  onError,
+}: {
+  targets: TargetState[];
+  onRegister: (target: TargetInput) => Promise<void>;
+  onUpdate: (id: string, target: TargetInput) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [id, setId] = useState("");
+  const [kind, setKind] = useState("ssh");
+  const [host, setHost] = useState("");
+  const [user, setUser] = useState("");
+  const [port, setPort] = useState("");
+  const [identityFile, setIdentityFile] = useState("");
+  const [insecureIgnoreHostKey, setInsecureIgnoreHostKey] = useState(false);
+  const [workDir, setWorkDir] = useState("");
+  const [workRoot, setWorkRoot] = useState("");
+  const [maxWorkers, setMaxWorkers] = useState("1");
+  const [cpuWeight, setCpuWeight] = useState("1");
+  const [memoryGB, setMemoryGB] = useState("");
+  const [labelEntries, setLabelEntries] = useState<PluginConfigEntry[]>([]);
+
+  const reset = () => {
+    setShowForm(false);
+    setEditingId("");
+    setId("");
+    setKind("ssh");
+    setHost("");
+    setUser("");
+    setPort("");
+    setIdentityFile("");
+    setInsecureIgnoreHostKey(false);
+    setWorkDir("");
+    setWorkRoot("");
+    setMaxWorkers("1");
+    setCpuWeight("1");
+    setMemoryGB("");
+    setLabelEntries([]);
+  };
+
+  const edit = (target: TargetState) => {
+    setEditingId(target.id);
+    setId(target.id);
+    setKind(target.kind || "ssh");
+    setHost(target.host ?? "");
+    setUser(target.user ?? "");
+    setPort(target.port ? String(target.port) : "");
+    setIdentityFile(target.identityFile ?? "");
+    setInsecureIgnoreHostKey(Boolean(target.insecureIgnoreHostKey));
+    setWorkDir(target.workDir ?? "");
+    setWorkRoot(target.workRoot ?? "");
+    setMaxWorkers(String(target.capacity?.maxWorkers ?? 1));
+    setCpuWeight(String(target.capacity?.cpuWeight ?? 1));
+    setMemoryGB(target.capacity?.memoryGB ? String(target.capacity.memoryGB) : "");
+    setLabelEntries(configEntriesFromRecord(target.labels));
+    setShowForm(true);
+  };
+
+  const updateLabelEntry = (entryId: string, values: Partial<PluginConfigEntry>) => {
+    setLabelEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      setBusy(true);
+      const labels = configRecordFromEntries(labelEntries);
+      const target: TargetInput = {
+        id: id.trim(),
+        kind,
+        host: host.trim() || undefined,
+        user: user.trim() || undefined,
+        port: port.trim() ? Number(port) : undefined,
+        identityFile: identityFile.trim() || undefined,
+        insecureIgnoreHostKey,
+        workDir: workDir.trim() || undefined,
+        workRoot: workRoot.trim() || undefined,
+        labels,
+        capacity: {
+          maxWorkers: Math.max(1, Number(maxWorkers) || 1),
+          cpuWeight: Number(cpuWeight) || 1,
+          memoryGB: memoryGB.trim() ? Number(memoryGB) : undefined,
+        },
+      };
+      if (editingId) {
+        await onUpdate(editingId, target);
+      } else {
+        await onRegister(target);
+      }
+      reset();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (targets.length === 0) return null;
   return (
     <section className="panel plugin-panel">
-      <div className="panel-title">
-        <Activity size={18} />
-        <h2>Targets</h2>
+      <div className="panel-title split-title">
+        <span>
+          <Activity size={18} />
+          <h2>Targets</h2>
+        </span>
+        <button className="secondary compact" type="button" onClick={() => setShowForm((value) => !value)}>
+          {showForm ? "Close" : "Add"}
+        </button>
       </div>
+      {showForm && (
+        <form className="target-register" onSubmit={submit}>
+          <label>
+            ID
+            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="vm-1" required disabled={Boolean(editingId)} />
+          </label>
+          <label>
+            Kind
+            <select value={kind} onChange={(event) => setKind(event.target.value)}>
+              <option value="ssh">SSH</option>
+              <option value="local">Local</option>
+            </select>
+          </label>
+          <label>
+            Host
+            <input value={host} onChange={(event) => setHost(event.target.value)} placeholder="vm.example.com" disabled={kind === "local"} />
+          </label>
+          <label>
+            User
+            <input value={user} onChange={(event) => setUser(event.target.value)} placeholder="aged" disabled={kind === "local"} />
+          </label>
+          <label>
+            Port
+            <input value={port} onChange={(event) => setPort(event.target.value)} inputMode="numeric" placeholder="22" disabled={kind === "local"} />
+          </label>
+          <label>
+            Identity file
+            <input value={identityFile} onChange={(event) => setIdentityFile(event.target.value)} placeholder="/Users/me/.ssh/id_ed25519" disabled={kind === "local"} />
+          </label>
+          <label className="target-wide-field">
+            Work dir
+            <input value={workDir} onChange={(event) => setWorkDir(event.target.value)} placeholder="/srv/aged/repos/aged" />
+          </label>
+          <label className="target-wide-field">
+            Work root
+            <input value={workRoot} onChange={(event) => setWorkRoot(event.target.value)} placeholder="/srv/aged/runs" disabled={kind === "local"} />
+          </label>
+          <label>
+            Max workers
+            <input value={maxWorkers} onChange={(event) => setMaxWorkers(event.target.value)} inputMode="numeric" />
+          </label>
+          <label>
+            CPU weight
+            <input value={cpuWeight} onChange={(event) => setCpuWeight(event.target.value)} inputMode="decimal" />
+          </label>
+          <label>
+            Memory GB
+            <input value={memoryGB} onChange={(event) => setMemoryGB(event.target.value)} inputMode="decimal" placeholder="32" />
+          </label>
+          <fieldset className="target-label-field">
+            <legend>Labels</legend>
+            {labelEntries.length === 0 ? <p className="plugin-config-empty">No labels</p> : (
+              <div className="plugin-config-list">
+                {labelEntries.map((entry) => (
+                  <div className="plugin-config-row" key={entry.id}>
+                    <input value={entry.key} onChange={(event) => updateLabelEntry(entry.id, { key: event.target.value })} placeholder="location" />
+                    <input value={entry.value} onChange={(event) => updateLabelEntry(entry.id, { value: event.target.value })} placeholder="remote" />
+                    <button type="button" className="icon-button ghost danger-text" onClick={() => setLabelEntries((entries) => entries.filter((item) => item.id !== entry.id))} title="Remove label">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button type="button" className="secondary compact" onClick={() => setLabelEntries((entries) => [...entries, pluginConfigEntry()])}>Add label</button>
+          </fieldset>
+          <div className="plugin-form-footer">
+            <label className="checkbox-label">
+              <input type="checkbox" checked={insecureIgnoreHostKey} onChange={(event) => setInsecureIgnoreHostKey(event.target.checked)} disabled={kind === "local"} />
+              Ignore host key
+            </label>
+            <div className="plugin-form-actions">
+              <button type="submit" disabled={busy}>{editingId ? "Update" : "Register"}</button>
+              <button type="button" className="secondary" onClick={reset}>Cancel</button>
+            </div>
+          </div>
+        </form>
+      )}
       <div className="node-grid">
         {targets.map((target) => (
           <article key={target.id} className="node-card">
@@ -2061,6 +2273,9 @@ function TargetPanel({ targets }: { targets: TargetState[] }) {
               {target.running}/{target.capacity.maxWorkers} workers
               {target.capacity.memoryGB ? ` | ${target.capacity.memoryGB} GB` : ""}
             </p>
+            {target.kind === "ssh" && (
+              <p className="target-location">{[target.user, target.host].filter(Boolean).join("@") || target.host}{target.workDir ? ` · ${target.workDir}` : ""}</p>
+            )}
             {target.health?.status && (
               <div className="target-health">
                 <span className={target.health.status === "ok" ? "health-dot ok" : "health-dot warn"} />
@@ -2073,6 +2288,16 @@ function TargetPanel({ targets }: { targets: TargetState[] }) {
               </div>
             )}
             {target.health?.error && <p className="plugin-error">{target.health.error}</p>}
+            <div className="plugin-card-actions">
+              <button className="secondary" onClick={() => edit(target)}>Edit</button>
+              <button
+                className="secondary danger-text"
+                disabled={target.running > 0 || targets.length <= 1}
+                onClick={() => onDelete(target.id).catch((err: Error) => onError(err.message))}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           </article>
         ))}
       </div>

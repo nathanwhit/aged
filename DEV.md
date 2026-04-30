@@ -69,6 +69,7 @@ The initial local-first vertical slice is implemented.
 - Worker execution is projected as first-class `executionNodes` snapshot state from `execution.node_planned` events, with node id, worker id, worker kind, spawn id, dependencies, role/reason, and status.
 - Per-task orchestration graphs are projected from durable execution events into snapshots/UI, including nodes, parent/dependency edges, target placement, and aggregate status counts.
 - Execution target pools are configurable with `-targets` / `AGED_TARGETS`. The default target is local; SSH targets use detached tmux sessions and remote status/log files so work can outlive the SSH connection.
+- Execution targets can also be added, edited, and deleted dynamically through `/api/targets` and the dashboard Targets pane. Dynamic targets are persisted in SQLite and registered with the live scheduler without restarting the daemon.
 - SSH target health is probed in the background. Probes report reachability, tmux availability, repo path presence, disk, load/CPU, and memory; snapshots/UI show the current health/resource state.
 - Target scheduling now avoids unhealthy SSH targets and incorporates live load, memory, and disk signals into target scoring alongside labels, configured capacity, running workers, worker size, and static CPU/memory hints.
 - Target placement is service-owned. Scheduler-provided target labels are ignored and annotated; task metadata target labels take precedence over project target labels.

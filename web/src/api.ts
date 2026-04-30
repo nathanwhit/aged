@@ -1,4 +1,4 @@
-import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -120,6 +120,55 @@ export async function updatePlugin(id: string, input: Plugin): Promise<Plugin> {
 
 export async function deletePlugin(id: string): Promise<void> {
   const response = await fetch(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+export type TargetInput = {
+  id: string;
+  kind: string;
+  host?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  insecureIgnoreHostKey?: boolean;
+  workDir?: string;
+  workRoot?: string;
+  labels?: Record<string, string>;
+  capacity?: {
+    maxWorkers?: number;
+    cpuWeight?: number;
+    memoryGB?: number;
+  };
+};
+
+export async function createTarget(input: TargetInput): Promise<TargetState> {
+  const response = await fetch("/api/targets", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function updateTarget(id: string, input: TargetInput): Promise<TargetState> {
+  const response = await fetch(`/api/targets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function deleteTarget(id: string): Promise<void> {
+  const response = await fetch(`/api/targets/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }

@@ -156,15 +156,26 @@ type TargetCapacity struct {
 	MemoryGB   float64 `json:"memoryGB,omitempty"`
 }
 
+type TargetConfig struct {
+	ID                    string            `json:"id"`
+	Kind                  string            `json:"kind"`
+	Host                  string            `json:"host,omitempty"`
+	User                  string            `json:"user,omitempty"`
+	Port                  int               `json:"port,omitempty"`
+	IdentityFile          string            `json:"identityFile,omitempty"`
+	InsecureIgnoreHostKey bool              `json:"insecureIgnoreHostKey,omitempty"`
+	WorkDir               string            `json:"workDir,omitempty"`
+	WorkRoot              string            `json:"workRoot,omitempty"`
+	Labels                map[string]string `json:"labels,omitempty"`
+	Capacity              TargetCapacity    `json:"capacity,omitempty"`
+}
+
 type TargetState struct {
-	ID        string            `json:"id"`
-	Kind      string            `json:"kind"`
-	Labels    map[string]string `json:"labels,omitempty"`
-	Capacity  TargetCapacity    `json:"capacity"`
-	Running   int               `json:"running"`
-	Available bool              `json:"available"`
-	Health    TargetHealth      `json:"health,omitempty"`
-	Resources TargetResources   `json:"resources,omitempty"`
+	TargetConfig
+	Running   int             `json:"running"`
+	Available bool            `json:"available"`
+	Health    TargetHealth    `json:"health,omitempty"`
+	Resources TargetResources `json:"resources,omitempty"`
 }
 
 type TargetHealth struct {

@@ -87,27 +87,116 @@ func NewTargetRegistry(configs []TargetConfig) *TargetRegistry {
 		resource: map[string]core.TargetResources{},
 	}
 	for _, config := range configs {
-		if strings.TrimSpace(config.ID) == "" {
+		normalized, err := normalizeTargetConfig(config)
+		if err != nil {
 			continue
 		}
-		if config.Kind == "" {
-			config.Kind = TargetKindLocal
-		}
-		if config.Capacity.MaxWorkers <= 0 {
-			config.Capacity.MaxWorkers = 1
-		}
-		if config.Capacity.CPUWeight <= 0 {
-			config.Capacity.CPUWeight = 1
-		}
-		if config.Labels == nil {
-			config.Labels = map[string]string{}
-		}
-		registry.targets[config.ID] = config
+		registry.targets[normalized.ID] = normalized
 	}
 	if len(registry.targets) == 0 {
 		registry.targets["local"] = NewLocalTargetRegistry().targets["local"]
 	}
 	return registry
+}
+
+func normalizeTargetConfig(config TargetConfig) (TargetConfig, error) {
+	config.ID = strings.TrimSpace(config.ID)
+	if config.ID == "" {
+		return TargetConfig{}, errors.New("target id is required")
+	}
+	if config.Kind == "" {
+		config.Kind = TargetKindLocal
+	}
+	config.Host = strings.TrimSpace(config.Host)
+	config.User = strings.TrimSpace(config.User)
+	config.IdentityFile = strings.TrimSpace(config.IdentityFile)
+	config.WorkDir = strings.TrimSpace(config.WorkDir)
+	config.WorkRoot = strings.TrimSpace(config.WorkRoot)
+	if config.Kind == TargetKindSSH && config.Host == "" {
+		return TargetConfig{}, errors.New("ssh target host is required")
+	}
+	if config.Capacity.MaxWorkers <= 0 {
+		config.Capacity.MaxWorkers = 1
+	}
+	if config.Capacity.CPUWeight <= 0 {
+		config.Capacity.CPUWeight = 1
+	}
+	if config.Labels == nil {
+		config.Labels = map[string]string{}
+	}
+	return config, nil
+}
+
+func targetConfigFromCore(config core.TargetConfig) TargetConfig {
+	return TargetConfig{
+		ID:                    config.ID,
+		Kind:                  TargetKind(config.Kind),
+		Host:                  config.Host,
+		User:                  config.User,
+		Port:                  config.Port,
+		IdentityFile:          config.IdentityFile,
+		InsecureIgnoreHostKey: config.InsecureIgnoreHostKey,
+		WorkDir:               config.WorkDir,
+		WorkRoot:              config.WorkRoot,
+		Labels:                config.Labels,
+		Capacity:              TargetCapacity(config.Capacity),
+	}
+}
+
+func coreTargetConfig(config TargetConfig) core.TargetConfig {
+	return core.TargetConfig{
+		ID:                    config.ID,
+		Kind:                  string(config.Kind),
+		Host:                  config.Host,
+		User:                  config.User,
+		Port:                  config.Port,
+		IdentityFile:          config.IdentityFile,
+		InsecureIgnoreHostKey: config.InsecureIgnoreHostKey,
+		WorkDir:               config.WorkDir,
+		WorkRoot:              config.WorkRoot,
+		Labels:                config.Labels,
+		Capacity:              core.TargetCapacity(config.Capacity),
+	}
+}
+
+func (r *TargetRegistry) Register(config TargetConfig) (TargetConfig, error) {
+	if r == nil {
+		return TargetConfig{}, errors.New("target registry is not configured")
+	}
+	normalized, err := normalizeTargetConfig(config)
+	if err != nil {
+		return TargetConfig{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.targets[normalized.ID] = normalized
+	return normalized, nil
+}
+
+func (r *TargetRegistry) Delete(id string) error {
+	if r == nil {
+		return errors.New("target registry is not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("target id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.targets[id]; !ok {
+		return errors.New("target not found")
+	}
+	if r.running[id] > 0 {
+		return errors.New("target has running workers")
+	}
+	if len(r.targets) <= 1 {
+		return errors.New("cannot delete the only execution target")
+	}
+	delete(r.targets, id)
+	delete(r.running, id)
+	delete(r.health, id)
+	delete(r.resource, id)
+	return nil
 }
 
 func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
@@ -192,14 +281,11 @@ func (r *TargetRegistry) Snapshot() []core.TargetState {
 	out := make([]core.TargetState, 0, len(r.targets))
 	for _, target := range r.targets {
 		out = append(out, core.TargetState{
-			ID:        target.ID,
-			Kind:      string(target.Kind),
-			Labels:    target.Labels,
-			Capacity:  core.TargetCapacity(target.Capacity),
-			Running:   r.running[target.ID],
-			Available: r.isAvailableLocked(target),
-			Health:    r.health[target.ID],
-			Resources: r.resource[target.ID],
+			TargetConfig: coreTargetConfig(target),
+			Running:      r.running[target.ID],
+			Available:    r.isAvailableLocked(target),
+			Health:       r.health[target.ID],
+			Resources:    r.resource[target.ID],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

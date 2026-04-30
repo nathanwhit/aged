@@ -141,6 +141,10 @@ func main() {
 		targets,
 		orchestrator.NewSSHRunner(),
 	)
+	if err := service.LoadRegisteredTargets(ctx); err != nil {
+		slog.Error("initialize registered targets", "error", err)
+		os.Exit(1)
+	}
 	if err := service.LoadProjects(ctx, projects); err != nil {
 		slog.Error("initialize projects", "error", err)
 		os.Exit(1)

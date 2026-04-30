@@ -13,6 +13,9 @@ type Store interface {
 	ListPlugins(ctx context.Context) ([]core.Plugin, error)
 	SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error)
 	DeletePlugin(ctx context.Context, id string) error
+	ListTargets(ctx context.Context) ([]core.TargetConfig, error)
+	SaveTarget(ctx context.Context, target core.TargetConfig) (core.TargetConfig, error)
+	DeleteTarget(ctx context.Context, id string) error
 	ListProjects(ctx context.Context) ([]core.Project, string, error)
 	CreateProject(ctx context.Context, project core.Project) (core.Project, error)
 	SaveProject(ctx context.Context, project core.Project, makeDefault bool) (core.Project, error)
