@@ -110,6 +110,7 @@ export type Plugin = {
   kind: string;
   protocol?: string;
   enabled: boolean;
+  builtIn?: boolean;
   status?: string;
   error?: string;
   command?: string[];

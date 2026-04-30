@@ -2085,6 +2085,49 @@ function formatMB(value: number): string {
   return `${Math.round(value)} MB`;
 }
 
+const SYSTEM_PLUGIN_IDS = new Set([
+  "brain:prompt",
+  "brain:codex",
+  "brain:api",
+  "runner:codex",
+  "runner:claude",
+  "runner:shell",
+  "runner:benchmark_compare",
+  "driver:http",
+  "driver:github",
+]);
+
+type PluginConfigEntry = {
+  id: string;
+  key: string;
+  value: string;
+};
+
+function pluginConfigEntry(key = "", value = ""): PluginConfigEntry {
+  return { id: `${Date.now()}-${Math.random()}`, key, value };
+}
+
+function configEntriesFromRecord(config?: Record<string, string>): PluginConfigEntry[] {
+  return Object.entries(config ?? {}).map(([key, value]) => pluginConfigEntry(key, value ?? ""));
+}
+
+function configRecordFromEntries(entries: PluginConfigEntry[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const key = entry.key.trim();
+    const value = entry.value.trim();
+    if (!key && !value) continue;
+    if (!key) throw new Error("config fields need a key");
+    if (Object.prototype.hasOwnProperty.call(out, key)) throw new Error(`duplicate config key ${key}`);
+    out[key] = value;
+  }
+  return out;
+}
+
+function isSystemPlugin(plugin: Plugin): boolean {
+  return Boolean(plugin.builtIn) || SYSTEM_PLUGIN_IDS.has(plugin.id);
+}
+
 function PluginPanel({
   plugins,
   onRegister,
@@ -2099,13 +2142,15 @@ function PluginPanel({
   onError: (message: string) => void;
 }) {
   const enabled = plugins.filter((plugin) => plugin.enabled).length;
+  const systemPlugins = plugins.filter(isSystemPlugin);
+  const customPlugins = plugins.filter((plugin) => !isSystemPlugin(plugin));
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [kind, setKind] = useState("runner");
   const [protocol, setProtocol] = useState("aged-runner-v1");
   const [command, setCommand] = useState("");
   const [enabledValue, setEnabledValue] = useState(true);
-  const [config, setConfig] = useState("{}");
+  const [configEntries, setConfigEntries] = useState<PluginConfigEntry[]>([]);
   const [editingId, setEditingId] = useState("");
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -2117,7 +2162,7 @@ function PluginPanel({
     setProtocol("aged-runner-v1");
     setCommand("");
     setEnabledValue(true);
-    setConfig("{}");
+    setConfigEntries([]);
     setEditingId("");
     setShowForm(false);
   };
@@ -2126,7 +2171,7 @@ function PluginPanel({
     event.preventDefault();
     try {
       setBusy(true);
-      const parsedConfig = config.trim() ? JSON.parse(config) : {};
+      const parsedConfig = configRecordFromEntries(configEntries);
       const plugin: Plugin = {
         id: id.trim(),
         name: name.trim() || id.trim(),
@@ -2150,6 +2195,7 @@ function PluginPanel({
   };
 
   const edit = (plugin: Plugin) => {
+    if (isSystemPlugin(plugin)) return;
     setEditingId(plugin.id);
     setId(plugin.id);
     setName(plugin.name ?? "");
@@ -2157,9 +2203,74 @@ function PluginPanel({
     setProtocol(plugin.protocol || (plugin.kind === "runner" ? "aged-runner-v1" : "aged-plugin-v1"));
     setCommand(plugin.command?.join(" ") ?? "");
     setEnabledValue(plugin.enabled);
-    setConfig(JSON.stringify(plugin.config ?? {}, null, 2));
+    setConfigEntries(configEntriesFromRecord(plugin.config));
     setShowForm(true);
   };
+
+  const updateConfigEntry = (entryId: string, values: Partial<PluginConfigEntry>) => {
+    setConfigEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
+  };
+
+  const removeConfigEntry = (entryId: string) => {
+    setConfigEntries((entries) => entries.filter((entry) => entry.id !== entryId));
+  };
+
+  const renderPluginCards = (items: Plugin[]) => (
+    <div className="plugin-grid">
+      {items.map((plugin) => {
+        const system = isSystemPlugin(plugin);
+        return (
+          <article key={plugin.id} className={[plugin.enabled ? "plugin-card" : "plugin-card disabled", system ? "system" : ""].filter(Boolean).join(" ")}>
+            <div>
+              <strong>{plugin.name}</strong>
+              <small>{plugin.id}</small>
+            </div>
+            <div className="plugin-status-row">
+              <span className={plugin.enabled ? "tool-status" : "tool-status neutral"}>{plugin.kind}</span>
+              {system && <span className="tool-status neutral">system</span>}
+              {plugin.status && <span className={plugin.status === "error" ? "tool-status failed" : "tool-status neutral"}>{plugin.status}</span>}
+            </div>
+            {plugin.capabilities && plugin.capabilities.length > 0 && (
+              <div className="plugin-capabilities">
+                {plugin.capabilities.slice(0, 5).map((capability) => (
+                  <span key={capability}>{capability}</span>
+                ))}
+              </div>
+            )}
+            {plugin.driver?.managed && (
+              <div className="driver-runtime">
+                {plugin.driver.pid ? <span>pid {plugin.driver.pid}</span> : <span>not running</span>}
+                {plugin.driver.restartPolicy && <span>{plugin.driver.restartPolicy}</span>}
+                {plugin.driver.restartCount ? <span>{plugin.driver.restartCount} restarts</span> : null}
+              </div>
+            )}
+            {plugin.driver?.logTail && plugin.driver.logTail.length > 0 && (
+              <details className="driver-log">
+                <summary>{plugin.driver.logTail.length} log lines</summary>
+                <pre>{plugin.driver.logTail.slice(-8).join("\n")}</pre>
+              </details>
+            )}
+            {plugin.error && <p className="plugin-error">{plugin.error}</p>}
+            <div className="plugin-card-actions">
+              {system ? (
+                <span className="plugin-system-note">Built in</span>
+              ) : (
+                <>
+                  <button className="secondary" onClick={() => edit(plugin)}>Edit</button>
+                  <button
+                    className="secondary danger-text"
+                    onClick={() => onDelete(plugin.id).catch((err: Error) => onError(err.message))}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </>
+              )}
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
 
   return (
     <section className="panel">
@@ -2179,7 +2290,7 @@ function PluginPanel({
         <form className="plugin-register" onSubmit={submit}>
           <label>
             ID
-            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="runner:lint" required />
+            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="runner:lint" required disabled={Boolean(editingId)} />
           </label>
           <label>
             Name
@@ -2206,10 +2317,25 @@ function PluginPanel({
             Command
             <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command arg..." />
           </label>
-          <label className="plugin-config-field">
-            Config JSON
-            <textarea value={config} onChange={(event) => setConfig(event.target.value)} rows={3} spellCheck={false} />
-          </label>
+          <fieldset className="plugin-config-field">
+            <legend>Config</legend>
+            {configEntries.length === 0 ? (
+              <p className="plugin-config-empty">No config fields</p>
+            ) : (
+              <div className="plugin-config-list">
+                {configEntries.map((entry) => (
+                  <div className="plugin-config-row" key={entry.id}>
+                    <input value={entry.key} onChange={(event) => updateConfigEntry(entry.id, { key: event.target.value })} placeholder="restart" />
+                    <input value={entry.value} onChange={(event) => updateConfigEntry(entry.id, { value: event.target.value })} placeholder="on_failure" />
+                    <button type="button" className="icon-button ghost danger-text" onClick={() => removeConfigEntry(entry.id)} title="Remove config field">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button type="button" className="secondary compact" onClick={() => setConfigEntries((entries) => [...entries, pluginConfigEntry()])}>Add field</button>
+          </fieldset>
           <div className="plugin-form-footer">
             <label className="checkbox-label">
               <input type="checkbox" checked={enabledValue} onChange={(event) => setEnabledValue(event.target.checked)} />
@@ -2222,49 +2348,13 @@ function PluginPanel({
           </div>
         </form>
       )}
-      <div className="plugin-grid">
-        {plugins.map((plugin) => (
-          <article key={plugin.id} className={plugin.enabled ? "plugin-card" : "plugin-card disabled"}>
-            <div>
-              <strong>{plugin.name}</strong>
-              <small>{plugin.id}</small>
-            </div>
-            <div className="plugin-status-row">
-              <span className={plugin.enabled ? "tool-status" : "tool-status neutral"}>{plugin.kind}</span>
-              {plugin.status && <span className={plugin.status === "error" ? "tool-status failed" : "tool-status neutral"}>{plugin.status}</span>}
-            </div>
-            {plugin.capabilities && plugin.capabilities.length > 0 && (
-              <div className="plugin-capabilities">
-                {plugin.capabilities.slice(0, 5).map((capability) => (
-                  <span key={capability}>{capability}</span>
-                ))}
-              </div>
-            )}
-            {plugin.driver?.managed && (
-              <div className="driver-runtime">
-                {plugin.driver.pid ? <span>pid {plugin.driver.pid}</span> : <span>not running</span>}
-                {plugin.driver.restartPolicy && <span>{plugin.driver.restartPolicy}</span>}
-                {plugin.driver.restartCount ? <span>{plugin.driver.restartCount} restarts</span> : null}
-              </div>
-            )}
-            {plugin.driver?.logTail && plugin.driver.logTail.length > 0 && (
-              <details className="driver-log">
-                <summary>{plugin.driver.logTail.length} log lines</summary>
-                <pre>{plugin.driver.logTail.slice(-8).join("\n")}</pre>
-              </details>
-            )}
-            {plugin.error && <p className="plugin-error">{plugin.error}</p>}
-            <div className="plugin-card-actions">
-              <button className="secondary" onClick={() => edit(plugin)}>Edit</button>
-              <button
-                className="secondary danger-text"
-                onClick={() => onDelete(plugin.id).catch((err: Error) => onError(err.message))}
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          </article>
-        ))}
+      <div className="plugin-section">
+        <div className="plugin-section-title">Custom</div>
+        {customPlugins.length > 0 ? renderPluginCards(customPlugins) : <p className="empty-state">No custom plugins registered.</p>}
+      </div>
+      <div className="plugin-section">
+        <div className="plugin-section-title">System</div>
+        {renderPluginCards(systemPlugins)}
       </div>
     </section>
   );

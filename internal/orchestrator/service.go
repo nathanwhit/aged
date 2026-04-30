@@ -402,6 +402,9 @@ func (s *Service) LoadRegisteredPlugins(ctx context.Context) error {
 		return err
 	}
 	for _, plugin := range plugins {
+		if s.plugins != nil && s.plugins.IsBuiltIn(plugin.ID) {
+			continue
+		}
 		if _, err := s.registerPluginRuntime(plugin, false); err != nil {
 			return err
 		}

@@ -52,6 +52,9 @@ func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 		if err != nil {
 			continue
 		}
+		if existing, ok := byID[normalized.ID]; ok && existing.BuiltIn {
+			normalized.BuiltIn = true
+		}
 		byID[normalized.ID] = normalized
 	}
 	out := make([]core.Plugin, 0, len(byID))
@@ -110,6 +113,9 @@ func (r *PluginRegistry) Register(plugin core.Plugin) (core.Plugin, error) {
 	replaced := false
 	for index, existing := range r.plugins {
 		if existing.ID == normalized.ID {
+			if existing.BuiltIn && !normalized.BuiltIn {
+				return core.Plugin{}, errors.New("built-in plugin cannot be replaced")
+			}
 			normalized.Driver = existing.Driver
 			r.plugins[index] = normalized
 			replaced = true
@@ -142,6 +148,9 @@ func (r *PluginRegistry) Delete(id string) error {
 		if plugin.ID != id {
 			continue
 		}
+		if plugin.BuiltIn {
+			return errors.New("built-in plugin cannot be deleted")
+		}
 		if cancel := r.driverCancel[id]; cancel != nil {
 			cancel()
 			delete(r.driverCancel, id)
@@ -157,6 +166,21 @@ func (r *PluginRegistry) Delete(id string) error {
 		return nil
 	}
 	return errors.New("plugin not found")
+}
+
+func (r *PluginRegistry) IsBuiltIn(id string) bool {
+	if r == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, plugin := range r.plugins {
+		if plugin.ID == id {
+			return plugin.BuiltIn
+		}
+	}
+	return false
 }
 
 func (r *PluginRegistry) Snapshot() []core.Plugin {
@@ -417,14 +441,14 @@ func runPluginCommand(ctx context.Context, argv []string) ([]byte, error) {
 
 func builtinPlugins() []core.Plugin {
 	return []core.Plugin{
-		{ID: "brain:prompt", Name: "Prompt Scheduler", Kind: "brain", Enabled: true, Capabilities: []string{"plan"}},
-		{ID: "brain:codex", Name: "Codex Scheduler", Kind: "brain", Enabled: true, Capabilities: []string{"plan", "replan"}},
-		{ID: "brain:api", Name: "OpenAI-Compatible Scheduler", Kind: "brain", Enabled: true, Capabilities: []string{"plan", "replan"}},
-		{ID: "runner:codex", Name: "Codex CLI Worker", Kind: "runner", Enabled: true, Capabilities: []string{"code", "shell", "json-events"}},
-		{ID: "runner:claude", Name: "Claude CLI Worker", Kind: "runner", Enabled: true, Capabilities: []string{"code", "review", "stream-events"}},
-		{ID: "runner:shell", Name: "Shell Worker", Kind: "runner", Enabled: true, Capabilities: []string{"shell", "steering"}},
-		{ID: "runner:benchmark_compare", Name: "Benchmark Comparator", Kind: "runner", Enabled: true, Capabilities: []string{"benchmark", "compare"}},
-		{ID: "driver:http", Name: "HTTP Task Driver", Kind: "driver", Enabled: true, Capabilities: []string{"create-task", "dedupe-external-id"}},
-		{ID: "driver:github", Name: "GitHub via HTTP Driver", Kind: "driver", Enabled: false, Capabilities: []string{"issues", "pull-requests", "status-refresh"}},
+		{ID: "brain:prompt", Name: "Prompt Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan"}},
+		{ID: "brain:codex", Name: "Codex Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan", "replan"}},
+		{ID: "brain:api", Name: "OpenAI-Compatible Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan", "replan"}},
+		{ID: "runner:codex", Name: "Codex CLI Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"code", "shell", "json-events"}},
+		{ID: "runner:claude", Name: "Claude CLI Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"code", "review", "stream-events"}},
+		{ID: "runner:shell", Name: "Shell Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"shell", "steering"}},
+		{ID: "runner:benchmark_compare", Name: "Benchmark Comparator", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"benchmark", "compare"}},
+		{ID: "driver:http", Name: "HTTP Task Driver", Kind: "driver", Enabled: true, BuiltIn: true, Capabilities: []string{"create-task", "dedupe-external-id"}},
+		{ID: "driver:github", Name: "GitHub via HTTP Driver", Kind: "driver", Enabled: false, BuiltIn: true, Capabilities: []string{"issues", "pull-requests", "status-refresh"}},
 	}
 }

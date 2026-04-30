@@ -230,6 +230,7 @@ http://127.0.0.1:8787
 - Discord conversational quality uses the configured assistant and now benefits from persisted Codex/Claude session resume. MCP remains the cleaner path when an external agent runtime is available.
 - Task retry is currently plan-level retry, not a durable Codex/Claude session resume or first-class graph resume from an arbitrary failed execution node.
 - Dashboard pane cards now align with the left `Start Work` column; dashboard controls float instead of reserving a separate row above `Targets`.
+- Plugin management now separates built-in system plugins from custom registrations. Built-ins are marked as system plugins, cannot be edited or deleted through the UI, and the backend rejects delete/replace attempts for them. Custom plugin config is edited as key/value fields instead of raw JSON.
 
 ## Next Work
 

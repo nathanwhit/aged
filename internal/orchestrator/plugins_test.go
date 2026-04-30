@@ -51,6 +51,24 @@ func TestLoadPluginRegistryIncludesBuiltinsAndConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestPluginRegistryRejectsBuiltinMutation(t *testing.T) {
+	registry := NewPluginRegistry(builtinPlugins())
+
+	if err := registry.Delete("runner:codex"); err == nil || !strings.Contains(err.Error(), "built-in") {
+		t.Fatalf("delete built-in err = %v", err)
+	}
+	if _, err := registry.Register(core.Plugin{ID: "runner:codex", Name: "Custom Codex", Kind: "runner", Enabled: false}); err == nil || !strings.Contains(err.Error(), "built-in") {
+		t.Fatalf("replace built-in err = %v", err)
+	}
+
+	plugins := registry.Snapshot()
+	for _, plugin := range plugins {
+		if plugin.ID == "runner:codex" && (!plugin.BuiltIn || !plugin.Enabled || plugin.Name != "Codex CLI Worker") {
+			t.Fatalf("built-in plugin mutated: %+v", plugin)
+		}
+	}
+}
+
 func TestPluginRegistryProbesExecutablePluginDescribe(t *testing.T) {
 	registry := NewPluginRegistry(corePluginFixture("driver:linear"))
 	registry.probeCommand = func(_ context.Context, argv []string) ([]byte, error) {

@@ -191,6 +191,7 @@ type Plugin struct {
 	Kind         string            `json:"kind"`
 	Protocol     string            `json:"protocol,omitempty"`
 	Enabled      bool              `json:"enabled"`
+	BuiltIn      bool              `json:"builtIn,omitempty"`
 	Status       string            `json:"status,omitempty"`
 	Error        string            `json:"error,omitempty"`
 	Command      []string          `json:"command,omitempty"`

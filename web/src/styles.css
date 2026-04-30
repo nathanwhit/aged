@@ -1599,15 +1599,47 @@ small {
   padding: 12px;
 }
 
-.plugin-register textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  min-height: 96px;
-  resize: vertical;
-}
-
 .plugin-command-field,
 .plugin-config-field {
   grid-column: 1 / -1;
+}
+
+.plugin-config-field {
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px;
+}
+
+.plugin-config-field legend {
+  color: #60646c;
+  font-weight: 700;
+  padding: 0 4px;
+}
+
+.plugin-config-empty {
+  color: #767b84;
+  font-size: 13px;
+  margin: 0;
+}
+
+.plugin-config-list {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-config-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(90px, 0.7fr) minmax(120px, 1fr) 34px;
+}
+
+.plugin-config-row .icon-button {
+  height: 34px;
+  min-height: 34px;
+  width: 34px;
 }
 
 .plugin-form-footer,
@@ -1649,6 +1681,10 @@ small {
   align-content: start;
 }
 
+.plugin-card.system {
+  background: #fbfcfe;
+}
+
 .plugin-card.disabled {
   opacity: 0.62;
 }
@@ -1671,6 +1707,30 @@ small {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.plugin-section {
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-section + .plugin-section {
+  margin-top: 14px;
+}
+
+.plugin-section-title {
+  color: #60646c;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.plugin-system-note {
+  color: #767b84;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 8px 0;
 }
 
 .plugin-capabilities span {
@@ -2037,6 +2097,10 @@ small {
   .plugin-config-field,
   .plugin-form-footer {
     grid-column: auto;
+  }
+
+  .plugin-config-row {
+    grid-template-columns: 1fr;
   }
 
   .plugin-form-footer {
