@@ -145,12 +145,22 @@ Projects are persisted in SQLite. On first startup with an empty database, aged 
       "repo": "owner/aged",
       "defaultBase": "main",
       "targetLabels": { "role": "default" }
+    },
+    {
+      "id": "aged-fork",
+      "name": "aged fork",
+      "localPath": "/Users/me/Documents/Code/aged-fork",
+      "repo": "fork-owner/aged",
+      "upstreamRepo": "owner/aged",
+      "headRepoOwner": "fork-owner",
+      "pushRemote": "fork",
+      "defaultBase": "main"
     }
   ]
 }
 ```
 
-Tasks may include `projectId`. External drivers can also include metadata such as `"repo": "owner/repo"`; if that repo matches a configured project, the task is routed there. Worker workspaces, worker cwd, apply, and PR publishing all resolve through the task's project.
+Tasks may include `projectId`. External drivers can also include metadata such as `"repo": "owner/repo"`; if that repo matches a configured project, the task is routed there. For fork workflows, `repo` is the local checkout/fork repository, `upstreamRepo` is the issue and PR target repository, `headRepoOwner` qualifies fork PR heads, and `pushRemote` selects the remote for pushed bookmarks or branches. Worker workspaces, worker cwd, apply, and PR publishing all resolve through the task's project.
 
 New projects can also be added while the daemon is running:
 

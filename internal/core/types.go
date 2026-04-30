@@ -146,6 +146,9 @@ type Project struct {
 	Name          string            `json:"name"`
 	LocalPath     string            `json:"localPath"`
 	Repo          string            `json:"repo,omitempty"`
+	UpstreamRepo  string            `json:"upstreamRepo,omitempty"`
+	HeadRepoOwner string            `json:"headRepoOwner,omitempty"`
+	PushRemote    string            `json:"pushRemote,omitempty"`
 	VCS           string            `json:"vcs,omitempty"`
 	DefaultBase   string            `json:"defaultBase,omitempty"`
 	WorkspaceRoot string            `json:"workspaceRoot,omitempty"`

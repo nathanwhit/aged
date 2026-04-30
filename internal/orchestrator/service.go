@@ -644,15 +644,17 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
-		TaskID:   taskID,
-		WorkerID: workerID,
-		WorkDir:  sourceRoot,
-		Repo:     nonEmpty(req.Repo, project.Repo),
-		Base:     nonEmpty(req.Base, project.DefaultBase),
-		Branch:   req.Branch,
-		Title:    title,
-		Body:     body,
-		Draft:    req.Draft,
+		TaskID:        taskID,
+		WorkerID:      workerID,
+		WorkDir:       sourceRoot,
+		Repo:          pullRequestTargetRepo(req, project),
+		Base:          nonEmpty(req.Base, project.DefaultBase),
+		Branch:        req.Branch,
+		HeadRepoOwner: pullRequestHeadRepoOwner(project),
+		PushRemote:    project.PushRemote,
+		Title:         title,
+		Body:          body,
+		Draft:         req.Draft,
 		Metadata: map[string]any{
 			"workerId":  workerID,
 			"workDir":   sourceRoot,
@@ -1309,7 +1311,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 
-	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, plan, results)
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
 	if !replanOK {
 		return
 	}
@@ -1492,7 +1494,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	if !ok {
 		return
 	}
-	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, plan, results)
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
 	if !replanOK {
 		return
 	}
@@ -1500,7 +1502,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 }
 
 func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) {
-	replanOK, finalCandidateWorkerID, finalCandidateReason := s.replanLoop(ctx, task, initial, results)
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
 	if !replanOK {
 		return
 	}
@@ -2097,10 +2099,10 @@ func taskCompletionModeFromTask(task core.Task) string {
 	}
 }
 
-func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string) {
+func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
-		return true, "", ""
+		return true, "", "", results
 	}
 	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
@@ -2123,17 +2125,17 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			}),
 		}); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
-			return false, "", ""
+			return false, "", "", results
 		}
 		switch decision.Action {
 		case "complete":
-			return true, decision.FinalCandidateWorkerID, decision.Rationale
+			return true, decision.FinalCandidateWorkerID, decision.Rationale, results
 		case "wait":
 			_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
-			return false, "", ""
+			return false, "", "", results
 		case "fail":
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
-			return false, "", ""
+			return false, "", "", results
 		case "continue":
 			next := *decision.Plan
 			if next.Metadata == nil {
@@ -2152,33 +2154,33 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				Payload: core.MustJSON(next),
 			}); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", ""
+				return false, "", "", results
 			}
 			result, err := s.runPlannedWorker(ctx, task, next)
 			if err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", ""
+				return false, "", "", results
 			}
 			results = append(results, result)
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
-				return false, "", ""
+				return false, "", "", results
 			}
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", ""
+				return false, "", "", results
 			}
 			if !ok {
-				return false, "", ""
+				return false, "", "", results
 			}
 		}
 	}
 	_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replanning exceeded %d turns", maxDynamicReplanTurns))
-	return false, "", ""
+	return false, "", "", results
 }
 
-func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error) (bool, string, string) {
+func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error) (bool, string, string, []WorkerTurnResult) {
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil {
 		reason := "fallback completion after replanner error: " + replanErr.Error()
@@ -2200,7 +2202,7 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 				"error":    replanErr.Error(),
 			}),
 		})
-		return true, candidateWorkerID, reason
+		return true, candidateWorkerID, reason, results
 	}
 	_, _ = s.append(ctx, core.Event{
 		Type:   core.EventTaskReplanned,
@@ -2227,7 +2229,7 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 		}),
 	})
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
-	return false, "", ""
+	return false, "", "", results
 }
 
 type followUpNode struct {
@@ -2486,6 +2488,20 @@ func nonEmpty(values ...string) string {
 	return ""
 }
 
+func pullRequestTargetRepo(req core.PublishPullRequestRequest, project core.Project) string {
+	return nonEmpty(req.Repo, project.UpstreamRepo, project.Repo)
+}
+
+func pullRequestHeadRepoOwner(project core.Project) string {
+	if owner := strings.TrimSpace(project.HeadRepoOwner); owner != "" {
+		return owner
+	}
+	if strings.TrimSpace(project.UpstreamRepo) == "" || strings.EqualFold(strings.TrimSpace(project.UpstreamRepo), strings.TrimSpace(project.Repo)) {
+		return ""
+	}
+	return repoOwner(project.Repo)
+}
+
 func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {
 	task, ok := findTask(snapshot, taskID)
 	if !ok {
@@ -2512,7 +2528,7 @@ func (s *Service) projectForTask(task core.Task) core.Project {
 				}
 			}
 			if repo := stringMetadataValue(metadata["repo"]); repo != "" {
-				if project, ok := s.projects.FindByRepo(repo); ok {
+				if project, ok := s.projects.findByMetadataRepo(metadata, repo); ok {
 					return project
 				}
 			}

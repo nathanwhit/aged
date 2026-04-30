@@ -42,6 +42,9 @@ export type Project = {
   name: string;
   localPath: string;
   repo?: string;
+  upstreamRepo?: string;
+  headRepoOwner?: string;
+  pushRemote?: string;
   vcs?: string;
   defaultBase?: string;
   workspaceRoot?: string;
