@@ -39,6 +39,12 @@ export async function createProject(input: {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  pullRequestPolicy?: {
+    branchPrefix?: string;
+    draft?: boolean;
+    allowMerge?: boolean;
+    autoMerge?: boolean;
+  };
 }): Promise<Project> {
   const response = await fetch("/api/projects", {
     method: "POST",
@@ -63,6 +69,12 @@ export async function updateProject(id: string, input: {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  pullRequestPolicy?: {
+    branchPrefix?: string;
+    draft?: boolean;
+    allowMerge?: boolean;
+    autoMerge?: boolean;
+  };
 }): Promise<Project> {
   const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
     method: "PUT",

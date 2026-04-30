@@ -251,6 +251,17 @@ button {
   gap: 14px;
 }
 
+.checkbox-label {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
 .project-list {
   display: grid;
   gap: 8px;

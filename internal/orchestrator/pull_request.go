@@ -24,6 +24,7 @@ type PullRequestPublishSpec struct {
 	Branch        string
 	HeadRepoOwner string
 	PushRemote    string
+	BranchPrefix  string
 	Title         string
 	Body          string
 	Draft         bool
@@ -265,7 +266,11 @@ func defaultPRBranch(spec PullRequestPublishSpec) string {
 	if spec.WorkerID != "" {
 		suffix = spec.WorkerID
 	}
-	return "codex/aged-" + shortID(suffix)
+	prefix := strings.TrimSpace(spec.BranchPrefix)
+	if prefix == "" {
+		prefix = "codex/aged-"
+	}
+	return prefix + shortID(suffix)
 }
 
 func prHeadRef(owner string, branch string) string {

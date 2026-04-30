@@ -3,7 +3,7 @@
 ## Objective And Workflow Reliability
 
 - [x] Make GitHub PR workflows a flexible durable objective loop, including PRs as intermediate artifacts from any task source, automatic refresh, review/check ingestion, same-task follow-up worker scheduling, and terminal satisfaction when merged.
-- [ ] Add configurable PR policy for draft/ready state, branch naming, base detection, repo/fork selection, merge permissions, and whether aged may merge automatically.
+- [x] Add configurable PR policy for draft/ready state, branch naming, base detection, repo/fork selection, merge permissions, and whether aged may merge automatically.
 - [ ] Add first-class recovery from arbitrary failed graph nodes, including durable Codex/Claude worker session resume when provider sessions are available.
 - [ ] Improve approval UX and policy so user decisions, autonomous decisions, and worker questions are visible and actionable in one place.
 

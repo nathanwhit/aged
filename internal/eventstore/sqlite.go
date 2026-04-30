@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	default_base TEXT NOT NULL DEFAULT '',
 	workspace_root TEXT NOT NULL DEFAULT '',
 	target_labels TEXT NOT NULL DEFAULT '{}',
+	pull_request_policy TEXT NOT NULL DEFAULT '{}',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS settings (
 		{"upstream_repo", "TEXT NOT NULL DEFAULT ''"},
 		{"head_repo_owner", "TEXT NOT NULL DEFAULT ''"},
 		{"push_remote", "TEXT NOT NULL DEFAULT ''"},
+		{"pull_request_policy", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		if err := s.ensureProjectColumn(ctx, column.name, column.definition); err != nil {
 			return err
@@ -173,7 +175,7 @@ LIMIT ?`, afterID, limit)
 
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels
+SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy
 FROM projects
 ORDER BY id ASC`)
 	if err != nil {
@@ -212,6 +214,10 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 	if string(labels) == "null" {
 		labels = []byte("{}")
 	}
+	policy, err := json.Marshal(project.PullRequestPolicy)
+	if err != nil {
+		return core.Project{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return core.Project{}, err
@@ -223,8 +229,8 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 		return core.Project{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.ID,
 		project.Name,
 		project.LocalPath,
@@ -236,6 +242,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.DefaultBase,
 		project.WorkspaceRoot,
 		string(labels),
+		string(policy),
 		now,
 		now,
 	); err != nil {
@@ -263,6 +270,10 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	if string(labels) == "null" {
 		labels = []byte("{}")
 	}
+	policy, err := json.Marshal(project.PullRequestPolicy)
+	if err != nil {
+		return core.Project{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return core.Project{}, err
@@ -270,8 +281,8 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	local_path = excluded.local_path,
@@ -283,6 +294,7 @@ ON CONFLICT(id) DO UPDATE SET
 	default_base = excluded.default_base,
 	workspace_root = excluded.workspace_root,
 	target_labels = excluded.target_labels,
+	pull_request_policy = excluded.pull_request_policy,
 	updated_at = excluded.updated_at`,
 		project.ID,
 		project.Name,
@@ -295,6 +307,7 @@ ON CONFLICT(id) DO UPDATE SET
 		project.DefaultBase,
 		project.WorkspaceRoot,
 		string(labels),
+		string(policy),
 		now,
 		now,
 	); err != nil {
@@ -965,6 +978,7 @@ type eventScanner interface {
 func scanProject(scanner eventScanner) (core.Project, error) {
 	var project core.Project
 	var labels string
+	var policy string
 	if err := scanner.Scan(
 		&project.ID,
 		&project.Name,
@@ -977,11 +991,17 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		&project.DefaultBase,
 		&project.WorkspaceRoot,
 		&labels,
+		&policy,
 	); err != nil {
 		return core.Project{}, err
 	}
 	if labels != "" {
 		if err := json.Unmarshal([]byte(labels), &project.TargetLabels); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if policy != "" {
+		if err := json.Unmarshal([]byte(policy), &project.PullRequestPolicy); err != nil {
 			return core.Project{}, err
 		}
 	}

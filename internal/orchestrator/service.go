@@ -782,13 +782,18 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		Branch:        req.Branch,
 		HeadRepoOwner: pullRequestHeadRepoOwner(project),
 		PushRemote:    project.PushRemote,
+		BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
 		Title:         title,
 		Body:          body,
-		Draft:         req.Draft,
+		Draft:         req.Draft || project.PullRequestPolicy.Draft,
 		Metadata: map[string]any{
-			"workerId":  workerID,
-			"workDir":   sourceRoot,
-			"projectId": project.ID,
+			"workerId":          workerID,
+			"workDir":           sourceRoot,
+			"projectId":         project.ID,
+			"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
+			"mergeAllowed":      project.PullRequestPolicy.AllowMerge,
+			"autoMerge":         project.PullRequestPolicy.AutoMerge,
+			"pullRequestPolicy": project.PullRequestPolicy,
 		},
 	})
 	if err != nil {

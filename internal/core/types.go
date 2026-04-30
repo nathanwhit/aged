@@ -180,17 +180,25 @@ type Plugin struct {
 }
 
 type Project struct {
-	ID            string            `json:"id"`
-	Name          string            `json:"name"`
-	LocalPath     string            `json:"localPath"`
-	Repo          string            `json:"repo,omitempty"`
-	UpstreamRepo  string            `json:"upstreamRepo,omitempty"`
-	HeadRepoOwner string            `json:"headRepoOwner,omitempty"`
-	PushRemote    string            `json:"pushRemote,omitempty"`
-	VCS           string            `json:"vcs,omitempty"`
-	DefaultBase   string            `json:"defaultBase,omitempty"`
-	WorkspaceRoot string            `json:"workspaceRoot,omitempty"`
-	TargetLabels  map[string]string `json:"targetLabels,omitempty"`
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	LocalPath         string            `json:"localPath"`
+	Repo              string            `json:"repo,omitempty"`
+	UpstreamRepo      string            `json:"upstreamRepo,omitempty"`
+	HeadRepoOwner     string            `json:"headRepoOwner,omitempty"`
+	PushRemote        string            `json:"pushRemote,omitempty"`
+	VCS               string            `json:"vcs,omitempty"`
+	DefaultBase       string            `json:"defaultBase,omitempty"`
+	WorkspaceRoot     string            `json:"workspaceRoot,omitempty"`
+	TargetLabels      map[string]string `json:"targetLabels,omitempty"`
+	PullRequestPolicy PullRequestPolicy `json:"pullRequestPolicy,omitempty"`
+}
+
+type PullRequestPolicy struct {
+	BranchPrefix string `json:"branchPrefix,omitempty"`
+	Draft        bool   `json:"draft,omitempty"`
+	AllowMerge   bool   `json:"allowMerge,omitempty"`
+	AutoMerge    bool   `json:"autoMerge,omitempty"`
 }
 
 type ProjectHealth struct {

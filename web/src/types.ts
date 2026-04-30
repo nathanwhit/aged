@@ -79,6 +79,14 @@ export type Project = {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  pullRequestPolicy?: PullRequestPolicy;
+};
+
+export type PullRequestPolicy = {
+  branchPrefix?: string;
+  draft?: boolean;
+  allowMerge?: boolean;
+  autoMerge?: boolean;
 };
 
 export type ProjectHealth = {

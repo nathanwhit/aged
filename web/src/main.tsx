@@ -860,6 +860,10 @@ function ProjectPanel({
   const [headRepoOwner, setHeadRepoOwner] = useState("");
   const [pushRemote, setPushRemote] = useState("");
   const [defaultBase, setDefaultBase] = useState("main");
+  const [branchPrefix, setBranchPrefix] = useState("codex/aged-");
+  const [draftPRs, setDraftPRs] = useState(false);
+  const [allowMerge, setAllowMerge] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(false);
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
   const [healthBusy, setHealthBusy] = useState("");
@@ -874,6 +878,10 @@ function ProjectPanel({
     setHeadRepoOwner(project.headRepoOwner ?? "");
     setPushRemote(project.pushRemote ?? "");
     setDefaultBase(project.defaultBase ?? "main");
+    setBranchPrefix(project.pullRequestPolicy?.branchPrefix ?? "codex/aged-");
+    setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
+    setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
+    setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
   }
 
   function resetForm() {
@@ -886,6 +894,10 @@ function ProjectPanel({
     setHeadRepoOwner("");
     setPushRemote("");
     setDefaultBase("main");
+    setBranchPrefix("codex/aged-");
+    setDraftPRs(false);
+    setAllowMerge(false);
+    setAutoMerge(false);
   }
 
   async function submit(event: React.FormEvent) {
@@ -902,6 +914,12 @@ function ProjectPanel({
         pushRemote: pushRemote || undefined,
         vcs: "auto",
         defaultBase: defaultBase || undefined,
+        pullRequestPolicy: {
+          branchPrefix: branchPrefix || undefined,
+          draft: draftPRs,
+          allowMerge,
+          autoMerge,
+        },
       };
       if (editingId) {
         await onUpdate(editingId, input);
@@ -992,6 +1010,22 @@ function ProjectPanel({
         <label>
           Base
           <input value={defaultBase} onChange={(event) => setDefaultBase(event.target.value)} placeholder="main" />
+        </label>
+        <label>
+          PR branch prefix
+          <input value={branchPrefix} onChange={(event) => setBranchPrefix(event.target.value)} placeholder="codex/aged-" />
+        </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
+          Draft PRs by default
+        </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={allowMerge} onChange={(event) => setAllowMerge(event.target.checked)} />
+          Allow aged to merge
+        </label>
+        <label className="checkbox-label">
+          <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
+          Auto-merge when policy allows
         </label>
         <button disabled={busy}>
           <FolderPlus size={16} />

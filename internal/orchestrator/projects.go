@@ -278,6 +278,7 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	project.VCS = strings.TrimSpace(project.VCS)
 	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
 	project.WorkspaceRoot = strings.TrimSpace(project.WorkspaceRoot)
+	project.PullRequestPolicy.BranchPrefix = strings.TrimSpace(project.PullRequestPolicy.BranchPrefix)
 	if project.ID == "" {
 		return core.Project{}, errors.New("project id is required")
 	}
@@ -312,6 +313,9 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	}
 	if project.DefaultBase == "" {
 		project.DefaultBase = nonEmpty(detectDefaultBase(context.Background(), abs, project.Repo), "main")
+	}
+	if project.PullRequestPolicy.BranchPrefix == "" {
+		project.PullRequestPolicy.BranchPrefix = "codex/aged-"
 	}
 	return project, nil
 }

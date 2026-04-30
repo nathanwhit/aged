@@ -369,7 +369,8 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	_ = waitForPullRequests(t, store, task.ID, 1)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	if len(snapshot.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
@@ -748,6 +749,12 @@ func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 		LocalPath:   projectRoot,
 		Repo:        "owner/repo",
 		DefaultBase: "trunk",
+		PullRequestPolicy: core.PullRequestPolicy{
+			BranchPrefix: "aged/custom-",
+			Draft:        true,
+			AllowMerge:   true,
+			AutoMerge:    false,
+		},
 	}}, "repo")
 	if err != nil {
 		t.Fatal(err)
@@ -782,6 +789,12 @@ func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 	}
 	if publisher.published.Base != "trunk" {
 		t.Fatalf("published base = %q", publisher.published.Base)
+	}
+	if publisher.published.BranchPrefix != "aged/custom-" {
+		t.Fatalf("published branch prefix = %q", publisher.published.BranchPrefix)
+	}
+	if !publisher.published.Draft {
+		t.Fatalf("published draft = false, want project policy draft")
 	}
 	if publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
 		t.Fatalf("published workDir = %q, want worker workspace", publisher.published.WorkDir)
@@ -3120,13 +3133,17 @@ func (g fakeTitleGenerator) GenerateTitle(context.Context, string) (string, erro
 
 func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
 	p.published = spec
+	branch := strings.TrimSpace(spec.Branch)
+	if branch == "" {
+		branch = defaultPRBranch(spec)
+	}
 	return core.PullRequest{
 		ID:           "pr-1",
 		TaskID:       spec.TaskID,
 		Repo:         spec.Repo,
 		Number:       12,
 		URL:          "https://github.com/" + spec.Repo + "/pull/12",
-		Branch:       nonEmpty(spec.Branch, "codex/aged-test"),
+		Branch:       branch,
 		Base:         nonEmpty(spec.Base, "main"),
 		Title:        spec.Title,
 		State:        "OPEN",
