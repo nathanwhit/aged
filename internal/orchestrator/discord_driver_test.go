@@ -332,9 +332,11 @@ func TestDiscordDriverListsProjects(t *testing.T) {
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	agedDir := t.TempDir()
+	nodeDir := t.TempDir()
 	projects, err := NewProjectRegistry([]core.Project{
-		{ID: "aged", Name: "aged", LocalPath: "/repo/aged", Repo: "nathanwhit/aged"},
-		{ID: "node", Name: "Node.js", LocalPath: "/repo/node", Repo: "nodejs/node"},
+		{ID: "aged", Name: "aged", LocalPath: agedDir, Repo: "nathanwhit/aged"},
+		{ID: "node", Name: "Node.js", LocalPath: nodeDir, Repo: "nodejs/node"},
 	}, "aged")
 	if err != nil {
 		t.Fatal(err)

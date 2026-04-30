@@ -349,7 +349,10 @@ function App() {
                       <strong>{task.title}</strong>
                       <small>{task.id.slice(0, 8)}</small>
                     </span>
-                    <Status value={task.status} />
+                    <span className="task-row-status">
+                      <Status value={task.status} />
+                      {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
+                    </span>
                   </button>
                   <div className="task-row-actions">
                     {isRetryableTask(task) && (
@@ -673,6 +676,10 @@ function isTerminalTask(task: Task): boolean {
 
 function isRetryableTask(task: Task): boolean {
   return task.status === "failed" || task.status === "canceled";
+}
+
+function canPublishPullRequest(task: Task): boolean {
+  return isTerminalTask(task) || Boolean(task.finalCandidateWorkerId);
 }
 
 function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[] }) {
@@ -1099,6 +1106,8 @@ function TaskDetail({
         </div>
         <div className="detail-actions">
           <Status value={task.status} />
+          {task.objectiveStatus && <Status value={task.objectiveStatus} />}
+          {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
           {completionMode === "github" && <span className="pill">GitHub mode</span>}
           {canApplyResult && (
             <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
@@ -1117,6 +1126,9 @@ function TaskDetail({
           </button>
         </div>
       </div>
+      {(task.artifacts?.length || task.milestones?.length) && (
+        <TaskObjectiveStrip task={task} />
+      )}
       <WorkerProgressSpotlight update={workerUpdate} />
       <form className="steer" onSubmit={steer}>
         <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this task..." required />
@@ -1146,6 +1158,36 @@ function TaskDetail({
           {diff?.open && <DiffViewer state={diff} />}
         </div>
       )}
+    </section>
+  );
+}
+
+function TaskObjectiveStrip({ task }: { task: Task }) {
+  const artifacts = task.artifacts ?? [];
+  const milestones = task.milestones ?? [];
+  const latestMilestone = milestones[milestones.length - 1];
+  return (
+    <section className="objective-strip">
+      {latestMilestone && (
+        <div className="objective-item">
+          <small>Latest milestone</small>
+          <strong>{humanizeKey(latestMilestone.name)}</strong>
+          {latestMilestone.summary && <span>{latestMilestone.summary}</span>}
+        </div>
+      )}
+      {artifacts.slice(-3).map((artifact) => (
+        <div key={artifact.id || `${artifact.kind}:${artifact.ref}`} className="objective-item">
+          <small>{humanizeKey(artifact.kind)}</small>
+          {artifact.url ? (
+            <a href={artifact.url} target="_blank" rel="noreferrer">
+              {artifact.name || artifact.ref || artifact.url}
+            </a>
+          ) : (
+            <strong>{artifact.name || artifact.ref || artifact.id}</strong>
+          )}
+          {artifact.ref && <span>{artifact.ref}</span>}
+        </div>
+      ))}
     </section>
   );
 }
@@ -1207,7 +1249,7 @@ function PullRequestPanel({
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState("");
-  const canPublish = isTerminalTask(task) && pullRequests.length === 0;
+  const canPublish = canPublishPullRequest(task) && pullRequests.length === 0;
 
   async function run(action: string, fn: () => Promise<unknown>) {
     setBusy(action);
@@ -1761,11 +1803,17 @@ function latestWorkerProgressEvent(events: EventRecord[]): EventRecord | undefin
 }
 
 function isInspectableWorkerEvent(event: EventRecord): boolean {
+  if (isBenignCodexRolloutRecordEvent(event)) {
+    return false;
+  }
   return event.type.startsWith("worker.");
 }
 
 function isWorkerProgressEvent(event: EventRecord): boolean {
   if (event.type !== "worker.output") {
+    return false;
+  }
+  if (isBenignCodexRolloutRecordEvent(event)) {
     return false;
   }
   const display = eventDisplayText(event).trim();
@@ -2407,6 +2455,9 @@ function shellTokenClass(token: string): string {
 }
 
 function eventDisplayText(event: EventRecord): string {
+  if (isBenignCodexRolloutRecordEvent(event)) {
+    return "";
+  }
   const compact = compactEventDisplay(event);
   if (compact) return compact;
 
@@ -2440,6 +2491,15 @@ function eventDisplayText(event: EventRecord): string {
       ? `${primaryText} | ${changeText}`
       : primaryText
     : (changeText ?? payloadSummary(event.payload));
+}
+
+function isBenignCodexRolloutRecordEvent(event: EventRecord): boolean {
+  if (event.type !== "worker.output") {
+    return false;
+  }
+  const payload = asRecord(event.payload);
+  const text = payloadValue(payload.text);
+  return text.includes("failed to record rollout items: thread") && text.includes("codex_core::session");
 }
 
 function compactEventDisplay(event: EventRecord): string {

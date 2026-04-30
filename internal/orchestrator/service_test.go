@@ -347,11 +347,86 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if len(snapshot.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
-	if snapshot.Tasks[0].FinalCandidateWorkerID == "" || publisher.published.WorkerID != snapshot.Tasks[0].FinalCandidateWorkerID {
-		t.Fatalf("published worker = %q, final candidate = %q", publisher.published.WorkerID, snapshot.Tasks[0].FinalCandidateWorkerID)
+	task = snapshot.Tasks[0]
+	if task.Status != core.TaskWaiting {
+		t.Fatalf("task status = %q, want waiting while PR is open", task.Status)
+	}
+	if task.ObjectiveStatus != core.ObjectiveWaitingExternal || task.ObjectivePhase != "pr_opened" {
+		t.Fatalf("objective = %q phase %q", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if task.FinalCandidateWorkerID == "" || publisher.published.WorkerID != task.FinalCandidateWorkerID {
+		t.Fatalf("published worker = %q, final candidate = %q", publisher.published.WorkerID, task.FinalCandidateWorkerID)
+	}
+	if len(task.Artifacts) != 1 || task.Artifacts[0].Kind != "github_pull_request" {
+		t.Fatalf("artifacts = %+v", task.Artifacts)
+	}
+	if !hasMilestone(task.Milestones, "candidate_ready") || !hasMilestone(task.Milestones, "pr_opened") {
+		t.Fatalf("milestones = %+v", task.Milestones)
 	}
 	if applyCalls != 1 {
 		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	}
+}
+
+func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		status: core.PullRequest{
+			ID:           "pr-1",
+			TaskID:       "task-1",
+			Repo:         "owner/repo",
+			Number:       12,
+			URL:          "https://github.com/owner/repo/pull/12",
+			Branch:       "codex/aged-test",
+			Base:         "main",
+			Title:        "Implement feature",
+			State:        "MERGED",
+			ChecksStatus: "success",
+			MergeStatus:  "CLEAN",
+			ReviewStatus: "APPROVED",
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Implement feature",
+		Prompt:   "Do it.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	pr := snapshot.PullRequests[0]
+	publisher.status.TaskID = task.ID
+	_, err = service.RefreshPullRequest(ctx, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	task = snapshot.Tasks[0]
+	if task.ObjectiveStatus != core.ObjectiveSatisfied || task.ObjectivePhase != "merged" {
+		t.Fatalf("objective = %q phase %q", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if !hasMilestone(task.Milestones, "pr_merged") {
+		t.Fatalf("milestones = %+v", task.Milestones)
 	}
 }
 
@@ -1342,6 +1417,9 @@ func TestServiceGuardsWorkerPromptWithPreparedWorkspace(t *testing.T) {
 
 	sourceRoot := filepath.Join(t.TempDir(), "source")
 	workspaceRoot := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{kind: "codex"}
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "codex",
@@ -3567,6 +3645,15 @@ func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, co
 func hasEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {
 	for _, event := range events {
 		if event.Type == eventType && event.TaskID == taskID && (workerID == "" || event.WorkerID == workerID) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMilestone(milestones []core.TaskMilestone, name string) bool {
+	for _, milestone := range milestones {
+		if milestone.Name == name {
 			return true
 		}
 	}

@@ -68,6 +68,85 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	}
 }
 
+func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-objective"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Resolve issue",
+			"prompt": "Open a PR and babysit it.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskArtifact,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":   "pr-1",
+			"kind": "github_pull_request",
+			"name": "owner/repo#12",
+			"url":  "https://github.com/owner/repo/pull/12",
+			"ref":  "codex/aged-test",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskMilestone,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"name":    "pr_opened",
+			"phase":   "pr_opened",
+			"summary": "Pull request opened.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskObjective,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.ObjectiveWaitingExternal,
+			"phase":  "pr_opened",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := snapshot.Tasks[0]
+	if task.Status != core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveWaitingExternal || task.ObjectivePhase != "pr_opened" {
+		t.Fatalf("task state = status %q objective %q phase %q", task.Status, task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if len(task.Milestones) != 1 || task.Milestones[0].Name != "pr_opened" {
+		t.Fatalf("milestones = %+v", task.Milestones)
+	}
+	if len(task.Artifacts) != 1 || task.Artifacts[0].ID != "pr-1" {
+		t.Fatalf("artifacts = %+v", task.Artifacts)
+	}
+}
+
 func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -240,7 +241,8 @@ func TestMCPProjectTools(t *testing.T) {
 	server := httptest.NewServer(New(service, nil).Routes())
 	defer server.Close()
 
-	created := postMCP(t, server.URL, `{
+	projectDir := t.TempDir()
+	created := postMCP(t, server.URL, fmt.Sprintf(`{
 		"jsonrpc": "2.0",
 		"id": 1,
 		"method": "tools/call",
@@ -249,13 +251,13 @@ func TestMCPProjectTools(t *testing.T) {
 			"arguments": {
 				"id": "node",
 				"name": "Node.js",
-				"localPath": "/tmp/node",
+				"localPath": %q,
 				"repo": "nodejs/node",
 				"vcs": "auto",
 				"defaultBase": "main"
 			}
 		}
-	}`)
+	}`, projectDir))
 	content := created["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
 	var project core.Project
 	if err := json.Unmarshal([]byte(content["text"].(string)), &project); err != nil {
@@ -379,17 +381,19 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	server := httptest.NewServer(New(service, nil).Routes())
 	defer server.Close()
 
-	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(`{
+	projectDir := t.TempDir()
+	body := fmt.Sprintf(`{
 		"id": "other",
 		"name": "Other",
-		"localPath": "/tmp/other",
+		"localPath": %q,
 		"repo": "owner/other",
 		"upstreamRepo": "upstream/other",
 		"headRepoOwner": "owner",
 		"pushRemote": "fork",
 		"vcs": "git",
 		"defaultBase": "main"
-	}`))
+	}`, projectDir)
+	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +406,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != "/tmp/other" || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" {
 		t.Fatalf("created = %+v", created)
 	}
 

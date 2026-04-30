@@ -485,6 +485,15 @@ button:disabled {
   min-width: 0;
 }
 
+.task-row-status {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
 .pending-task-main {
   cursor: progress;
 }
@@ -536,10 +545,25 @@ small {
 .status.running,
 .status.planning,
 .status.starting,
-.status.open {
+.status.open,
+.status.active,
+.status.waiting_external {
   background: #e6f0ff;
   border-color: #a7c3f3;
   color: #245aa5;
+}
+
+.status.waiting_user,
+.status.waiting {
+  background: #fff4d6;
+  border-color: #e5c466;
+  color: #765200;
+}
+
+.status.satisfied {
+  background: #e7f4ea;
+  border-color: #9bc7a6;
+  color: #1d6b34;
 }
 
 .status.starting {
@@ -560,7 +584,8 @@ small {
 }
 
 .status.failed,
-.status.canceled {
+.status.canceled,
+.status.abandoned {
   background: #fde8e7;
   border-color: #eeaaa5;
   color: #9a2d25;
@@ -576,6 +601,34 @@ small {
   display: flex;
   gap: 16px;
   justify-content: space-between;
+}
+
+.objective-strip {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.objective-item {
+  background: #f8f7f3;
+  border: 1px solid #e0ddd5;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.objective-item strong,
+.objective-item a,
+.objective-item span {
+  overflow-wrap: anywhere;
+}
+
+.objective-item a {
+  color: #245aa5;
+  font-weight: 700;
+  text-decoration: none;
 }
 
 .detail p {

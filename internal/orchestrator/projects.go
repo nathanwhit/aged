@@ -246,9 +246,24 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	if err != nil {
 		return core.Project{}, err
 	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return core.Project{}, fmt.Errorf("project %q localPath %q is not accessible: %w", project.ID, abs, err)
+	}
+	if !info.IsDir() {
+		return core.Project{}, fmt.Errorf("project %q localPath %q is not a directory", project.ID, abs)
+	}
 	project.LocalPath = abs
 	if project.Name == "" {
 		project.Name = filepath.Base(abs)
+	}
+	if project.Repo == "" {
+		project.Repo = detectGitHubRepo(context.Background(), abs)
+	}
+	if project.VCS == "" || strings.EqualFold(project.VCS, "auto") {
+		if detected := detectProjectVCS(context.Background(), abs); detected != "" {
+			project.VCS = detected
+		}
 	}
 	if project.VCS == "" {
 		project.VCS = "auto"
@@ -276,6 +291,16 @@ func detectGitHubRepo(ctx context.Context, dir string) string {
 		if repo := githubRepoFromRemote(line); repo != "" {
 			return repo
 		}
+	}
+	return ""
+}
+
+func detectProjectVCS(ctx context.Context, dir string) string {
+	if _, err := runCommand(ctx, dir, "jj", "root"); err == nil {
+		return "jj"
+	}
+	if _, err := runCommand(ctx, dir, "git", "rev-parse", "--show-toplevel"); err == nil {
+		return "git"
 	}
 	return ""
 }

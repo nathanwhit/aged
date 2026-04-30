@@ -343,14 +343,16 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 				projectID = projectIDFromMetadata(payload.Metadata)
 			}
 			tasks[event.TaskID] = core.Task{
-				ID:        event.TaskID,
-				ProjectID: projectID,
-				Title:     payload.Title,
-				Prompt:    payload.Prompt,
-				Status:    core.TaskQueued,
-				CreatedAt: event.At,
-				UpdatedAt: event.At,
-				Metadata:  payload.Metadata,
+				ID:              event.TaskID,
+				ProjectID:       projectID,
+				Title:           payload.Title,
+				Prompt:          payload.Prompt,
+				Status:          core.TaskQueued,
+				ObjectiveStatus: core.ObjectiveActive,
+				ObjectivePhase:  "queued",
+				CreatedAt:       event.At,
+				UpdatedAt:       event.At,
+				Metadata:        payload.Metadata,
 			}
 		case core.EventTaskStatus:
 			var payload struct {
@@ -361,6 +363,24 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			}
 			task := tasks[event.TaskID]
 			task.Status = payload.Status
+			switch payload.Status {
+			case core.TaskSucceeded, core.TaskFailed, core.TaskCanceled:
+				nextObjective := objectiveStatusForTaskStatus(payload.Status)
+				if task.ObjectiveStatus == "" || task.ObjectiveStatus == core.ObjectiveActive || task.ObjectiveStatus != nextObjective {
+					task.ObjectiveStatus = nextObjective
+					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
+				}
+			case core.TaskWaiting:
+				if task.ObjectiveStatus == "" || task.ObjectiveStatus == core.ObjectiveActive {
+					task.ObjectiveStatus = core.ObjectiveWaitingUser
+					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
+				}
+			default:
+				if task.ObjectiveStatus == "" {
+					task.ObjectiveStatus = objectiveStatusForTaskStatus(payload.Status)
+					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
+				}
+			}
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
 		case core.EventTaskCandidate:
@@ -372,6 +392,68 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			}
 			task := tasks[event.TaskID]
 			task.FinalCandidateWorkerID = payload.WorkerID
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
+		case core.EventTaskObjective:
+			var payload struct {
+				Status core.ObjectiveStatus `json:"status"`
+				Phase  string               `json:"phase,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.objective_updated: %w", err)
+			}
+			task := tasks[event.TaskID]
+			if payload.Status != "" {
+				task.ObjectiveStatus = payload.Status
+			}
+			if payload.Phase != "" {
+				task.ObjectivePhase = payload.Phase
+			}
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
+		case core.EventTaskMilestone:
+			var payload struct {
+				Name     string          `json:"name"`
+				Phase    string          `json:"phase,omitempty"`
+				Summary  string          `json:"summary,omitempty"`
+				Metadata json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.milestone_reached: %w", err)
+			}
+			task := tasks[event.TaskID]
+			task.Milestones = append(task.Milestones, core.TaskMilestone{
+				Name:     payload.Name,
+				Phase:    payload.Phase,
+				Summary:  payload.Summary,
+				At:       event.At,
+				Metadata: payload.Metadata,
+			})
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
+		case core.EventTaskArtifact:
+			var payload struct {
+				ID       string          `json:"id"`
+				Kind     string          `json:"kind"`
+				Name     string          `json:"name,omitempty"`
+				URL      string          `json:"url,omitempty"`
+				Ref      string          `json:"ref,omitempty"`
+				Metadata json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.artifact_recorded: %w", err)
+			}
+			task := tasks[event.TaskID]
+			task.Artifacts = upsertTaskArtifact(task.Artifacts, core.TaskArtifact{
+				ID:        payload.ID,
+				Kind:      payload.Kind,
+				Name:      payload.Name,
+				URL:       payload.URL,
+				Ref:       payload.Ref,
+				CreatedAt: event.At,
+				UpdatedAt: event.At,
+				Metadata:  payload.Metadata,
+			})
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
 		case core.EventTaskCleared:
@@ -605,10 +687,67 @@ func filterClearedTasks(values map[string]core.Task, cleared map[string]bool) ma
 	out := map[string]core.Task{}
 	for id, task := range values {
 		if !cleared[id] {
+			if task.ObjectiveStatus == "" {
+				task.ObjectiveStatus = objectiveStatusForTaskStatus(task.Status)
+			}
+			if task.ObjectivePhase == "" {
+				task.ObjectivePhase = objectivePhaseForTaskStatus(task.Status)
+			}
 			out[id] = task
 		}
 	}
 	return out
+}
+
+func objectiveStatusForTaskStatus(status core.TaskStatus) core.ObjectiveStatus {
+	switch status {
+	case core.TaskSucceeded:
+		return core.ObjectiveSatisfied
+	case core.TaskFailed, core.TaskCanceled:
+		return core.ObjectiveAbandoned
+	case core.TaskWaiting:
+		return core.ObjectiveWaitingUser
+	default:
+		return core.ObjectiveActive
+	}
+}
+
+func objectivePhaseForTaskStatus(status core.TaskStatus) string {
+	switch status {
+	case core.TaskQueued:
+		return "queued"
+	case core.TaskPlanning:
+		return "planning"
+	case core.TaskRunning:
+		return "running"
+	case core.TaskWaiting:
+		return "waiting"
+	case core.TaskSucceeded:
+		return "satisfied"
+	case core.TaskFailed:
+		return "failed"
+	case core.TaskCanceled:
+		return "canceled"
+	default:
+		return ""
+	}
+}
+
+func upsertTaskArtifact(items []core.TaskArtifact, next core.TaskArtifact) []core.TaskArtifact {
+	if next.ID == "" {
+		return append(items, next)
+	}
+	for i, item := range items {
+		if item.ID != next.ID {
+			continue
+		}
+		if next.CreatedAt.IsZero() {
+			next.CreatedAt = item.CreatedAt
+		}
+		items[i] = next
+		return items
+	}
+	return append(items, next)
 }
 
 func filterClearedWorkers(values map[string]core.Worker, cleared map[string]bool) map[string]core.Worker {

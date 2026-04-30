@@ -15,6 +15,13 @@ export type WorkerStatus =
   | "failed"
   | "canceled";
 
+export type ObjectiveStatus =
+  | "active"
+  | "waiting_external"
+  | "waiting_user"
+  | "satisfied"
+  | "abandoned";
+
 export type EventRecord = {
   id: number;
   at: string;
@@ -30,11 +37,34 @@ export type Task = {
   title: string;
   prompt: string;
   status: TaskStatus;
+  objectiveStatus?: ObjectiveStatus;
+  objectivePhase?: string;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
   finalCandidateWorkerId?: string;
   appliedWorkerId?: string;
+  milestones?: TaskMilestone[];
+  artifacts?: TaskArtifact[];
+};
+
+export type TaskMilestone = {
+  name: string;
+  phase?: string;
+  summary?: string;
+  at: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type TaskArtifact = {
+  id: string;
+  kind: string;
+  name?: string;
+  url?: string;
+  ref?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type Project = {

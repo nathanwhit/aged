@@ -594,8 +594,8 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if !ok {
 		return core.PullRequest{}, eventstore.ErrNotFound
 	}
-	if !isTerminalTaskStatus(task.Status) {
-		return core.PullRequest{}, errors.New("can only publish pull requests for terminal tasks")
+	if !canPublishPullRequestForTask(task) {
+		return core.PullRequest{}, errors.New("can only publish pull requests after a final candidate exists or for terminal tasks")
 	}
 	workerID := strings.TrimSpace(req.WorkerID)
 	project := s.projectForTask(task)
@@ -692,6 +692,21 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	pr.CreatedAt = event.At
 	pr.UpdatedAt = event.At
+	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.recordTaskMilestone(ctx, taskID, "pr_opened", "pr_opened", "Pull request opened.", map[string]any{
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+		"branch":        pr.Branch,
+	}); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
+		return core.PullRequest{}, err
+	}
 	return pr, nil
 }
 
@@ -729,6 +744,40 @@ func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.Pul
 		return core.PullRequest{}, err
 	}
 	checked.UpdatedAt = event.At
+	if err := s.recordPullRequestArtifact(ctx, checked); err != nil {
+		return core.PullRequest{}, err
+	}
+	status, phase := objectiveForPullRequest(checked)
+	if phase != "" {
+		if err := s.updateTaskObjective(ctx, checked.TaskID, status, phase, pullRequestObjectiveSummary(checked, phase)); err != nil {
+			return core.PullRequest{}, err
+		}
+	}
+	if strings.EqualFold(checked.State, "MERGED") {
+		if err := s.recordTaskMilestone(ctx, checked.TaskID, "pr_merged", "merged", "Pull request merged.", map[string]any{
+			"pullRequestId": checked.ID,
+			"url":           checked.URL,
+			"repo":          checked.Repo,
+			"number":        checked.Number,
+		}); err != nil {
+			return core.PullRequest{}, err
+		}
+		if err := s.setTaskStatus(ctx, checked.TaskID, core.TaskSucceeded); err != nil {
+			return core.PullRequest{}, err
+		}
+	} else if strings.EqualFold(checked.State, "CLOSED") {
+		if err := s.recordTaskMilestone(ctx, checked.TaskID, "pr_closed", "pr_closed", "Pull request closed without merge.", map[string]any{
+			"pullRequestId": checked.ID,
+			"url":           checked.URL,
+			"repo":          checked.Repo,
+			"number":        checked.Number,
+		}); err != nil {
+			return core.PullRequest{}, err
+		}
+		if err := s.setTaskStatus(ctx, checked.TaskID, core.TaskCanceled); err != nil {
+			return core.PullRequest{}, err
+		}
+	}
 	return checked, nil
 }
 
@@ -807,6 +856,53 @@ func pullRequestBabysitterAttempt(snapshot core.Snapshot, prID string) int {
 		}
 	}
 	return attempt
+}
+
+func (s *Service) recordPullRequestArtifact(ctx context.Context, pr core.PullRequest) error {
+	name := pr.Title
+	if name == "" {
+		name = fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+	}
+	return s.recordTaskArtifact(ctx, pr.TaskID, pr.ID, "github_pull_request", name, pr.URL, pr.Branch, map[string]any{
+		"repo":         pr.Repo,
+		"number":       pr.Number,
+		"state":        pr.State,
+		"draft":        pr.Draft,
+		"checksStatus": pr.ChecksStatus,
+		"mergeStatus":  pr.MergeStatus,
+		"reviewStatus": pr.ReviewStatus,
+	})
+}
+
+func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string) {
+	switch strings.ToUpper(strings.TrimSpace(pr.State)) {
+	case "MERGED":
+		return core.ObjectiveSatisfied, "merged"
+	case "CLOSED":
+		return core.ObjectiveAbandoned, "pr_closed"
+	}
+	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") {
+		return core.ObjectiveActive, "pr_needs_work"
+	}
+	if strings.EqualFold(pr.ChecksStatus, "success") && (pr.ReviewStatus == "" || strings.EqualFold(pr.ReviewStatus, "APPROVED")) {
+		return core.ObjectiveWaitingExternal, "ready_to_merge"
+	}
+	return core.ObjectiveWaitingExternal, "pr_open"
+}
+
+func pullRequestObjectiveSummary(pr core.PullRequest, phase string) string {
+	switch phase {
+	case "merged":
+		return "Pull request merged."
+	case "pr_closed":
+		return "Pull request closed without merge."
+	case "pr_needs_work":
+		return "Pull request needs follow-up work from checks or review."
+	case "ready_to_merge":
+		return "Pull request is ready for merge."
+	default:
+		return "Pull request is open; waiting on external GitHub state."
+	}
 }
 
 func (s *Service) FindTaskByExternalID(ctx context.Context, source string, externalID string) (core.Task, bool, error) {
@@ -991,6 +1087,10 @@ func (s *Service) ClearTerminalTasks(ctx context.Context) (ClearTasksResult, err
 
 func isTerminalTaskStatus(status core.TaskStatus) bool {
 	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
+}
+
+func canPublishPullRequestForTask(task core.Task) bool {
+	return isTerminalTaskStatus(task.Status) || strings.TrimSpace(task.FinalCandidateWorkerID) != ""
 }
 
 func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
@@ -1939,17 +2039,24 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 		}); err != nil {
 			return err
 		}
-	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskSucceeded); err != nil {
-		return err
+		if err := s.recordTaskMilestone(ctx, taskID, "candidate_ready", "candidate_ready", "Final candidate selected.", map[string]any{
+			"workerId": candidateWorkerID,
+			"reason":   reason,
+		}); err != nil {
+			return err
+		}
 	}
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
 			_ = s.failTask(ctx, taskID, fmt.Errorf("publish completion pull request: %w", err))
 			return err
 		}
+		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
 	}
-	return nil
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "satisfied", "Local task result is complete."); err != nil {
+		return err
+	}
+	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
 }
 
 func (s *Service) waitForFinalCandidateResolution(ctx context.Context, taskID string, err error) error {
@@ -3074,6 +3181,55 @@ func (s *Service) setTaskStatus(ctx context.Context, taskID string, status core.
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"status": status,
+		}),
+	})
+	return err
+}
+
+func (s *Service) updateTaskObjective(ctx context.Context, taskID string, status core.ObjectiveStatus, phase string, summary string) error {
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskObjective,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  status,
+			"phase":   phase,
+			"summary": summary,
+		}),
+	})
+	return err
+}
+
+func (s *Service) recordTaskMilestone(ctx context.Context, taskID string, name string, phase string, summary string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskMilestone,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"name":     name,
+			"phase":    phase,
+			"summary":  summary,
+			"metadata": metadata,
+		}),
+	})
+	return err
+}
+
+func (s *Service) recordTaskArtifact(ctx context.Context, taskID string, id string, kind string, name string, url string, ref string, metadata map[string]any) error {
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskArtifact,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":       id,
+			"kind":     kind,
+			"name":     name,
+			"url":      url,
+			"ref":      ref,
+			"metadata": metadata,
 		}),
 	})
 	return err

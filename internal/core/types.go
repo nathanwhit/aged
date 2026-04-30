@@ -17,6 +17,16 @@ const (
 	TaskCanceled  TaskStatus = "canceled"
 )
 
+type ObjectiveStatus string
+
+const (
+	ObjectiveActive          ObjectiveStatus = "active"
+	ObjectiveWaitingExternal ObjectiveStatus = "waiting_external"
+	ObjectiveWaitingUser     ObjectiveStatus = "waiting_user"
+	ObjectiveSatisfied       ObjectiveStatus = "satisfied"
+	ObjectiveAbandoned       ObjectiveStatus = "abandoned"
+)
+
 type WorkerStatus string
 
 const (
@@ -37,6 +47,9 @@ const (
 	EventTaskReplanned     EventType = "task.replanned"
 	EventTaskSteered       EventType = "task.steered"
 	EventTaskCandidate     EventType = "task.final_candidate_selected"
+	EventTaskObjective     EventType = "task.objective_updated"
+	EventTaskMilestone     EventType = "task.milestone_reached"
+	EventTaskArtifact      EventType = "task.artifact_recorded"
 	EventTaskCleared       EventType = "task.cleared"
 	EventExecutionPlanned  EventType = "execution.node_planned"
 	EventExecutionStatus   EventType = "execution.node_status"
@@ -72,11 +85,34 @@ type Task struct {
 	Title                  string          `json:"title"`
 	Prompt                 string          `json:"prompt"`
 	Status                 TaskStatus      `json:"status"`
+	ObjectiveStatus        ObjectiveStatus `json:"objectiveStatus,omitempty"`
+	ObjectivePhase         string          `json:"objectivePhase,omitempty"`
 	CreatedAt              time.Time       `json:"createdAt"`
 	UpdatedAt              time.Time       `json:"updatedAt"`
 	Metadata               json.RawMessage `json:"metadata,omitempty"`
 	FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
 	AppliedWorkerID        string          `json:"appliedWorkerId,omitempty"`
+	Milestones             []TaskMilestone `json:"milestones,omitempty"`
+	Artifacts              []TaskArtifact  `json:"artifacts,omitempty"`
+}
+
+type TaskMilestone struct {
+	Name     string          `json:"name"`
+	Phase    string          `json:"phase,omitempty"`
+	Summary  string          `json:"summary,omitempty"`
+	At       time.Time       `json:"at"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+type TaskArtifact struct {
+	ID        string          `json:"id"`
+	Kind      string          `json:"kind"`
+	Name      string          `json:"name,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	Ref       string          `json:"ref,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 type Worker struct {
