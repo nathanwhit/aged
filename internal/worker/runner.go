@@ -273,13 +273,23 @@ func (f parserFunc) ParseLine(stream string, line string) Event {
 
 func ParserForKind(kind string) Parser {
 	switch kind {
-	case "codex", "claude":
+	case "codex":
+		return parserFunc(parseCodexWorkerLine)
+	case "claude":
 		return parserFunc(parseJSONWorkerLine)
 	default:
 		return parserFunc(func(stream string, line string) Event {
 			return LogEvent(stream, line)
 		})
 	}
+}
+
+func parseCodexWorkerLine(stream string, line string) Event {
+	event := parseJSONWorkerLine(stream, line)
+	if stream == "stderr" && strings.Contains(line, "failed to record rollout items: thread") {
+		event.Kind = EventLog
+	}
+	return event
 }
 
 func parseJSONWorkerLine(stream string, line string) Event {

@@ -258,6 +258,20 @@ func TestParserDoesNotTreatCodexTurnCompletionAsResult(t *testing.T) {
 	}
 }
 
+func TestCodexParserDowngradesRolloutRecordError(t *testing.T) {
+	parser := ParserForKind("codex")
+
+	event := parser.ParseLine("stderr", "2026-04-30T02:06:16.268038Z ERROR codex_core::session: failed to record rollout items: thread 019ddc1f-f8f0-7da0-a932-a956e7f51071 not found")
+	if event.Kind != EventLog {
+		t.Fatalf("kind = %q, want %q", event.Kind, EventLog)
+	}
+
+	realError := parser.ParseLine("stderr", "actual codex failure")
+	if realError.Kind != EventError {
+		t.Fatalf("real error kind = %q, want %q", realError.Kind, EventError)
+	}
+}
+
 func TestBenchmarkCompareRunnerReportsImprovement(t *testing.T) {
 	sink := &recordingSink{}
 	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `

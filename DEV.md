@@ -75,7 +75,7 @@ The initial local-first vertical slice is implemented.
 - Failed review/validation follow-up workers are preserved in the orchestration state and sent to the replanner instead of immediately failing the whole task. That lets the orchestrator retry with another worker, continue from a valid candidate, or ask for steering.
 - Dynamic replanning is available for brains that implement `Replan`: after follow-up workers, the brain can return `continue`, `complete`, `wait`, or `fail`; `continue` schedules another worker turn and records `task.replanned`.
 - Dynamic replanning carries workers created during `continue` turns forward into final completion, so a replanner-selected final candidate can be a worker that did not exist before the replan loop began.
-- Codex parser treats `agent_message` as the useful result summary and leaves `turn.completed` usage records as logs.
+- Codex parser treats `agent_message` as the useful result summary, leaves `turn.completed` usage records as logs, and downgrades Codex's benign `failed to record rollout items` shutdown/session-recording message so successful workers do not surface it as their completion error.
 
 ## Verified
 
