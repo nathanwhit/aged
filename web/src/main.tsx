@@ -46,6 +46,8 @@ type TaskStartInput = {
   metadata?: Record<string, unknown>;
 };
 
+type InitialSnapshotStatus = "loading" | "ready" | "error";
+
 const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
@@ -109,18 +111,26 @@ function App() {
   const [error, setError] = useState<string>("");
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
+  const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
 
   async function refresh() {
     const next = normalizeSnapshot(await getSnapshot());
     setSnapshot(next);
+    setInitialSnapshotStatus("ready");
     setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : next.tasks.at(-1)?.id || ""));
   }
 
   useEffect(() => {
-    refresh().catch((err: Error) => setError(err.message));
+    refresh().catch((err: Error) => {
+      setError(err.message);
+      setInitialSnapshotStatus((current) => (current === "loading" ? "error" : current));
+    });
   }, []);
 
   useEffect(() => {
+    if (initialSnapshotStatus !== "ready") {
+      return;
+    }
     const lastID = snapshot.events.at(-1)?.id ?? 0;
     const source = new EventSource(`/api/events/stream?after=${lastID}`);
     source.addEventListener("open", () => setConnected(true));
@@ -130,7 +140,7 @@ function App() {
       setSnapshot((current) => reduceEvent(current, event));
     });
     return () => source.close();
-  }, []);
+  }, [initialSnapshotStatus]);
 
   const selectedTask = useMemo(
     () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? snapshot.tasks.at(-1),
@@ -341,7 +351,11 @@ function App() {
               <Trash2 size={16} />
             </button>
           </div>
-          {snapshot.tasks.length === 0 && !pendingTask ? (
+          {initialSnapshotStatus === "loading" ? (
+            <TaskListLoading />
+          ) : initialSnapshotStatus === "error" && snapshot.tasks.length === 0 && !pendingTask ? (
+            <p className="empty">Unable to load tasks.</p>
+          ) : snapshot.tasks.length === 0 && !pendingTask ? (
             <p className="empty">No tasks yet.</p>
           ) : (
             <>
@@ -376,7 +390,14 @@ function App() {
           )}
         </section>
 
-        {selectedTask ? (
+        {initialSnapshotStatus === "loading" ? (
+          <section className="workspace">
+            <div className="panel empty-state loading-state">
+              <LoaderCircle className="spin" size={18} />
+              <span>Loading tasks...</span>
+            </div>
+          </section>
+        ) : selectedTask ? (
           <DashboardGrid panes={dashboardPanes} />
         ) : (
           <section className="workspace">
@@ -385,6 +406,15 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+function TaskListLoading() {
+  return (
+    <div className="task-list-loading" role="status" aria-live="polite">
+      <LoaderCircle className="spin" size={16} />
+      <span>Loading tasks...</span>
+    </div>
   );
 }
 
