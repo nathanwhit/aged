@@ -460,6 +460,14 @@ button:disabled {
   border-color: #a7c3f3;
 }
 
+.task-list-loading,
+.loading-state {
+  align-items: center;
+  color: #4b4f58;
+  display: flex;
+  gap: 8px;
+}
+
 .task-row-main {
   align-items: center;
   background: transparent;
