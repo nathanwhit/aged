@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	name TEXT NOT NULL,
 	local_path TEXT NOT NULL,
 	repo TEXT NOT NULL DEFAULT '',
+	upstream_repo TEXT NOT NULL DEFAULT '',
 	vcs TEXT NOT NULL DEFAULT '',
 	default_base TEXT NOT NULL DEFAULT '',
 	workspace_root TEXT NOT NULL DEFAULT '',
@@ -68,6 +69,35 @@ CREATE TABLE IF NOT EXISTS settings (
 	value TEXT NOT NULL
 );
 `)
+	if err != nil {
+		return err
+	}
+	return s.ensureProjectColumn(ctx, "upstream_repo", "TEXT NOT NULL DEFAULT ''")
+}
+
+func (s *SQLiteStore) ensureProjectColumn(ctx context.Context, name string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(projects)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE projects ADD COLUMN %s %s", name, definition))
 	return err
 }
 
@@ -128,7 +158,7 @@ LIMIT ?`, afterID, limit)
 
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, local_path, repo, vcs, default_base, workspace_root, target_labels
+SELECT id, name, local_path, repo, upstream_repo, vcs, default_base, workspace_root, target_labels
 FROM projects
 ORDER BY id ASC`)
 	if err != nil {
@@ -178,12 +208,13 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 		return core.Project{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.ID,
 		project.Name,
 		project.LocalPath,
 		project.Repo,
+		project.UpstreamRepo,
 		project.VCS,
 		project.DefaultBase,
 		project.WorkspaceRoot,
@@ -222,12 +253,13 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, vcs, default_base, workspace_root, target_labels, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	local_path = excluded.local_path,
 	repo = excluded.repo,
+	upstream_repo = excluded.upstream_repo,
 	vcs = excluded.vcs,
 	default_base = excluded.default_base,
 	workspace_root = excluded.workspace_root,
@@ -237,6 +269,7 @@ ON CONFLICT(id) DO UPDATE SET
 		project.Name,
 		project.LocalPath,
 		project.Repo,
+		project.UpstreamRepo,
 		project.VCS,
 		project.DefaultBase,
 		project.WorkspaceRoot,
@@ -733,6 +766,7 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		&project.Name,
 		&project.LocalPath,
 		&project.Repo,
+		&project.UpstreamRepo,
 		&project.VCS,
 		&project.DefaultBase,
 		&project.WorkspaceRoot,

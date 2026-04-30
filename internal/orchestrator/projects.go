@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -162,7 +163,7 @@ func (r *ProjectRegistry) Resolve(req core.CreateTaskRequest) (core.Project, err
 				return project, nil
 			}
 			if repo, ok := metadata["repo"].(string); ok && strings.TrimSpace(repo) != "" {
-				if project, found := r.FindByRepo(repo); found {
+				if project, found := r.findByMetadataRepo(metadata, repo); found {
 					return project, nil
 				}
 			}
@@ -186,11 +187,50 @@ func (r *ProjectRegistry) FindByRepo(repo string) (core.Project, bool) {
 	return core.Project{}, false
 }
 
+func (r *ProjectRegistry) FindByIssueRepo(repo string) (core.Project, bool) {
+	repo = strings.TrimSpace(strings.ToLower(repo))
+	if repo == "" || r == nil {
+		return core.Project{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, project := range r.sortedProjectsLocked() {
+		if strings.ToLower(project.UpstreamRepo) == repo {
+			return project, true
+		}
+	}
+	for _, project := range r.sortedProjectsLocked() {
+		if strings.ToLower(project.Repo) == repo {
+			return project, true
+		}
+	}
+	return core.Project{}, false
+}
+
+func (r *ProjectRegistry) findByMetadataRepo(metadata map[string]any, repo string) (core.Project, bool) {
+	if source, ok := metadata["source"].(string); ok && strings.TrimSpace(source) == "github-issue" {
+		return r.FindByIssueRepo(repo)
+	}
+	return r.FindByRepo(repo)
+}
+
+func (r *ProjectRegistry) sortedProjectsLocked() []core.Project {
+	out := make([]core.Project, 0, len(r.projects))
+	for _, project := range r.projects {
+		out = append(out, project)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
 func normalizeProject(project core.Project) (core.Project, error) {
 	project.ID = strings.TrimSpace(project.ID)
 	project.Name = strings.TrimSpace(project.Name)
 	project.LocalPath = strings.TrimSpace(project.LocalPath)
 	project.Repo = strings.TrimSpace(project.Repo)
+	project.UpstreamRepo = strings.TrimSpace(project.UpstreamRepo)
 	project.VCS = strings.TrimSpace(project.VCS)
 	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
 	project.WorkspaceRoot = strings.TrimSpace(project.WorkspaceRoot)

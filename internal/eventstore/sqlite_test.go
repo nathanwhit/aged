@@ -161,6 +161,7 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 		Name:          "aged",
 		LocalPath:     "/tmp/aged",
 		Repo:          "owner/aged",
+		UpstreamRepo:  "upstream/aged",
 		VCS:           "jj",
 		DefaultBase:   "main",
 		WorkspaceRoot: ".aged/workspaces",
@@ -186,7 +187,7 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 	if len(projects) != 1 {
 		t.Fatalf("projects = %d, want 1", len(projects))
 	}
-	if projects[0].Repo != "owner/aged" || projects[0].TargetLabels["pool"] != "local" {
+	if projects[0].Repo != "owner/aged" || projects[0].UpstreamRepo != "upstream/aged" || projects[0].TargetLabels["pool"] != "local" {
 		t.Fatalf("project = %+v", projects[0])
 	}
 }

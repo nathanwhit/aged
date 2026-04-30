@@ -2512,7 +2512,7 @@ func (s *Service) projectForTask(task core.Task) core.Project {
 				}
 			}
 			if repo := stringMetadataValue(metadata["repo"]); repo != "" {
-				if project, ok := s.projects.FindByRepo(repo); ok {
+				if project, ok := s.projects.findByMetadataRepo(metadata, repo); ok {
 					return project
 				}
 			}

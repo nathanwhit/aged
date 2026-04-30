@@ -474,6 +474,82 @@ func TestServiceMapsExternalRepoToProject(t *testing.T) {
 	}
 }
 
+func TestServiceRoutesGitHubIssueToExplicitUpstreamProject(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	upstreamCheckout := t.TempDir()
+	forkCheckout := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "upstream", Name: "Upstream", LocalPath: upstreamCheckout, Repo: "owner/repo"},
+		{ID: "fork", Name: "Fork", LocalPath: forkCheckout, Repo: "fork-owner/repo", UpstreamRepo: "owner/repo"},
+	}, "upstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, upstreamCheckout, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "GitHub issue owner/repo#1",
+		Prompt:   "Fix it.",
+		Metadata: core.MustJSON(map[string]any{"source": "github-issue", "repo": "owner/repo"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ProjectID != "fork" {
+		t.Fatalf("task project = %q, want fork", task.ProjectID)
+	}
+	if workspace.workDir != forkCheckout {
+		t.Fatalf("workspace workDir = %q, want %q", workspace.workDir, forkCheckout)
+	}
+}
+
+func TestServiceKeepsLocalRepoLookupWhenNotGitHubIssue(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	upstreamCheckout := t.TempDir()
+	forkCheckout := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "upstream", Name: "Upstream", LocalPath: upstreamCheckout, Repo: "owner/repo"},
+		{ID: "fork", Name: "Fork", LocalPath: forkCheckout, Repo: "fork-owner/repo", UpstreamRepo: "owner/repo"},
+	}, "fork")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, forkCheckout, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Local repo task",
+		Prompt:   "Fix it.",
+		Metadata: core.MustJSON(map[string]any{"repo": "owner/repo"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if task.ProjectID != "upstream" {
+		t.Fatalf("task project = %q, want upstream", task.ProjectID)
+	}
+	if workspace.workDir != upstreamCheckout {
+		t.Fatalf("workspace workDir = %q, want %q", workspace.workDir, upstreamCheckout)
+	}
+}
+
 func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

@@ -136,34 +136,48 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 }
 
 func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, exec commandExecutor, dir string, repo string, branch string) (core.PullRequest, error) {
-	out, err := exec(ctx, dir, "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json", "number,url,state,title,isDraft,headRefName,baseRefName")
+	headOwner, headBranch, hasHeadOwner := strings.Cut(branch, ":")
+	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,headRepositoryOwner"
+	args := []string{"pr", "list", "--repo", repo, "--state", "all", "--json", jsonFields}
+	if hasHeadOwner {
+		args = append(args, "--search", "head:"+headOwner+":"+headBranch)
+	} else {
+		args = append(args, "--head", branch)
+	}
+	out, err := exec(ctx, dir, "gh", args...)
 	if err != nil {
 		return core.PullRequest{}, err
 	}
 	var prs []struct {
-		Number      int    `json:"number"`
-		URL         string `json:"url"`
-		State       string `json:"state"`
-		Title       string `json:"title"`
-		IsDraft     bool   `json:"isDraft"`
-		HeadRefName string `json:"headRefName"`
-		BaseRefName string `json:"baseRefName"`
+		Number              int    `json:"number"`
+		URL                 string `json:"url"`
+		State               string `json:"state"`
+		Title               string `json:"title"`
+		IsDraft             bool   `json:"isDraft"`
+		HeadRefName         string `json:"headRefName"`
+		BaseRefName         string `json:"baseRefName"`
+		HeadRepositoryOwner struct {
+			Login string `json:"login"`
+		} `json:"headRepositoryOwner"`
 	}
 	if err := json.Unmarshal([]byte(out), &prs); err != nil {
 		return core.PullRequest{}, err
 	}
-	if len(prs) == 0 {
-		return core.PullRequest{}, errors.New("no existing pull request found for branch")
+	for _, pr := range prs {
+		if hasHeadOwner && (!strings.EqualFold(pr.HeadRepositoryOwner.Login, headOwner) || pr.HeadRefName != headBranch) {
+			continue
+		}
+		return core.PullRequest{
+			Number: pr.Number,
+			URL:    pr.URL,
+			State:  pr.State,
+			Title:  pr.Title,
+			Draft:  pr.IsDraft,
+			Branch: pr.HeadRefName,
+			Base:   pr.BaseRefName,
+		}, nil
 	}
-	return core.PullRequest{
-		Number: prs[0].Number,
-		URL:    prs[0].URL,
-		State:  prs[0].State,
-		Title:  prs[0].Title,
-		Draft:  prs[0].IsDraft,
-		Branch: prs[0].HeadRefName,
-		Base:   prs[0].BaseRefName,
-	}, nil
+	return core.PullRequest{}, errors.New("no existing pull request found for branch")
 }
 
 func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string) error {
