@@ -74,6 +74,7 @@ The initial local-first vertical slice is implemented.
 - Follow-up worker prompts include the original request, follow-up role/reason, prior worker summaries/errors, and changed files.
 - Failed review/validation follow-up workers are preserved in the orchestration state and sent to the replanner instead of immediately failing the whole task. That lets the orchestrator retry with another worker, continue from a valid candidate, or ask for steering.
 - Dynamic replanning is available for brains that implement `Replan`: after follow-up workers, the brain can return `continue`, `complete`, `wait`, or `fail`; `continue` schedules another worker turn and records `task.replanned`.
+- Dynamic replanning carries workers created during `continue` turns forward into final completion, so a replanner-selected final candidate can be a worker that did not exist before the replan loop began.
 - Codex parser treats `agent_message` as the useful result summary and leaves `turn.completed` usage records as logs.
 
 ## Verified
@@ -108,6 +109,7 @@ The initial local-first vertical slice is implemented.
   - Follow-up worker prompts include prior worker result context.
   - Service dynamically replans after follow-up output and can schedule an incorporation worker.
   - Service runs spawned workers from dynamic replans before asking the brain for the next decision.
+  - Service can complete with a final candidate worker created during a dynamic replan turn.
 - Service emits durable execution graph nodes into snapshots.
 - Snapshot projection includes per-task orchestration graphs with dependency edges.
 - Plugin registry tests verify built-in/configured plugin descriptors and executable `describe` probing.

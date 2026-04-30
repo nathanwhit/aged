@@ -2421,6 +2421,49 @@ func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	}
 }
 
+func TestServiceCompletesWithWorkerCreatedDuringDynamicReplan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueThenSelectLatestBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement initial slice",
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial"}}},
+		"follow": eventRunner{kind: "follow", events: []worker.Event{{Kind: worker.EventResult, Text: "follow-up patch"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Dynamic final candidate", Prompt: "Patch then select the patch."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	var followWorkerID string
+	for _, worker := range snapshot.Workers {
+		if worker.Kind == "follow" {
+			followWorkerID = worker.ID
+			break
+		}
+	}
+	if followWorkerID == "" {
+		t.Fatalf("missing follow-up worker: %+v", snapshot.Workers)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID != followWorkerID {
+		t.Fatalf("final candidate = %q, want dynamic worker %q", snapshot.Tasks[0].FinalCandidateWorkerID, followWorkerID)
+	}
+	if len(brain.states) != 2 || len(brain.states[1].Results) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+}
+
 func TestServiceEmitsExecutionGraphNodes(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2990,6 +3033,33 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return decision, nil
+}
+
+type continueThenSelectLatestBrain struct {
+	plan   Plan
+	states []OrchestrationState
+}
+
+func (b *continueThenSelectLatestBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return b.plan, nil
+}
+
+func (b *continueThenSelectLatestBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	if state.Turn == 1 {
+		return ReplanDecision{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "follow",
+				Prompt:     "patch the candidate",
+			},
+		}, nil
+	}
+	return ReplanDecision{
+		Action:                 "complete",
+		FinalCandidateWorkerID: latestCandidateWorkerID(state.Results),
+		Rationale:              "select latest dynamic candidate",
+	}, nil
 }
 
 type errorReplanningBrain struct {
