@@ -3151,6 +3151,47 @@ func TestServiceUsesTaskTargetLabels(t *testing.T) {
 	}
 }
 
+func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"tmux=false",
+		"repoPresent=false",
+		"cpuCount=4",
+		"load1=0.3",
+	}, "\n")}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, NewLocalTargetRegistry(), SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	_, err := service.RegisterTarget(ctx, core.TargetConfig{
+		ID:       "vm-1",
+		Kind:     "ssh",
+		Host:     "vm.local",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: core.TargetCapacity{MaxWorkers: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range snapshot.Targets {
+		if target.ID == "vm-1" {
+			if target.Health.Status != "unhealthy" || !strings.Contains(target.Health.Error, "tmux") || target.Resources.CPUCount != 4 {
+				t.Fatalf("target health = %+v resources = %+v", target.Health, target.Resources)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing registered target: %+v", snapshot.Targets)
+}
+
 type fixedBrain struct {
 	plan Plan
 	err  error

@@ -2288,6 +2288,14 @@ function TargetPanel({
               </div>
             )}
             {target.health?.error && <p className="plugin-error">{target.health.error}</p>}
+            {target.health && (
+              <div className="target-debug">
+                <span>reachable: {healthFlag(target.health.reachable)}</span>
+                <span>tmux: {healthFlag(target.health.tmux)}</span>
+                <span>repo: {healthFlag(target.health.repoPresent)}</span>
+                {target.health.checkedAt && <span>checked: {new Date(target.health.checkedAt).toLocaleTimeString()}</span>}
+              </div>
+            )}
             <div className="plugin-card-actions">
               <button className="secondary" onClick={() => edit(target)}>Edit</button>
               <button
@@ -2308,6 +2316,12 @@ function TargetPanel({
 function formatMB(value: number): string {
   if (value >= 1024) return `${(value / 1024).toFixed(value >= 10240 ? 0 : 1)} GB`;
   return `${Math.round(value)} MB`;
+}
+
+function healthFlag(value?: boolean): string {
+  if (value === true) return "yes";
+  if (value === false) return "no";
+  return "unknown";
 }
 
 const SYSTEM_PLUGIN_IDS = new Set([

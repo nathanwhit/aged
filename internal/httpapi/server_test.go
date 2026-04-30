@@ -293,12 +293,8 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	defer server.Close()
 
 	res, err := http.Post(server.URL+"/api/targets", "application/json", strings.NewReader(`{
-		"id": "vm-1",
-		"kind": "ssh",
-		"host": "vm.local",
-		"user": "aged",
-		"workDir": "/repo",
-		"workRoot": "/runs",
+		"id": "local-ci",
+		"kind": "local",
 		"labels": {"location": "remote"},
 		"capacity": {"maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32}
 	}`))
@@ -314,7 +310,7 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 1 || targets[0].ID != "vm-1" || targets[0].Labels["location"] != "remote" {
+	if len(targets) != 1 || targets[0].ID != "local-ci" || targets[0].Labels["location"] != "remote" {
 		t.Fatalf("targets = %+v", targets)
 	}
 	snapshot, err := service.Snapshot(ctx)
@@ -323,7 +319,7 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	}
 	var found bool
 	for _, target := range snapshot.Targets {
-		if target.ID == "vm-1" && target.Host == "vm.local" {
+		if target.ID == "local-ci" && target.Health.Status == "ok" {
 			found = true
 		}
 	}

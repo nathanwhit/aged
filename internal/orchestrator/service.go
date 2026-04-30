@@ -418,6 +418,7 @@ func (s *Service) RegisterTarget(ctx context.Context, target core.TargetConfig) 
 	if _, err := s.store.SaveTarget(ctx, out); err != nil {
 		return core.TargetConfig{}, err
 	}
+	s.RefreshTargetHealthFor(ctx, registered.ID)
 	return out, nil
 }
 
@@ -548,24 +549,39 @@ func (s *Service) RefreshTargetHealth(ctx context.Context) {
 		return
 	}
 	for _, target := range s.targets.Configs() {
-		if target.Kind == TargetKindLocal {
-			s.targets.UpdateHealth(target.ID, core.TargetHealth{
-				Status:      "ok",
-				CheckedAt:   time.Now().UTC(),
-				Reachable:   true,
-				Tmux:        true,
-				RepoPresent: true,
-			}, core.TargetResources{})
-			continue
-		}
-		if target.Kind != TargetKindSSH {
-			continue
-		}
-		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		health, resources := s.sshRunner.Probe(probeCtx, target)
-		cancel()
-		s.targets.UpdateHealth(target.ID, health, resources)
+		s.refreshTargetHealth(ctx, target)
 	}
+}
+
+func (s *Service) RefreshTargetHealthFor(ctx context.Context, id string) {
+	if s == nil || s.targets == nil {
+		return
+	}
+	target, ok := s.targets.Get(id)
+	if !ok {
+		return
+	}
+	s.refreshTargetHealth(ctx, target)
+}
+
+func (s *Service) refreshTargetHealth(ctx context.Context, target TargetConfig) {
+	if target.Kind == TargetKindLocal {
+		s.targets.UpdateHealth(target.ID, core.TargetHealth{
+			Status:      "ok",
+			CheckedAt:   time.Now().UTC(),
+			Reachable:   true,
+			Tmux:        true,
+			RepoPresent: true,
+		}, core.TargetResources{})
+		return
+	}
+	if target.Kind != TargetKindSSH {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	health, resources := s.sshRunner.Probe(probeCtx, target)
+	s.targets.UpdateHealth(target.ID, health, resources)
 }
 
 func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
