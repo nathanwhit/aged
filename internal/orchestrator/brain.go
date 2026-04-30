@@ -29,6 +29,7 @@ type Plan struct {
 	Rationale         string            `json:"rationale,omitempty"`
 	Steps             []PlanStep        `json:"steps,omitempty"`
 	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
+	Actions           []PlanAction      `json:"actions,omitempty"`
 	Spawns            []SpawnRequest    `json:"spawns,omitempty"`
 	Metadata          map[string]any    `json:"metadata,omitempty"`
 }
@@ -41,6 +42,14 @@ type PlanStep struct {
 type ApprovalRequest struct {
 	Title  string `json:"title"`
 	Reason string `json:"reason"`
+}
+
+type PlanAction struct {
+	Kind     string         `json:"kind"`
+	When     string         `json:"when"`
+	Reason   string         `json:"reason"`
+	WorkerID string         `json:"workerId,omitempty"`
+	Inputs   map[string]any `json:"inputs,omitempty"`
 }
 
 type SpawnRequest struct {
@@ -73,6 +82,28 @@ func (p Plan) Validate() error {
 	}
 	if strings.TrimSpace(p.Prompt) == "" {
 		return errors.New("plan workerPrompt is required")
+	}
+	for index, action := range p.Actions {
+		if err := action.Validate(); err != nil {
+			return fmt.Errorf("plan actions[%d]: %w", index, err)
+		}
+	}
+	return nil
+}
+
+func (a PlanAction) Validate() error {
+	switch strings.TrimSpace(a.Kind) {
+	case "publish_pull_request", "wait_external":
+	default:
+		return errors.New("kind must be one of publish_pull_request or wait_external")
+	}
+	switch strings.TrimSpace(a.When) {
+	case "", "after_success":
+	default:
+		return errors.New("when must be after_success")
+	}
+	if strings.TrimSpace(a.Reason) == "" {
+		return errors.New("reason is required")
 	}
 	return nil
 }

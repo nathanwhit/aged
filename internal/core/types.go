@@ -51,6 +51,7 @@ const (
 	EventTaskMilestone     EventType = "task.milestone_reached"
 	EventTaskArtifact      EventType = "task.artifact_recorded"
 	EventTaskCleared       EventType = "task.cleared"
+	EventTaskAction        EventType = "task.action_executed"
 	EventExecutionPlanned  EventType = "execution.node_planned"
 	EventExecutionStatus   EventType = "execution.node_status"
 	EventApplyPolicy       EventType = "apply.policy_recommended"
@@ -68,6 +69,7 @@ const (
 	EventPRPublished       EventType = "pull_request.published"
 	EventPRStatusChecked   EventType = "pull_request.status_checked"
 	EventPRBabysitter      EventType = "pull_request.babysitter_started"
+	EventPRFollowUp        EventType = "pull_request.followup_started"
 )
 
 type Event struct {

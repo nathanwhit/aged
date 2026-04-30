@@ -163,7 +163,7 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 			if issue.Repo == "" {
 				issue.Repo = repo
 			}
-			if _, err := d.service.CreateTask(ctx, githubIssueTaskRequest(issue, source.ProjectID)); err != nil {
+			if _, err := d.service.CreateTask(ctx, githubIssueTaskRequest(issue, source.ProjectID, boolDefault(d.config.PullRequests.AutoPublish, true))); err != nil {
 				errs = append(errs, fmt.Sprintf("%s#%d task: %v", issue.Repo, issue.Number, err))
 			}
 		}
@@ -235,8 +235,8 @@ func (d *GitHubDriver) monitorPullRequests(ctx context.Context) error {
 			continue
 		}
 		if boolDefault(d.config.PullRequests.AutoBabysit, true) && pullRequestNeedsBabysitter(checked) {
-			if _, err := d.service.StartPullRequestBabysitter(ctx, pr.ID); err != nil {
-				errs = append(errs, fmt.Sprintf("%s babysit pr: %v", pr.ID, err))
+			if err := d.service.ContinueTaskForPullRequest(ctx, pr.ID); err != nil {
+				errs = append(errs, fmt.Sprintf("%s continue pr task: %v", pr.ID, err))
 			}
 		}
 	}
@@ -267,23 +267,27 @@ func (d *GitHubDriver) monitorsPullRequestRepo(repo string) bool {
 	return false
 }
 
-func githubIssueTaskRequest(issue GitHubIssue, projectID string) core.CreateTaskRequest {
+func githubIssueTaskRequest(issue GitHubIssue, projectID string, githubCompletion bool) core.CreateTaskRequest {
 	labels := issue.Labels
 	slices.Sort(labels)
 	title := fmt.Sprintf("GitHub issue %s#%d: %s", issue.Repo, issue.Number, strings.TrimSpace(issue.Title))
+	metadata := map[string]any{
+		"repo":      issue.Repo,
+		"number":    issue.Number,
+		"url":       issue.URL,
+		"labels":    labels,
+		"updatedAt": issue.UpdatedAt,
+	}
+	if githubCompletion {
+		metadata["completionMode"] = "github"
+	}
 	return core.CreateTaskRequest{
 		ProjectID:  projectID,
 		Title:      title,
 		Prompt:     githubIssuePrompt(issue),
 		Source:     "github-issue",
 		ExternalID: fmt.Sprintf("%s#%d", issue.Repo, issue.Number),
-		Metadata: core.MustJSON(map[string]any{
-			"repo":      issue.Repo,
-			"number":    issue.Number,
-			"url":       issue.URL,
-			"labels":    labels,
-			"updatedAt": issue.UpdatedAt,
-		}),
+		Metadata:   core.MustJSON(metadata),
 	}
 }
 

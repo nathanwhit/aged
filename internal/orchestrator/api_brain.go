@@ -269,7 +269,7 @@ func planResponseFormat() map[string]any {
 			"schema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"workerKind", "workerPrompt", "reasoningEffort", "rationale", "steps", "requiredApprovals", "spawns"},
+				"required":             []string{"workerKind", "workerPrompt", "reasoningEffort", "rationale", "steps", "requiredApprovals", "actions", "spawns"},
 				"properties": map[string]any{
 					"workerKind": map[string]any{
 						"type": "string",
@@ -307,6 +307,24 @@ func planResponseFormat() map[string]any {
 							"properties": map[string]any{
 								"title":  map[string]any{"type": "string"},
 								"reason": map[string]any{"type": "string"},
+							},
+						},
+					},
+					"actions": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"kind", "when", "reason", "workerId", "inputs"},
+							"properties": map[string]any{
+								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "wait_external"}},
+								"when":     map[string]any{"type": "string", "enum": []string{"after_success"}},
+								"reason":   map[string]any{"type": "string"},
+								"workerId": map[string]any{"type": "string"},
+								"inputs": map[string]any{
+									"type":                 "object",
+									"additionalProperties": true,
+								},
 							},
 						},
 					},

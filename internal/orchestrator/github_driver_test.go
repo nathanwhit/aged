@@ -54,6 +54,58 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	}
 }
 
+func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
+	}, fakeGitHubClient{issues: []GitHubIssue{{
+		Repo:   "owner/repo",
+		Number: 12,
+		Title:  "Add feature",
+		Body:   "Please add the feature.",
+		URL:    "https://github.com/owner/repo/issues/12",
+		Labels: []string{"aged"},
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, ok, err := service.FindTaskByExternalID(ctx, "github-issue", "owner/repo#12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing github issue task")
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	task, ok = findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveWaitingExternal {
+		t.Fatalf("task status = %q objective = %q", task.Status, task.ObjectiveStatus)
+	}
+	if publisher.published.Repo != "owner/repo" {
+		t.Fatalf("published repo = %q", publisher.published.Repo)
+	}
+}
+
 func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -227,6 +279,15 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRPublished,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -251,18 +312,18 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshot, err := store.Snapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Tasks) != 2 {
+	snapshot := waitForEvent(t, store, core.EventPRFollowUp, "task-1")
+	if len(snapshot.Tasks) != 1 {
 		t.Fatalf("tasks = %+v", snapshot.Tasks)
 	}
 	if !hasEvent(snapshot.Events, core.EventPRStatusChecked, "task-1", "") {
 		t.Fatalf("missing pr status check event")
 	}
-	if !hasEvent(snapshot.Events, core.EventPRBabysitter, "task-1", "") {
-		t.Fatalf("missing pr babysitter event")
+	if !hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
+		t.Fatalf("missing pr follow-up event")
+	}
+	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("missing task steering event")
 	}
 }
 
@@ -332,6 +393,82 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 	}
 	if !hasEvent(snapshot.Events, core.EventPRStatusChecked, "task-1", "") {
 		t.Fatalf("missing pr status check event")
+	}
+}
+
+func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: core.PullRequest{
+		ID:           "pr-1",
+		Repo:         "owner/repo",
+		Number:       7,
+		URL:          "https://github.com/owner/repo/pull/7",
+		Branch:       "codex/aged-test",
+		Base:         "main",
+		Title:        "Task",
+		State:        "MERGED",
+		ChecksStatus: "success",
+		MergeStatus:  "CLEAN",
+		ReviewStatus: "APPROVED",
+	}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "babysit"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"title":  "Task",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled:      true,
+		PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, "task-1", core.TaskSucceeded)
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.ObjectiveStatus != core.ObjectiveSatisfied || task.ObjectivePhase != "merged" {
+		t.Fatalf("objective = %q phase %q", task.ObjectiveStatus, task.ObjectivePhase)
 	}
 }
 

@@ -229,6 +229,32 @@ func TestServiceGeneratesMissingTaskTitle(t *testing.T) {
 	}
 }
 
+func TestServiceInfersGitHubCompletionModeFromPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Fix TODOs",
+		Prompt: "Take a look at TODOs in the code, fix them, open PR and make sure it gets merged.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "github" || metadata["completionModeInferred"] != true {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+}
+
 func TestServiceFallsBackWhenTitleGeneratorFails(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -278,7 +304,7 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 
 	pr, err := service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{
 		Repo: "owner/repo",
@@ -287,8 +313,8 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applyCalls != 1 {
-		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0", applyCalls)
 	}
 	if pr.URL == "" || pr.Repo != "owner/repo" {
 		t.Fatalf("pr = %+v", pr)
@@ -297,15 +323,15 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 		t.Fatalf("publisher worker id was empty")
 	}
 
-	snapshot, err := store.Snapshot(ctx)
+	snapshot, err = store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(snapshot.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
-	if !hasEvent(snapshot.Events, core.EventWorkerApplied, task.ID, publisher.published.WorkerID) {
-		t.Fatalf("missing worker apply event")
+	if hasEvent(snapshot.Events, core.EventWorkerApplied, task.ID, publisher.published.WorkerID) {
+		t.Fatalf("worker was applied during PR publish")
 	}
 	if !hasEvent(snapshot.Events, core.EventPRPublished, task.ID, "") {
 		t.Fatalf("missing pr published event")
@@ -363,8 +389,55 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if !hasMilestone(task.Milestones, "candidate_ready") || !hasMilestone(task.Milestones, "pr_opened") {
 		t.Fatalf("milestones = %+v", task.Milestones)
 	}
-	if applyCalls != 1 {
-		t.Fatalf("apply calls = %d, want 1", applyCalls)
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0", applyCalls)
+	}
+}
+
+func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "open a PR so review can happen while the objective continues",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Implement feature", Prompt: "Do it, open a PR, and babysit it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveWaitingExternal {
+		t.Fatalf("task status = %q objective = %q", task.Status, task.ObjectiveStatus)
+	}
+	if !hasEvent(snapshot.Events, core.EventTaskAction, task.ID, "") {
+		t.Fatalf("missing task action event")
+	}
+	if publisher.published.WorkerID == "" || publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
+		t.Fatalf("published from wrong worker workspace: %+v", publisher.published)
 	}
 }
 
@@ -700,7 +773,7 @@ func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if _, err := service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -710,8 +783,8 @@ func TestServicePublishesPullRequestUsingProjectDefaults(t *testing.T) {
 	if publisher.published.Base != "trunk" {
 		t.Fatalf("published base = %q", publisher.published.Base)
 	}
-	if publisher.published.WorkDir != projectRoot {
-		t.Fatalf("published workDir = %q, want %q", publisher.published.WorkDir, projectRoot)
+	if publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
+		t.Fatalf("published workDir = %q, want worker workspace", publisher.published.WorkDir)
 	}
 	if publisher.published.HeadRepoOwner != "" || publisher.published.PushRemote != "" {
 		t.Fatalf("non-fork publish spec had fork fields: %+v", publisher.published)
@@ -3640,6 +3713,38 @@ func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, co
 	snapshot, _ := store.Snapshot(context.Background())
 	t.Fatalf("task %s did not publish %d pull requests; pull requests = %+v", taskID, count, snapshot.PullRequests)
 	return core.Snapshot{}
+}
+
+func waitForEvent(t *testing.T, store eventstore.Store, eventType core.EventType, taskID string) core.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasEvent(snapshot.Events, eventType, taskID, "") {
+			return snapshot
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot, _ := store.Snapshot(context.Background())
+	t.Fatalf("task %s did not record event %s; events = %+v", taskID, eventType, snapshot.Events)
+	return core.Snapshot{}
+}
+
+func taskWorkspaceCWD(snapshot core.Snapshot, taskID string) string {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventWorkerWorkspace || event.TaskID != taskID {
+			continue
+		}
+		var workspace PreparedWorkspace
+		if err := json.Unmarshal(event.Payload, &workspace); err == nil {
+			return workspace.CWD
+		}
+	}
+	return ""
 }
 
 func hasEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {

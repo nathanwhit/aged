@@ -542,6 +542,10 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	if err != nil {
 		return core.Task{}, err
 	}
+	if stringMetadataValue(metadata["completionMode"]) == "" && promptRequestsGitHubCompletion(req.Prompt) {
+		metadata["completionMode"] = "github"
+		metadata["completionModeInferred"] = true
+	}
 	if title == "" {
 		title = s.generateTaskTitle(ctx, req.Prompt)
 		metadata["titleGenerated"] = true
@@ -724,10 +728,10 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if !ok {
 		return core.PullRequest{}, eventstore.ErrNotFound
 	}
-	if !canPublishPullRequestForTask(task) {
-		return core.PullRequest{}, errors.New("can only publish pull requests after a final candidate exists or for terminal tasks")
-	}
 	workerID := strings.TrimSpace(req.WorkerID)
+	if !canPublishPullRequestForTask(task) && workerID == "" {
+		return core.PullRequest{}, errors.New("provide workerId when publishing before task completion")
+	}
 	project := s.projectForTask(task)
 	sourceRoot := project.LocalPath
 	if workerID == "" {
@@ -749,20 +753,16 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		}
 	}
 	if workerID != "" {
-		applied, err := s.workerChangesApplied(ctx, workerID)
-		if err != nil {
-			return core.PullRequest{}, err
+		if !workerBelongsToTask(snapshot, workerID, taskID) {
+			return core.PullRequest{}, errors.New("worker does not belong to task")
 		}
-		if !applied {
-			result, err := s.ApplyWorkerChanges(ctx, workerID)
-			if err != nil {
-				return core.PullRequest{}, err
-			}
-			sourceRoot = result.SourceRoot
+		workspace, workspaceErr := s.workspaceForWorker(ctx, workerID)
+		if workspaceErr == nil && workspace.CWD != "" {
+			sourceRoot = workspace.CWD
 		} else if appliedRoot := appliedWorkerSourceRoot(snapshot, workerID); appliedRoot != "" {
 			sourceRoot = appliedRoot
-		} else if workspace, err := s.workspaceForWorker(ctx, workerID); err == nil && workspace.SourceRoot != "" {
-			sourceRoot = workspace.SourceRoot
+		} else if workspaceErr != nil {
+			return core.PullRequest{}, workspaceErr
 		}
 	}
 	title := strings.TrimSpace(req.Title)
@@ -777,7 +777,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		TaskID:        taskID,
 		WorkerID:      workerID,
 		WorkDir:       sourceRoot,
-		Repo:          pullRequestTargetRepo(req, project),
+		Repo:          pullRequestTargetRepo(req, project, task),
 		Base:          nonEmpty(req.Base, project.DefaultBase),
 		Branch:        req.Branch,
 		HeadRepoOwner: pullRequestHeadRepoOwner(project),
@@ -961,6 +961,63 @@ func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (
 	return task, nil
 }
 
+func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	var pr core.PullRequest
+	var ok bool
+	for _, candidate := range snapshot.PullRequests {
+		if candidate.ID == prID {
+			pr = candidate
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if task.Status == core.TaskRunning || task.Status == core.TaskPlanning || task.Status == core.TaskQueued {
+		return nil
+	}
+	if isTerminalTaskStatus(task.Status) {
+		return nil
+	}
+	if pullRequestFollowUpStartedAfterLatestStatus(snapshot, pr.ID) {
+		return nil
+	}
+	attempt := pullRequestFollowUpAttempt(snapshot, pr.ID) + 1
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      pr.ID,
+			"attempt": attempt,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		return err
+	}
+	if err := s.recordTaskMilestone(ctx, pr.TaskID, fmt.Sprintf("pr_followup_%d", attempt), "pr_needs_work", "Pull request needs follow-up work.", map[string]any{
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+		"attempt":       attempt,
+	}); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, "pr_needs_work", "Pull request needs follow-up work from checks or review."); err != nil {
+		return err
+	}
+	return s.SteerTask(ctx, pr.TaskID, core.SteeringRequest{Message: pullRequestFollowUpPrompt(pr)})
+}
+
 func activePullRequestBabysitter(snapshot core.Snapshot, pr core.PullRequest) core.Task {
 	if pr.BabysitterTaskID == "" {
 		return core.Task{}
@@ -986,6 +1043,43 @@ func pullRequestBabysitterAttempt(snapshot core.Snapshot, prID string) int {
 		}
 	}
 	return attempt
+}
+
+func pullRequestFollowUpAttempt(snapshot core.Snapshot, prID string) int {
+	attempt := 0
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventPRFollowUp {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.ID == prID {
+			attempt++
+		}
+	}
+	return attempt
+}
+
+func pullRequestFollowUpStartedAfterLatestStatus(snapshot core.Snapshot, prID string) bool {
+	latestStatusEvent := int64(0)
+	latestFollowUpEvent := int64(0)
+	for _, event := range snapshot.Events {
+		var payload struct {
+			ID string `json:"id"`
+		}
+		switch event.Type {
+		case core.EventPRStatusChecked:
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.ID == prID {
+				latestStatusEvent = event.ID
+			}
+		case core.EventPRFollowUp:
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.ID == prID {
+				latestFollowUpEvent = event.ID
+			}
+		}
+	}
+	return latestFollowUpEvent > 0 && latestFollowUpEvent >= latestStatusEvent
 }
 
 func (s *Service) recordPullRequestArtifact(ctx context.Context, pr core.PullRequest) error {
@@ -1469,6 +1563,20 @@ func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bo
 	return false, nil
 }
 
+func workerBelongsToTask(snapshot core.Snapshot, workerID string, taskID string) bool {
+	for _, worker := range snapshot.Workers {
+		if worker.ID == workerID && worker.TaskID == taskID {
+			return true
+		}
+	}
+	for _, event := range snapshot.Events {
+		if event.WorkerID == workerID && event.TaskID == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) findPullRequest(ctx context.Context, prID string) (core.PullRequest, bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -1491,6 +1599,21 @@ Base: %s
 
 Repeatedly inspect CI status, review comments, and mergeability. If checks fail or review comments request changes, diagnose the issue, make the required code changes in the repo, and report what changed. If the PR is green and no action is needed, report that it is ready. Do not merge unless the user explicitly asks for merge.
 `, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base)
+}
+
+func pullRequestFollowUpPrompt(pr core.PullRequest) string {
+	return fmt.Sprintf(`GitHub pull request %s#%d needs follow-up work on the existing task.
+
+Pull request URL: %s
+Branch: %s
+Base: %s
+State: %s
+Checks: %s
+Merge status: %s
+Review status: %s
+
+Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. Keep this as the same long-running task objective; do not start a separate babysitter task.
+`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus)
 }
 
 func (s *Service) runTask(ctx context.Context, task core.Task) {
@@ -1538,6 +1661,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 	if !ok {
+		return
+	}
+	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	} else if !ok {
 		return
 	}
 
@@ -1622,7 +1751,12 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		} else if result.Status == core.WorkerWaiting {
 			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
 		} else if s.finishOrContinueTask(ctx, task.ID, result) {
-			_ = s.completeTask(ctx, task.ID, append(results, result), decision.FinalCandidateWorkerID, decision.Rationale)
+			nextResults := append(results, result)
+			if ok, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+			} else if ok {
+				_ = s.completeTask(ctx, task.ID, nextResults, decision.FinalCandidateWorkerID, decision.Rationale)
+			}
 		}
 	case "wait":
 		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
@@ -1690,7 +1824,12 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		return
 	}
 	if s.finishOrContinueTask(ctx, taskID, result) {
-		_ = s.completeTask(ctx, taskID, []WorkerTurnResult{result}, "", "")
+		results := []WorkerTurnResult{result}
+		if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+			_ = s.failTask(ctx, taskID, err)
+		} else if ok {
+			_ = s.completeTask(ctx, taskID, results, "", "")
+		}
 	}
 }
 
@@ -1722,6 +1861,12 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		return
 	}
 	if !ok {
+		return
+	}
+	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	} else if !ok {
 		return
 	}
 	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
@@ -2183,10 +2328,110 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 		}
 		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
 	}
+	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok {
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
+			return err
+		}
+		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "satisfied", "Local task result is complete."); err != nil {
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+			continue
+		}
+		return pr, true
+	}
+	return core.PullRequest{}, false
+}
+
+func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) (bool, error) {
+	for _, action := range plan.Actions {
+		if strings.TrimSpace(action.When) != "" && strings.TrimSpace(action.When) != "after_success" {
+			continue
+		}
+		switch strings.TrimSpace(action.Kind) {
+		case "publish_pull_request":
+			workerID := strings.TrimSpace(action.WorkerID)
+			if workerID == "" {
+				workerID = latestCandidateWorkerID(results)
+			}
+			if workerID == "" {
+				return false, errors.New("publish_pull_request action requires a candidate worker")
+			}
+			req := publishPullRequestRequestFromAction(action)
+			req.WorkerID = workerID
+			pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
+			if err != nil {
+				return false, err
+			}
+			if _, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskAction,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"kind":          action.Kind,
+					"when":          nonEmpty(action.When, "after_success"),
+					"reason":        action.Reason,
+					"workerId":      workerID,
+					"pullRequestId": pr.ID,
+					"url":           pr.URL,
+				}),
+			}); err != nil {
+				return false, err
+			}
+			return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		case "wait_external":
+			phase := stringMetadata(action.Inputs, "phase")
+			if phase == "" {
+				phase = "waiting_external"
+			}
+			summary := stringMetadata(action.Inputs, "summary")
+			if summary == "" {
+				summary = action.Reason
+			}
+			if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, phase, summary); err != nil {
+				return false, err
+			}
+			if _, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskAction,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"kind":   action.Kind,
+					"when":   nonEmpty(action.When, "after_success"),
+					"reason": action.Reason,
+					"inputs": action.Inputs,
+				}),
+			}); err != nil {
+				return false, err
+			}
+			return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		}
+	}
+	return true, nil
+}
+
+func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
+	inputs := action.Inputs
+	return core.PublishPullRequestRequest{
+		Title:  stringMetadata(inputs, "title"),
+		Body:   stringMetadata(inputs, "body"),
+		Repo:   stringMetadata(inputs, "repo"),
+		Base:   stringMetadata(inputs, "base"),
+		Branch: stringMetadata(inputs, "branch"),
+		Draft:  boolMetadata(inputs, "draft"),
+	}
 }
 
 func (s *Service) waitForFinalCandidateResolution(ctx context.Context, taskID string, err error) error {
@@ -2409,6 +2654,12 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				return false, "", "", results
 			}
 			if !ok {
+				return false, "", "", results
+			}
+			if ok, err := s.runPlanActions(ctx, task, next, results); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			} else if !ok {
 				return false, "", "", results
 			}
 		}
@@ -2725,8 +2976,12 @@ func nonEmpty(values ...string) string {
 	return ""
 }
 
-func pullRequestTargetRepo(req core.PublishPullRequestRequest, project core.Project) string {
-	return nonEmpty(req.Repo, project.UpstreamRepo, project.Repo)
+func pullRequestTargetRepo(req core.PublishPullRequestRequest, project core.Project, task core.Task) string {
+	var metadata map[string]any
+	if len(task.Metadata) > 0 {
+		_ = json.Unmarshal(task.Metadata, &metadata)
+	}
+	return nonEmpty(req.Repo, project.UpstreamRepo, project.Repo, stringMetadataValue(metadata["repo"]))
 }
 
 func pullRequestHeadRepoOwner(project core.Project) string {
@@ -2794,6 +3049,20 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 		metadata["projectId"] = strings.TrimSpace(req.ProjectID)
 	}
 	return metadata, nil
+}
+
+func promptRequestsGitHubCompletion(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	return strings.Contains(lower, "open pr") ||
+		strings.Contains(lower, "open a pr") ||
+		strings.Contains(lower, "open pull request") ||
+		strings.Contains(lower, "open a pull request") ||
+		strings.Contains(lower, "create pr") ||
+		strings.Contains(lower, "create a pr") ||
+		strings.Contains(lower, "create pull request") ||
+		strings.Contains(lower, "make sure it gets merged") ||
+		strings.Contains(lower, "until merged") ||
+		strings.Contains(lower, "babysit")
 }
 
 func taskTargetLabels(task core.Task) map[string]string {
@@ -3483,6 +3752,14 @@ func stringMetadata(metadata map[string]any, key string) string {
 	default:
 		return ""
 	}
+}
+
+func boolMetadata(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	value, _ := metadata[key].(bool)
+	return value
 }
 
 func stringSliceMetadata(metadata map[string]any, key string) []string {

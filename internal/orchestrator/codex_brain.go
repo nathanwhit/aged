@@ -237,6 +237,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Rationale         string          `json:"rationale,omitempty"`
 		Steps             json.RawMessage `json:"steps,omitempty"`
 		RequiredApprovals json.RawMessage `json:"requiredApprovals,omitempty"`
+		Actions           json.RawMessage `json:"actions,omitempty"`
 		Spawns            json.RawMessage `json:"spawns,omitempty"`
 		Metadata          map[string]any  `json:"metadata,omitempty"`
 	}
@@ -251,6 +252,10 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 	if err != nil {
 		return Plan{}, fmt.Errorf("decode requiredApprovals: %w", err)
 	}
+	actions, err := decodePlanActions(raw.Actions)
+	if err != nil {
+		return Plan{}, fmt.Errorf("decode actions: %w", err)
+	}
 	spawns, err := decodeSpawnRequests(raw.Spawns)
 	if err != nil {
 		return Plan{}, fmt.Errorf("decode spawns: %w", err)
@@ -262,6 +267,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Rationale:         raw.Rationale,
 		Steps:             steps,
 		RequiredApprovals: approvals,
+		Actions:           actions,
 		Spawns:            spawns,
 		Metadata:          raw.Metadata,
 	}, nil
@@ -370,6 +376,17 @@ func decodeApprovalRequests(data json.RawMessage) ([]ApprovalRequest, error) {
 	return approvals, nil
 }
 
+func decodePlanActions(data json.RawMessage) ([]PlanAction, error) {
+	if len(data) == 0 || string(data) == "null" {
+		return nil, nil
+	}
+	var actions []PlanAction
+	if err := json.Unmarshal(data, &actions); err != nil {
+		return nil, err
+	}
+	return actions, nil
+}
+
 func decodeSpawnRequests(data json.RawMessage) ([]SpawnRequest, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
@@ -464,6 +481,8 @@ Field rules:
 - Use "wait" when user input or approval is needed.
 - Use "fail" when the task cannot continue.
 - When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
+- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. Use "wait_external" when the task should pause for an external event.
+- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success". Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed.
 - Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
 - When action is not "continue", "plan" must be null or omitted.
