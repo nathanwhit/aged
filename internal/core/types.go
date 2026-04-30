@@ -191,6 +191,21 @@ type Project struct {
 	TargetLabels  map[string]string `json:"targetLabels,omitempty"`
 }
 
+type ProjectHealth struct {
+	ProjectID         string    `json:"projectId"`
+	OK                bool      `json:"ok"`
+	PathStatus        string    `json:"pathStatus"`
+	VCSStatus         string    `json:"vcsStatus"`
+	GitHubStatus      string    `json:"githubStatus,omitempty"`
+	DefaultBaseStatus string    `json:"defaultBaseStatus,omitempty"`
+	TargetStatus      string    `json:"targetStatus,omitempty"`
+	DetectedVCS       string    `json:"detectedVcs,omitempty"`
+	DetectedRepo      string    `json:"detectedRepo,omitempty"`
+	DetectedBase      string    `json:"detectedBase,omitempty"`
+	Errors            []string  `json:"errors,omitempty"`
+	CheckedAt         time.Time `json:"checkedAt"`
+}
+
 type PullRequest struct {
 	ID               string          `json:"id"`
 	TaskID           string          `json:"taskId"`

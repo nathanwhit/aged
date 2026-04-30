@@ -419,6 +419,85 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	}
 }
 
+func TestProjectUpdateDeleteAndHealthEndpoints(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	root := t.TempDir()
+	other := t.TempDir()
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), root)
+	if _, err := service.CreateProject(ctx, core.Project{ID: "keep", LocalPath: root}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CreateProject(ctx, core.Project{ID: "edit", LocalPath: other}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	updateBody := fmt.Sprintf(`{"id":"edit","name":"Edited","localPath":%q,"repo":"owner/edit","defaultBase":"trunk"}`, other)
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/projects/edit", strings.NewReader(updateBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("content-type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d", res.StatusCode)
+	}
+	var updated core.Project
+	if err := json.NewDecoder(res.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "Edited" || updated.DefaultBase != "trunk" {
+		t.Fatalf("updated = %+v", updated)
+	}
+
+	healthRes, err := http.Get(server.URL + "/api/projects/edit/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer healthRes.Body.Close()
+	if healthRes.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d", healthRes.StatusCode)
+	}
+	var health core.ProjectHealth
+	if err := json.NewDecoder(healthRes.Body).Decode(&health); err != nil {
+		t.Fatal(err)
+	}
+	if health.ProjectID != "edit" || health.PathStatus != "ok" {
+		t.Fatalf("health = %+v", health)
+	}
+
+	deleteReq, err := http.NewRequest(http.MethodDelete, server.URL+"/api/projects/edit", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleteRes, err := http.DefaultClient.Do(deleteReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deleteRes.Body.Close()
+	if deleteRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d", deleteRes.StatusCode)
+	}
+	projects, _, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].ID != "keep" {
+		t.Fatalf("projects = %+v", projects)
+	}
+}
+
 func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {

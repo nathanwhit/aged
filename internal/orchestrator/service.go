@@ -252,6 +252,136 @@ func (s *Service) CreateProject(ctx context.Context, project core.Project) (core
 	return saved, nil
 }
 
+func (s *Service) UpdateProject(ctx context.Context, id string, project core.Project) (core.Project, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return core.Project{}, errors.New("project id is required")
+	}
+	project.ID = id
+	normalized, err := normalizeProject(project)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if s.projects == nil {
+		return core.Project{}, errors.New("project registry is not configured")
+	}
+	if _, exists := s.projects.Get(id); !exists {
+		return core.Project{}, eventstore.ErrNotFound
+	}
+	saved, err := s.store.SaveProject(ctx, normalized, false)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if _, err := s.projects.Update(saved); err != nil {
+		return core.Project{}, err
+	}
+	return saved, nil
+}
+
+func (s *Service) DeleteProject(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("project id is required")
+	}
+	if s.projects == nil {
+		return errors.New("project registry is not configured")
+	}
+	if _, exists := s.projects.Get(id); !exists {
+		return eventstore.ErrNotFound
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ProjectID == id && !isTerminalTaskStatus(task.Status) {
+			return fmt.Errorf("cannot delete project %q while task %q is nonterminal", id, task.ID)
+		}
+	}
+	if err := s.store.DeleteProject(ctx, id); err != nil {
+		return err
+	}
+	return s.projects.Delete(id)
+}
+
+func (s *Service) ProjectHealth(ctx context.Context, id string) (core.ProjectHealth, error) {
+	if s.projects == nil {
+		return core.ProjectHealth{}, errors.New("project registry is not configured")
+	}
+	project, ok := s.projects.Get(id)
+	if !ok {
+		return core.ProjectHealth{}, eventstore.ErrNotFound
+	}
+	health := core.ProjectHealth{
+		ProjectID:    project.ID,
+		OK:           true,
+		PathStatus:   "ok",
+		VCSStatus:    "unknown",
+		GitHubStatus: "not_configured",
+		TargetStatus: "ok",
+		CheckedAt:    time.Now().UTC(),
+	}
+	addError := func(message string) {
+		health.OK = false
+		health.Errors = append(health.Errors, message)
+	}
+	info, err := os.Stat(project.LocalPath)
+	if err != nil {
+		health.PathStatus = "missing"
+		addError(err.Error())
+		return health, nil
+	}
+	if !info.IsDir() {
+		health.PathStatus = "not_directory"
+		addError("localPath is not a directory")
+		return health, nil
+	}
+	detectedVCS := detectProjectVCS(ctx, project.LocalPath)
+	health.DetectedVCS = detectedVCS
+	switch {
+	case detectedVCS == "":
+		health.VCSStatus = "not_detected"
+		addError("no jj or git checkout detected")
+	case project.VCS == "" || project.VCS == "auto" || project.VCS == detectedVCS:
+		health.VCSStatus = "ok"
+	default:
+		health.VCSStatus = "mismatch"
+		addError(fmt.Sprintf("configured vcs %q does not match detected %q", project.VCS, detectedVCS))
+	}
+	health.DetectedRepo = detectGitHubRepo(ctx, project.LocalPath)
+	if project.Repo != "" || project.UpstreamRepo != "" {
+		if health.DetectedRepo == "" {
+			health.GitHubStatus = "repo_not_detected"
+		} else {
+			health.GitHubStatus = "repo_detected"
+		}
+		if _, err := runCommand(ctx, project.LocalPath, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+			health.GitHubStatus = "auth_not_ready"
+		} else if health.GitHubStatus == "repo_detected" {
+			health.GitHubStatus = "ok"
+		} else {
+			health.GitHubStatus = "auth_ok"
+		}
+	}
+	health.DetectedBase = detectDefaultBase(ctx, project.LocalPath, project.Repo)
+	if project.DefaultBase == "" {
+		health.DefaultBaseStatus = "missing"
+		addError("defaultBase is not configured")
+	} else if health.DetectedBase == "" || health.DetectedBase == project.DefaultBase {
+		health.DefaultBaseStatus = "ok"
+	} else {
+		health.DefaultBaseStatus = "mismatch"
+	}
+	if len(project.TargetLabels) > 0 && s.targets != nil {
+		_, err := s.targets.Select(Plan{Metadata: map[string]any{"targetLabels": project.TargetLabels}})
+		if err != nil {
+			health.TargetStatus = "no_matching_target"
+			addError(err.Error())
+		}
+	}
+	return health, nil
+}
+
 func (s *Service) SetPlugins(plugins *PluginRegistry) {
 	if plugins != nil {
 		s.plugins = plugins

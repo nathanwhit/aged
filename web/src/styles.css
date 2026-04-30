@@ -283,6 +283,40 @@ button {
   font-size: 12px;
 }
 
+.project-chip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.project-health {
+  border-radius: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+}
+
+.project-health.ok {
+  background: #e7f4ea;
+  border: 1px solid #9bc7a6;
+}
+
+.project-health.issue {
+  background: #fff4d6;
+  border: 1px solid #e5c466;
+}
+
+.project-health strong,
+.project-health span,
+.project-health small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 label {
   color: #4b4f58;
   display: grid;

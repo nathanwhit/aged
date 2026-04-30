@@ -38,6 +38,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
+	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
+	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
+	mux.HandleFunc("GET /api/projects/{id}/health", s.projectHealth)
 	mux.HandleFunc("GET /api/plugins", s.plugins)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
@@ -101,6 +104,37 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
+	var project core.Project
+	if err := decodeJSON(r, &project); err != nil {
+		writeError(w, err)
+		return
+	}
+	updated, err := s.service.UpdateProject(r.Context(), r.PathValue("id"), project)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeleteProject(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) projectHealth(w http.ResponseWriter, r *http.Request) {
+	health, err := s.service.ProjectHealth(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, health)
 }
 
 func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {

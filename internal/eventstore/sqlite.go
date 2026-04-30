@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"aged/internal/core"
@@ -310,6 +311,50 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, project.ID); err != nil 
 		return core.Project{}, err
 	}
 	return project, nil
+}
+
+func (s *SQLiteStore) DeleteProject(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("project id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = ?`, id).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	var total int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&total); err != nil {
+		return err
+	}
+	if total <= 1 {
+		return errors.New("cannot delete the last project")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id); err != nil {
+		return err
+	}
+	var defaultID string
+	_ = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'default_project_id'`).Scan(&defaultID)
+	if defaultID == id {
+		var nextID string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM projects ORDER BY id LIMIT 1`).Scan(&nextID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO settings (key, value) VALUES ('default_project_id', ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, nextID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {

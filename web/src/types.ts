@@ -81,6 +81,21 @@ export type Project = {
   targetLabels?: Record<string, string>;
 };
 
+export type ProjectHealth = {
+  projectId: string;
+  ok: boolean;
+  pathStatus: string;
+  vcsStatus: string;
+  githubStatus?: string;
+  defaultBaseStatus?: string;
+  targetStatus?: string;
+  detectedVcs?: string;
+  detectedRepo?: string;
+  detectedBase?: string;
+  errors?: string[];
+  checkedAt: string;
+};
+
 export type Plugin = {
   id: string;
   name: string;

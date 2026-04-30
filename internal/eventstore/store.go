@@ -13,5 +13,6 @@ type Store interface {
 	ListProjects(ctx context.Context) ([]core.Project, string, error)
 	CreateProject(ctx context.Context, project core.Project) (core.Project, error)
 	SaveProject(ctx context.Context, project core.Project, makeDefault bool) (core.Project, error)
+	DeleteProject(ctx context.Context, id string) error
 	Close() error
 }

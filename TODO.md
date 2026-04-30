@@ -11,9 +11,9 @@
 
 - [x] Validate project `localPath` during project registration.
 - [x] Discover project checkout metadata on registration when possible: VCS kind and GitHub repo.
-- [ ] Add project edit/delete APIs and UI.
-- [ ] Add project health checks in API/UI, including path accessibility, VCS status, GitHub auth readiness, default branch, and target policy.
-- [ ] Discover default branch/base more robustly from checkout or GitHub metadata.
+- [x] Add project edit/delete APIs and UI.
+- [x] Add project health checks in API/UI, including path accessibility, VCS status, GitHub auth readiness, default branch, and target policy.
+- [x] Discover default branch/base more robustly from checkout or GitHub metadata.
 
 ## Remote Targets
 
@@ -33,4 +33,3 @@
 - [ ] Add structured benchmark/profiler artifacts when prompt-parsed text is not enough for comparison, UI display, or auditability.
 - [ ] Extend benchmark comparison to enforce same-command before/after runs, repeated samples, thresholds, and anti-cherry-picking rules.
 - [ ] Add richer task artifacts for deployments, packages, test reports, CI runs, and review comments.
-

@@ -273,6 +273,42 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 	}
 }
 
+func TestProjectsUpdateAndDeleteInSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	first := core.Project{ID: "a", Name: "A", LocalPath: t.TempDir(), VCS: "auto", DefaultBase: "main"}
+	second := core.Project{ID: "b", Name: "B", LocalPath: t.TempDir(), VCS: "auto", DefaultBase: "main"}
+	if _, err := store.CreateProject(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateProject(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	second.Name = "Bee"
+	second.DefaultBase = "trunk"
+	if _, err := store.SaveProject(ctx, second, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	projects, defaultID, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].ID != "b" || projects[0].Name != "Bee" || projects[0].DefaultBase != "trunk" {
+		t.Fatalf("projects = %+v", projects)
+	}
+	if defaultID != "b" {
+		t.Fatalf("defaultID = %q, want b", defaultID)
+	}
+}
+
 func TestSnapshotHidesClearedTasksAndKeepsEvents(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

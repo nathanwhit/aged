@@ -22,8 +22,8 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask, updateProject } from "./api";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -316,6 +316,17 @@ function App() {
               await createProject(input);
               await refresh();
             }}
+            onUpdate={async (id, input) => {
+              setError("");
+              await updateProject(id, input);
+              await refresh();
+            }}
+            onDelete={async (id) => {
+              setError("");
+              await deleteProject(id);
+              await refresh();
+            }}
+            onHealth={getProjectHealth}
             onError={setError}
           />
           <AssistantPanel onError={setError} />
@@ -828,12 +839,19 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
 function ProjectPanel({
   projects,
   onCreate,
+  onUpdate,
+  onDelete,
+  onHealth,
   onError,
 }: {
   projects: Project[];
   onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
+  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
 }) {
+  const [editingId, setEditingId] = useState("");
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [localPath, setLocalPath] = useState("");
@@ -843,12 +861,38 @@ function ProjectPanel({
   const [pushRemote, setPushRemote] = useState("");
   const [defaultBase, setDefaultBase] = useState("main");
   const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
+  const [healthBusy, setHealthBusy] = useState("");
+
+  function loadProject(project: Project) {
+    setEditingId(project.id);
+    setId(project.id);
+    setName(project.name ?? "");
+    setLocalPath(project.localPath);
+    setRepo(project.repo ?? "");
+    setUpstreamRepo(project.upstreamRepo ?? "");
+    setHeadRepoOwner(project.headRepoOwner ?? "");
+    setPushRemote(project.pushRemote ?? "");
+    setDefaultBase(project.defaultBase ?? "main");
+  }
+
+  function resetForm() {
+    setEditingId("");
+    setId("");
+    setName("");
+    setLocalPath("");
+    setRepo("");
+    setUpstreamRepo("");
+    setHeadRepoOwner("");
+    setPushRemote("");
+    setDefaultBase("main");
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     try {
-      await onCreate({
+      const input = {
         id,
         name: name || undefined,
         localPath,
@@ -858,19 +902,38 @@ function ProjectPanel({
         pushRemote: pushRemote || undefined,
         vcs: "auto",
         defaultBase: defaultBase || undefined,
-      });
-      setId("");
-      setName("");
-      setLocalPath("");
-      setRepo("");
-      setUpstreamRepo("");
-      setHeadRepoOwner("");
-      setPushRemote("");
-      setDefaultBase("main");
+      };
+      if (editingId) {
+        await onUpdate(editingId, input);
+      } else {
+        await onCreate(input);
+      }
+      resetForm();
     } catch (err) {
       onError((err as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function checkHealth(projectId: string) {
+    setHealthBusy(projectId);
+    try {
+      const result = await onHealth(projectId);
+      setHealth((current) => ({ ...current, [projectId]: result }));
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setHealthBusy("");
+    }
+  }
+
+  async function removeProject(projectId: string) {
+    try {
+      await onDelete(projectId);
+      if (editingId === projectId) resetForm();
+    } catch (err) {
+      onError((err as Error).message);
     }
   }
 
@@ -886,13 +949,21 @@ function ProjectPanel({
             <strong>{project.name}</strong>
             <span>{project.id}</span>
             <small>{project.localPath}</small>
+            <div className="project-chip-actions">
+              <button className="secondary compact" onClick={() => loadProject(project)} type="button">Edit</button>
+              <button className="secondary compact" disabled={healthBusy === project.id} onClick={() => checkHealth(project.id)} type="button">
+                {healthBusy === project.id ? "Checking" : "Health"}
+              </button>
+              <button className="secondary compact danger-text" onClick={() => removeProject(project.id)} type="button">Delete</button>
+            </div>
+            {health[project.id] && <ProjectHealthSummary health={health[project.id]} />}
           </div>
         ))}
       </div>
       <form className="project-form" onSubmit={submit}>
         <label>
           ID
-          <input value={id} onChange={(event) => setId(event.target.value)} placeholder="nodejs" required />
+          <input value={id} onChange={(event) => setId(event.target.value)} placeholder="nodejs" required disabled={Boolean(editingId)} />
         </label>
         <label>
           Name
@@ -924,10 +995,25 @@ function ProjectPanel({
         </label>
         <button disabled={busy}>
           <FolderPlus size={16} />
-          {busy ? "Adding" : "Add Project"}
+          {busy ? "Saving" : editingId ? "Save Project" : "Add Project"}
         </button>
+        {editingId && <button type="button" className="secondary" onClick={resetForm}>Cancel Edit</button>}
       </form>
     </section>
+  );
+}
+
+function ProjectHealthSummary({ health }: { health: ProjectHealth }) {
+  return (
+    <div className={health.ok ? "project-health ok" : "project-health issue"}>
+      <strong>{health.ok ? "Healthy" : "Needs attention"}</strong>
+      <span>path {health.pathStatus}</span>
+      <span>vcs {health.vcsStatus}{health.detectedVcs ? `:${health.detectedVcs}` : ""}</span>
+      {health.githubStatus && <span>github {health.githubStatus}</span>}
+      {health.defaultBaseStatus && <span>base {health.defaultBaseStatus}{health.detectedBase ? `:${health.detectedBase}` : ""}</span>}
+      {health.targetStatus && <span>target {health.targetStatus}</span>}
+      {(health.errors ?? []).slice(0, 2).map((error) => <small key={error}>{error}</small>)}
+    </div>
   );
 }
 

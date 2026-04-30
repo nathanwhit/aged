@@ -1,4 +1,4 @@
-import type { Project, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
+import type { Project, ProjectHealth, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -45,6 +45,45 @@ export async function createProject(input: {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function updateProject(id: string, input: {
+  id: string;
+  name?: string;
+  localPath: string;
+  repo?: string;
+  upstreamRepo?: string;
+  headRepoOwner?: string;
+  pushRemote?: string;
+  vcs?: string;
+  defaultBase?: string;
+  workspaceRoot?: string;
+  targetLabels?: Record<string, string>;
+}): Promise<Project> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+export async function getProjectHealth(id: string): Promise<ProjectHealth> {
+  const response = await fetch(`/api/projects/${encodeURIComponent(id)}/health`);
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"aged/internal/core"
+	"aged/internal/eventstore"
 )
 
 type ProjectRegistry struct {
@@ -139,6 +140,47 @@ func (r *ProjectRegistry) Add(project core.Project) (core.Project, error) {
 		r.defaultID = normalized.ID
 	}
 	return normalized, nil
+}
+
+func (r *ProjectRegistry) Update(project core.Project) (core.Project, error) {
+	normalized, err := normalizeProject(project)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if r == nil {
+		return core.Project{}, errors.New("project registry is not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.projects[normalized.ID]; !exists {
+		return core.Project{}, eventstore.ErrNotFound
+	}
+	r.projects[normalized.ID] = normalized
+	return normalized, nil
+}
+
+func (r *ProjectRegistry) Delete(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("project id is required")
+	}
+	if r == nil {
+		return errors.New("project registry is not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.projects[id]; !exists {
+		return eventstore.ErrNotFound
+	}
+	if len(r.projects) <= 1 {
+		return errors.New("cannot delete the last project")
+	}
+	delete(r.projects, id)
+	if r.defaultID == id {
+		projects := r.sortedProjectsLocked()
+		r.defaultID = projects[0].ID
+	}
+	return nil
 }
 
 func (r *ProjectRegistry) Resolve(req core.CreateTaskRequest) (core.Project, error) {
@@ -269,7 +311,7 @@ func normalizeProject(project core.Project) (core.Project, error) {
 		project.VCS = "auto"
 	}
 	if project.DefaultBase == "" {
-		project.DefaultBase = "main"
+		project.DefaultBase = nonEmpty(detectDefaultBase(context.Background(), abs, project.Repo), "main")
 	}
 	return project, nil
 }
@@ -301,6 +343,33 @@ func detectProjectVCS(ctx context.Context, dir string) string {
 	}
 	if _, err := runCommand(ctx, dir, "git", "rev-parse", "--show-toplevel"); err == nil {
 		return "git"
+	}
+	return ""
+}
+
+func detectDefaultBase(ctx context.Context, dir string, repo string) string {
+	out, err := runCommand(ctx, dir, "git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err == nil {
+		branch := strings.TrimSpace(out)
+		branch = strings.TrimPrefix(branch, "origin/")
+		if branch != "" {
+			return branch
+		}
+	}
+	for _, branch := range []string{"main", "master", "trunk"} {
+		if _, err := runCommand(ctx, dir, "git", "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			return branch
+		}
+		if _, err := runCommand(ctx, dir, "git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch); err == nil {
+			return branch
+		}
+	}
+	repo = strings.TrimSpace(repo)
+	if repo != "" {
+		out, err := runCommand(ctx, dir, "gh", "repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+		if err == nil && strings.TrimSpace(out) != "" {
+			return strings.TrimSpace(out)
+		}
 	}
 	return ""
 }
