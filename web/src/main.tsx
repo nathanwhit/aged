@@ -1025,8 +1025,9 @@ function TaskDetail({
   const [applying, setApplying] = useState(false);
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
-  const canApplyResult = completionMode !== "github" && isTerminalTask(task) && Boolean(task.finalCandidateWorkerId) && task.appliedWorkerId !== task.finalCandidateWorkerId;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
+  const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
+  const canApplyResult = completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
 
@@ -1100,7 +1101,7 @@ function TaskDetail({
               {applying ? "Applying" : "Apply Result"}
             </button>
           )}
-          {task.appliedWorkerId && <span className="pill">Applied</span>}
+          {(task.appliedWorkerId || finalWorkerApplied) && <span className="pill">Applied</span>}
           {isRetryableTask(task) && (
             <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
               <RefreshCw size={18} />
