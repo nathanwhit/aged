@@ -94,7 +94,7 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "workers", span: 12, minHeight: 0 },
   { id: "worker-detail", span: 8, minHeight: 0 },
   { id: "targets", span: 4, minHeight: 0 },
-  { id: "plugins", span: 4, minHeight: 0 },
+  { id: "plugins", span: 8, minHeight: 0 },
   { id: "timeline", span: 12, minHeight: 360 },
 ];
 
@@ -626,9 +626,10 @@ function normalizeDashboardLayout(value: unknown): DashboardPaneLayout[] {
   for (const entry of value) {
     if (!isRecord(entry) || typeof entry.id !== "string" || !defaults.has(entry.id as DashboardPaneId)) continue;
     const defaultsForPane = defaults.get(entry.id as DashboardPaneId)!;
+    const minSpan = entry.id === "plugins" ? 8 : DASHBOARD_MIN_SPAN;
     normalized.push({
       id: entry.id as DashboardPaneId,
-      span: clampNumber(entry.span, defaultsForPane.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
+      span: clampNumber(entry.span, defaultsForPane.span, minSpan, DASHBOARD_MAX_SPAN),
       minHeight: clampNumber(entry.minHeight, defaultsForPane.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
     });
     defaults.delete(entry.id as DashboardPaneId);
@@ -646,7 +647,7 @@ function updatePaneLayout(
       item.id === id
         ? {
             ...item,
-            span: values.span === undefined ? item.span : clamp(values.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
+            span: values.span === undefined ? item.span : clamp(values.span, item.id === "plugins" ? 8 : DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
             minHeight: values.minHeight === undefined ? item.minHeight : clamp(values.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
           }
         : item,
@@ -2043,7 +2044,7 @@ function workerEventLabel(event: EventRecord): string {
 function TargetPanel({ targets }: { targets: TargetState[] }) {
   if (targets.length === 0) return null;
   return (
-    <section className="panel">
+    <section className="panel plugin-panel">
       <div className="panel-title">
         <Activity size={18} />
         <h2>Targets</h2>
@@ -2107,6 +2108,7 @@ function PluginPanel({
   const [config, setConfig] = useState("{}");
   const [editingId, setEditingId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showForm, setShowForm] = useState(false);
 
   const reset = () => {
     setId("");
@@ -2117,6 +2119,7 @@ function PluginPanel({
     setEnabledValue(true);
     setConfig("{}");
     setEditingId("");
+    setShowForm(false);
   };
 
   const submit = async (event: React.FormEvent) => {
@@ -2155,6 +2158,7 @@ function PluginPanel({
     setCommand(plugin.command?.join(" ") ?? "");
     setEnabledValue(plugin.enabled);
     setConfig(JSON.stringify(plugin.config ?? {}, null, 2));
+    setShowForm(true);
   };
 
   return (
@@ -2164,33 +2168,60 @@ function PluginPanel({
           <Puzzle size={18} />
           <h2>Plugins</h2>
         </span>
-        <span className="pill">{enabled}/{plugins.length} enabled</span>
+        <span className="plugin-title-actions">
+          <span className="pill">{enabled}/{plugins.length} enabled</span>
+          <button className="secondary compact" type="button" onClick={() => setShowForm((value) => !value)}>
+            {showForm ? "Close" : "Add"}
+          </button>
+        </span>
       </div>
-      <form className="plugin-register" onSubmit={submit}>
-        <input value={id} onChange={(event) => setId(event.target.value)} placeholder="runner:lint" required />
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Display name" />
-        <select value={kind} onChange={(event) => {
-          const next = event.target.value;
-          setKind(next);
-          setProtocol(next === "runner" ? "aged-runner-v1" : "aged-plugin-v1");
-        }}>
-          <option value="runner">Runner</option>
-          <option value="driver">Driver</option>
-          <option value="brain">Brain</option>
-          <option value="external">External</option>
-        </select>
-        <input value={protocol} onChange={(event) => setProtocol(event.target.value)} placeholder="protocol" />
-        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command arg..." />
-        <textarea value={config} onChange={(event) => setConfig(event.target.value)} rows={3} spellCheck={false} />
-        <label className="checkbox-label">
-          <input type="checkbox" checked={enabledValue} onChange={(event) => setEnabledValue(event.target.checked)} />
-          Enabled
-        </label>
-        <div className="plugin-form-actions">
-          <button type="submit" disabled={busy}>{editingId ? "Update" : "Register"}</button>
-          {editingId && <button type="button" className="secondary" onClick={reset}>Cancel</button>}
-        </div>
-      </form>
+      {showForm && (
+        <form className="plugin-register" onSubmit={submit}>
+          <label>
+            ID
+            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="runner:lint" required />
+          </label>
+          <label>
+            Name
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Lint runner" />
+          </label>
+          <label>
+            Kind
+            <select value={kind} onChange={(event) => {
+              const next = event.target.value;
+              setKind(next);
+              setProtocol(next === "runner" ? "aged-runner-v1" : "aged-plugin-v1");
+            }}>
+              <option value="runner">Runner</option>
+              <option value="driver">Driver</option>
+              <option value="brain">Brain</option>
+              <option value="external">External</option>
+            </select>
+          </label>
+          <label>
+            Protocol
+            <input value={protocol} onChange={(event) => setProtocol(event.target.value)} placeholder="aged-runner-v1" />
+          </label>
+          <label className="plugin-command-field">
+            Command
+            <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command arg..." />
+          </label>
+          <label className="plugin-config-field">
+            Config JSON
+            <textarea value={config} onChange={(event) => setConfig(event.target.value)} rows={3} spellCheck={false} />
+          </label>
+          <div className="plugin-form-footer">
+            <label className="checkbox-label">
+              <input type="checkbox" checked={enabledValue} onChange={(event) => setEnabledValue(event.target.checked)} />
+              Enabled
+            </label>
+            <div className="plugin-form-actions">
+              <button type="submit" disabled={busy}>{editingId ? "Update" : "Register"}</button>
+              <button type="button" className="secondary" onClick={reset}>Cancel</button>
+            </div>
+          </div>
+        </form>
+      )}
       <div className="plugin-grid">
         {plugins.map((plugin) => (
           <article key={plugin.id} className={plugin.enabled ? "plugin-card" : "plugin-card disabled"}>

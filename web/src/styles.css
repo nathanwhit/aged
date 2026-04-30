@@ -63,7 +63,10 @@ button {
 .layout {
   display: grid;
   gap: 16px;
-  grid-template-columns: clamp(280px, 22vw, 360px) clamp(240px, 20vw, 340px) minmax(520px, 1fr);
+  grid-template-areas:
+    "sidebar main"
+    "tasks main";
+  grid-template-columns: clamp(300px, 24vw, 390px) minmax(0, 1fr);
   margin: 0 auto;
   max-width: 1800px;
   width: 100%;
@@ -72,12 +75,14 @@ button {
 .left-stack {
   align-self: start;
   display: grid;
+  grid-area: sidebar;
   gap: 16px;
   min-width: 0;
 }
 
 .workspace {
   align-self: start;
+  grid-area: main;
   min-width: 0;
 }
 
@@ -213,7 +218,7 @@ button {
   background: #ffffff;
   border: 1px solid #e1e5ea;
   border-radius: 8px;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 5%), 0 10px 30px rgb(15 23 42 / 4%);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 5%);
   min-width: 0;
   padding: 16px;
 }
@@ -484,6 +489,7 @@ button:disabled {
 
 .task-list {
   align-self: start;
+  grid-area: tasks;
 }
 
 .task-row {
@@ -1557,22 +1563,45 @@ small {
 .graph-node-list {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
 .plugin-register {
+  background: #f8fafc;
+  border: 1px solid #e3e7ee;
+  border-radius: 8px;
   display: grid;
-  gap: 8px;
+  gap: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 12px;
+  padding: 12px;
 }
 
 .plugin-register textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  grid-column: 1 / -1;
+  min-height: 96px;
   resize: vertical;
 }
 
+.plugin-command-field,
+.plugin-config-field {
+  grid-column: 1 / -1;
+}
+
+.plugin-form-footer,
 .plugin-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.plugin-form-footer {
+  align-items: center;
+  grid-column: 1 / -1;
+  justify-content: space-between;
+}
+
+.plugin-title-actions {
+  align-items: center;
   display: flex;
   gap: 8px;
 }
@@ -1592,6 +1621,10 @@ small {
   gap: 8px;
   min-width: 0;
   padding: 12px;
+}
+
+.plugin-card {
+  align-content: start;
 }
 
 .plugin-card.disabled {
@@ -1871,6 +1904,10 @@ small {
 
 @media (max-width: 1080px) {
   .layout {
+    grid-template-areas:
+      "sidebar"
+      "tasks"
+      "main";
     grid-template-columns: 1fr;
   }
 
@@ -1962,6 +1999,21 @@ small {
 
   .pr-watch-form {
     grid-template-columns: 1fr;
+  }
+
+  .plugin-register {
+    grid-template-columns: 1fr;
+  }
+
+  .plugin-command-field,
+  .plugin-config-field,
+  .plugin-form-footer {
+    grid-column: auto;
+  }
+
+  .plugin-form-footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .pr-statuses,
