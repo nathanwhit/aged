@@ -1952,6 +1952,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	results := []WorkerTurnResult{}
 	result, err := s.runPlannedWorker(ctx, task, plan)
 	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
@@ -1966,6 +1969,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 
 	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
 	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
@@ -1973,6 +1979,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	}
 	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	} else if !ok {
@@ -1989,16 +1998,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 
 func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
 	question := nonEmpty(waiting.Summary, waiting.Error, "worker requested orchestrator input")
-	_, _ = s.append(ctx, core.Event{
-		Type:     core.EventApprovalNeeded,
-		TaskID:   task.ID,
-		WorkerID: waiting.WorkerID,
-		Payload: core.MustJSON(map[string]any{
-			"question": question,
-			"summary":  waiting.Summary,
-			"error":    waiting.Error,
-			"reason":   "worker_needs_input",
-		}),
+	_ = s.recordUserActionNeeded(ctx, task.ID, waiting.WorkerID, "worker_needs_input", question, map[string]any{
+		"summary": waiting.Summary,
+		"error":   waiting.Error,
 	})
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
@@ -2057,20 +2059,27 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			Payload: core.MustJSON(decision.Plan),
 		})
 		if result, err := s.runPlannedWorker(ctx, task, *decision.Plan); err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, waiting.WorkerID, err) {
+				return
+			}
 			_ = s.failTask(ctx, task.ID, err)
 		} else if result.Status == core.WorkerWaiting {
 			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
 		} else if s.finishOrContinueTask(ctx, task.ID, result) {
 			nextResults := append(results, result)
 			if ok, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
+				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+					return
+				}
 				_ = s.failTask(ctx, task.ID, err)
 			} else if ok {
 				_ = s.completeTask(ctx, task.ID, nextResults, decision.FinalCandidateWorkerID, decision.Rationale)
 			}
 		}
 	case "wait":
-		_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", nonEmpty(decision.Message, decision.Rationale, question))
-		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		_ = s.waitForUserAction(ctx, task.ID, waiting.WorkerID, "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, question), map[string]any{
+			"rationale": decision.Rationale,
+		})
 	case "complete":
 		_ = s.completeTask(ctx, task.ID, results, decision.FinalCandidateWorkerID, decision.Rationale)
 	case "fail":
@@ -2137,6 +2146,9 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	if s.finishOrContinueTask(ctx, taskID, result) {
 		results := []WorkerTurnResult{result}
 		if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
+				return
+			}
 			_ = s.failTask(ctx, taskID, err)
 		} else if ok {
 			_ = s.completeTask(ctx, taskID, results, "", "")
@@ -2155,6 +2167,9 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	}
 	result, err := s.runPlannedWorker(ctx, task, plan)
 	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
@@ -2168,6 +2183,9 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	results := []WorkerTurnResult{result}
 	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
 	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
@@ -2175,6 +2193,9 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		return
 	}
 	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	} else if !ok {
@@ -2618,6 +2639,15 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 	case core.WorkerCanceled:
 		_ = s.setTaskStatus(ctx, taskID, core.TaskCanceled)
 	default:
+		if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
+			_ = s.waitForUserAction(ctx, taskID, result.WorkerID, blocker.Reason, blocker.Question, map[string]any{
+				"summary":    blocker.Summary,
+				"workerKind": result.Kind,
+				"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
+				"error":      result.Error,
+			})
+			return false
+		}
 		_ = s.setTaskStatus(ctx, taskID, core.TaskFailed)
 	}
 	return false
@@ -2775,6 +2805,29 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			return false, err
 		}
 		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+	case "ask_user":
+		question := stringMetadata(action.Inputs, "question")
+		if question == "" {
+			question = stringMetadata(action.Inputs, "summary")
+		}
+		if question == "" {
+			question = action.Reason
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   action.Kind,
+			"when":   nonEmpty(action.When, "after_success"),
+			"reason": action.Reason,
+			"inputs": action.Inputs,
+		}); err != nil {
+			return false, err
+		}
+		return false, s.waitForUserAction(ctx, task.ID, strings.TrimSpace(action.WorkerID), "ask_user", question, map[string]any{
+			"summary":    stringMetadata(action.Inputs, "summary"),
+			"target":     stringMetadata(action.Inputs, "target"),
+			"project":    stringMetadata(action.Inputs, "project"),
+			"resumeHint": stringMetadata(action.Inputs, "resumeHint"),
+			"commands":   stringSliceMetadata(action.Inputs, "commands"),
+		})
 	default:
 		return true, nil
 	}
@@ -2787,6 +2840,119 @@ func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload m
 		Payload: core.MustJSON(payload),
 	})
 	return err
+}
+
+func (s *Service) waitForUserAction(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {
+	if err := s.recordUserActionNeeded(ctx, taskID, workerID, reason, question, metadata); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingUser, "approval_needed", question); err != nil {
+		return err
+	}
+	return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+}
+
+func (s *Service) recordUserActionNeeded(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {
+	payload := map[string]any{
+		"question": nonEmpty(question, "The orchestrator needs user input before continuing."),
+		"reason":   nonEmpty(reason, "user_input_required"),
+	}
+	for key, value := range metadata {
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				payload[key] = typed
+			}
+		case []string:
+			if len(typed) > 0 {
+				payload[key] = typed
+			}
+		default:
+			if value != nil {
+				payload[key] = value
+			}
+		}
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:     core.EventApprovalNeeded,
+		TaskID:   taskID,
+		WorkerID: strings.TrimSpace(workerID),
+		Payload:  core.MustJSON(payload),
+	})
+	return err
+}
+
+func (s *Service) waitForRecoverableError(ctx context.Context, taskID string, workerID string, err error) bool {
+	if err == nil {
+		return false
+	}
+	blocker, ok := classifyUserRecoverableBlocker(err.Error())
+	if !ok {
+		return false
+	}
+	_ = s.waitForUserAction(ctx, taskID, workerID, blocker.Reason, blocker.Question, map[string]any{
+		"summary":    blocker.Summary,
+		"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
+		"error":      err.Error(),
+	})
+	return true
+}
+
+type userRecoverableBlocker struct {
+	Reason   string
+	Summary  string
+	Question string
+}
+
+func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return userRecoverableBlocker{}, false
+	}
+	lower := strings.ToLower(trimmed)
+	checks := []struct {
+		reason  string
+		summary string
+		any     []string
+	}{
+		{
+			reason:  "missing_tool",
+			summary: "A required command or tool is missing from the execution environment.",
+			any:     []string{"command not found", "executable file not found", "no such file or directory: \"perf\"", "exec: \"perf\"", "exec: \"go\"", "exec: \"npm\"", "exec: \"deno\"", "exec: \"cargo\""},
+		},
+		{
+			reason:  "permission_denied",
+			summary: "The worker is blocked by operating-system or sandbox permissions.",
+			any:     []string{"permission denied", "operation not permitted", "not permitted", "requires root", "must be root", "sudo:"},
+		},
+		{
+			reason:  "profiler_setup_required",
+			summary: "Profiling is blocked by VM or kernel profiling configuration.",
+			any:     []string{"perf_event_paranoid", "kernel.perf_event", "perf_event_open", "failed to open perf", "debug symbols", "dwarf"},
+		},
+		{
+			reason:  "ssh_setup_required",
+			summary: "Remote execution is blocked by SSH authentication or host setup.",
+			any:     []string{"permission denied (publickey)", "host key verification failed", "no route to host", "could not resolve hostname", "connection refused"},
+		},
+		{
+			reason:  "repo_setup_required",
+			summary: "Repository checkout or access is missing on the target environment.",
+			any:     []string{"repository not found", "not a git repository", "workdir is not inside a supported vcs workspace", "missing repository", "clone"},
+		},
+	}
+	for _, check := range checks {
+		for _, needle := range check.any {
+			if strings.Contains(lower, needle) {
+				return userRecoverableBlocker{
+					Reason:   check.reason,
+					Summary:  check.summary,
+					Question: fmt.Sprintf("%s\n\nBlocked error:\n%s\n\nPlease fix this setup issue in the target environment, then reply with what changed so the orchestrator can continue.", check.summary, trimmed),
+				}, true
+			}
+		}
+	}
+	return userRecoverableBlocker{}, false
 }
 
 func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
@@ -2996,7 +3162,10 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 		case "complete":
 			return true, decision.FinalCandidateWorkerID, decision.Rationale, results
 		case "wait":
-			_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+			_ = s.waitForUserAction(ctx, task.ID, "", "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, "The orchestrator needs user input before continuing."), map[string]any{
+				"turn":      turn,
+				"rationale": decision.Rationale,
+			})
 			return false, "", "", results
 		case "fail":
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
@@ -3023,6 +3192,9 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			}
 			result, err := s.runPlannedWorker(ctx, task, next)
 			if err != nil {
+				if s.waitForRecoverableError(ctx, task.ID, "", err) {
+					return false, "", "", results
+				}
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			}
@@ -3033,6 +3205,9 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
+				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+					return false, "", "", results
+				}
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			}
@@ -3040,6 +3215,9 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 				return false, "", "", results
 			}
 			if ok, err := s.runPlanActions(ctx, task, next, results); err != nil {
+				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+					return false, "", "", results
+				}
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			} else if !ok {

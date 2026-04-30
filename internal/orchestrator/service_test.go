@@ -1837,6 +1837,95 @@ func TestServiceResumesWaitingTaskWhenSteered(t *testing.T) {
 	}
 }
 
+func TestServiceAskUserActionMovesTaskToWaiting(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "noop",
+		Prompt:     "confirm profiling setup",
+		Actions: []PlanAction{{
+			Kind:   "ask_user",
+			When:   "after_success",
+			Reason: "perf setup is missing",
+			Inputs: map[string]any{
+				"question":   "Please install perf on the VM.",
+				"summary":    "Profiling setup required.",
+				"target":     "vm-a",
+				"commands":   []any{"sudo apt-get install linux-perf"},
+				"resumeHint": "Reply when perf works.",
+			},
+		}},
+	}}, map[string]worker.Runner{"noop": eventRunner{
+		kind: "noop",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "ready to profile",
+		}},
+	}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Profile", Prompt: "Run profiling"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser {
+		t.Fatalf("objective = %q", snapshot.Tasks[0].ObjectiveStatus)
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "ask_user" || payload["target"] != "vm-a" {
+		t.Fatalf("approval payload = %+v", payload)
+	}
+	if commands, ok := payload["commands"].([]any); !ok || len(commands) != 1 {
+		t.Fatalf("commands = %+v", payload["commands"])
+	}
+}
+
+func TestServiceTreatsRecoverableWorkerFailureAsUserAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "fail",
+		Prompt:     "run perf",
+	}}, map[string]worker.Runner{"fail": failingRunner{
+		kind: "fail",
+		err:  errors.New("perf: command not found"),
+	}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Profile", Prompt: "Run perf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser {
+		t.Fatalf("objective = %q", snapshot.Tasks[0].ObjectiveStatus)
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "missing_tool" {
+		t.Fatalf("reason = %v", payload["reason"])
+	}
+	if question, _ := payload["question"].(string); !strings.Contains(question, "perf: command not found") {
+		t.Fatalf("question = %q", question)
+	}
+}
+
 func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3449,6 +3538,11 @@ type eventRunner struct {
 	events []worker.Event
 }
 
+type failingRunner struct {
+	kind string
+	err  error
+}
+
 type fileWritingRunner struct {
 	kind string
 	path string
@@ -3508,6 +3602,18 @@ func (r eventRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) e
 		}
 	}
 	return nil
+}
+
+func (r failingRunner) Kind() string {
+	return r.kind
+}
+
+func (r failingRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r failingRunner) Run(context.Context, worker.Spec, worker.Sink) error {
+	return r.err
 }
 
 func (r *recordingEventRunner) Kind() string {
@@ -3921,6 +4027,16 @@ func hasEvent(events []core.Event, eventType core.EventType, taskID string, work
 		}
 	}
 	return false
+}
+
+func latestEventOfType(events []core.Event, eventType core.EventType, taskID string) core.Event {
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Type == eventType && event.TaskID == taskID {
+			return event
+		}
+	}
+	return core.Event{}
 }
 
 func hasMilestone(milestones []core.TaskMilestone, name string) bool {

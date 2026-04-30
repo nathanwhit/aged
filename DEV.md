@@ -30,6 +30,7 @@ The initial local-first vertical slice is implemented.
 - Worker detail and event views use compact responsive metadata strips, scroll-safe path rows, structured lifecycle cards, and concise timeline summaries instead of wrapping raw JSON/path fields into oversized cards.
 - The dashboard hides Codex's benign `failed to record rollout items` session bookkeeping message from active worker progress, including older persisted events recorded before the parser downgrade.
 - Workers that emit `needs_input` now create `approval.needed` events. Replanning brains can answer autonomously with a continuation plan; otherwise the task waits, and user/orchestrator feedback through task steering records `approval.decided` and resumes with a continuation worker.
+- Scheduler/replanner plans can now use an `ask_user` action for explicit setup blockers, and common environment failures such as missing tools, profiler/kernel permission issues, SSH setup failures, and missing repo setup are classified into the same waiting-user path instead of immediately failing.
 - Approval-needed paths now move task objective state to `waiting_user` / `approval_needed`, and the dashboard task detail view renders approval cards with pending/decided status and a one-click response starter that feeds the task steering box.
 - External drivers can use `POST /api/tasks` directly with optional `source`, `externalId`, and metadata. `source` plus `externalId` dedupes visible tasks, and `GET /api/tasks/lookup` resolves an external item back to its aged task.
 - Built-in GitHub driver support is available with `-github-driver` / `AGED_GITHUB_DRIVER`. It polls configured GitHub issues through `gh`, creates idempotent `github-issue` tasks, auto-publishes PRs for tasks that opt into GitHub completion mode, refreshes known PR status, and steers the original waiting task when checks fail, reviews request changes, or mergeability is blocked/dirty.
@@ -106,6 +107,7 @@ The initial local-first vertical slice is implemented.
 - MCP tests verify initialize, tool listing, task creation through `tools/call`, resource listing/reading, and auth protection.
 - Worker tests verify the default Codex runner does not advertise stdin steering; recovery tests verify stale local workers become canceled on daemon startup.
 - Worker-question tests verify autonomous replanning answers and user feedback both resume waiting tasks.
+- User-action tests verify explicit `ask_user` actions and recoverable worker setup failures move tasks to waiting-user state with approval metadata.
 - Assistant tests verify Q&A records durable question/answer events.
 - CLI assistant tests verify Codex JSON and Claude stream output are converted into Ask responses.
 - Title-generation tests verify blank task titles use the generator and fall back locally when generation fails.

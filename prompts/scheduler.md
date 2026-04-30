@@ -21,6 +21,8 @@ For performance-improvement requests, prefer decomposing the work into bounded i
 
 Use `dependsOn` to make implementation wait for investigation outputs and validation wait for implementation outputs. A worker can run benchmarks and compare results itself; only request new orchestrator primitives when repeatability, auditability, or UI display requires machine-readable benchmark artifacts.
 
+When work is blocked by external user setup, do not fail the task. Use an `ask_user` action or ask the worker to report a `needs_input` blocker with exact setup requirements. Examples include missing profiling tools on a VM, missing permissions, SSH/auth setup, missing repository checkout, missing secrets, kernel settings, or a package/tool install that the orchestrator should not perform autonomously. The question must name the target/project when known, explain the blocker, list concrete commands or checks when possible, and say what response should resume the task.
+
 Return exactly one JSON object and nothing else. Do not wrap it in markdown.
 The first non-whitespace character of your response must be `{`, and the last non-whitespace character must be `}`.
 Do not include prose before or after the JSON object. Do not emit more than one JSON object. Do not add an extra closing brace after the object.
@@ -80,11 +82,11 @@ Field rules:
 - `steps` must be an array of objects. Each object must have string fields `title` and `description`.
 - `requiredApprovals` must be an array of objects. Each object must have string fields `title` and `reason`. Use `[]` when no approval is needed.
 - `actions` must be an array of objects. Use `[]` when no orchestration action is needed after this worker turn.
-- Action `kind` must be `"publish_pull_request"`, `"watch_pull_requests"`, or `"wait_external"`.
+- Action `kind` must be `"publish_pull_request"`, `"watch_pull_requests"`, `"wait_external"`, or `"ask_user"`.
 - Action `when` must be `"immediate"` or `"after_success"`. Use `"immediate"` only for `watch_pull_requests` tasks that do not need an initial worker.
 - Action `reason` must explain why the orchestrator should take this action.
 - Action `workerId` should be `""` unless you are explicitly targeting a known worker from prior state. An empty worker id means the latest successful candidate worker from this turn.
-- Action `inputs` must be an object. For `publish_pull_request`, optional inputs are `title`, `body`, `repo`, `base`, `branch`, and `draft`. For `watch_pull_requests`, optional inputs are `repo`, `number`, `url`, `state`, `author`, `headBranch`, and `limit`; provide at least `repo` or `url`. For `wait_external`, optional inputs are `phase` and `summary`.
+- Action `inputs` must be an object. For `publish_pull_request`, optional inputs are `title`, `body`, `repo`, `base`, `branch`, and `draft`. For `watch_pull_requests`, optional inputs are `repo`, `number`, `url`, `state`, `author`, `headBranch`, and `limit`; provide at least `repo` or `url`. For `wait_external`, optional inputs are `phase` and `summary`. For `ask_user`, inputs should include `question`, and may include `summary`, `target`, `project`, `commands` as an array of strings, and `resumeHint`.
 - `metadata` is optional. Do not use `metadata.targetLabels`; placement is selected by the orchestrator service from task or project policy, not by the scheduler brain. Use `metadata.workerSize` as `"small"`, `"medium"`, or `"large"` to help load balancing.
 - `spawns` must be an array of objects. Each object must have string fields `role` and `reason`. Use `[]` when no additional future workers are useful.
 - Each spawn may include `id`, `workerKind`, `reasoningEffort`, and `dependsOn`. Use `id` when another spawn depends on it. `workerKind`, when present, must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`. `reasoningEffort`, when present, must use the same values as the top-level field. `dependsOn` must contain spawn ids from the same `spawns` array.

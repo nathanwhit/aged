@@ -1362,6 +1362,11 @@ type ApprovalState = {
   at: string;
   question: string;
   reason: string;
+  summary?: string;
+  target?: string;
+  project?: string;
+  resumeHint?: string;
+  commands?: string[];
   workerId?: string;
   decided: boolean;
   answer?: string;
@@ -1371,18 +1376,28 @@ function ApprovalPanel({ approvals, onUseMessage }: { approvals: ApprovalState[]
   return (
     <section className="approval-panel">
       <div className="approval-title">
-        <strong>Approvals</strong>
+        <strong>User Action Required</strong>
         <span>{approvals.filter((approval) => !approval.decided).length} pending</span>
       </div>
       {approvals.slice(0, 4).map((approval) => (
         <div className={approval.decided ? "approval-card decided" : "approval-card"} key={approval.id}>
           <div>
             <small>{new Date(approval.at).toLocaleTimeString()} · {humanizeKey(approval.reason || "approval")}</small>
+            {approval.summary && <span>{approval.summary}</span>}
+            {(approval.target || approval.project) && (
+              <span>
+                {[approval.project && `Project: ${approval.project}`, approval.target && `Target: ${approval.target}`].filter(Boolean).join(" · ")}
+              </span>
+            )}
             <p>{approval.question}</p>
+            {approval.commands && approval.commands.length > 0 && (
+              <pre className="approval-commands">{approval.commands.join("\n")}</pre>
+            )}
+            {approval.resumeHint && <span>{approval.resumeHint}</span>}
             {approval.answer && <span>Answer: {approval.answer}</span>}
           </div>
           {!approval.decided && (
-            <button className="secondary compact" type="button" onClick={() => onUseMessage(`Answer approval: ${approval.question}\n\n`)}>
+            <button className="secondary compact" type="button" onClick={() => onUseMessage(`I handled this setup blocker: ${approval.question}\n\n`)}>
               Respond
             </button>
           )}
@@ -2717,6 +2732,11 @@ function approvalStates(events: EventRecord[]): ApprovalState[] {
         at: event.at,
         question,
         reason,
+        summary: payloadValue(payload.summary),
+        target: payloadValue(payload.target || payload.targetId),
+        project: payloadValue(payload.project || payload.projectId),
+        resumeHint: payloadValue(payload.resumeHint),
+        commands: payloadStringArray(payload.commands),
         workerId,
         decided: Boolean(decision),
         answer: decision ? payloadValue(decision.payload.answer || decision.payload.message) : undefined,
@@ -3380,6 +3400,11 @@ function payloadValue(value: unknown): string {
   if (Array.isArray(value)) return value.map(payloadValue).filter(Boolean).join(", ");
   if (typeof value === "object") return prettyPayload(value);
   return String(value);
+}
+
+function payloadStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(payloadValue).filter(Boolean);
 }
 
 function prettyPayload(value: unknown): string {

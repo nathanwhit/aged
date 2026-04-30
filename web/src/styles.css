@@ -748,6 +748,20 @@ small {
   margin: 4px 0;
 }
 
+.approval-commands {
+  background: #1f2937;
+  border-radius: 6px;
+  color: #f8fafc;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .detail p {
   color: #4b4f58;
   margin: 8px 0 0;

@@ -478,10 +478,10 @@ Field rules:
 - When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id that should be the final task result. If no existing candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
 - When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty.
 - Use "continue" when another worker turn is needed.
-- Use "wait" when user input or approval is needed.
+- Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
 - When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
-- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event.
+- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
 - Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed.
 - Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
