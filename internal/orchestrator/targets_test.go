@@ -115,6 +115,41 @@ func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerProbeAllowsMissingRepoForPreparation(t *testing.T) {
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"tmux=true",
+		"repoPresent=false",
+		"cpuCount=4",
+		"load1=0.1",
+	}, "\n")}
+	runner := SSHRunner{Executor: executor}
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo"})
+	if health.Status != "ok" || !strings.Contains(health.Error, "prepared") {
+		t.Fatalf("health = %+v", health)
+	}
+}
+
+func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:     "https://github.com/nathanwhit/aged.git",
+		WorkDir:     "/srv/aged/repos/aged",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing prepare command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{"git clone", "git fetch origin --prune", "git checkout --detach", "origin/$base"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestNewRemoteRunUsesSpecWorkDirWhenTargetOmitsWorkDir(t *testing.T) {
 	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{
 		ID:      "worker-1234567890",

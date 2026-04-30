@@ -62,6 +62,7 @@ Remote execution targets can be registered dynamically through `POST /api/target
 ```
 
 SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
+Before starting a fresh remote worker, aged prepares the project checkout on the target: if `workDir` is missing it clones the configured project repo, and if `workDir` is a clean Git checkout it fetches origin and checks out the project `defaultBase` from `origin`. Dirty remote checkouts are rejected instead of being overwritten. Retry/follow-up workers reuse the previous remote workdir so partial work is preserved.
 Remote workers also write VCS change summaries and `diff.patch` into the run directory. When the remote workdir is a `jj` or Git checkout, aged reads those artifacts back into the normal `worker.completed.workspaceChanges` projection.
 Remote worker patches can be reviewed and applied through the normal worker apply endpoint. The current remote apply path applies `diff.patch` to the task project's local checkout with `git apply`, then records `worker.changes_applied`.
 

@@ -29,6 +29,12 @@ type remoteRun struct {
 	StartedAt time.Time    `json:"startedAt"`
 }
 
+type RemoteCheckoutSpec struct {
+	RepoURL     string
+	WorkDir     string
+	DefaultBase string
+}
+
 type remoteStatus struct {
 	Status string `json:"status"`
 	Exit   int    `json:"exit,omitempty"`
@@ -136,6 +142,20 @@ func (r SSHRunner) DirectoryExists(ctx context.Context, target TargetConfig, dir
 	return true, nil
 }
 
+func (r SSHRunner) PrepareCheckout(ctx context.Context, target TargetConfig, spec RemoteCheckoutSpec) (string, error) {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	if strings.TrimSpace(spec.WorkDir) == "" {
+		return "", errors.New("remote workDir is required")
+	}
+	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remotePrepareCheckoutScript(spec)))
+	if err != nil {
+		return strings.TrimSpace(out), err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetHealth, core.TargetResources) {
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
@@ -163,17 +183,16 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 	health.Reachable = true
 	health.Tmux = parseProbeBool(values["tmux"])
 	health.RepoPresent = parseProbeBool(values["repoPresent"])
-	if health.Tmux && health.RepoPresent {
+	if health.Tmux {
 		health.Status = "ok"
 	} else {
 		health.Status = "unhealthy"
 		if !health.Tmux {
 			health.Error = "tmux is not available"
 		}
-		if !health.RepoPresent {
-			health.Error = strings.TrimSpace(health.Error + "; repo path is not present")
-			health.Error = strings.TrimPrefix(health.Error, "; ")
-		}
+	}
+	if health.Tmux && !health.RepoPresent {
+		health.Error = "repo path will be prepared before worker start"
 	}
 	return health, resources
 }
@@ -280,6 +299,51 @@ func remoteStartScript(run remoteRun, argv []string) string {
 func remoteChangeScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
 	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; fi`, runDir)
+}
+
+func remotePrepareCheckoutScript(spec RemoteCheckoutSpec) string {
+	return fmt.Sprintf(`set -eu
+work_dir=%[1]s
+repo_url=%[2]s
+base=%[3]s
+if [ -d "$work_dir/.git" ]; then
+  cd "$work_dir"
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "remote checkout is dirty: $work_dir"
+    exit 20
+  fi
+  if [ -n "$repo_url" ] && ! git remote get-url origin >/dev/null 2>&1; then
+    git remote add origin "$repo_url"
+  fi
+  git fetch origin --prune
+elif [ -d "$work_dir/.jj" ] && [ ! -d "$work_dir/.git" ]; then
+  cd "$work_dir"
+  if [ -n "$(jj diff --stat)" ]; then
+    echo "remote jj checkout is dirty: $work_dir"
+    exit 20
+  fi
+  jj git fetch || true
+  echo "prepared jj checkout $work_dir"
+  exit 0
+else
+  if [ -z "$repo_url" ]; then
+    echo "remote checkout is missing and project repo is not configured: $work_dir"
+    exit 21
+  fi
+  mkdir -p "$(dirname "$work_dir")"
+  git clone "$repo_url" "$work_dir"
+  cd "$work_dir"
+  git fetch origin --prune
+fi
+if [ -n "$base" ]; then
+  if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
+    git checkout --detach "origin/$base"
+  else
+    git checkout "$base"
+    git pull --ff-only
+  fi
+fi
+echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase))
 }
 
 func remoteProbeScript(workDir string) string {

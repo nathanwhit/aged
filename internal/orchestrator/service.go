@@ -2448,6 +2448,19 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			plan.Metadata["baseWorkspaceCWD"] = remoteWorkDir
 		}
 	}
+	if !reusedWorkspace && stringMetadata(plan.Metadata, "baseWorkerID") == "" {
+		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
+			RepoURL:     projectCloneURL(project),
+			WorkDir:     remoteWorkDir,
+			DefaultBase: project.DefaultBase,
+		})
+		if err != nil {
+			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
+		}
+		if checkoutLog != "" {
+			plan.Metadata["remoteCheckout"] = checkoutLog
+		}
+	}
 	workspace := PreparedWorkspace{
 		Root:       remoteWorkDir,
 		CWD:        remoteWorkDir,
@@ -3382,6 +3395,20 @@ func (s *Service) projectForTask(task core.Task) core.Project {
 		}
 	}
 	return s.projects.Default()
+}
+
+func projectCloneURL(project core.Project) string {
+	repo := strings.TrimSpace(nonEmpty(project.Repo, project.UpstreamRepo))
+	if repo == "" {
+		return ""
+	}
+	if strings.Contains(repo, "://") || strings.HasPrefix(repo, "git@") || strings.HasSuffix(repo, ".git") {
+		return repo
+	}
+	if strings.Count(repo, "/") == 1 {
+		return "https://github.com/" + repo + ".git"
+	}
+	return repo
 }
 
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {

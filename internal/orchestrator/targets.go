@@ -337,7 +337,7 @@ func (r *TargetRegistry) isAvailableLocked(target TargetConfig) bool {
 	if strings.EqualFold(health.Status, "error") || strings.EqualFold(health.Status, "unhealthy") {
 		return false
 	}
-	if health.Reachable && health.Tmux && health.RepoPresent {
+	if health.Reachable && health.Tmux {
 		return true
 	}
 	return false
