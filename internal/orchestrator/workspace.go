@@ -62,6 +62,16 @@ type WorkspaceChanges struct {
 	ChangedFiles  []WorkspaceChangedFile `json:"changedFiles"`
 	Dirty         bool                   `json:"dirty"`
 	Error         string                 `json:"error,omitempty"`
+	Artifacts     []WorkspaceArtifact    `json:"artifacts,omitempty"`
+}
+
+type WorkspaceArtifact struct {
+	ID       string         `json:"id"`
+	Kind     string         `json:"kind"`
+	Name     string         `json:"name,omitempty"`
+	Path     string         `json:"path,omitempty"`
+	Content  string         `json:"content,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type WorkspaceResult string

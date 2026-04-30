@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"aged/internal/core"
+	"aged/internal/worker"
 )
 
 func TestLoadPluginRegistryIncludesBuiltinsAndConfiguredPlugins(t *testing.T) {
@@ -67,6 +69,60 @@ func TestPluginRegistryProbesExecutablePluginDescribe(t *testing.T) {
 	if plugin.Status != "ready" || plugin.Name != "Linear Driver" || len(plugin.Capabilities) != 2 {
 		t.Fatalf("plugin = %+v", plugin)
 	}
+}
+
+func TestPluginRegistrySupervisesDriverLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then echo driver-ready; sleep 0.05; exit 0; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewPluginRegistry([]core.Plugin{{
+		ID:       "driver:test",
+		Name:     "Test Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry.StartDrivers(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		plugin := registry.Snapshot()[0]
+		if plugin.Driver.Managed && (plugin.Status == "running" || plugin.Status == "stopped") && len(plugin.Driver.LogTail) > 0 {
+			if !strings.Contains(strings.Join(plugin.Driver.LogTail, "\n"), "driver-ready") {
+				t.Fatalf("log tail = %+v", plugin.Driver.LogTail)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("driver did not report lifecycle state: %+v", registry.Snapshot())
+}
+
+func TestPluginRegistryExposesRunnerPlugins(t *testing.T) {
+	registry := NewPluginRegistry([]core.Plugin{{
+		ID:       "runner:lint",
+		Name:     "Lint Runner",
+		Kind:     "runner",
+		Enabled:  true,
+		Command:  []string{"aged-lint"},
+		Protocol: "aged-runner-v1",
+	}})
+	runners := registry.RunnerPlugins()
+	runner, ok := runners["lint"]
+	if !ok {
+		t.Fatalf("runners = %+v", runners)
+	}
+	if got := strings.Join(runner.BuildCommand(workerSpec("w1")), " "); got != "aged-lint run" {
+		t.Fatalf("command = %q", got)
+	}
+}
+
+func workerSpec(id string) worker.Spec {
+	return worker.Spec{ID: id, Prompt: "run"}
 }
 
 func corePluginFixture(id string) []core.Plugin {

@@ -2024,6 +2024,32 @@ func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	}
 }
 
+func TestServiceRecordsBenchmarkResultArtifact(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "benchmark_compare",
+		Prompt:     "baseline: 10\ncandidate: 12\nthreshold_percent: 5\nhigher_is_better: true",
+	}}, map[string]worker.Runner{
+		"benchmark_compare": worker.BenchmarkCompareRunner{},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Bench", Prompt: "Compare benchmark result."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	task = snapshot.Tasks[0]
+	if len(task.Artifacts) != 1 || task.Artifacts[0].Kind != "benchmark_report" {
+		t.Fatalf("artifacts = %+v", task.Artifacts)
+	}
+	if !strings.Contains(string(task.Artifacts[0].Metadata), "deltaPercent") {
+		t.Fatalf("artifact metadata = %s", task.Artifacts[0].Metadata)
+	}
+}
+
 func TestServiceRunsSpawnedFollowUpWorkerWithPriorResultContext(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

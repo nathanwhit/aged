@@ -398,6 +398,53 @@ func (s *Service) SetRemotePatchApplier(applier func(context.Context, core.Proje
 	}
 }
 
+func (s *Service) StartTargetProbes(ctx context.Context, interval time.Duration) {
+	if s == nil || s.targets == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	go func() {
+		s.RefreshTargetHealth(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.RefreshTargetHealth(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) RefreshTargetHealth(ctx context.Context) {
+	if s == nil || s.targets == nil {
+		return
+	}
+	for _, target := range s.targets.Configs() {
+		if target.Kind == TargetKindLocal {
+			s.targets.UpdateHealth(target.ID, core.TargetHealth{
+				Status:      "ok",
+				CheckedAt:   time.Now().UTC(),
+				Reachable:   true,
+				Tmux:        true,
+				RepoPresent: true,
+			}, core.TargetResources{})
+			continue
+		}
+		if target.Kind != TargetKindSSH {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		health, resources := s.sshRunner.Probe(probeCtx, target)
+		cancel()
+		s.targets.UpdateHealth(target.ID, health, resources)
+	}
+}
+
 func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -2087,6 +2134,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			WorkerID: workerID,
 			Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
 		})
+		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		return runState.turnResult(workerID, plan, status, err, changes), nil
 	}
@@ -2099,6 +2147,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			WorkerID: workerID,
 			Payload:  core.MustJSON(runState.completionPayload(core.WorkerWaiting, nil, changes)),
 		})
+		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		return runState.turnResult(workerID, plan, core.WorkerWaiting, nil, changes), nil
 	}
 
@@ -2109,6 +2158,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		WorkerID: workerID,
 		Payload:  core.MustJSON(runState.completionPayload(core.WorkerSucceeded, nil, changes)),
 	})
+	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
 }
@@ -2285,6 +2335,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		WorkerID: workerID,
 		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
 	})
+	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
 }
 
@@ -3562,8 +3613,16 @@ func applyRemotePatch(ctx context.Context, project core.Project, workspace Prepa
 		return result, err
 	}
 	defer os.Remove(patchFile)
+	if _, err := runCommand(ctx, project.LocalPath, "git", "apply", "--check", "--whitespace=nowarn", patchFile); err != nil {
+		if _, threeWayErr := runCommand(ctx, project.LocalPath, "git", "apply", "--3way", "--whitespace=nowarn", patchFile); threeWayErr == nil {
+			result.Method = "remote_patch_apply_3way"
+			return result, nil
+		} else {
+			return result, fmt.Errorf("remote patch has conflicts or no longer applies cleanly; check failed: %w; 3-way apply failed: %v", err, threeWayErr)
+		}
+	}
 	if _, err := runCommand(ctx, project.LocalPath, "git", "apply", "--whitespace=nowarn", patchFile); err != nil {
-		return result, fmt.Errorf("apply remote patch: %w", err)
+		return result, fmt.Errorf("apply checked remote patch: %w", err)
 	}
 	return result, nil
 }
@@ -3643,6 +3702,128 @@ func (s *Service) recordTaskArtifact(ctx context.Context, taskID string, id stri
 		}),
 	})
 	return err
+}
+
+func (s *Service) recordWorkerArtifacts(ctx context.Context, taskID string, workerID string, workerKind string, state *workerRunState, changes WorkspaceChanges) error {
+	for _, artifact := range changes.Artifacts {
+		metadata := artifact.Metadata
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["workerId"] = workerID
+		if artifact.Path != "" {
+			metadata["path"] = artifact.Path
+		}
+		if artifact.Content != "" {
+			metadata["content"] = artifact.Content
+		}
+		if err := s.recordTaskArtifact(ctx, taskID, nonEmpty(artifact.ID, workerID+"-"+artifact.Kind), artifact.Kind, artifact.Name, "", artifact.Path, metadata); err != nil {
+			return err
+		}
+	}
+	summary := state.summaryText()
+	if strings.TrimSpace(summary) == "" {
+		return nil
+	}
+	for _, artifact := range resultArtifacts(workerID, workerKind, summary) {
+		if err := s.recordTaskArtifact(ctx, taskID, artifact.ID, artifact.Kind, artifact.Name, "", "", artifact.Metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type resultArtifact struct {
+	ID       string
+	Kind     string
+	Name     string
+	Metadata map[string]any
+}
+
+func resultArtifacts(workerID string, workerKind string, summary string) []resultArtifact {
+	lower := strings.ToLower(summary)
+	artifacts := []resultArtifact{}
+	if workerKind == "benchmark_compare" || strings.Contains(lower, "## benchmark results") {
+		metadata := parseMarkdownKeyValues(summary)
+		metadata["workerId"] = workerID
+		metadata["content"] = truncateArtifactContent(summary)
+		artifacts = append(artifacts, resultArtifact{
+			ID:       workerID + "-benchmark",
+			Kind:     "benchmark_report",
+			Name:     "Benchmark report",
+			Metadata: metadata,
+		})
+	}
+	if strings.Contains(lower, "flamegraph") || strings.Contains(lower, "profiler") || strings.Contains(lower, "profile report") {
+		artifacts = append(artifacts, resultArtifact{
+			ID:   workerID + "-profile",
+			Kind: "profiler_report",
+			Name: "Profiler report",
+			Metadata: map[string]any{
+				"workerId": workerID,
+				"content":  truncateArtifactContent(summary),
+			},
+		})
+	}
+	for _, spec := range []struct {
+		marker string
+		kind   string
+		name   string
+	}{
+		{"## test report", "test_report", "Test report"},
+		{"## ci", "ci_run", "CI run"},
+		{"## review comments", "review_comments", "Review comments"},
+		{"## deployment", "deployment", "Deployment"},
+		{"## package", "package", "Package"},
+	} {
+		if strings.Contains(lower, spec.marker) {
+			artifacts = append(artifacts, resultArtifact{
+				ID:   workerID + "-" + spec.kind,
+				Kind: spec.kind,
+				Name: spec.name,
+				Metadata: map[string]any{
+					"workerId": workerID,
+					"content":  truncateArtifactContent(summary),
+				},
+			})
+		}
+	}
+	return artifacts
+}
+
+func parseMarkdownKeyValues(text string) map[string]any {
+	values := map[string]any{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		values[camelArtifactKey(key)] = value
+	}
+	return values
+}
+
+func camelArtifactKey(key string) string {
+	parts := strings.FieldsFunc(strings.ToLower(key), func(r rune) bool {
+		return r == '_' || r == '-' || r == ' '
+	})
+	if len(parts) == 0 {
+		return key
+	}
+	out := parts[0]
+	for _, part := range parts[1:] {
+		if part == "" {
+			continue
+		}
+		out += strings.ToUpper(part[:1]) + part[1:]
+	}
+	return out
 }
 
 func (s *Service) setExecutionNodeStatus(ctx context.Context, taskID string, nodeID string, status core.WorkerStatus) error {
@@ -3865,6 +4046,12 @@ func (s *workerRunState) isWaitingForInput() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.needsInput
+}
+
+func (s *workerRunState) summaryText() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.summary
 }
 
 func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr error, changes WorkspaceChanges) map[string]any {

@@ -136,6 +136,48 @@ func (r SSHRunner) DirectoryExists(ctx context.Context, target TargetConfig, dir
 	return true, nil
 }
 
+func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetHealth, core.TargetResources) {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	health := core.TargetHealth{
+		Status:    "unknown",
+		CheckedAt: time.Now().UTC(),
+	}
+	workDir := nonEmpty(target.WorkDir, ".")
+	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remoteProbeScript(workDir)))
+	if err != nil {
+		health.Status = "error"
+		health.Error = strings.TrimSpace(nonEmpty(out, err.Error()))
+		return health, core.TargetResources{}
+	}
+	values := parseProbeValues(out)
+	resources := core.TargetResources{
+		Load1:             parseProbeFloat(values["load1"]),
+		CPUCount:          int(parseProbeInt(values["cpuCount"])),
+		MemoryTotalMB:     parseProbeInt(values["memoryTotalKB"]) / 1024,
+		MemoryAvailableMB: parseProbeInt(values["memoryAvailableKB"]) / 1024,
+		DiskAvailableMB:   parseProbeInt(values["diskAvailableKB"]) / 1024,
+		DiskUsedPercent:   parseProbeFloat(strings.TrimSuffix(values["diskUsedPercent"], "%")),
+	}
+	health.Reachable = true
+	health.Tmux = parseProbeBool(values["tmux"])
+	health.RepoPresent = parseProbeBool(values["repoPresent"])
+	if health.Tmux && health.RepoPresent {
+		health.Status = "ok"
+	} else {
+		health.Status = "unhealthy"
+		if !health.Tmux {
+			health.Error = "tmux is not available"
+		}
+		if !health.RepoPresent {
+			health.Error = strings.TrimSpace(health.Error + "; repo path is not present")
+			health.Error = strings.TrimPrefix(health.Error, "; ")
+		}
+	}
+	return health, resources
+}
+
 func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) WorkspaceChanges {
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
@@ -153,6 +195,8 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	status := readRaw("changes.txt")
 	diffStat := readRaw("diffstat.txt")
 	diff := readRaw("diff.patch")
+	stdout := readRaw("stdout.log")
+	stderr := readRaw("stderr.log")
 	changes := WorkspaceChanges{
 		Root:          root,
 		CWD:           run.WorkDir,
@@ -163,6 +207,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		DiffStat:      nonEmpty(diffStat, status),
 		Diff:          diff,
 		Dirty:         strings.TrimSpace(status) != "",
+		Artifacts:     remoteLogArtifacts(run, stdout, stderr),
 	}
 	switch vcs {
 	case "jj":
@@ -171,6 +216,45 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		changes.ChangedFiles = parseGitPorcelain(status)
 	}
 	return changes
+}
+
+func remoteLogArtifacts(run remoteRun, stdout string, stderr string) []WorkspaceArtifact {
+	artifacts := []WorkspaceArtifact{}
+	if strings.TrimSpace(stdout) != "" {
+		artifacts = append(artifacts, WorkspaceArtifact{
+			ID:      run.Session + "-stdout",
+			Kind:    "worker_log",
+			Name:    "Remote stdout",
+			Path:    path.Join(run.RunDir, "stdout.log"),
+			Content: truncateArtifactContent(stdout),
+			Metadata: map[string]any{
+				"stream": "stdout",
+				"bytes":  len(stdout),
+			},
+		})
+	}
+	if strings.TrimSpace(stderr) != "" {
+		artifacts = append(artifacts, WorkspaceArtifact{
+			ID:      run.Session + "-stderr",
+			Kind:    "worker_log",
+			Name:    "Remote stderr",
+			Path:    path.Join(run.RunDir, "stderr.log"),
+			Content: truncateArtifactContent(stderr),
+			Metadata: map[string]any{
+				"stream": "stderr",
+				"bytes":  len(stderr),
+			},
+		})
+	}
+	return artifacts
+}
+
+func truncateArtifactContent(content string) string {
+	const limit = 64 * 1024
+	if len(content) <= limit {
+		return content
+	}
+	return content[:limit] + "\n[truncated]"
 }
 
 func remoteStartScript(run remoteRun, argv []string) string {
@@ -196,6 +280,42 @@ func remoteStartScript(run remoteRun, argv []string) string {
 func remoteChangeScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
 	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; fi`, runDir)
+}
+
+func remoteProbeScript(workDir string) string {
+	return fmt.Sprintf(`printf 'tmux=%%s\n' "$(command -v tmux >/dev/null 2>&1 && echo true || echo false)"
+printf 'repoPresent=%%s\n' "$(test -d %s && echo true || echo false)"
+df -Pk %s 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
+if [ -r /proc/meminfo ]; then awk '/MemTotal:/ { print "memoryTotalKB="$2 } /MemAvailable:/ { print "memoryAvailableKB="$2 }' /proc/meminfo; fi
+if [ -r /proc/loadavg ]; then awk '{ print "load1="$1 }' /proc/loadavg; else uptime | sed -n 's/.*load averages*: *\([0-9.]*\).*/load1=\1/p'; fi
+cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
+printf 'cpuCount=%%s\n' "$cpu_count"`, shellQuote(workDir), shellQuote(workDir))
+}
+
+func parseProbeValues(out string) map[string]string {
+	values := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return values
+}
+
+func parseProbeBool(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "true") || strings.TrimSpace(value) == "1"
+}
+
+func parseProbeFloat(value string) float64 {
+	number, _ := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	return number
+}
+
+func parseProbeInt(value string) int64 {
+	number, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	return number
 }
 
 func sshArgs(target TargetConfig, remoteArgv ...string) []string {

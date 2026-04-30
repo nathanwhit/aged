@@ -1602,6 +1602,31 @@ small {
   overflow-wrap: anywhere;
 }
 
+.driver-runtime {
+  color: #536070;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px 10px;
+}
+
+.driver-log summary {
+  color: #536070;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.driver-log pre {
+  background: #111827;
+  border-radius: 6px;
+  color: #e5e7eb;
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 6px 0 0;
+  overflow-x: auto;
+  padding: 8px;
+}
+
 .graph-panel {
   display: grid;
   gap: 12px;
@@ -1626,6 +1651,30 @@ small {
   font-size: 13px;
   line-height: 1.4;
   margin: 0;
+}
+
+.target-health {
+  align-items: center;
+  color: #536070;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px 10px;
+}
+
+.health-dot {
+  background: #b48b2b;
+  border-radius: 999px;
+  height: 8px;
+  width: 8px;
+}
+
+.health-dot.ok {
+  background: #2f8a51;
+}
+
+.health-dot.warn {
+  background: #b9574c;
 }
 
 .worker-review {

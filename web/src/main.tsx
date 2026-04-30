@@ -2022,11 +2022,28 @@ function TargetPanel({ targets }: { targets: TargetState[] }) {
               {target.running}/{target.capacity.maxWorkers} workers
               {target.capacity.memoryGB ? ` | ${target.capacity.memoryGB} GB` : ""}
             </p>
+            {target.health?.status && (
+              <div className="target-health">
+                <span className={target.health.status === "ok" ? "health-dot ok" : "health-dot warn"} />
+                <span>{target.health.status}</span>
+                {target.resources?.load1 !== undefined && target.resources?.cpuCount ? (
+                  <span>load {target.resources.load1.toFixed(2)}/{target.resources.cpuCount}</span>
+                ) : null}
+                {target.resources?.memoryAvailableMb ? <span>{formatMB(target.resources.memoryAvailableMb)} free</span> : null}
+                {target.resources?.diskAvailableMb ? <span>{formatMB(target.resources.diskAvailableMb)} disk</span> : null}
+              </div>
+            )}
+            {target.health?.error && <p className="plugin-error">{target.health.error}</p>}
           </article>
         ))}
       </div>
     </section>
   );
+}
+
+function formatMB(value: number): string {
+  if (value >= 1024) return `${(value / 1024).toFixed(value >= 10240 ? 0 : 1)} GB`;
+  return `${Math.round(value)} MB`;
 }
 
 function PluginPanel({ plugins }: { plugins: Plugin[] }) {
@@ -2058,6 +2075,19 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
                   <span key={capability}>{capability}</span>
                 ))}
               </div>
+            )}
+            {plugin.driver?.managed && (
+              <div className="driver-runtime">
+                {plugin.driver.pid ? <span>pid {plugin.driver.pid}</span> : <span>not running</span>}
+                {plugin.driver.restartPolicy && <span>{plugin.driver.restartPolicy}</span>}
+                {plugin.driver.restartCount ? <span>{plugin.driver.restartCount} restarts</span> : null}
+              </div>
+            )}
+            {plugin.driver?.logTail && plugin.driver.logTail.length > 0 && (
+              <details className="driver-log">
+                <summary>{plugin.driver.logTail.length} log lines</summary>
+                <pre>{plugin.driver.logTail.slice(-8).join("\n")}</pre>
+              </details>
             )}
             {plugin.error && <p className="plugin-error">{plugin.error}</p>}
           </article>

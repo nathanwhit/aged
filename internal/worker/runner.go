@@ -143,7 +143,7 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	}
 
 	errCh := make(chan error, 2)
-	parser := ParserForKind(r.kind)
+	parser := parserFunc(parseJSONWorkerLine)
 	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
 	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
 	if stdin != nil {
@@ -188,6 +188,84 @@ func forwardSteering(ctx context.Context, sink Sink, steering <-chan string, std
 
 func defaultSteeringFormatter(message string) string {
 	return "\n[orchestrator steering]\n" + message + "\n[/orchestrator steering]"
+}
+
+type PluginRunner struct {
+	kind    string
+	command []string
+}
+
+func NewPluginRunner(kind string, command []string) PluginRunner {
+	return PluginRunner{kind: strings.TrimSpace(kind), command: append([]string{}, command...)}
+}
+
+func (r PluginRunner) Kind() string {
+	return r.kind
+}
+
+func (r PluginRunner) BuildCommand(Spec) []string {
+	return append(append([]string{}, r.command...), "run")
+}
+
+func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
+	argv := r.BuildCommand(spec)
+	if len(argv) == 0 {
+		return errors.New("empty plugin runner command")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	if spec.WorkDir != "" {
+		cmd.Dir = spec.WorkDir
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	payload := struct {
+		ID              string   `json:"id"`
+		TaskID          string   `json:"taskId"`
+		Kind            string   `json:"kind"`
+		Prompt          string   `json:"prompt"`
+		WorkDir         string   `json:"workDir,omitempty"`
+		Command         []string `json:"command,omitempty"`
+		ResumeSessionID string   `json:"resumeSessionId,omitempty"`
+		ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	}{
+		ID:              spec.ID,
+		TaskID:          spec.TaskID,
+		Kind:            spec.Kind,
+		Prompt:          spec.Prompt,
+		WorkDir:         spec.WorkDir,
+		Command:         spec.Command,
+		ResumeSessionID: spec.ResumeSessionID,
+		ReasoningEffort: spec.ReasoningEffort,
+	}
+	if err := json.NewEncoder(stdin).Encode(payload); err != nil {
+		_ = stdin.Close()
+		return err
+	}
+	_ = stdin.Close()
+	errCh := make(chan error, 2)
+	parser := ParserForKind(r.kind)
+	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
+	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			_ = cmd.Wait()
+			return err
+		}
+	}
+	return cmd.Wait()
 }
 
 func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, reader io.Reader, errCh chan<- error) {

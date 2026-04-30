@@ -116,6 +116,15 @@ export type Plugin = {
   endpoint?: string;
   capabilities?: string[];
   config?: Record<string, string>;
+  driver?: {
+    managed?: boolean;
+    pid?: number;
+    startedAt?: string;
+    lastExitAt?: string;
+    restartCount?: number;
+    restartPolicy?: string;
+    logTail?: string[];
+  };
 };
 
 export type Worker = {
@@ -227,6 +236,22 @@ export type TargetState = {
   };
   running: number;
   available: boolean;
+  health?: {
+    status?: string;
+    error?: string;
+    checkedAt?: string;
+    reachable?: boolean;
+    tmux?: boolean;
+    repoPresent?: boolean;
+  };
+  resources?: {
+    load1?: number;
+    cpuCount?: number;
+    memoryTotalMb?: number;
+    memoryAvailableMb?: number;
+    diskAvailableMb?: number;
+    diskUsedPercent?: number;
+  };
 };
 
 export type PullRequestState = {

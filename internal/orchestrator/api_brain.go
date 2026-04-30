@@ -272,8 +272,8 @@ func planResponseFormat() map[string]any {
 				"required":             []string{"workerKind", "workerPrompt", "reasoningEffort", "rationale", "steps", "requiredApprovals", "actions", "spawns"},
 				"properties": map[string]any{
 					"workerKind": map[string]any{
-						"type": "string",
-						"enum": []string{"codex", "claude", "mock", "benchmark_compare"},
+						"type":        "string",
+						"description": "Configured worker kind, such as codex, claude, mock, benchmark_compare, or an enabled aged-runner-v1 plugin kind.",
 					},
 					"workerPrompt": map[string]any{
 						"type":      "string",
@@ -342,7 +342,7 @@ func planResponseFormat() map[string]any {
 								"id":              map[string]any{"type": "string"},
 								"role":            map[string]any{"type": "string"},
 								"reason":          map[string]any{"type": "string"},
-								"workerKind":      map[string]any{"type": "string", "enum": []string{"codex", "claude", "mock", "benchmark_compare"}},
+								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
 								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
 								"dependsOn": map[string]any{
 									"type":  "array",

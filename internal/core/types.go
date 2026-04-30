@@ -163,6 +163,26 @@ type TargetState struct {
 	Capacity  TargetCapacity    `json:"capacity"`
 	Running   int               `json:"running"`
 	Available bool              `json:"available"`
+	Health    TargetHealth      `json:"health,omitempty"`
+	Resources TargetResources   `json:"resources,omitempty"`
+}
+
+type TargetHealth struct {
+	Status      string    `json:"status,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	CheckedAt   time.Time `json:"checkedAt,omitempty"`
+	Reachable   bool      `json:"reachable,omitempty"`
+	Tmux        bool      `json:"tmux,omitempty"`
+	RepoPresent bool      `json:"repoPresent,omitempty"`
+}
+
+type TargetResources struct {
+	Load1             float64 `json:"load1,omitempty"`
+	CPUCount          int     `json:"cpuCount,omitempty"`
+	MemoryTotalMB     int64   `json:"memoryTotalMb,omitempty"`
+	MemoryAvailableMB int64   `json:"memoryAvailableMb,omitempty"`
+	DiskAvailableMB   int64   `json:"diskAvailableMb,omitempty"`
+	DiskUsedPercent   float64 `json:"diskUsedPercent,omitempty"`
 }
 
 type Plugin struct {
@@ -177,6 +197,17 @@ type Plugin struct {
 	Endpoint     string            `json:"endpoint,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Config       map[string]string `json:"config,omitempty"`
+	Driver       PluginDriverState `json:"driver,omitempty"`
+}
+
+type PluginDriverState struct {
+	Managed       bool      `json:"managed,omitempty"`
+	PID           int       `json:"pid,omitempty"`
+	StartedAt     time.Time `json:"startedAt,omitempty"`
+	LastExitAt    time.Time `json:"lastExitAt,omitempty"`
+	RestartCount  int       `json:"restartCount,omitempty"`
+	RestartPolicy string    `json:"restartPolicy,omitempty"`
+	LogTail       []string  `json:"logTail,omitempty"`
 }
 
 type Project struct {

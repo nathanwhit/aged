@@ -34,6 +34,32 @@ func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 	}
 }
 
+func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "bad", Kind: TargetKindSSH, Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},
+		{ID: "good", Kind: TargetKindSSH, Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1, MemoryGB: 16}},
+	})
+	registry.UpdateHealth("bad", core.TargetHealth{Status: "unhealthy", Reachable: true, Tmux: false, RepoPresent: true}, core.TargetResources{})
+	registry.UpdateHealth("good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.2, MemoryAvailableMB: 8192})
+
+	target, err := registry.Select(Plan{
+		Prompt:   "run benchmark",
+		Metadata: map[string]any{"targetLabels": map[string]any{"role": "benchmark"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "good" {
+		t.Fatalf("target = %q, want good", target.ID)
+	}
+	snapshot := registry.Snapshot()
+	for _, state := range snapshot {
+		if state.ID == "bad" && state.Available {
+			t.Fatalf("bad target should not be available: %+v", state)
+		}
+	}
+}
+
 func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -62,6 +88,30 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	changes := runner.DescribeChanges(context.Background(), run)
 	if changes.VCSType != "git" || !changes.Dirty || len(changes.ChangedFiles) != 1 || changes.ChangedFiles[0].Path != "main.go" || !strings.Contains(changes.Diff, "diff --git") {
 		t.Fatalf("changes = %+v", changes)
+	}
+	if len(changes.Artifacts) != 1 || changes.Artifacts[0].Kind != "worker_log" || !strings.Contains(changes.Artifacts[0].Content, "remote output") {
+		t.Fatalf("artifacts = %+v", changes.Artifacts)
+	}
+}
+
+func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"tmux=true",
+		"repoPresent=true",
+		"diskAvailableKB=10485760",
+		"diskUsedPercent=42%",
+		"memoryTotalKB=33554432",
+		"memoryAvailableKB=16777216",
+		"load1=1.25",
+		"cpuCount=8",
+	}, "\n")}
+	runner := SSHRunner{Executor: executor}
+	health, resources := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo"})
+	if health.Status != "ok" || !health.Reachable || !health.Tmux || !health.RepoPresent {
+		t.Fatalf("health = %+v", health)
+	}
+	if resources.CPUCount != 8 || resources.MemoryAvailableMB != 16384 || resources.DiskAvailableMB != 10240 || resources.DiskUsedPercent != 42 {
+		t.Fatalf("resources = %+v", resources)
 	}
 }
 
@@ -136,13 +186,19 @@ func TestServiceRunsWorkerOnRealSSHTarget(t *testing.T) {
 }
 
 type fakeRemoteExecutor struct {
-	commands [][]string
+	commands    [][]string
+	probeOutput string
 }
 
 func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
 	e.commands = append(e.commands, append([]string(nil), argv...))
 	joined := strings.Join(argv, " ")
 	switch {
+	case strings.Contains(joined, "repoPresent="):
+		if e.probeOutput != "" {
+			return e.probeOutput, nil
+		}
+		return "tmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
 	case strings.Contains(joined, "stdout.log"):
 		return "remote output\n", nil
 	case strings.Contains(joined, "stderr.log"):

@@ -41,9 +41,11 @@ type TargetConfig struct {
 }
 
 type TargetRegistry struct {
-	mu      sync.Mutex
-	targets map[string]TargetConfig
-	running map[string]int
+	mu       sync.Mutex
+	targets  map[string]TargetConfig
+	running  map[string]int
+	health   map[string]core.TargetHealth
+	resource map[string]core.TargetResources
 }
 
 func NewLocalTargetRegistry() *TargetRegistry {
@@ -79,8 +81,10 @@ func LoadTargetRegistry(path string) (*TargetRegistry, error) {
 
 func NewTargetRegistry(configs []TargetConfig) *TargetRegistry {
 	registry := &TargetRegistry{
-		targets: map[string]TargetConfig{},
-		running: map[string]int{},
+		targets:  map[string]TargetConfig{},
+		running:  map[string]int{},
+		health:   map[string]core.TargetHealth{},
+		resource: map[string]core.TargetResources{},
 	}
 	for _, config := range configs {
 		if strings.TrimSpace(config.ID) == "" {
@@ -114,7 +118,7 @@ func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
 	size := workerSize(plan.Metadata, plan.Prompt)
 	candidates := make([]TargetConfig, 0, len(r.targets))
 	for _, target := range r.targets {
-		if labelsMatch(target.Labels, required) && r.running[target.ID] < target.Capacity.MaxWorkers {
+		if labelsMatch(target.Labels, required) && r.isAvailableLocked(target) {
 			candidates = append(candidates, target)
 		}
 	}
@@ -134,7 +138,7 @@ func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {
 	if !ok {
 		return TargetConfig{}, fmt.Errorf("execution target %q is not configured", id)
 	}
-	if r.running[target.ID] >= target.Capacity.MaxWorkers {
+	if !r.isAvailableLocked(target) {
 		return TargetConfig{}, fmt.Errorf("execution target %q is at capacity", id)
 	}
 	return target, nil
@@ -145,6 +149,17 @@ func (r *TargetRegistry) Get(id string) (TargetConfig, bool) {
 	defer r.mu.Unlock()
 	target, ok := r.targets[id]
 	return target, ok
+}
+
+func (r *TargetRegistry) Configs() []TargetConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TargetConfig, 0, len(r.targets))
+	for _, target := range r.targets {
+		out = append(out, target)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (r *TargetRegistry) Begin(targetID string) {
@@ -161,6 +176,16 @@ func (r *TargetRegistry) Finish(targetID string) {
 	}
 }
 
+func (r *TargetRegistry) UpdateHealth(targetID string, health core.TargetHealth, resources core.TargetResources) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.targets[targetID]; !ok {
+		return
+	}
+	r.health[targetID] = health
+	r.resource[targetID] = resources
+}
+
 func (r *TargetRegistry) Snapshot() []core.TargetState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -172,7 +197,9 @@ func (r *TargetRegistry) Snapshot() []core.TargetState {
 			Labels:    target.Labels,
 			Capacity:  core.TargetCapacity(target.Capacity),
 			Running:   r.running[target.ID],
-			Available: r.running[target.ID] < target.Capacity.MaxWorkers,
+			Available: r.isAvailableLocked(target),
+			Health:    r.health[target.ID],
+			Resources: r.resource[target.ID],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -185,15 +212,49 @@ func (r *TargetRegistry) scoreLocked(target TargetConfig, size string) float64 {
 	if target.Kind == TargetKindLocal {
 		score += 0.5
 	}
+	resources := r.resource[target.ID]
+	if resources.CPUCount > 0 && resources.Load1 > 0 {
+		loadRatio := resources.Load1 / float64(resources.CPUCount)
+		score -= loadRatio * 2
+	}
+	if resources.MemoryAvailableMB > 0 {
+		score += float64(resources.MemoryAvailableMB) / 32768
+	}
+	if resources.DiskAvailableMB > 0 {
+		score += float64(resources.DiskAvailableMB) / 262144
+	}
+	if resources.DiskUsedPercent >= 90 {
+		score -= 4
+	}
 	switch size {
 	case "large":
 		score += target.Capacity.MemoryGB / 16
+		if resources.MemoryAvailableMB > 0 {
+			score += float64(resources.MemoryAvailableMB) / 16384
+		}
 		score -= running * 2
 	case "medium":
 		score += target.Capacity.MemoryGB / 32
 		score -= running
 	}
 	return score
+}
+
+func (r *TargetRegistry) isAvailableLocked(target TargetConfig) bool {
+	if r.running[target.ID] >= target.Capacity.MaxWorkers {
+		return false
+	}
+	health, hasHealth := r.health[target.ID]
+	if !hasHealth || target.Kind == TargetKindLocal {
+		return true
+	}
+	if strings.EqualFold(health.Status, "error") || strings.EqualFold(health.Status, "unhealthy") {
+		return false
+	}
+	if health.Reachable && health.Tmux && health.RepoPresent {
+		return true
+	}
+	return false
 }
 
 func labelsMatch(labels map[string]string, required map[string]string) bool {

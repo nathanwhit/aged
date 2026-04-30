@@ -1,6 +1,6 @@
 # Development Status
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
 
 ## Current State
 
@@ -13,6 +13,8 @@ The initial local-first vertical slice is implemented.
 - SSE event stream for live dashboard updates.
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
 - Plugin manifests are first-class snapshot/API state. Built-in brain/runner/driver capabilities are projected by default, and `-plugins` / `AGED_PLUGINS` can add external plugin descriptors for drivers, runners, or integrations. Enabled `aged-plugin-v1` command plugins are probed at startup with `command... describe`.
+- Enabled `aged-plugin-v1` driver plugins are supervised as long-running `command... serve` processes. Snapshots/UI expose driver lifecycle state, PID, restart policy, restart count, recent logs, and failures.
+- Enabled `aged-runner-v1` runner plugins become worker kinds. The daemon invokes `command... run`, sends the worker spec as JSON on stdin, and consumes JSON worker events from stdout/stderr.
 - Project registry support for managing multiple local repositories from one daemon. Projects are persisted in SQLite; `-projects` / `AGED_PROJECTS` seeds an empty database, otherwise the daemon creates a default project from `-workdir`. Tasks can carry `projectId`, and external task metadata can map a `repo` to a configured project.
 - Runtime project management is available through `POST /api/projects`, `PUT /api/projects/{id}`, `DELETE /api/projects/{id}`, `GET /api/projects/{id}/health`, and the dashboard Projects panel. Project registration validates `localPath`, discovers VCS kind / GitHub repo metadata from the checkout when possible, and fills `defaultBase` from local branch metadata when available.
 - Projects persist a `pullRequestPolicy` used by PR publication. The policy currently covers branch prefix, draft-by-default behavior, whether aged is allowed to merge, and whether auto-merge is permitted; repo/base/fork selection remains in the project repo/upstream/head-owner/push-remote/default-base fields.
@@ -65,15 +67,17 @@ The initial local-first vertical slice is implemented.
 - Worker execution is projected as first-class `executionNodes` snapshot state from `execution.node_planned` events, with node id, worker id, worker kind, spawn id, dependencies, role/reason, and status.
 - Per-task orchestration graphs are projected from durable execution events into snapshots/UI, including nodes, parent/dependency edges, target placement, and aggregate status counts.
 - Execution target pools are configurable with `-targets` / `AGED_TARGETS`. The default target is local; SSH targets use detached tmux sessions and remote status/log files so work can outlive the SSH connection.
+- SSH target health is probed in the background. Probes report reachability, tmux availability, repo path presence, disk, load/CPU, and memory; snapshots/UI show the current health/resource state.
+- Target scheduling now avoids unhealthy SSH targets and incorporates live load, memory, and disk signals into target scoring alongside labels, configured capacity, running workers, worker size, and static CPU/memory hints.
 - Target placement is service-owned. Scheduler-provided target labels are ignored and annotated; task metadata target labels take precedence over project target labels.
-- SSH targets write remote VCS change artifacts (`jj` or Git summaries plus `diff.patch`) into the run directory; the orchestrator reads them back into `worker.completed.workspaceChanges` for normal review/projection.
-- Remote worker patches can be reviewed/applied through the normal worker apply endpoint; the current implementation applies the collected `diff.patch` to the task project's local checkout and records `worker.changes_applied`.
-- Target scheduling scores matching targets by labels, capacity, current running workers, worker size, and memory/CPU hints.
+- SSH targets write remote VCS change artifacts (`jj` or Git summaries plus `diff.patch`) and remote stdout/stderr artifacts into the run directory; the orchestrator reads them back into `worker.completed.workspaceChanges` and task artifacts for normal review/projection.
+- Remote worker patches can be reviewed/applied through the normal worker apply endpoint. The service checks patch applicability first, attempts a 3-way fallback on conflict, and returns an explicit conflict/error message when the remote patch cannot be applied safely.
 - Retained isolated worker changes can be reviewed and applied through HTTP/UI; jj apply creates a merge revision and records `worker.changes_applied`.
 - Task-level apply policy recommendations are available through `POST /api/tasks/{id}/apply-policy`; when the orchestrator selected a final candidate, the recommendation is `apply_final` / `already_applied`, with manual selection remaining as a fallback for unresolved competing candidates.
 - Follow-up workers inherit candidate state from the latest changed successful dependency. For jj workspaces this uses the candidate workspace revision; for Git workspaces this copies the base workspace patch into a fresh worktree before running the follow-up worker.
 - Active task steering is delivered to currently running workers through `worker.Spec.Steering` for runners that support mid-run steering. Codex and Claude exec adapters intentionally do not hold stdin open because those CLIs treat piped stdin as extra prompt input and may wait indefinitely.
-- `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison.
+- `benchmark_compare` provides a reusable primitive for explicit numeric before/after benchmark comparison. It supports same-command checks, repeated baseline/candidate samples, minimum sample counts, threshold checks, and median-based verdicts while retaining the simple single-number path.
+- Worker result summaries that contain benchmark, profiler, test, CI, review-comment, deployment, or package report sections are projected into structured task artifacts for auditability and UI display.
 - Repeated worker apply attempts are blocked in the service and already-applied workers render as disabled `Applied` actions in the dashboard.
 - Failed or canceled tasks can be retried through `POST /api/tasks/{id}/retry` and the dashboard. Retry reuses the persisted plan on the same task id, records a new `task.planned`, and runs normal follow-up/replan handling again; this supports picking work back up after daemon restart recovery marks local workers canceled.
 - Scheduler `spawns` now run as dependency-aware follow-up worker turns after the plan's primary worker succeeds; independent spawns run in parallel and dependent spawns wait for prerequisite spawn ids. This applies to both initial plans and dynamic `continue` replans.
@@ -119,9 +123,9 @@ The initial local-first vertical slice is implemented.
   - Service can complete with a final candidate worker created during a dynamic replan turn.
 - Service emits durable execution graph nodes into snapshots.
 - Snapshot projection includes per-task orchestration graphs with dependency edges.
-- Plugin registry tests verify built-in/configured plugin descriptors and executable `describe` probing.
+- Plugin registry tests verify built-in/configured plugin descriptors, executable `describe` probing, supervised driver lifecycles, and runner plugin exposure.
 - Service schedules workers onto local or SSH execution targets and records target/session metadata on execution nodes.
-  - SSH runner tests verify remote change artifact and patch collection/parsing.
+  - SSH runner tests verify remote health probing, remote change artifact collection, and stdout/stderr artifact collection.
   - Service tests verify remote worker patch artifacts route through the normal apply flow.
   - Service delivers task steering to compatible running workers.
   - Service records final task candidates, applies task results through the selected candidate, and publishes GitHub-mode completions through that final candidate.
@@ -140,7 +144,7 @@ The initial local-first vertical slice is implemented.
   - command-not-found
   - Codex/Claude JSONL normalization
   - Codex `turn.completed` does not overwrite the final agent-message summary
-  - Benchmark comparison primitive emits an improvement verdict for explicit before/after inputs
+  - Benchmark comparison primitive emits an improvement verdict for explicit before/after inputs and validates repeated-sample same-command comparisons
 - Workspace tests:
   - service passes the prepared cwd into the runner
   - service emits `worker.workspace_prepared`
@@ -216,7 +220,7 @@ http://127.0.0.1:8787
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
 - User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude exec adapters need an out-of-band resume/session mechanism before they can support mid-run steering safely.
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.
-- SSH target execution exists for pre-provisioned machines and now collects remote VCS summaries/patch artifacts and can apply the patch back locally. Conflict handling is currently delegated to `git apply` errors.
+- SSH target execution exists for pre-provisioned machines and now collects remote VCS summaries/patch/log artifacts and can apply the patch back locally with applicability checks plus a 3-way fallback.
 - GitHub PR publishing and the built-in GitHub driver currently depend on local `gh` authentication and repo remotes being configured.
 - Apply is task-level by default: in local mode the user applies the final selected candidate after the task is terminal; in GitHub mode the task publishes the final candidate as a PR, waits on the external PR lifecycle, and merge is the apply/satisfaction step.
 - Project creation/editing/deletion is DB-backed through the API/UI. Project health checks cover local path accessibility, detected VCS, configured GitHub repo/auth readiness, default base status, and target-label matchability.

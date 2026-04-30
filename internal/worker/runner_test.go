@@ -292,6 +292,37 @@ higher_is_better: true
 	}
 }
 
+func TestBenchmarkCompareRunnerUsesRepeatedSamplesAndSameCommand(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+baseline_command: go test -bench=Parser
+candidate_command: go test -bench=Parser
+baseline_samples: 100, 101, 99
+candidate_samples: 108, 109, 107
+min_samples: 3
+threshold_percent: 5
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sink.events[0].Text, "sample_count: 3") || !strings.Contains(sink.events[0].Text, "verdict: improved") {
+		t.Fatalf("report = %s", sink.events[0].Text)
+	}
+}
+
+func TestBenchmarkCompareRunnerRejectsCommandMismatch(t *testing.T) {
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+baseline_command: go test -bench=Parser
+candidate_command: go test -bench=Lexer
+baseline_samples: 100, 101, 99
+candidate_samples: 108, 109, 107
+`}, &recordingSink{})
+	if err == nil || !strings.Contains(err.Error(), "to match") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 type recordingSink struct {
 	mu     sync.Mutex
 	events []Event

@@ -17,19 +17,19 @@
 
 ## Remote Targets
 
-- [ ] Add live target probes for SSH targets: reachable, tmux available, repo path present, disk, CPU/load, and memory.
-- [ ] Incorporate live target health/resource data into target scheduling, not just configured capacity and assigned worker count.
-- [ ] Improve remote apply conflict handling beyond raw patch application failures.
-- [ ] Store and expose remote artifacts beyond `diff.patch`, such as logs, benchmark output, and profiler reports.
+- [x] Add live target probes for SSH targets: reachable, tmux available, repo path present, disk, CPU/load, and memory.
+- [x] Incorporate live target health/resource data into target scheduling, not just configured capacity and assigned worker count.
+- [x] Improve remote apply conflict handling beyond raw patch application failures.
+- [x] Store and expose remote artifacts beyond `diff.patch`, such as logs, benchmark output, and profiler reports.
 
 ## Plugins And Drivers
 
-- [ ] Turn plugin descriptors into supervised long-running driver lifecycles.
-- [ ] Add driver lifecycle status, logs, restart policy, and failure visibility in snapshots/UI.
-- [ ] Define a runner plugin protocol beyond built-in subprocess adapters.
+- [x] Turn plugin descriptors into supervised long-running driver lifecycles.
+- [x] Add driver lifecycle status, logs, restart policy, and failure visibility in snapshots/UI.
+- [x] Define a runner plugin protocol beyond built-in subprocess adapters.
 
 ## Artifacts And Evaluation
 
-- [ ] Add structured benchmark/profiler artifacts when prompt-parsed text is not enough for comparison, UI display, or auditability.
-- [ ] Extend benchmark comparison to enforce same-command before/after runs, repeated samples, thresholds, and anti-cherry-picking rules.
-- [ ] Add richer task artifacts for deployments, packages, test reports, CI runs, and review comments.
+- [x] Add structured benchmark/profiler artifacts when prompt-parsed text is not enough for comparison, UI display, or auditability.
+- [x] Extend benchmark comparison to enforce same-command before/after runs, repeated samples, thresholds, and anti-cherry-picking rules.
+- [x] Add richer task artifacts for deployments, packages, test reports, CI runs, and review comments.

@@ -126,11 +126,16 @@ func main() {
 		os.Exit(1)
 	}
 	plugins.Probe(ctx)
+	plugins.StartDrivers(ctx)
 
+	runners := worker.DefaultRunners()
+	for kind, runner := range plugins.RunnerPlugins() {
+		runners[kind] = runner
+	}
 	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
 		store,
 		brain,
-		worker.DefaultRunners(),
+		runners,
 		absWorkDir,
 		orchestrator.NewWorkspaceManager(orchestrator.WorkspaceVCS(*workspaceVCS), orchestrator.WorkspaceMode(*workspaceMode), *workspaceRoot, orchestrator.WorkspaceCleanupPolicy(*workspaceCleanup)),
 		targets,
@@ -156,6 +161,7 @@ func main() {
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		slog.Warn("recover workers", "error", err)
 	}
+	service.StartTargetProbes(ctx, 30*time.Second)
 	githubDriverConfig, err := orchestrator.LoadGitHubDriverConfig(*githubDriverPath)
 	if err != nil {
 		slog.Error("load github driver", "error", err)
