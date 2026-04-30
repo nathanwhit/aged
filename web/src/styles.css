@@ -84,6 +84,7 @@ button {
   align-self: start;
   grid-area: main;
   min-width: 0;
+  position: relative;
 }
 
 .dashboard-toolbar {
@@ -93,8 +94,11 @@ button {
   font-size: 12px;
   gap: 8px;
   justify-content: flex-end;
-  margin-bottom: 6px;
+  margin: 0;
   min-height: 32px;
+  position: absolute;
+  right: 0;
+  top: -44px;
 }
 
 .dashboard-toolbar .icon-button {
@@ -113,7 +117,7 @@ button {
 
 .dashboard-pane {
   display: grid;
-  gap: 6px;
+  gap: 0;
   grid-column: span var(--pane-span);
   min-width: 0;
   position: relative;
@@ -139,11 +143,32 @@ button {
 
 .dashboard-pane-chrome {
   align-items: center;
+  background: rgb(255 255 255 / 92%);
+  border: 1px solid #e1e5ea;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
+  bottom: 10px;
   display: flex;
   gap: 8px;
   justify-content: space-between;
-  min-height: 30px;
-  padding: 0 4px;
+  min-height: 0;
+  opacity: 0;
+  padding: 4px;
+  position: absolute;
+  right: 32px;
+  transform: translateY(4px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+  z-index: 3;
+}
+
+.dashboard-pane:hover .dashboard-pane-chrome,
+.dashboard-pane:focus-within .dashboard-pane-chrome,
+.dashboard-pane.dragging .dashboard-pane-chrome,
+.dashboard-pane.resizing .dashboard-pane-chrome {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .dashboard-pane-grip {
@@ -157,7 +182,7 @@ button {
   font-weight: 700;
   gap: 4px;
   min-width: 0;
-  padding: 5px 7px 5px 3px;
+  padding: 5px 4px;
   text-transform: uppercase;
 }
 
@@ -174,15 +199,12 @@ button {
 }
 
 .dashboard-pane-grip span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: none;
 }
 
 .dashboard-pane-actions {
   display: flex;
-  gap: 4px;
+  gap: 3px;
 }
 
 .dashboard-pane-actions .icon-button {
@@ -1927,10 +1949,16 @@ small {
     grid-template-columns: 1fr;
   }
 
+  .dashboard-toolbar {
+    margin-bottom: 8px;
+    position: static;
+  }
+
   .dashboard-pane {
     grid-column: 1 / -1;
   }
 
+  .dashboard-pane-chrome,
   .dashboard-pane-actions,
   .dashboard-pane-resize {
     display: none;

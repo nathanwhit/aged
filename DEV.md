@@ -229,6 +229,7 @@ http://127.0.0.1:8787
 - Assistant Q&A is currently one-shot CLI execution. It records conversation ids, but does not yet resume durable Codex/Claude sessions across asks.
 - Discord conversational quality uses the configured assistant and now benefits from persisted Codex/Claude session resume. MCP remains the cleaner path when an external agent runtime is available.
 - Task retry is currently plan-level retry, not a durable Codex/Claude session resume or first-class graph resume from an arbitrary failed execution node.
+- Dashboard pane cards now align with the left `Start Work` column; dashboard controls float instead of reserving a separate row above `Targets`.
 
 ## Next Work
 
