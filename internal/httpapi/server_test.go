@@ -326,6 +326,15 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	if !found {
 		t.Fatalf("snapshot targets = %+v", snapshot.Targets)
 	}
+
+	healthRes, err := http.Post(server.URL+"/api/targets/local-ci/health", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer healthRes.Body.Close()
+	if healthRes.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d", healthRes.StatusCode)
+	}
 }
 
 func TestMCPProjectTools(t *testing.T) {

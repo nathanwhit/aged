@@ -71,6 +71,7 @@ The initial local-first vertical slice is implemented.
 - Execution target pools are configurable with `-targets` / `AGED_TARGETS`. The default target is local; SSH targets use detached tmux sessions and remote status/log files so work can outlive the SSH connection.
 - Execution targets can also be added, edited, and deleted dynamically through `/api/targets` and the dashboard Targets pane. Dynamic targets are persisted in SQLite and registered with the live scheduler without restarting the daemon.
 - Target registration immediately runs a health probe and the UI shows SSH diagnostics for reachability, tmux availability, repo presence, resources, checked time, and probe errors.
+- Target health can be retried manually with `POST /api/targets/{id}/health` or the target card `Health` button. Editing a target also re-runs the registration path and probes health again.
 - SSH target `identityFile` is optional; when omitted, aged relies on normal OpenSSH behavior such as `ssh-agent` and `~/.ssh/config`.
 - Fresh SSH workers prepare their project checkout before launch: clone the configured project repo if `workDir` is missing, or fetch and detach a clean Git checkout at `origin/<defaultBase>`. Dirty remote checkouts fail fast to avoid destroying partial work; retries and dependency follow-ups reuse the previous remote workdir.
 - SSH target health is probed in the background. Probes report reachability, tmux availability, repo path presence, disk, load/CPU, and memory; snapshots/UI show the current health/resource state.

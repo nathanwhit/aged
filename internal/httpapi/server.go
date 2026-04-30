@@ -44,6 +44,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/targets", s.targets)
 	mux.HandleFunc("POST /api/targets", s.registerTarget)
 	mux.HandleFunc("PUT /api/targets/{id}", s.updateTarget)
+	mux.HandleFunc("POST /api/targets/{id}/health", s.refreshTargetHealth)
 	mux.HandleFunc("DELETE /api/targets/{id}", s.deleteTarget)
 	mux.HandleFunc("GET /api/plugins", s.plugins)
 	mux.HandleFunc("POST /api/plugins", s.registerPlugin)
@@ -187,6 +188,23 @@ func (s *Server) updateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, registered)
+}
+
+func (s *Server) refreshTargetHealth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.service.RefreshTargetHealthFor(r.Context(), id)
+	snapshot, err := s.service.Snapshot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	for _, target := range snapshot.Targets {
+		if target.ID == id {
+			writeJSON(w, http.StatusOK, target)
+			return
+		}
+	}
+	writeError(w, eventstore.ErrNotFound)
 }
 
 func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request) {

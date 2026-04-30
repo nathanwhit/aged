@@ -174,6 +174,14 @@ export async function deleteTarget(id: string): Promise<void> {
   }
 }
 
+export async function refreshTargetHealth(id: string): Promise<TargetState> {
+  const response = await fetch(`/api/targets/${encodeURIComponent(id)}/health`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
 export async function getProjectHealth(id: string): Promise<ProjectHealth> {
   const response = await fetch(`/api/projects/${encodeURIComponent(id)}/health`);
   if (!response.ok) {

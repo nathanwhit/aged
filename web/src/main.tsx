@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -231,6 +231,11 @@ function App() {
           onDelete={async (id) => {
             setError("");
             await deleteTarget(id);
+            await refresh();
+          }}
+          onProbe={async (id) => {
+            setError("");
+            await refreshTargetHealth(id);
             await refresh();
           }}
           onError={setError}
@@ -2071,12 +2076,14 @@ function TargetPanel({
   onRegister,
   onUpdate,
   onDelete,
+  onProbe,
   onError,
 }: {
   targets: TargetState[];
   onRegister: (target: TargetInput) => Promise<void>;
   onUpdate: (id: string, target: TargetInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  onProbe: (id: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [showForm, setShowForm] = useState(false);
@@ -2095,6 +2102,7 @@ function TargetPanel({
   const [cpuWeight, setCpuWeight] = useState("1");
   const [memoryGB, setMemoryGB] = useState("");
   const [labelEntries, setLabelEntries] = useState<PluginConfigEntry[]>([]);
+  const [probingTargetId, setProbingTargetId] = useState("");
 
   const reset = () => {
     setShowForm(false);
@@ -2168,6 +2176,17 @@ function TargetPanel({
       onError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const retryHealth = async (targetId: string) => {
+    try {
+      setProbingTargetId(targetId);
+      await onProbe(targetId);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProbingTargetId("");
     }
   };
 
@@ -2297,6 +2316,10 @@ function TargetPanel({
               </div>
             )}
             <div className="plugin-card-actions">
+              <button className="secondary" disabled={probingTargetId === target.id} onClick={() => retryHealth(target.id)}>
+                <RefreshCw size={14} />
+                Health
+              </button>
               <button className="secondary" onClick={() => edit(target)}>Edit</button>
               <button
                 className="secondary danger-text"
