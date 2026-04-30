@@ -584,6 +584,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 		return PreparedWorkspace{}, fmt.Errorf("read git status: %w", err)
 	}
 	sourceStatus = strings.TrimSpace(sourceStatus)
+	sourceDirty := gitSourceStatusDirty(sourceStatus)
 
 	if m.Mode == WorkspaceModeShared {
 		return PreparedWorkspace{
@@ -596,7 +597,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 			Status:        sourceStatus,
 			SourceStatus:  sourceStatus,
 			Dirty:         gitStatusDirty(sourceStatus),
-			SourceDirty:   gitStatusDirty(sourceStatus),
+			SourceDirty:   sourceDirty,
 			Mode:          string(WorkspaceModeShared),
 			VCSType:       "git",
 			CleanupPolicy: string(WorkspaceCleanupRetain),
@@ -604,7 +605,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 			TaskID:        spec.TaskID,
 		}, nil
 	}
-	if gitStatusDirty(sourceStatus) {
+	if sourceDirty {
 		return PreparedWorkspace{}, errors.New("isolated git workspaces require a clean source working tree")
 	}
 
@@ -648,7 +649,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 		Status:        status,
 		SourceStatus:  sourceStatus,
 		Dirty:         gitStatusDirty(status),
-		SourceDirty:   gitStatusDirty(sourceStatus),
+		SourceDirty:   sourceDirty,
 		Mode:          string(WorkspaceModeIsolated),
 		VCSType:       "git",
 		CleanupPolicy: m.cleanupPolicy(),
@@ -1033,6 +1034,25 @@ func gitStatusDirty(status string) bool {
 		}
 	}
 	return false
+}
+
+func gitSourceStatusDirty(status string) bool {
+	for _, line := range strings.Split(status, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "##") || gitStatusLineIsAgedState(line) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func gitStatusLineIsAgedState(line string) bool {
+	if !strings.HasPrefix(line, "?? ") {
+		return false
+	}
+	path := strings.TrimSpace(strings.TrimPrefix(line, "?? "))
+	return path == ".aged" || path == ".aged/" || strings.HasPrefix(path, ".aged/")
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {

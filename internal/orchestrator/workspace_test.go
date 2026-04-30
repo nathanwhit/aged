@@ -59,6 +59,12 @@ func TestGitStatusDirty(t *testing.T) {
 	if !gitStatusDirty("## main\n M file.go") {
 		t.Fatalf("modified file should be dirty")
 	}
+	if gitSourceStatusDirty("## main\n?? .aged/") {
+		t.Fatalf("untracked aged state should not dirty git source checkouts")
+	}
+	if !gitSourceStatusDirty("## main\n?? .aged/\n M file.go") {
+		t.Fatalf("real source changes should dirty git source checkouts")
+	}
 }
 
 func TestDefaultWorkspaceRootUsesUserAgedDirectory(t *testing.T) {
@@ -222,6 +228,32 @@ func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
 	subject := strings.TrimSpace(runTestGit(t, followUp.CWD, "log", "-1", "--pretty=%s"))
 	if subject != "Base worker candidate" {
 		t.Fatalf("follow-up base commit subject = %q", subject)
+	}
+}
+
+func TestGitWorkspaceManagerAllowsLegacyAgedStateInSource(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, ".aged", "workspaces", "legacy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".aged", "workspaces", "legacy", "state"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker-with-legacy-state",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(workspace.SourceStatus, "?? .aged/") {
+		t.Fatalf("source status = %q, want legacy state recorded", workspace.SourceStatus)
+	}
+	if workspace.SourceDirty {
+		t.Fatalf("legacy aged state should not mark source dirty")
 	}
 }
 
