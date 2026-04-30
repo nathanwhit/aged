@@ -38,7 +38,7 @@ func main() {
 		claudePath        = flag.String("claude-path", envOr("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for the assistant")
 		workspaceVCS      = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
 		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
-		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "directory for isolated worker workspaces")
+		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ""), "directory for isolated worker workspaces; empty defaults to ~/.aged/workspaces")
 		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
 		targetsPath       = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
 		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")

@@ -223,7 +223,8 @@ http://127.0.0.1:8787
 - Claude smoke used `--no-session-persistence` to avoid durable state from a disposable parser probe. The default runner does not hard-code that policy.
 - Isolated workspace mode is the default.
 - Jujutsu isolated workspaces are created with `jj workspace add -r @`.
-- Git isolated workspaces are implemented with `git worktree add --detach HEAD`, but require a clean source working tree because Git worktrees cannot safely carry uncommitted source changes.
+- When no workspace root is configured, isolated workspaces default to `~/.aged/workspaces`; relative workspace roots are resolved inside the source checkout for explicit project-local setups.
+- Git isolated workspaces are implemented with `git worktree add --detach HEAD`, but require a clean source working tree because Git worktrees cannot safely carry uncommitted source changes. Dependent Git workers copy the parent candidate into a committed base revision, including untracked files.
 - Tests that run real `jj` preflight may need permission to let `jj` snapshot `.git/objects` in the sandbox.
 - User steering is recorded as events and delivered to compatible active runners through `worker.Spec.Steering`; Codex/Claude exec adapters need an out-of-band resume/session mechanism before they can support mid-run steering safely.
 - Multi-turn orchestration executes initial and dynamically replanned `spawns` as dependency graphs. Dynamic replanning still has a bounded maximum turn count.

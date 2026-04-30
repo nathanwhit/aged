@@ -61,6 +61,21 @@ func TestGitStatusDirty(t *testing.T) {
 	}
 }
 
+func TestDefaultWorkspaceRootUsesUserAgedDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	gitManager := NewGitWorkspaceManager(WorkspaceModeIsolated, "", WorkspaceCleanupRetain)
+	if gitManager.WorkspaceRoot != filepath.Join(home, ".aged", "workspaces") {
+		t.Fatalf("git workspace root = %q", gitManager.WorkspaceRoot)
+	}
+
+	jjManager := NewJJWorkspaceManager(WorkspaceModeIsolated, "", WorkspaceCleanupRetain)
+	if jjManager.WorkspaceRoot != filepath.Join(home, ".aged", "workspaces") {
+		t.Fatalf("jj workspace root = %q", jjManager.WorkspaceRoot)
+	}
+}
+
 func TestParseJJDiffSummary(t *testing.T) {
 	files := parseJJDiffSummary("M internal/orchestrator/service.go\nA web/src/types.ts\nD old.txt\n")
 	if len(files) != 3 {
@@ -153,6 +168,63 @@ func TestJJWorkspaceManagerApplyBackfillsWorkerDescription(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	base, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "base-worker",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, "file.txt"), []byte("base candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base.CWD, "tests", "bench"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, "tests", "bench", "serve_ab.ts"), []byte("console.log('bench')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	followUp, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:      "task",
+		WorkerID:    "followup-worker",
+		WorkDir:     repo,
+		BaseWorkDir: base.CWD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(filepath.Join(followUp.CWD, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "base candidate\n" {
+		t.Fatalf("tracked file contents = %q", contents)
+	}
+	untrackedContents, err := os.ReadFile(filepath.Join(followUp.CWD, "tests", "bench", "serve_ab.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(untrackedContents) != "console.log('bench')\n" {
+		t.Fatalf("untracked file contents = %q", untrackedContents)
+	}
+	status := strings.TrimSpace(runTestGit(t, followUp.CWD, "status", "--porcelain=v1"))
+	if status != "" {
+		t.Fatalf("follow-up workspace status = %q, want clean committed base candidate", status)
+	}
+	subject := strings.TrimSpace(runTestGit(t, followUp.CWD, "log", "-1", "--pretty=%s"))
+	if subject != "Base worker candidate" {
+		t.Fatalf("follow-up base commit subject = %q", subject)
+	}
+}
+
 func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
 	changedFiles := []WorkspaceChangedFile{
 		{Path: "internal/orchestrator/workspace.go", Status: "modified"},
@@ -213,6 +285,21 @@ func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
 	}
 }
 
+func initGitTestRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	repo := t.TempDir()
+	runTestGit(t, repo, "init")
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "commit", "-m", "base")
+	return repo
+}
+
 func initJJTestRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("jj"); err != nil {
@@ -225,6 +312,17 @@ func initJJTestRepo(t *testing.T) string {
 	}
 	runTestJJ(t, repo, "describe", "--message", "base")
 	return repo
+}
+
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 func runTestJJ(t *testing.T, dir string, args ...string) string {

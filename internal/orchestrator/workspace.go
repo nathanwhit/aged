@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -228,7 +229,9 @@ func NewJJWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPoli
 		mode = WorkspaceModeIsolated
 	}
 	if workspaceRoot == "" {
-		workspaceRoot = ".aged/workspaces"
+		workspaceRoot = defaultWorkspaceRoot()
+	} else {
+		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
 	}
 	if cleanupPolicy == "" {
 		cleanupPolicy = WorkspaceCleanupRetain
@@ -365,7 +368,9 @@ func (m JJWorkspaceManager) workspaceDestination(root string, spec WorkspaceSpec
 	name := "aged-" + shortID(spec.WorkerID)
 	workspaceRoot := m.WorkspaceRoot
 	if workspaceRoot == "" {
-		workspaceRoot = ".aged/workspaces"
+		workspaceRoot = defaultWorkspaceRoot()
+	} else {
+		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
 	}
 	if !filepath.IsAbs(workspaceRoot) {
 		workspaceRoot = filepath.Join(root, workspaceRoot)
@@ -525,7 +530,9 @@ func NewGitWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPol
 		mode = WorkspaceModeIsolated
 	}
 	if workspaceRoot == "" {
-		workspaceRoot = ".aged/workspaces"
+		workspaceRoot = defaultWorkspaceRoot()
+	} else {
+		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
 	}
 	if cleanupPolicy == "" {
 		cleanupPolicy = WorkspaceCleanupRetain
@@ -770,20 +777,27 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 	if err != nil {
 		return fmt.Errorf("read git base workspace diff: %w", err)
 	}
-	if strings.TrimSpace(diff) == "" {
-		return nil
-	}
-	cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn")
-	cmd.Dir = destination
-	cmd.Stdin = strings.NewReader(diff)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("apply git base workspace diff: %w: %s", err, detail)
+	hasChanges := strings.TrimSpace(diff) != ""
+	if hasChanges {
+		cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn")
+		cmd.Dir = destination
+		cmd.Stdin = strings.NewReader(diff)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("apply git base workspace diff: %w: %s", err, detail)
+			}
+			return fmt.Errorf("apply git base workspace diff: %w", err)
 		}
-		return fmt.Errorf("apply git base workspace diff: %w", err)
+	}
+	copiedUntracked, err := copyGitUntrackedFiles(ctx, source, destination)
+	if err != nil {
+		return err
+	}
+	if !hasChanges && !copiedUntracked {
+		return nil
 	}
 	if _, err := runGit(ctx, destination, "add", "-A"); err != nil {
 		return fmt.Errorf("stage git base workspace diff: %w", err)
@@ -792,6 +806,69 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil
+}
+
+func copyGitUntrackedFiles(ctx context.Context, source string, destination string) (bool, error) {
+	untracked, err := runGit(ctx, source, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return false, fmt.Errorf("list git base workspace untracked files: %w", err)
+	}
+	copied := false
+	for _, path := range strings.Split(untracked, "\x00") {
+		if path == "" {
+			continue
+		}
+		sourcePath, err := safeWorkspacePath(source, path)
+		if err != nil {
+			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
+		}
+		destinationPath, err := safeWorkspacePath(destination, path)
+		if err != nil {
+			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
+		}
+		if err := copyWorkspaceFile(sourcePath, destinationPath); err != nil {
+			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
+		}
+		copied = true
+	}
+	return copied, nil
+}
+
+func safeWorkspacePath(root string, relativePath string) (string, error) {
+	if filepath.IsAbs(relativePath) {
+		return "", errors.New("absolute paths are not allowed")
+	}
+	clean := filepath.Clean(relativePath)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", errors.New("paths outside the workspace are not allowed")
+	}
+	return filepath.Join(root, clean), nil
+}
+
+func copyWorkspaceFile(source string, destination string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		target, err := os.Readlink(source)
+		if err != nil {
+			return err
+		}
+		_ = os.Remove(destination)
+		return os.Symlink(target, destination)
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destination, contents, info.Mode().Perm())
 }
 
 func cleanupDecision(workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, bool) {
@@ -912,12 +989,40 @@ func normalizeChangeStatus(status string) string {
 func gitWorkspaceDestination(root string, workspaceRoot string, spec WorkspaceSpec) (string, string) {
 	name := "aged-" + shortID(spec.WorkerID)
 	if workspaceRoot == "" {
-		workspaceRoot = ".aged/workspaces"
+		workspaceRoot = defaultWorkspaceRoot()
+	} else {
+		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
 	}
 	if !filepath.IsAbs(workspaceRoot) {
 		workspaceRoot = filepath.Join(root, workspaceRoot)
 	}
 	return filepath.Join(workspaceRoot, name), name
+}
+
+func defaultWorkspaceRoot() string {
+	home, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".aged", "workspaces")
+	}
+	return ".aged/workspaces"
+}
+
+func expandWorkspaceRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "~" {
+		home, err := os.UserHomeDir()
+		if err == nil && strings.TrimSpace(home) != "" {
+			return home
+		}
+		return root
+	}
+	if strings.HasPrefix(root, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil && strings.TrimSpace(home) != "" {
+			return filepath.Join(home, strings.TrimPrefix(root, "~/"))
+		}
+	}
+	return root
 }
 
 func gitStatusDirty(status string) bool {

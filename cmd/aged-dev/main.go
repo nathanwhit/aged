@@ -60,7 +60,7 @@ func main() {
 		brainMode         = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
 		workspaceVCS      = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "aged daemon workspace VCS")
 		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
-		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ".aged/workspaces"), "aged daemon workspace root")
+		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ""), "aged daemon workspace root; empty defaults to ~/.aged/workspaces")
 		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "aged daemon workspace cleanup policy")
 		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "aged daemon GitHub driver config JSON path or inline JSON")
 		discordDriverPath = flag.String("discord-driver", envOr("AGED_DISCORD_DRIVER", ""), "aged daemon Discord driver config JSON path or inline JSON")
