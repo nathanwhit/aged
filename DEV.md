@@ -13,6 +13,7 @@ The initial local-first vertical slice is implemented.
 - SSE event stream for live dashboard updates.
 - Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
 - Plugin manifests are first-class snapshot/API state. Built-in brain/runner/driver capabilities are projected by default, and `-plugins` / `AGED_PLUGINS` can add external plugin descriptors for drivers, runners, or integrations. Enabled `aged-plugin-v1` command plugins are probed at startup with `command... describe`.
+- Plugins can be registered dynamically through `POST /api/plugins`, updated with `PUT /api/plugins/{id}`, deleted with `DELETE /api/plugins/{id}`, and managed from the dashboard Plugins panel. Runtime registrations are persisted in SQLite and reloaded on daemon restart.
 - Enabled `aged-plugin-v1` driver plugins are supervised as long-running `command... serve` processes. Snapshots/UI expose driver lifecycle state, PID, restart policy, restart count, recent logs, and failures.
 - Enabled `aged-runner-v1` runner plugins become worker kinds. The daemon invokes `command... run`, sends the worker spec as JSON on stdin, and consumes JSON worker events from stdout/stderr.
 - Project registry support for managing multiple local repositories from one daemon. Projects are persisted in SQLite; `-projects` / `AGED_PROJECTS` seeds an empty database, otherwise the daemon creates a default project from `-workdir`. Tasks can carry `projectId`, and external task metadata can map a `repo` to a configured project.
@@ -123,7 +124,7 @@ The initial local-first vertical slice is implemented.
   - Service can complete with a final candidate worker created during a dynamic replan turn.
 - Service emits durable execution graph nodes into snapshots.
 - Snapshot projection includes per-task orchestration graphs with dependency edges.
-- Plugin registry tests verify built-in/configured plugin descriptors, executable `describe` probing, supervised driver lifecycles, and runner plugin exposure.
+- Plugin registry and API tests verify built-in/configured plugin descriptors, executable `describe` probing, supervised driver lifecycles, runner plugin exposure, dynamic registration, and SQLite persistence.
 - Service schedules workers onto local or SSH execution targets and records target/session metadata on execution nodes.
   - SSH runner tests verify remote health probing, remote change artifact collection, and stdout/stderr artifact collection.
   - Service tests verify remote worker patch artifacts route through the normal apply flow.
@@ -231,17 +232,10 @@ http://127.0.0.1:8787
 ## Next Work
 
 - Add more tests for event replay and state reconstruction.
-- Add richer artifact semantics beyond PRs and changed source files.
-- Add structured benchmark/profiler artifact semantics when prompt-parsed text stops being reliable enough for comparison, UI display, or audit trails.
-- Extend benchmark comparison beyond explicit numeric prompt fields if the orchestrator needs to enforce same-command before/after runs, repeated samples, thresholds, or anti-cherry-picking rules.
 - Add UI affordances for workspace location and cleanup status.
 - Exercise the Codex/API brains against real code-editing tasks and continue tuning `prompts/scheduler.md`.
 - Exercise dynamic replanning with a real Codex brain on a retained self-editing task.
-- Extend the executable plugin process protocol beyond startup `describe` probing into long-running driver lifecycle management.
 - Improve task cancellation so task-scoped worker indexing survives daemon restart.
-- Add approval request/decision flow in the UI and orchestrator.
-- Add richer remote apply conflict handling and optional remote artifact download/storage beyond the current patch application path.
-- Add live SSH resource probes for CPU/memory/load rather than relying only on configured capacity and assigned worker count.
 - Ingest GitHub review comments/check logs as richer structured context for babysitter tasks.
 - Add configurable PR publish policy for branch naming, base branch detection, draft-vs-ready default, repo selection, merge permissions, and whether aged should ever merge automatically.
 - Finish project CRUD and health checks in the UI/API, including editing/deletion, repo path validation, VCS detection, default branch discovery, and per-project runner/target policy.

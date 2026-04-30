@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 type PluginRegistry struct {
 	mu           sync.Mutex
 	plugins      []core.Plugin
+	driverCancel map[string]context.CancelFunc
 	probeCommand func(context.Context, []string) ([]byte, error)
 }
 
@@ -46,27 +48,11 @@ func LoadPluginRegistry(path string) (*PluginRegistry, error) {
 func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 	byID := map[string]core.Plugin{}
 	for _, plugin := range plugins {
-		plugin.ID = strings.TrimSpace(plugin.ID)
-		if plugin.ID == "" {
+		normalized, err := normalizePlugin(plugin)
+		if err != nil {
 			continue
 		}
-		if plugin.Name == "" {
-			plugin.Name = plugin.ID
-		}
-		if plugin.Kind == "" {
-			plugin.Kind = "external"
-		}
-		if plugin.Protocol == "" && len(plugin.Command) > 0 {
-			plugin.Protocol = "aged-plugin-v1"
-		}
-		if plugin.Status == "" {
-			if plugin.Enabled {
-				plugin.Status = "ready"
-			} else {
-				plugin.Status = "disabled"
-			}
-		}
-		byID[plugin.ID] = plugin
+		byID[normalized.ID] = normalized
 	}
 	out := make([]core.Plugin, 0, len(byID))
 	for _, plugin := range byID {
@@ -78,7 +64,99 @@ func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 		}
 		return out[i].Kind < out[j].Kind
 	})
-	return &PluginRegistry{plugins: out, probeCommand: runPluginCommand}
+	return &PluginRegistry{plugins: out, driverCancel: map[string]context.CancelFunc{}, probeCommand: runPluginCommand}
+}
+
+func normalizePlugin(plugin core.Plugin) (core.Plugin, error) {
+	plugin.ID = strings.TrimSpace(plugin.ID)
+	if plugin.ID == "" {
+		return core.Plugin{}, errors.New("plugin id is required")
+	}
+	plugin.Name = strings.TrimSpace(plugin.Name)
+	if plugin.Name == "" {
+		plugin.Name = plugin.ID
+	}
+	plugin.Kind = strings.TrimSpace(plugin.Kind)
+	if plugin.Kind == "" {
+		plugin.Kind = "external"
+	}
+	plugin.Protocol = strings.TrimSpace(plugin.Protocol)
+	if plugin.Protocol == "" && len(plugin.Command) > 0 {
+		plugin.Protocol = "aged-plugin-v1"
+	}
+	if plugin.Config == nil {
+		plugin.Config = map[string]string{}
+	}
+	if plugin.Status == "" {
+		if plugin.Enabled {
+			plugin.Status = "ready"
+		} else {
+			plugin.Status = "disabled"
+		}
+	}
+	return plugin, nil
+}
+
+func (r *PluginRegistry) Register(plugin core.Plugin) (core.Plugin, error) {
+	if r == nil {
+		return core.Plugin{}, errors.New("plugin registry is not configured")
+	}
+	normalized, err := normalizePlugin(plugin)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	replaced := false
+	for index, existing := range r.plugins {
+		if existing.ID == normalized.ID {
+			normalized.Driver = existing.Driver
+			r.plugins[index] = normalized
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		r.plugins = append(r.plugins, normalized)
+	}
+	sort.Slice(r.plugins, func(i, j int) bool {
+		if r.plugins[i].Kind == r.plugins[j].Kind {
+			return r.plugins[i].ID < r.plugins[j].ID
+		}
+		return r.plugins[i].Kind < r.plugins[j].Kind
+	})
+	return normalized, nil
+}
+
+func (r *PluginRegistry) Delete(id string) error {
+	if r == nil {
+		return errors.New("plugin registry is not configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("plugin id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index, plugin := range r.plugins {
+		if plugin.ID != id {
+			continue
+		}
+		if cancel := r.driverCancel[id]; cancel != nil {
+			cancel()
+			delete(r.driverCancel, id)
+		}
+		if plugin.Driver.Managed && plugin.Driver.PID != 0 {
+			plugin.Enabled = false
+			plugin.Status = "disabled"
+			plugin.Driver.PID = 0
+			r.plugins[index] = plugin
+			return nil
+		}
+		r.plugins = append(r.plugins[:index], r.plugins[index+1:]...)
+		return nil
+	}
+	return errors.New("plugin not found")
 }
 
 func (r *PluginRegistry) Snapshot() []core.Plugin {
@@ -179,7 +257,9 @@ func (r *PluginRegistry) StartDrivers(ctx context.Context) {
 		plugin.Driver.RestartPolicy = nonEmpty(plugin.Config["restart"], "on_failure")
 		plugin.Status = "starting"
 		r.updatePlugin(index, plugin)
-		go r.superviseDriver(ctx, index)
+		driverCtx, cancel := context.WithCancel(ctx)
+		r.setDriverCancel(plugin.ID, cancel)
+		go r.superviseDriver(driverCtx, index)
 	}
 }
 
@@ -223,6 +303,7 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 			plugin.Status = "stopped"
 			plugin.Error = ""
 			r.updatePlugin(index, plugin)
+			r.clearDriverCancel(plugin.ID)
 			return
 		}
 		if err != nil {
@@ -234,6 +315,7 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 		}
 		r.updatePlugin(index, plugin)
 		if !shouldRestartPlugin(plugin, err) {
+			r.clearDriverCancel(plugin.ID)
 			return
 		}
 		plugin.Driver.RestartCount++
@@ -245,6 +327,21 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 		case <-time.After(restartBackoff(plugin.Driver.RestartCount)):
 		}
 	}
+}
+
+func (r *PluginRegistry) setDriverCancel(id string, cancel context.CancelFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.driverCancel == nil {
+		r.driverCancel = map[string]context.CancelFunc{}
+	}
+	r.driverCancel[id] = cancel
+}
+
+func (r *PluginRegistry) clearDriverCancel(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.driverCancel, id)
 }
 
 func (r *PluginRegistry) captureDriverLogs(index int, stream string, reader io.Reader) {

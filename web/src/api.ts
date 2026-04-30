@@ -1,4 +1,4 @@
-import type { Project, ProjectHealth, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
+import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -89,6 +89,37 @@ export async function updateProject(id: string, input: {
 
 export async function deleteProject(id: string): Promise<void> {
   const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+}
+
+export async function registerPlugin(input: Plugin): Promise<Plugin> {
+  const response = await fetch("/api/plugins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function updatePlugin(id: string, input: Plugin): Promise<Plugin> {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function deletePlugin(id: string): Promise<void> {
+  const response = await fetch(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }

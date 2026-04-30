@@ -72,6 +72,22 @@ CREATE TABLE IF NOT EXISTS settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS plugins (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	protocol TEXT NOT NULL DEFAULT '',
+	enabled INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '',
+	command TEXT NOT NULL DEFAULT '[]',
+	endpoint TEXT NOT NULL DEFAULT '',
+	capabilities TEXT NOT NULL DEFAULT '[]',
+	config TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -116,6 +132,103 @@ func (s *SQLiteStore) ensureProjectColumn(ctx context.Context, name string, defi
 	}
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE projects ADD COLUMN %s %s", name, definition))
 	return err
+}
+
+func (s *SQLiteStore) ListPlugins(ctx context.Context) ([]core.Plugin, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, name, kind, protocol, enabled, status, error, command, endpoint, capabilities, config
+FROM plugins
+ORDER BY kind ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var plugins []core.Plugin
+	for rows.Next() {
+		plugin, err := scanPlugin(rows)
+		if err != nil {
+			return nil, err
+		}
+		plugins = append(plugins, plugin)
+	}
+	return plugins, rows.Err()
+}
+
+func (s *SQLiteStore) SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	command, err := json.Marshal(plugin.Command)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	capabilities, err := json.Marshal(plugin.Capabilities)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	config, err := json.Marshal(plugin.Config)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	if string(command) == "null" {
+		command = []byte("[]")
+	}
+	if string(capabilities) == "null" {
+		capabilities = []byte("[]")
+	}
+	if string(config) == "null" {
+		config = []byte("{}")
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO plugins (id, name, kind, protocol, enabled, status, error, command, endpoint, capabilities, config, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	name = excluded.name,
+	kind = excluded.kind,
+	protocol = excluded.protocol,
+	enabled = excluded.enabled,
+	status = excluded.status,
+	error = excluded.error,
+	command = excluded.command,
+	endpoint = excluded.endpoint,
+	capabilities = excluded.capabilities,
+	config = excluded.config,
+	updated_at = excluded.updated_at`,
+		plugin.ID,
+		plugin.Name,
+		plugin.Kind,
+		plugin.Protocol,
+		boolInt(plugin.Enabled),
+		plugin.Status,
+		plugin.Error,
+		string(command),
+		plugin.Endpoint,
+		string(capabilities),
+		string(config),
+		now,
+		now,
+	)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	return plugin, nil
+}
+
+func (s *SQLiteStore) DeletePlugin(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("plugin id is required")
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM plugins WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *SQLiteStore) Append(ctx context.Context, event core.Event) (core.Event, error) {
@@ -1006,6 +1119,53 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		}
 	}
 	return project, nil
+}
+
+func scanPlugin(scanner eventScanner) (core.Plugin, error) {
+	var plugin core.Plugin
+	var enabled int
+	var command string
+	var capabilities string
+	var config string
+	if err := scanner.Scan(
+		&plugin.ID,
+		&plugin.Name,
+		&plugin.Kind,
+		&plugin.Protocol,
+		&enabled,
+		&plugin.Status,
+		&plugin.Error,
+		&command,
+		&plugin.Endpoint,
+		&capabilities,
+		&config,
+	); err != nil {
+		return core.Plugin{}, err
+	}
+	plugin.Enabled = enabled != 0
+	if command != "" {
+		if err := json.Unmarshal([]byte(command), &plugin.Command); err != nil {
+			return core.Plugin{}, err
+		}
+	}
+	if capabilities != "" {
+		if err := json.Unmarshal([]byte(capabilities), &plugin.Capabilities); err != nil {
+			return core.Plugin{}, err
+		}
+	}
+	if config != "" {
+		if err := json.Unmarshal([]byte(config), &plugin.Config); err != nil {
+			return core.Plugin{}, err
+		}
+	}
+	return plugin, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func scanEvent(scanner eventScanner) (core.Event, error) {

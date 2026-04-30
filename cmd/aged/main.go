@@ -145,7 +145,12 @@ func main() {
 		slog.Error("initialize projects", "error", err)
 		os.Exit(1)
 	}
+	service.SetPluginRuntimeContext(ctx)
 	service.SetPlugins(plugins)
+	if err := service.LoadRegisteredPlugins(ctx); err != nil {
+		slog.Error("initialize registered plugins", "error", err)
+		os.Exit(1)
+	}
 	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
 		CodexPath:  *codexPath,
 		ClaudePath: *claudePath,

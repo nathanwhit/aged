@@ -64,6 +64,7 @@ type Service struct {
 	workDir     string
 	projects    *ProjectRegistry
 	plugins     *PluginRegistry
+	pluginCtx   context.Context
 	workspaces  WorkspaceManager
 	targets     *TargetRegistry
 	sshRunner   SSHRunner
@@ -386,6 +387,79 @@ func (s *Service) SetPlugins(plugins *PluginRegistry) {
 	if plugins != nil {
 		s.plugins = plugins
 	}
+}
+
+func (s *Service) SetPluginRuntimeContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.pluginCtx = ctx
+}
+
+func (s *Service) LoadRegisteredPlugins(ctx context.Context) error {
+	plugins, err := s.store.ListPlugins(ctx)
+	if err != nil {
+		return err
+	}
+	for _, plugin := range plugins {
+		if _, err := s.registerPluginRuntime(plugin, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) RegisterPlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error) {
+	registered, err := s.registerPluginRuntime(plugin, true)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	return s.store.SavePlugin(ctx, registered)
+}
+
+func (s *Service) DeletePlugin(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("plugin id is required")
+	}
+	if err := s.store.DeletePlugin(ctx, id); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+		return err
+	}
+	if err := s.plugins.Delete(id); err != nil {
+		return err
+	}
+	delete(s.runners, strings.TrimPrefix(id, "runner:"))
+	return nil
+}
+
+func (s *Service) registerPluginRuntime(plugin core.Plugin, probe bool) (core.Plugin, error) {
+	if s.plugins == nil {
+		s.plugins = NewPluginRegistry(nil)
+	}
+	registered, err := s.plugins.Register(plugin)
+	if err != nil {
+		return core.Plugin{}, err
+	}
+	if probe {
+		s.plugins.Probe(context.Background())
+		for _, current := range s.plugins.Snapshot() {
+			if current.ID == registered.ID {
+				registered = current
+				break
+			}
+		}
+	}
+	for kind, runner := range s.plugins.RunnerPlugins() {
+		s.runners[kind] = runner
+	}
+	if registered.Kind == "driver" && registered.Enabled {
+		ctx := s.pluginCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		s.plugins.StartDrivers(ctx)
+	}
+	return registered, nil
 }
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {

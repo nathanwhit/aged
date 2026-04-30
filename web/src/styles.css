@@ -453,6 +453,10 @@ textarea {
   color: #8f2d2d;
 }
 
+button.danger-text {
+  color: #8f2d2d;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
@@ -1548,6 +1552,29 @@ small {
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.plugin-register {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.plugin-register textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  grid-column: 1 / -1;
+  resize: vertical;
+}
+
+.plugin-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.plugin-card-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: end;
 }
 
 .plugin-card,

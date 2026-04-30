@@ -309,6 +309,47 @@ func TestProjectsUpdateAndDeleteInSQLite(t *testing.T) {
 	}
 }
 
+func TestPluginsPersistInSQLite(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	plugin := core.Plugin{
+		ID:           "runner:lint",
+		Name:         "Lint Runner",
+		Kind:         "runner",
+		Protocol:     "aged-runner-v1",
+		Enabled:      true,
+		Status:       "ready",
+		Command:      []string{"aged-lint"},
+		Capabilities: []string{"lint"},
+		Config:       map[string]string{"restart": "never"},
+	}
+	if _, err := store.SavePlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	plugins, err := store.ListPlugins(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 1 || plugins[0].ID != "runner:lint" || plugins[0].Command[0] != "aged-lint" || plugins[0].Config["restart"] != "never" {
+		t.Fatalf("plugins = %+v", plugins)
+	}
+	if err := store.DeletePlugin(ctx, "runner:lint"); err != nil {
+		t.Fatal(err)
+	}
+	plugins, err = store.ListPlugins(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 0 {
+		t.Fatalf("plugins after delete = %+v", plugins)
+	}
+}
+
 func TestSnapshotHidesClearedTasksAndKeepsEvents(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

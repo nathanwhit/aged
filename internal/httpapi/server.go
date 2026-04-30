@@ -42,6 +42,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 	mux.HandleFunc("GET /api/projects/{id}/health", s.projectHealth)
 	mux.HandleFunc("GET /api/plugins", s.plugins)
+	mux.HandleFunc("POST /api/plugins", s.registerPlugin)
+	mux.HandleFunc("PUT /api/plugins/{id}", s.updatePlugin)
+	mux.HandleFunc("DELETE /api/plugins/{id}", s.deletePlugin)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
 	mux.HandleFunc("POST /api/assistant", s.assistant)
@@ -144,6 +147,49 @@ func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, snapshot.Plugins)
+}
+
+func (s *Server) registerPlugin(w http.ResponseWriter, r *http.Request) {
+	var plugin core.Plugin
+	if err := decodeJSON(r, &plugin); err != nil {
+		writeError(w, err)
+		return
+	}
+	registered, err := s.service.RegisterPlugin(r.Context(), plugin)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, registered)
+}
+
+func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) {
+	var plugin core.Plugin
+	if err := decodeJSON(r, &plugin); err != nil {
+		writeError(w, err)
+		return
+	}
+	if plugin.ID == "" {
+		plugin.ID = r.PathValue("id")
+	}
+	if plugin.ID != r.PathValue("id") {
+		writeError(w, fmt.Errorf("plugin id mismatch"))
+		return
+	}
+	registered, err := s.service.RegisterPlugin(r.Context(), plugin)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, registered)
+}
+
+func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.DeletePlugin(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {

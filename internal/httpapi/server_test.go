@@ -229,6 +229,57 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	}
 }
 
+func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/plugins", "application/json", strings.NewReader(`{
+		"id": "runner:lint",
+		"name": "Lint Runner",
+		"kind": "runner",
+		"protocol": "aged-runner-v1",
+		"enabled": true,
+		"command": ["aged-lint"],
+		"capabilities": ["lint"]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+
+	plugins, err := store.ListPlugins(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plugins) != 1 || plugins[0].ID != "runner:lint" {
+		t.Fatalf("plugins = %+v", plugins)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, plugin := range snapshot.Plugins {
+		if plugin.ID == "runner:lint" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("snapshot plugins = %+v", snapshot.Plugins)
+	}
+}
+
 func TestMCPProjectTools(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

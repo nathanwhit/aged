@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, retryTask, steerTask, updateProject } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deletePlugin, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
@@ -221,15 +221,31 @@ function App() {
               },
             ]
           : []),
-        ...(snapshot.plugins.length > 0
-          ? [
-              {
-                id: "plugins" as const,
-                title: "Plugins",
-                element: <PluginPanel plugins={snapshot.plugins} />,
-              },
-            ]
-          : []),
+        {
+          id: "plugins" as const,
+          title: "Plugins",
+          element: (
+            <PluginPanel
+              plugins={snapshot.plugins}
+              onRegister={async (plugin) => {
+                setError("");
+                await registerPlugin(plugin);
+                await refresh();
+              }}
+              onUpdate={async (id, plugin) => {
+                setError("");
+                await updatePlugin(id, plugin);
+                await refresh();
+              }}
+              onDelete={async (id) => {
+                setError("");
+                await deletePlugin(id);
+                await refresh();
+              }}
+              onError={setError}
+            />
+          ),
+        },
         {
           id: "workers",
           title: "Orchestration",
@@ -2046,9 +2062,79 @@ function formatMB(value: number): string {
   return `${Math.round(value)} MB`;
 }
 
-function PluginPanel({ plugins }: { plugins: Plugin[] }) {
-  if (plugins.length === 0) return null;
+function PluginPanel({
+  plugins,
+  onRegister,
+  onUpdate,
+  onDelete,
+  onError,
+}: {
+  plugins: Plugin[];
+  onRegister: (plugin: Plugin) => Promise<void>;
+  onUpdate: (id: string, plugin: Plugin) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
   const enabled = plugins.filter((plugin) => plugin.enabled).length;
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState("runner");
+  const [protocol, setProtocol] = useState("aged-runner-v1");
+  const [command, setCommand] = useState("");
+  const [enabledValue, setEnabledValue] = useState(true);
+  const [config, setConfig] = useState("{}");
+  const [editingId, setEditingId] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reset = () => {
+    setId("");
+    setName("");
+    setKind("runner");
+    setProtocol("aged-runner-v1");
+    setCommand("");
+    setEnabledValue(true);
+    setConfig("{}");
+    setEditingId("");
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      setBusy(true);
+      const parsedConfig = config.trim() ? JSON.parse(config) : {};
+      const plugin: Plugin = {
+        id: id.trim(),
+        name: name.trim() || id.trim(),
+        kind,
+        protocol,
+        enabled: enabledValue,
+        command: command.trim() ? command.trim().split(/\s+/) : undefined,
+        config: parsedConfig,
+      };
+      if (editingId) {
+        await onUpdate(editingId, plugin);
+      } else {
+        await onRegister(plugin);
+      }
+      reset();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const edit = (plugin: Plugin) => {
+    setEditingId(plugin.id);
+    setId(plugin.id);
+    setName(plugin.name ?? "");
+    setKind(plugin.kind || "runner");
+    setProtocol(plugin.protocol || (plugin.kind === "runner" ? "aged-runner-v1" : "aged-plugin-v1"));
+    setCommand(plugin.command?.join(" ") ?? "");
+    setEnabledValue(plugin.enabled);
+    setConfig(JSON.stringify(plugin.config ?? {}, null, 2));
+  };
+
   return (
     <section className="panel">
       <div className="panel-title split-title">
@@ -2058,6 +2144,31 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
         </span>
         <span className="pill">{enabled}/{plugins.length} enabled</span>
       </div>
+      <form className="plugin-register" onSubmit={submit}>
+        <input value={id} onChange={(event) => setId(event.target.value)} placeholder="runner:lint" required />
+        <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Display name" />
+        <select value={kind} onChange={(event) => {
+          const next = event.target.value;
+          setKind(next);
+          setProtocol(next === "runner" ? "aged-runner-v1" : "aged-plugin-v1");
+        }}>
+          <option value="runner">Runner</option>
+          <option value="driver">Driver</option>
+          <option value="brain">Brain</option>
+          <option value="external">External</option>
+        </select>
+        <input value={protocol} onChange={(event) => setProtocol(event.target.value)} placeholder="protocol" />
+        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="command arg..." />
+        <textarea value={config} onChange={(event) => setConfig(event.target.value)} rows={3} spellCheck={false} />
+        <label className="checkbox-label">
+          <input type="checkbox" checked={enabledValue} onChange={(event) => setEnabledValue(event.target.checked)} />
+          Enabled
+        </label>
+        <div className="plugin-form-actions">
+          <button type="submit" disabled={busy}>{editingId ? "Update" : "Register"}</button>
+          {editingId && <button type="button" className="secondary" onClick={reset}>Cancel</button>}
+        </div>
+      </form>
       <div className="plugin-grid">
         {plugins.map((plugin) => (
           <article key={plugin.id} className={plugin.enabled ? "plugin-card" : "plugin-card disabled"}>
@@ -2090,6 +2201,15 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
               </details>
             )}
             {plugin.error && <p className="plugin-error">{plugin.error}</p>}
+            <div className="plugin-card-actions">
+              <button className="secondary" onClick={() => edit(plugin)}>Edit</button>
+              <button
+                className="secondary danger-text"
+                onClick={() => onDelete(plugin.id).catch((err: Error) => onError(err.message))}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           </article>
         ))}
       </div>
