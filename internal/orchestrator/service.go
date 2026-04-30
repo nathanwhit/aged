@@ -1698,6 +1698,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 	})
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
+		_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", question)
 		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 		return
 	}
@@ -1764,6 +1765,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			}
 		}
 	case "wait":
+		_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", nonEmpty(decision.Message, decision.Rationale, question))
 		_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "complete":
 		_ = s.completeTask(ctx, task.ID, results, decision.FinalCandidateWorkerID, decision.Rationale)
@@ -2452,6 +2454,9 @@ func (s *Service) waitForFinalCandidateResolution(ctx context.Context, taskID st
 	if statusErr := s.setTaskStatus(ctx, taskID, core.TaskWaiting); statusErr != nil {
 		return statusErr
 	}
+	if objectiveErr := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingUser, "approval_needed", "Final candidate selection needs user or orchestrator approval."); objectiveErr != nil {
+		return objectiveErr
+	}
 	return err
 }
 
@@ -2721,6 +2726,7 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 			"error":    replanErr.Error(),
 		}),
 	})
+	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
 }

@@ -1700,6 +1700,9 @@ func TestServiceMovesTaskToWaitingWhenWorkerNeedsInput(t *testing.T) {
 	if !payload.NeedsInput {
 		t.Fatalf("needsInput = false")
 	}
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser || snapshot.Tasks[0].ObjectivePhase != "approval_needed" {
+		t.Fatalf("objective = %q phase %q", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
+	}
 	if hasEvent(snapshot.Events, core.EventWorkerCleanup, task.ID, "") {
 		t.Fatalf("waiting worker workspace should be retained")
 	}

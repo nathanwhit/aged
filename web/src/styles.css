@@ -676,6 +676,46 @@ small {
   text-decoration: none;
 }
 
+.approval-panel {
+  background: #fff8e8;
+  border: 1px solid #ead49a;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.approval-title,
+.approval-card {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.approval-title span,
+.approval-card small,
+.approval-card span {
+  color: #767b84;
+  font-size: 12px;
+}
+
+.approval-card {
+  background: #fffdfa;
+  border: 1px solid #eadfca;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.approval-card.decided {
+  background: #f7f5ef;
+}
+
+.approval-card p {
+  color: #27292d;
+  margin: 4px 0;
+}
+
 .detail p {
   color: #4b4f58;
   margin: 8px 0 0;

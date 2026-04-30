@@ -1162,6 +1162,7 @@ function TaskDetail({
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
+  const approvals = approvalStates(events);
 
   useEffect(() => {
     setDiff(undefined);
@@ -1249,6 +1250,7 @@ function TaskDetail({
       {(task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} />
       )}
+      {approvals.length > 0 && <ApprovalPanel approvals={approvals} onUseMessage={setMessage} />}
       <WorkerProgressSpotlight update={workerUpdate} />
       <form className="steer" onSubmit={steer}>
         <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this task..." required />
@@ -1306,6 +1308,41 @@ function TaskObjectiveStrip({ task }: { task: Task }) {
             <strong>{artifact.name || artifact.ref || artifact.id}</strong>
           )}
           {artifact.ref && <span>{artifact.ref}</span>}
+        </div>
+      ))}
+    </section>
+  );
+}
+
+type ApprovalState = {
+  id: number;
+  at: string;
+  question: string;
+  reason: string;
+  workerId?: string;
+  decided: boolean;
+  answer?: string;
+};
+
+function ApprovalPanel({ approvals, onUseMessage }: { approvals: ApprovalState[]; onUseMessage: (message: string) => void }) {
+  return (
+    <section className="approval-panel">
+      <div className="approval-title">
+        <strong>Approvals</strong>
+        <span>{approvals.filter((approval) => !approval.decided).length} pending</span>
+      </div>
+      {approvals.slice(0, 4).map((approval) => (
+        <div className={approval.decided ? "approval-card decided" : "approval-card"} key={approval.id}>
+          <div>
+            <small>{new Date(approval.at).toLocaleTimeString()} · {humanizeKey(approval.reason || "approval")}</small>
+            <p>{approval.question}</p>
+            {approval.answer && <span>Answer: {approval.answer}</span>}
+          </div>
+          {!approval.decided && (
+            <button className="secondary compact" type="button" onClick={() => onUseMessage(`Answer approval: ${approval.question}\n\n`)}>
+              Respond
+            </button>
+          )}
         </div>
       ))}
     </section>
@@ -2102,6 +2139,37 @@ function workerChangesApplied(events: EventRecord[], workerId: string): boolean 
   return events.some((event) => event.type === "worker.changes_applied" && event.workerId === workerId);
 }
 
+function approvalStates(events: EventRecord[]): ApprovalState[] {
+  const decisions = events
+    .filter((event) => event.type === "approval.decided")
+    .map((event) => ({ event, payload: asRecord(event.payload) }));
+  return events
+    .filter((event) => event.type === "approval.needed")
+    .map((event) => {
+      const payload = asRecord(event.payload);
+      const workerId = event.workerId || payloadValue(payload.workerId);
+      const reason = payloadValue(payload.reason);
+      const question = payloadValue(payload.question || payload.error || payload.summary) || "Approval needed.";
+      const decision = decisions.find(({ event: decidedEvent, payload: decisionPayload }) => {
+        if (decidedEvent.id < event.id) return false;
+        const decidedWorker = decidedEvent.workerId || payloadValue(decisionPayload.workerId);
+        if (workerId && decidedWorker && workerId !== decidedWorker) return false;
+        const decidedReason = payloadValue(decisionPayload.reason);
+        return !reason || !decidedReason || reason === decidedReason || decidedReason === "user_feedback" || decidedReason === "autonomous_replan";
+      });
+      return {
+        id: event.id,
+        at: event.at,
+        question,
+        reason,
+        workerId,
+        decided: Boolean(decision),
+        answer: decision ? payloadValue(decision.payload.answer || decision.payload.message) : undefined,
+      };
+    })
+    .reverse();
+}
+
 function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: EventRecord[]): WorkerProgressUpdate | undefined {
   if (workers.length === 0 && nodes.length === 0) {
     return undefined;
@@ -2642,6 +2710,12 @@ function compactEventDisplay(event: EventRecord): string {
   }
   if (event.type === "execution.node_status") {
     return payloadValue(payload.status) || "Node status changed";
+  }
+  if (event.type === "approval.needed") {
+    return payloadValue(payload.question || payload.error || payload.reason) || "Approval needed";
+  }
+  if (event.type === "approval.decided") {
+    return payloadValue(payload.answer || payload.message || payload.reason) || "Approval decided";
   }
   if (event.type === "worker.created") {
     const brain = payloadValue(metadata.brain);
