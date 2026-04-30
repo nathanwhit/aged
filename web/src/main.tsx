@@ -1117,13 +1117,13 @@ function TaskDetail({
           </button>
         </div>
       </div>
+      <WorkerProgressSpotlight update={workerUpdate} />
       <form className="steer" onSubmit={steer}>
         <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this task..." required />
         <button className="icon-button" title="Send steering">
           <Send size={18} />
         </button>
       </form>
-      <WorkerProgressSpotlight update={workerUpdate} />
       {finalWorkerId && finalChangedFiles.length > 0 && (
         <div className="worker-review final-result-review">
           <details>
@@ -1168,7 +1168,7 @@ function WorkerProgressSpotlight({ update }: { update: WorkerProgressUpdate | un
     <section className={`worker-progress-spotlight ${update.source}`} aria-live="polite">
       <div className="worker-progress-heading">
         <div>
-          <span>Active worker update</span>
+          <span className="worker-progress-eyebrow">Active worker update</span>
           <strong>{update.title}</strong>
         </div>
         <div className="worker-progress-meta">
@@ -1178,12 +1178,12 @@ function WorkerProgressSpotlight({ update }: { update: WorkerProgressUpdate | un
         </div>
       </div>
       <p>{update.text}</p>
-      <small>
+      <small title="Worker output may be a progress summary, log message, tool event, or final message rather than private model thinking.">
         {update.source === "output"
-          ? "Shown from the worker output event stream; it may be a progress summary, log message, tool event, or final message rather than private model thinking."
+          ? "Latest worker output."
           : update.source === "waiting"
-            ? "Waiting for the worker output stream to report more detail."
-            : "Shown from worker lifecycle events because no richer output update is available."}
+            ? "Waiting for worker output."
+            : "Worker lifecycle update."}
       </small>
     </section>
   );
@@ -1943,19 +1943,40 @@ function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: 
   const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status));
   const candidates = (activeWorkers.length > 0 ? activeWorkers : [...workers])
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const progressCandidates = candidates
+    .map((worker) => {
+      const progressEvent = latestWorkerProgressEvent(events.filter((event) => event.workerId === worker.id));
+      return { worker, progressEvent };
+    })
+    .filter((candidate): candidate is { worker: Worker; progressEvent: EventRecord } => Boolean(candidate.progressEvent))
+    .sort((left, right) => Date.parse(right.progressEvent.at) - Date.parse(left.progressEvent.at));
+
+  const latestProgressCandidate = progressCandidates[0];
+  if (latestProgressCandidate) {
+    const { worker, progressEvent } = latestProgressCandidate;
+    return {
+      workerId: worker.id,
+      title: workerProgressTitle(worker, nodesByWorkerId.get(worker.id)),
+      status: worker.status,
+      at: progressEvent.at,
+      label: workerEventLabel(progressEvent),
+      text: eventDisplayText(progressEvent),
+      source: "output",
+    };
+  }
 
   for (const worker of candidates) {
     const workerEvents = events.filter((event) => event.workerId === worker.id);
-    const progressEvent = latestWorkerProgressEvent(workerEvents);
-    if (progressEvent) {
+    const latestEvent = latestInspectableWorkerEvent(workerEvents);
+    if (latestEvent) {
       return {
         workerId: worker.id,
         title: workerProgressTitle(worker, nodesByWorkerId.get(worker.id)),
         status: worker.status,
-        at: progressEvent.at,
-        label: workerEventLabel(progressEvent),
-        text: eventDisplayText(progressEvent),
-        source: "output",
+        at: latestEvent.at,
+        label: workerEventLabel(latestEvent),
+        text: eventDisplayText(latestEvent),
+        source: "lifecycle",
       };
     }
   }
@@ -1977,15 +1998,12 @@ function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: 
   if (!latestWorker) {
     return undefined;
   }
-  const latestEvent = latestInspectableWorkerEvent(events.filter((event) => event.workerId === latestWorker.id));
   return {
     workerId: latestWorker.id,
     title: workerProgressTitle(latestWorker, nodesByWorkerId.get(latestWorker.id)),
     status: latestWorker.status,
-    at: latestEvent?.at,
-    label: latestEvent ? workerEventLabel(latestEvent) : undefined,
-    text: latestEvent ? eventDisplayText(latestEvent) : "No worker output has been reported yet.",
-    source: latestEvent ? "lifecycle" : "waiting",
+    text: "No worker output has been reported yet.",
+    source: "waiting",
   };
 }
 

@@ -655,12 +655,12 @@ small {
 .worker-progress-spotlight {
   background: #f3f7fb;
   border: 1px solid #b7c8dc;
-  border-left: 4px solid #245aa5;
+  border-left: 5px solid #245aa5;
   border-radius: 8px;
   display: grid;
   gap: 10px;
   min-width: 0;
-  padding: 12px;
+  padding: 14px 14px 12px;
 }
 
 .worker-progress-spotlight.waiting {
@@ -683,15 +683,21 @@ small {
   min-width: 0;
 }
 
-.worker-progress-heading span:first-child,
+.worker-progress-eyebrow,
 .worker-progress-spotlight small {
   color: #687384;
   font-size: 12px;
 }
 
+.worker-progress-eyebrow {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .worker-progress-heading strong {
   color: #202124;
-  font-size: 14px;
+  font-size: 15px;
   overflow-wrap: anywhere;
 }
 
@@ -711,7 +717,7 @@ small {
 
 .worker-progress-spotlight p {
   color: #202124;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.45;
   margin: 0;
   max-height: 8.7em;
