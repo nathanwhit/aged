@@ -195,7 +195,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} onCancel={cancelTask} onRetry={handleRetryTask} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -999,8 +999,10 @@ function assistantProgressLabel(elapsedSeconds: number): string {
 
 function TaskDetail({
   task,
+  events,
   onCancel,
   onRetry,
+  onReview,
   onApply,
   onApplied,
   onSteer,
@@ -1008,8 +1010,10 @@ function TaskDetail({
   onError,
 }: {
   task: Task;
+  events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
+  onReview: (id: string) => Promise<WorkerChangesReview>;
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
@@ -1018,8 +1022,16 @@ function TaskDetail({
 }) {
   const [message, setMessage] = useState("");
   const [applying, setApplying] = useState(false);
+  const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const canApplyResult = completionMode !== "github" && isTerminalTask(task) && Boolean(task.finalCandidateWorkerId) && task.appliedWorkerId !== task.finalCandidateWorkerId;
+  const finalWorkerId = task.finalCandidateWorkerId ?? "";
+  const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
+  const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
+
+  useEffect(() => {
+    setDiff(undefined);
+  }, [finalWorkerId]);
 
   async function steer(event: React.FormEvent) {
     event.preventDefault();
@@ -1040,6 +1052,33 @@ function TaskDetail({
       onError((err as Error).message);
     } finally {
       setApplying(false);
+    }
+  }
+
+  async function toggleFinalDiff() {
+    if (!finalWorkerId) return;
+    if (diff?.open) {
+      setDiff({ ...diff, open: false });
+      return;
+    }
+    if (diff?.loaded) {
+      setDiff({ ...diff, open: true });
+      return;
+    }
+    setDiff({ open: true, loading: true, loaded: false, diff: "" });
+    try {
+      const review = await onReview(finalWorkerId);
+      setDiff({
+        open: true,
+        loading: false,
+        loaded: true,
+        diff: review.changes.diff ?? "",
+        error: review.changes.error,
+      });
+    } catch (err) {
+      const error = (err as Error).message;
+      setDiff({ open: true, loading: false, loaded: true, diff: "", error });
+      onError(error);
     }
   }
 
@@ -1077,6 +1116,28 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
+      {finalWorkerId && finalChangedFiles.length > 0 && (
+        <div className="worker-review final-result-review">
+          <details>
+            <summary>{finalChangedFiles.length} changed files</summary>
+            <ul>
+              {finalChangedFiles.slice(0, 8).map((file) => (
+                <li key={`${file.status}-${file.path}`}>
+                  <code>{file.status ?? "changed"}</code>
+                  <span>{file.path}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+          <div className="worker-review-actions">
+            <button className="secondary compact" disabled={diff?.loading} onClick={toggleFinalDiff} title={diff?.open ? "Hide final result diff" : "Show final result diff"}>
+              <FileText size={16} />
+              {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
+            </button>
+          </div>
+          {diff?.open && <DiffViewer state={diff} />}
+        </div>
+      )}
     </section>
   );
 }

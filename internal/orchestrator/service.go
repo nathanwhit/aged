@@ -870,6 +870,17 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
+	if task.Status == core.TaskFailed {
+		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
+		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
+			if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+				return core.Task{}, err
+			}
+			task.Status = core.TaskPlanning
+			go s.retryGraphTask(context.Background(), task, initial, results)
+			return task, nil
+		}
+	}
 	if task.Status == core.TaskFailed && taskFailedDuringDynamicReplan(snapshot, taskID) {
 		initial, results, err := retryGraphStateForTask(snapshot, taskID)
 		if err != nil {
@@ -1910,7 +1921,7 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
 	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
 	if err != nil {
-		return s.failTask(ctx, taskID, err)
+		return s.waitForFinalCandidateResolution(ctx, taskID, err)
 	}
 	if candidateWorkerID != "" {
 		if strings.TrimSpace(reason) == "" {
@@ -1939,6 +1950,22 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 	return nil
 }
 
+func (s *Service) waitForFinalCandidateResolution(ctx context.Context, taskID string, err error) error {
+	_, _ = s.append(ctx, core.Event{
+		Type:   core.EventApprovalNeeded,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"question": "Final candidate selection is ambiguous or points at a non-applyable worker. Retry after steering the orchestrator to consolidate or select the intended candidate.",
+			"reason":   "final_candidate_selection",
+			"error":    err.Error(),
+		}),
+	})
+	if statusErr := s.setTaskStatus(ctx, taskID, core.TaskWaiting); statusErr != nil {
+		return statusErr
+	}
+	return err
+}
+
 func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) (string, string, error) {
 	candidates := candidateResults(results)
 	selectedWorkerID = strings.TrimSpace(selectedWorkerID)
@@ -1947,6 +1974,12 @@ func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) 
 			if candidate.WorkerID == selectedWorkerID {
 				return selectedWorkerID, "orchestrator selected final candidate explicitly", nil
 			}
+		}
+		if ancestorID := selectedCandidateAncestor(results, selectedWorkerID); ancestorID != "" {
+			return ancestorID, fmt.Sprintf("orchestrator selected worker %s; using nearest changed candidate ancestor", selectedWorkerID), nil
+		}
+		if fallbackID, fallbackReason, err := resolveFinalCandidate(results, ""); err == nil && fallbackID != "" {
+			return fallbackID, fmt.Sprintf("selected final candidate %q was not applyable; fallback selected %s", selectedWorkerID, fallbackReason), nil
 		}
 		return "", "", fmt.Errorf("selected final candidate %q is not a successful worker with candidate changes", selectedWorkerID)
 	}
@@ -1965,6 +1998,34 @@ func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) 
 		ids = append(ids, leaf.WorkerID)
 	}
 	return "", "", fmt.Errorf("multiple competing final candidates remain (%s); the orchestrator must select finalCandidateWorkerId or schedule a consolidation/validation worker", strings.Join(ids, ", "))
+}
+
+func selectedCandidateAncestor(results []WorkerTurnResult, selectedWorkerID string) string {
+	byID := map[string]WorkerTurnResult{}
+	for _, result := range results {
+		byID[result.WorkerID] = result
+	}
+	current, ok := byID[selectedWorkerID]
+	if !ok || current.Status != core.WorkerSucceeded {
+		return ""
+	}
+	seen := map[string]bool{selectedWorkerID: true}
+	for strings.TrimSpace(current.BaseWorkerID) != "" {
+		parentID := current.BaseWorkerID
+		if seen[parentID] {
+			return ""
+		}
+		seen[parentID] = true
+		parent, ok := byID[parentID]
+		if !ok {
+			return ""
+		}
+		if parent.Status == core.WorkerSucceeded && resultHasCandidateChanges(parent) {
+			return parent.WorkerID
+		}
+		current = parent
+	}
+	return ""
 }
 
 func candidateResults(results []WorkerTurnResult) []WorkerTurnResult {
@@ -2289,27 +2350,16 @@ func (s *Service) runFollowUpWave(ctx context.Context, task core.Task, initial P
 
 	ordered := make([]WorkerTurnResult, len(nodes))
 	var firstErr error
-	var firstProblem *WorkerTurnResult
 	for range nodes {
 		outcome := <-outcomes
 		ordered[outcome.index] = outcome.result
 		if outcome.err != nil && firstErr == nil {
 			firstErr = outcome.err
 			cancel()
-			continue
-		}
-		if outcome.err == nil && outcome.result.Status != core.WorkerSucceeded && firstProblem == nil {
-			result := outcome.result
-			firstProblem = &result
-			cancel()
 		}
 	}
 	if firstErr != nil {
 		return ordered, false, firstErr
-	}
-	if firstProblem != nil {
-		s.finishOrContinueTask(ctx, task.ID, *firstProblem)
-		return ordered, false, nil
 	}
 	return ordered, true, nil
 }
@@ -2600,6 +2650,30 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 }
 
 func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
+	return latestTaskFailureMatches(snapshot, taskID, func(errorText string) bool {
+		return strings.Contains(errorText, "dynamic replan")
+	})
+}
+
+func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, results []WorkerTurnResult) bool {
+	if len(candidateResults(results)) == 0 {
+		return false
+	}
+	if latestTaskFailureMatches(snapshot, taskID, func(errorText string) bool {
+		return errorText == "" ||
+			strings.Contains(errorText, "dynamic replan") ||
+			strings.Contains(errorText, "final candidate") ||
+			strings.Contains(errorText, "selected final candidate") ||
+			strings.Contains(errorText, "multiple competing final candidates") ||
+			strings.Contains(errorText, "worker command failed")
+	}) {
+		return true
+	}
+	latest := latestWorkerResult(results)
+	return latest.Status == core.WorkerFailed || latest.Status == core.WorkerCanceled
+}
+
+func latestTaskFailureMatches(snapshot core.Snapshot, taskID string, match func(string) bool) bool {
 	for i := len(snapshot.Events) - 1; i >= 0; i-- {
 		event := snapshot.Events[i]
 		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
@@ -2612,9 +2686,16 @@ func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			return false
 		}
-		return payload.Status == core.TaskFailed && strings.Contains(strings.ToLower(payload.Error), "dynamic replan")
+		return payload.Status == core.TaskFailed && match(strings.ToLower(strings.TrimSpace(payload.Error)))
 	}
 	return false
+}
+
+func latestWorkerResult(results []WorkerTurnResult) WorkerTurnResult {
+	if len(results) == 0 {
+		return WorkerTurnResult{}
+	}
+	return results[len(results)-1]
 }
 
 func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []WorkerTurnResult, error) {

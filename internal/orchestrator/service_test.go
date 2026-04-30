@@ -846,6 +846,198 @@ func TestServiceRetriesDynamicReplanFailureFromCompletedGraph(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesFinalCandidateSelectionFailureFromCompletedGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-final-candidate"
+	workerID := "worker-impl"
+	validationID := "worker-validation"
+	initial := Plan{WorkerKind: "codex", Prompt: "implement the change"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Final candidate retry",
+			"prompt": "Retry final candidate selection.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(initial)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"kind": "codex", "metadata": map[string]any{"nodeID": "node-1"}}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "implemented",
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: validationID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "codex",
+			"metadata": map[string]any{"nodeID": "node-2", "baseWorkerID": workerID, "spawnRole": "validation"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: validationID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "validated",
+			"workspaceChanges": WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+			"error":  `selected final candidate "worker-validation" is not a successful worker with candidate changes`,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	retried, err := service.RetryTask(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != core.TaskPlanning {
+		t.Fatalf("retry status = %q", retried.Status)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 2 {
+		t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
+func TestServiceRetriesFollowUpFailureFromCompletedGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-follow-up"
+	workerID := "worker-impl"
+	reviewID := "worker-review"
+	initial := Plan{WorkerKind: "codex", Prompt: "implement the change"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Follow-up failure retry",
+			"prompt": "Retry orchestration after review failure.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(initial)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"kind": "codex", "metadata": map[string]any{"nodeID": "node-1"}}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "implemented",
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: reviewID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "claude",
+			"metadata": map[string]any{"nodeID": "node-2", "baseWorkerID": workerID, "spawnRole": "review"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: reviewID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerFailed,
+			"error":  "worker command failed: exit status 1",
+			"workspaceChanges": WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	_, err := service.RetryTask(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 2 {
+		t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
 func TestServiceRetryReusesCanceledWorkerWorkspaceAndSession(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1570,6 +1762,56 @@ func TestServiceRunsSpawnedFollowUpWorkerWithPriorResultContext(t *testing.T) {
 	}
 }
 
+func TestServiceContinuesAfterFailedFollowUpWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	reviewer := &flakyRunner{kind: "reviewer"}
+	brain := &replanningBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement the first bounded refactor slice",
+		Spawns: []SpawnRequest{{
+			ID:         "review",
+			Role:       "reviewer",
+			Reason:     "Review the implementation output.",
+			WorkerKind: "reviewer",
+		}},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":    eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"reviewer": reviewer,
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/refactor.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Recover failed review",
+		Prompt: "Implement, then review the candidate.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	if brain.states[0].Results[1].Status != core.WorkerFailed {
+		t.Fatalf("follow-up status = %q, want failed", brain.states[0].Results[1].Status)
+	}
+	if reviewer.callsValue() != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", reviewer.callsValue())
+	}
+}
+
 func TestServiceBasesFollowUpWorkspaceOnLatestCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2114,7 +2356,7 @@ func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	}
 }
 
-func TestServiceFailsAmbiguousCompetingCandidatesWithoutFinalSelection(t *testing.T) {
+func TestServiceWaitsOnAmbiguousCompetingCandidatesWithoutFinalSelection(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -2142,9 +2384,12 @@ func TestServiceFailsAmbiguousCompetingCandidatesWithoutFinalSelection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	if snapshot.Tasks[0].FinalCandidateWorkerID != "" {
 		t.Fatalf("final candidate = %q, want empty", snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing approval-needed event")
 	}
 }
 
@@ -2190,6 +2435,36 @@ func TestServiceUsesExplicitReplanFinalCandidateForCompetingBranches(t *testing.
 	}
 	if selected.Role != "right" {
 		t.Fatalf("selected role = %q, want right; final=%q results=%+v", selected.Role, snapshot.Tasks[0].FinalCandidateWorkerID, brain.states[0].Results)
+	}
+}
+
+func TestResolveFinalCandidateUsesSelectedWorkerCandidateAncestor(t *testing.T) {
+	workerID, reason, err := resolveFinalCandidate([]WorkerTurnResult{
+		{
+			WorkerID: "impl",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			},
+		},
+		{
+			WorkerID:     "validation",
+			Status:       core.WorkerSucceeded,
+			BaseWorkerID: "impl",
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+	}, "validation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workerID != "impl" {
+		t.Fatalf("workerID = %q, want impl", workerID)
+	}
+	if !strings.Contains(reason, "nearest changed candidate ancestor") {
+		t.Fatalf("reason = %q", reason)
 	}
 }
 
