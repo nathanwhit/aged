@@ -70,6 +70,7 @@ The initial local-first vertical slice is implemented.
 - Per-task orchestration graphs are projected from durable execution events into snapshots/UI, including nodes, parent/dependency edges, target placement, and aggregate status counts.
 - Execution target pools are configurable with `-targets` / `AGED_TARGETS`. The default target is local; SSH targets use detached tmux sessions and remote status/log files so work can outlive the SSH connection.
 - Execution targets can also be added, edited, and deleted dynamically through `/api/targets` and the dashboard Targets pane. Dynamic targets are persisted in SQLite and registered with the live scheduler without restarting the daemon.
+- SSH target `identityFile` is optional; when omitted, aged relies on normal OpenSSH behavior such as `ssh-agent` and `~/.ssh/config`.
 - Fresh SSH workers prepare their project checkout before launch: clone the configured project repo if `workDir` is missing, or fetch and detach a clean Git checkout at `origin/<defaultBase>`. Dirty remote checkouts fail fast to avoid destroying partial work; retries and dependency follow-ups reuse the previous remote workdir.
 - SSH target health is probed in the background. Probes report reachability, tmux availability, repo path presence, disk, load/CPU, and memory; snapshots/UI show the current health/resource state.
 - Target scheduling now avoids unhealthy SSH targets and incorporates live load, memory, and disk signals into target scoring alongside labels, configured capacity, running workers, worker size, and static CPU/memory hints.

@@ -2209,8 +2209,8 @@ function TargetPanel({
             <input value={port} onChange={(event) => setPort(event.target.value)} inputMode="numeric" placeholder="22" disabled={kind === "local"} />
           </label>
           <label>
-            Identity file
-            <input value={identityFile} onChange={(event) => setIdentityFile(event.target.value)} placeholder="/Users/me/.ssh/id_ed25519" disabled={kind === "local"} />
+            Identity file (optional)
+            <input value={identityFile} onChange={(event) => setIdentityFile(event.target.value)} placeholder="Blank uses ssh-agent or ~/.ssh/config" disabled={kind === "local"} />
           </label>
           <label className="target-wide-field">
             Work dir
