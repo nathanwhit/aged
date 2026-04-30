@@ -185,7 +185,35 @@ function App() {
     }
   }
 
-  const dashboardPanes: DashboardPane[] = selectedTask
+  const pluginPane: DashboardPane = {
+    id: "plugins",
+    title: "Plugins",
+    element: (
+      <PluginPanel
+        plugins={snapshot.plugins}
+        onRegister={async (plugin) => {
+          setError("");
+          await registerPlugin(plugin);
+          await refresh();
+        }}
+        onUpdate={async (id, plugin) => {
+          setError("");
+          await updatePlugin(id, plugin);
+          await refresh();
+        }}
+        onDelete={async (id) => {
+          setError("");
+          await deletePlugin(id);
+          await refresh();
+        }}
+        onError={setError}
+      />
+    ),
+  };
+  const targetPanes: DashboardPane[] = snapshot.targets.length > 0
+    ? [{ id: "targets", title: "Targets", element: <TargetPanel targets={snapshot.targets} /> }]
+    : [];
+  const taskPanes: DashboardPane[] = selectedTask
     ? [
         {
           id: "task-detail",
@@ -212,40 +240,6 @@ function App() {
           id: "current-state",
           title: "Current State",
           element: <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />,
-        },
-        ...(snapshot.targets.length > 0
-          ? [
-              {
-                id: "targets" as const,
-                title: "Targets",
-                element: <TargetPanel targets={snapshot.targets} />,
-              },
-            ]
-          : []),
-        {
-          id: "plugins" as const,
-          title: "Plugins",
-          element: (
-            <PluginPanel
-              plugins={snapshot.plugins}
-              onRegister={async (plugin) => {
-                setError("");
-                await registerPlugin(plugin);
-                await refresh();
-              }}
-              onUpdate={async (id, plugin) => {
-                setError("");
-                await updatePlugin(id, plugin);
-                await refresh();
-              }}
-              onDelete={async (id) => {
-                setError("");
-                await deletePlugin(id);
-                await refresh();
-              }}
-              onError={setError}
-            />
-          ),
         },
         {
           id: "workers",
@@ -284,6 +278,7 @@ function App() {
         },
       ]
     : [];
+  const dashboardPanes: DashboardPane[] = [...taskPanes, ...targetPanes, pluginPane];
 
   return (
     <main className="app">
@@ -408,7 +403,7 @@ function App() {
               <span>Loading tasks...</span>
             </div>
           </section>
-        ) : selectedTask ? (
+        ) : dashboardPanes.length > 0 ? (
           <DashboardGrid panes={dashboardPanes} />
         ) : (
           <section className="workspace">
