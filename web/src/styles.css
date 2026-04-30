@@ -699,6 +699,30 @@ small {
   gap: 10px;
 }
 
+.orchestration-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.orchestration-overview {
+  border-bottom: 1px solid #e9e5dd;
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.summary-grid.compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.orchestration-meta {
+  color: #60646c;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 8px 14px;
+}
+
 .worker-card {
   align-items: center;
   border: 1px solid #e0ddd5;
@@ -715,11 +739,53 @@ small {
 }
 
 .worker-current,
-.worker-activity {
+.worker-activity,
+.worker-context,
+.worker-graph-context {
   border-top: 1px solid #e9e5dd;
   grid-column: 1 / -1;
   min-width: 0;
   padding-top: 10px;
+}
+
+.worker-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worker-context span {
+  background: #f8fafc;
+  border: 1px solid #e3e7ee;
+  border-radius: 999px;
+  color: #536070;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 5px;
+  min-width: 0;
+  padding: 5px 8px;
+}
+
+.worker-context strong {
+  color: #767b84;
+  font-weight: 700;
+}
+
+.worker-graph-context {
+  color: #4b4f58;
+  display: grid;
+  font-size: 13px;
+  gap: 6px;
+}
+
+.worker-graph-context p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.worker-graph-context .warning {
+  color: #9a5d00;
+  font-weight: 700;
 }
 
 .worker-current {
@@ -747,6 +813,7 @@ small {
   color: #4b4f58;
   cursor: pointer;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .worker-command {
@@ -820,6 +887,23 @@ small {
   display: grid;
   gap: 8px;
   min-width: 0;
+}
+
+.worker-event-details {
+  min-width: 0;
+}
+
+.worker-event-details summary {
+  color: #343741;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.worker-event-details[open] summary {
+  margin-bottom: 8px;
 }
 
 .event-payload p {

@@ -13,7 +13,6 @@ import {
   LoaderCircle,
   Maximize2,
   Minimize2,
-  Network,
   MessageSquarePlus,
   Play,
   Puzzle,
@@ -66,8 +65,6 @@ type DashboardPaneId =
   | "current-state"
   | "targets"
   | "plugins"
-  | "orchestration-graph"
-  | "execution"
   | "workers"
   | "worker-detail"
   | "timeline";
@@ -96,8 +93,6 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "current-state", span: 6, minHeight: 0 },
   { id: "workers", span: 12, minHeight: 0 },
   { id: "worker-detail", span: 8, minHeight: 0 },
-  { id: "orchestration-graph", span: 6, minHeight: 0 },
-  { id: "execution", span: 6, minHeight: 0 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "plugins", span: 4, minHeight: 0 },
   { id: "timeline", span: 12, minHeight: 360 },
@@ -235,30 +230,15 @@ function App() {
               },
             ]
           : []),
-        ...(selectedGraph && selectedGraph.nodes.length > 0
-          ? [
-              {
-                id: "orchestration-graph" as const,
-                title: "Orchestration Graph",
-                element: <OrchestrationGraphPanel graph={selectedGraph} />,
-              },
-            ]
-          : []),
-        ...(selectedNodes.length > 0
-          ? [
-              {
-                id: "execution" as const,
-                title: "Execution",
-                element: <ExecutionGraph nodes={selectedNodes} />,
-              },
-            ]
-          : []),
         {
           id: "workers",
-          title: "Workers",
+          title: "Orchestration",
           element: (
             <WorkerList
               workers={selectedWorkers}
+              nodes={selectedNodes}
+              graph={selectedGraph}
+              progress={progress}
               task={selectedTask}
               events={selectedEvents}
               selectedWorkerId={selectedWorkerId}
@@ -1225,6 +1205,9 @@ function PullRequestPanel({
 function WorkerList({
   task,
   workers,
+  nodes,
+  graph,
+  progress,
   events,
   selectedWorkerId,
   onSelect,
@@ -1236,6 +1219,9 @@ function WorkerList({
 }: {
   task: Task;
   workers: Worker[];
+  nodes: ExecutionNode[];
+  graph: OrchestrationGraph | undefined;
+  progress: WorkProgress;
   events: EventRecord[];
   selectedWorkerId: string;
   onSelect: (id: string) => void;
@@ -1294,41 +1280,70 @@ function WorkerList({
   }
 
   return (
-    <section className="panel">
-      <div className="panel-title">
-        <Bot size={18} />
-        <h2>Workers</h2>
+    <section className="panel orchestration-panel">
+      <div className="panel-title split-title">
+        <span>
+          <Bot size={18} />
+          <h2>Orchestration</h2>
+        </span>
+        <span className="pill">{workers.length || nodes.length} workers</span>
       </div>
-      {workers.length === 0 ? (
+      <OrchestrationOverview progress={progress} graph={graph} nodes={nodes} workers={workers} />
+      {workers.length === 0 && nodes.length === 0 ? (
         <p className="empty">No workers have been spawned.</p>
       ) : (
         <div className="worker-grid">
-          {workers.map((worker) => {
-            const completion = latestWorkerCompletion(events, worker.id);
+          {orchestrationRows(workers, nodes, graph).map(({ worker, node, graphNode }) => {
+            const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
+            const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
+            const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
+            const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
+            const completion = workerId ? latestWorkerCompletion(events, workerId) : {};
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
-            const applied = workerChangesApplied(events, worker.id);
-            const isFinalCandidate = task.finalCandidateWorkerId === worker.id;
-            const workerEvents = events.filter((event) => event.workerId === worker.id);
+            const applied = workerId ? workerChangesApplied(events, workerId) : false;
+            const isFinalCandidate = task.finalCandidateWorkerId === workerId;
+            const workerEvents = workerId ? events.filter((event) => event.workerId === workerId) : [];
             const latestEvent = latestInspectableWorkerEvent(workerEvents);
-            const diff = diffs[worker.id];
+            const diff = workerId ? diffs[workerId] : undefined;
+            const dependencies = node?.dependsOn ?? graph?.edges.filter((edge) => edge.to === (graphNode?.id ?? node?.id)).map((edge) => edge.from) ?? [];
+            const blockers = dependencies.filter((dependencyId) => {
+              const dependency = nodes.find((candidate) => candidate.id === dependencyId) ?? graph?.nodes.find((candidate) => candidate.id === dependencyId);
+              return dependency && dependency.status !== "succeeded";
+            });
+            const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
             return (
-              <article key={worker.id} className={worker.id === selectedWorkerId ? "worker-card selected" : "worker-card"}>
+              <article key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
-                  <strong>{worker.kind}</strong>
-                  <small>{worker.id.slice(0, 8)}</small>
+                  <strong>{node?.role || graphNode?.role || kind}</strong>
+                  <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
                 </div>
-                <Status value={worker.status} />
-                <button className="icon-button ghost" onClick={() => onSelect(worker.id)} title="Inspect worker">
+                <Status value={status} />
+                <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
                   <Eye size={16} />
                 </button>
-                <button className="icon-button danger" onClick={() => onCancel(worker.id).catch((err: Error) => onError(err.message))} title="Cancel worker">
+                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
                   <CircleStop size={16} />
                 </button>
+                <div className="worker-context">
+                  <WorkerContextItem label="Kind" value={kind} />
+                  <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
+                  <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
+                  <WorkerContextItem label="Updated" value={worker ? new Date(worker.updatedAt).toLocaleTimeString() : node ? new Date(node.updatedAt).toLocaleTimeString() : ""} />
+                  {duration && <WorkerContextItem label="Duration" value={duration} />}
+                  {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
+                </div>
+                {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
+                  <div className="worker-graph-context">
+                    {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                    {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                    {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
+                  </div>
+                )}
                 <div className="worker-current">
                   <span>Latest</span>
                   <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
                 </div>
-                <WorkerActivity events={workerEvents} defaultOpen={worker.status === "running" || worker.status === "waiting"} />
+                <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
                 {changes.length > 0 && (
                   <div className="worker-review">
                     <details>
@@ -1343,13 +1358,13 @@ function WorkerList({
                       </ul>
                     </details>
                     <div className="worker-review-actions">
-                      <button className="secondary compact" disabled={diff?.loading} onClick={() => toggleDiff(worker.id)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
+                      <button className="secondary compact" disabled={!workerId || diff?.loading} onClick={() => toggleDiff(workerId)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
                         <FileText size={16} />
                         {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
                       </button>
-                      <button className="secondary compact" disabled={applied || applying === worker.id || isFinalCandidate} onClick={() => apply(worker.id)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
+                      <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
                         <Check size={16} />
-                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === worker.id ? "Applying" : "Manual Apply"}
+                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
                       </button>
                     </div>
                     {diff?.open && <DiffViewer state={diff} />}
@@ -1362,6 +1377,97 @@ function WorkerList({
       )}
     </section>
   );
+}
+
+function OrchestrationOverview({
+  progress,
+  graph,
+  nodes,
+  workers,
+}: {
+  progress: WorkProgress;
+  graph: OrchestrationGraph | undefined;
+  nodes: ExecutionNode[];
+  workers: Worker[];
+}) {
+  const edgeCount = graph?.edges.length ?? nodes.reduce((total, node) => total + (node.dependsOn?.length ?? 0), 0);
+  const failed = graph ? graph.summary.failed + graph.summary.canceled : progress.failed;
+  const waiting = graph ? graph.summary.waiting : progress.waiting;
+  const running = graph ? graph.summary.running : progress.running;
+  return (
+    <div className="orchestration-overview">
+      <div className="summary-grid compact">
+        <Metric label="Progress" value={`${progress.percent}%`} />
+        <Metric label="Done" value={`${progress.done}/${progress.total}`} />
+        <Metric label="Running" value={String(running)} />
+        <Metric label="Waiting" value={String(waiting)} />
+        <Metric label="Failed" value={String(failed)} />
+      </div>
+      <div className="progress-track" aria-label={`Progress ${progress.percent}%`}>
+        <div style={{ width: `${progress.percent}%` }} />
+      </div>
+      <div className="orchestration-meta">
+        <span>{nodes.length || workers.length} execution nodes</span>
+        <span>{edgeCount} dependencies</span>
+        {graph?.updatedAt && <span>Updated {new Date(graph.updatedAt).toLocaleTimeString()}</span>}
+      </div>
+    </div>
+  );
+}
+
+type OrchestrationRow = {
+  worker?: Worker;
+  node?: ExecutionNode;
+  graphNode?: OrchestrationGraph["nodes"][number];
+};
+
+function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: OrchestrationGraph | undefined): OrchestrationRow[] {
+  const rows = new Map<string, OrchestrationRow>();
+  for (const node of nodes) {
+    rows.set(node.workerId ?? node.id, { node });
+  }
+  for (const graphNode of graph?.nodes ?? []) {
+    const key = graphNode.workerId ?? graphNode.id;
+    rows.set(key, { ...rows.get(key), graphNode });
+  }
+  for (const worker of workers) {
+    rows.set(worker.id, { ...rows.get(worker.id), worker });
+  }
+  return [...rows.values()];
+}
+
+function WorkerContextItem({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <span>
+      <strong>{label}</strong>
+      {value}
+    </span>
+  );
+}
+
+function targetLabel(node: ExecutionNode | undefined, graphNode: OrchestrationGraph["nodes"][number] | undefined): string {
+  const targetId = node?.targetId ?? graphNode?.targetId;
+  if (!targetId) return "local";
+  return `${node?.targetKind ?? graphNode?.targetKind ?? "target"}:${targetId}`;
+}
+
+function isTerminalWorkerStatus(status: Worker["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+function formatDuration(start: string, end: string): string {
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return "";
+  const seconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
 }
 
 type DiffReviewState = {
@@ -1453,11 +1559,12 @@ function WorkerMetaItem({ label, value }: { label: string; value: string }) {
 
 function WorkerActivity({ events, defaultOpen }: { events: EventRecord[]; defaultOpen: boolean }) {
   const inspectable = events.filter(isInspectableWorkerEvent);
-  const recent = inspectable.slice(-8).reverse();
+  const recent = inspectable.slice(-6).reverse();
   const command = events.find((event) => event.type === "worker.created");
+  const latest = recent[0];
   return (
     <details className="worker-activity" open={defaultOpen}>
-      <summary>{inspectable.length} events</summary>
+      <summary>{inspectable.length} events{latest ? `, latest: ${eventDisplayText(latest)}` : ""}</summary>
       {command && <CommandLine event={command} />}
       <div className="worker-event-list">
         {recent.length === 0 ? (
@@ -1550,13 +1657,20 @@ function PathRow({ label, value }: { label: string; value: string }) {
 }
 
 function WorkerEventLine({ event }: { event: EventRecord }) {
+  const label = workerEventLabel(event);
+  const display = eventDisplayText(event);
+  const lowerDisplay = display.toLowerCase();
+  const defaultOpen = event.type === "worker.completed" || lowerDisplay.includes("error") || lowerDisplay.includes("failed");
   return (
     <div className="worker-event-line">
       <div className="worker-event-meta">
         <time>{new Date(event.at).toLocaleTimeString()}</time>
-        <code>{workerEventLabel(event)}</code>
+        <code>{label}</code>
       </div>
-      <EventPayload event={event} />
+      <details className="worker-event-details" open={defaultOpen}>
+        <summary>{display || label}</summary>
+        <EventPayload event={event} />
+      </details>
     </div>
   );
 }
@@ -1588,39 +1702,6 @@ function workerEventLabel(event: EventRecord): string {
     return [payload.kind, payload.stream].filter(Boolean).join(":") || "output";
   }
   return event.type.replace("worker.", "");
-}
-
-function ExecutionGraph({ nodes }: { nodes: ExecutionNode[] }) {
-  if (nodes.length === 0) {
-    return null;
-  }
-  return (
-    <section className="panel">
-      <div className="panel-title">
-        <Activity size={18} />
-        <h2>Execution</h2>
-      </div>
-      <div className="node-grid">
-        {nodes.map((node) => (
-          <article key={node.id} className="node-card">
-            <div>
-              <strong>{node.role || node.workerKind}</strong>
-              <small>{node.id.slice(0, 8)}</small>
-            </div>
-            <Status value={node.status} />
-            <small>{node.workerKind}</small>
-            {node.targetId && <small>{node.targetKind ?? "target"}: {node.targetId}</small>}
-            {(node.spawnId || node.dependsOn?.length) && (
-              <p>
-                {node.spawnId ? `spawn ${node.spawnId}` : ""}
-                {node.dependsOn?.length ? ` depends on ${node.dependsOn.join(", ")}` : ""}
-              </p>
-            )}
-          </article>
-        ))}
-      </div>
-    </section>
-  );
 }
 
 function TargetPanel({ targets }: { targets: TargetState[] }) {
@@ -1683,44 +1764,6 @@ function PluginPanel({ plugins }: { plugins: Plugin[] }) {
             {plugin.error && <p className="plugin-error">{plugin.error}</p>}
           </article>
         ))}
-      </div>
-    </section>
-  );
-}
-
-function OrchestrationGraphPanel({ graph }: { graph: OrchestrationGraph | undefined }) {
-  if (!graph || graph.nodes.length === 0) return null;
-  return (
-    <section className="panel graph-panel">
-      <div className="panel-title split-title">
-        <span>
-          <Network size={18} />
-          <h2>Orchestration Graph</h2>
-        </span>
-        <span className="pill">{graph.edges.length} edges</span>
-      </div>
-      <div className="graph-summary">
-        <Metric label="Nodes" value={String(graph.summary.total)} />
-        <Metric label="Done" value={String(graph.summary.done)} />
-        <Metric label="Running" value={String(graph.summary.running)} />
-        <Metric label="Waiting" value={String(graph.summary.waiting)} />
-        <Metric label="Failed" value={String(graph.summary.failed + graph.summary.canceled)} />
-      </div>
-      <div className="graph-node-list">
-        {graph.nodes.map((node) => {
-          const incoming = graph.edges.filter((edge) => edge.to === node.id);
-          return (
-            <article key={node.id} className="graph-node">
-              <div>
-                <strong>{node.role || node.workerKind}</strong>
-                <small>{node.spawnId || node.id.slice(0, 8)}</small>
-              </div>
-              <Status value={node.status} />
-              {incoming.length > 0 && <small>after {incoming.map((edge) => edge.from.slice(0, 8)).join(", ")}</small>}
-              {node.targetId && <small>{node.targetKind ?? "target"}: {node.targetId}</small>}
-            </article>
-          );
-        })}
       </div>
     </section>
   );
@@ -2112,7 +2155,7 @@ function WorkerCompletedCard({ payload }: { payload: Record<string, unknown> }) 
 
 function ChangedFilesList({ files }: { files: { path: string; status?: string }[] }) {
   return (
-    <details className="event-files" open>
+    <details className="event-files">
       <summary>{files.length} changed files</summary>
       <ul>
         {files.map((file) => (
