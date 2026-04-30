@@ -924,30 +924,9 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		pr.ID = uuid.NewString()
 	}
 	pr.TaskID = taskID
-	event, err := s.append(ctx, core.Event{
-		Type:   core.EventPRPublished,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":           pr.ID,
-			"repo":         pr.Repo,
-			"number":       pr.Number,
-			"url":          pr.URL,
-			"branch":       pr.Branch,
-			"base":         pr.Base,
-			"title":        pr.Title,
-			"state":        pr.State,
-			"draft":        pr.Draft,
-			"checksStatus": pr.ChecksStatus,
-			"mergeStatus":  pr.MergeStatus,
-			"reviewStatus": pr.ReviewStatus,
-			"metadata":     pr.Metadata,
-		}),
-	})
-	if err != nil {
+	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
-	pr.CreatedAt = event.At
-	pr.UpdatedAt = event.At
 	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
@@ -964,6 +943,116 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
+}
+
+func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core.WatchPullRequestsRequest) ([]core.PullRequest, error) {
+	if s.prPublisher == nil {
+		return nil, errors.New("pull request publisher is not configured")
+	}
+	lister, ok := s.prPublisher.(PullRequestLister)
+	if !ok {
+		return nil, errors.New("pull request publisher cannot list existing pull requests")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return nil, eventstore.ErrNotFound
+	}
+	project := s.projectForTask(task)
+	repo := strings.TrimSpace(req.Repo)
+	if repo == "" {
+		repo = project.UpstreamRepo
+	}
+	if repo == "" {
+		repo = project.Repo
+	}
+	if repo == "" && strings.TrimSpace(req.URL) != "" {
+		parsedRepo, _ := parsePullRequestURL(req.URL)
+		repo = parsedRepo
+	}
+	metadata := map[string]any{
+		"watch": true,
+		"repo":  repo,
+		"state": nonEmpty(req.State, "open"),
+	}
+	if req.Number > 0 {
+		metadata["number"] = req.Number
+	}
+	if req.URL != "" {
+		metadata["url"] = req.URL
+	}
+	if req.Author != "" {
+		metadata["author"] = req.Author
+	}
+	if req.HeadBranch != "" {
+		metadata["headBranch"] = req.HeadBranch
+	}
+	prs, err := lister.List(ctx, PullRequestListSpec{
+		TaskID:     taskID,
+		Repo:       repo,
+		Number:     req.Number,
+		URL:        req.URL,
+		State:      req.State,
+		Author:     req.Author,
+		HeadBranch: req.HeadBranch,
+		Limit:      req.Limit,
+		Metadata:   metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(prs) == 0 {
+		return nil, errors.New("no pull requests matched watch request")
+	}
+	for _, pr := range prs {
+		pr.ID = watchedPullRequestID(pr)
+		pr.TaskID = taskID
+		if pr.Repo == "" {
+			pr.Repo = repo
+		}
+		if len(pr.Metadata) == 0 {
+			pr.Metadata = core.MustJSON(metadata)
+		}
+		if err := s.recordPullRequestPublished(ctx, pr); err != nil {
+			return nil, err
+		}
+		if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
+		"count": len(prs),
+		"repo":  repo,
+	}); err != nil {
+		return nil, err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "watching_pull_requests", fmt.Sprintf("Watching %d pull request(s) for GitHub state changes.", len(prs))); err != nil {
+		return nil, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+		return nil, err
+	}
+	return prs, nil
+}
+
+func watchedPullRequestID(pr core.PullRequest) string {
+	repo := strings.TrimSpace(pr.Repo)
+	if repo != "" && pr.Number > 0 {
+		return "github:" + repo + "#" + fmt.Sprint(pr.Number)
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		repo, number := parsePullRequestURL(pr.URL)
+		if repo != "" && number > 0 {
+			return "github:" + repo + "#" + fmt.Sprint(number)
+		}
+	}
+	if strings.TrimSpace(pr.ID) != "" {
+		return pr.ID
+	}
+	return newPullRequestID()
 }
 
 func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.PullRequest, error) {
@@ -1222,6 +1311,29 @@ func (s *Service) recordPullRequestArtifact(ctx context.Context, pr core.PullReq
 		"mergeStatus":  pr.MergeStatus,
 		"reviewStatus": pr.ReviewStatus,
 	})
+}
+
+func (s *Service) recordPullRequestPublished(ctx context.Context, pr core.PullRequest) error {
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":           pr.ID,
+			"repo":         pr.Repo,
+			"number":       pr.Number,
+			"url":          pr.URL,
+			"branch":       pr.Branch,
+			"base":         pr.Base,
+			"title":        pr.Title,
+			"state":        pr.State,
+			"draft":        pr.Draft,
+			"checksStatus": pr.ChecksStatus,
+			"mergeStatus":  pr.MergeStatus,
+			"reviewStatus": pr.ReviewStatus,
+			"metadata":     pr.Metadata,
+		}),
+	})
+	return err
 }
 
 func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string) {
@@ -1763,6 +1875,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		Payload: core.MustJSON(plan),
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if ok, err := s.runImmediatePlanActions(ctx, task, plan); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	} else if !ok {
 		return
 	}
 
@@ -2489,69 +2607,108 @@ func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (co
 	return core.PullRequest{}, false
 }
 
-func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) (bool, error) {
+func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, plan Plan) (bool, error) {
 	for _, action := range plan.Actions {
-		if strings.TrimSpace(action.When) != "" && strings.TrimSpace(action.When) != "after_success" {
+		if strings.TrimSpace(action.When) != "immediate" {
 			continue
 		}
-		switch strings.TrimSpace(action.Kind) {
-		case "publish_pull_request":
-			workerID := strings.TrimSpace(action.WorkerID)
-			if workerID == "" {
-				workerID = latestCandidateWorkerID(results)
-			}
-			if workerID == "" {
-				return false, errors.New("publish_pull_request action requires a candidate worker")
-			}
-			req := publishPullRequestRequestFromAction(action)
-			req.WorkerID = workerID
-			pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
-			if err != nil {
-				return false, err
-			}
-			if _, err := s.append(ctx, core.Event{
-				Type:   core.EventTaskAction,
-				TaskID: task.ID,
-				Payload: core.MustJSON(map[string]any{
-					"kind":          action.Kind,
-					"when":          nonEmpty(action.When, "after_success"),
-					"reason":        action.Reason,
-					"workerId":      workerID,
-					"pullRequestId": pr.ID,
-					"url":           pr.URL,
-				}),
-			}); err != nil {
-				return false, err
-			}
-			return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
-		case "wait_external":
-			phase := stringMetadata(action.Inputs, "phase")
-			if phase == "" {
-				phase = "waiting_external"
-			}
-			summary := stringMetadata(action.Inputs, "summary")
-			if summary == "" {
-				summary = action.Reason
-			}
-			if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, phase, summary); err != nil {
-				return false, err
-			}
-			if _, err := s.append(ctx, core.Event{
-				Type:   core.EventTaskAction,
-				TaskID: task.ID,
-				Payload: core.MustJSON(map[string]any{
-					"kind":   action.Kind,
-					"when":   nonEmpty(action.When, "after_success"),
-					"reason": action.Reason,
-					"inputs": action.Inputs,
-				}),
-			}); err != nil {
-				return false, err
-			}
-			return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		keepGoing, err := s.executePlanAction(ctx, task, action, nil)
+		if err != nil || !keepGoing {
+			return keepGoing, err
 		}
 	}
 	return true, nil
+}
+
+func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) (bool, error) {
+	for _, action := range plan.Actions {
+		if strings.TrimSpace(action.When) == "immediate" {
+			continue
+		}
+		keepGoing, err := s.executePlanAction(ctx, task, action, results)
+		if err != nil || !keepGoing {
+			return keepGoing, err
+		}
+	}
+	return true, nil
+}
+
+func (s *Service) executePlanAction(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) (bool, error) {
+	switch strings.TrimSpace(action.Kind) {
+	case "publish_pull_request":
+		workerID := strings.TrimSpace(action.WorkerID)
+		if workerID == "" {
+			workerID = latestCandidateWorkerID(results)
+		}
+		if workerID == "" {
+			return false, errors.New("publish_pull_request action requires a candidate worker")
+		}
+		req := publishPullRequestRequestFromAction(action)
+		req.WorkerID = workerID
+		pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
+		if err != nil {
+			return false, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          action.Kind,
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        action.Reason,
+			"workerId":      workerID,
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+		}); err != nil {
+			return false, err
+		}
+		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+	case "watch_pull_requests":
+		req := watchPullRequestsRequestFromAction(action)
+		prs, err := s.WatchPullRequests(ctx, task.ID, req)
+		if err != nil {
+			return false, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":             action.Kind,
+			"when":             nonEmpty(action.When, "after_success"),
+			"reason":           action.Reason,
+			"inputs":           action.Inputs,
+			"pullRequestCount": len(prs),
+		}); err != nil {
+			return false, err
+		}
+		return false, nil
+	case "wait_external":
+		phase := stringMetadata(action.Inputs, "phase")
+		if phase == "" {
+			phase = "waiting_external"
+		}
+		summary := stringMetadata(action.Inputs, "summary")
+		if summary == "" {
+			summary = action.Reason
+		}
+		if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, phase, summary); err != nil {
+			return false, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   action.Kind,
+			"when":   nonEmpty(action.When, "after_success"),
+			"reason": action.Reason,
+			"inputs": action.Inputs,
+		}); err != nil {
+			return false, err
+		}
+		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+	default:
+		return true, nil
+	}
+}
+
+func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {
+	_, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskAction,
+		TaskID:  taskID,
+		Payload: core.MustJSON(payload),
+	})
+	return err
 }
 
 func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
@@ -2563,6 +2720,19 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 		Base:   stringMetadata(inputs, "base"),
 		Branch: stringMetadata(inputs, "branch"),
 		Draft:  boolMetadata(inputs, "draft"),
+	}
+}
+
+func watchPullRequestsRequestFromAction(action PlanAction) core.WatchPullRequestsRequest {
+	inputs := action.Inputs
+	return core.WatchPullRequestsRequest{
+		Repo:       stringMetadata(inputs, "repo"),
+		Number:     intMetadata(inputs, "number"),
+		URL:        stringMetadata(inputs, "url"),
+		State:      stringMetadata(inputs, "state"),
+		Author:     stringMetadata(inputs, "author"),
+		HeadBranch: stringMetadata(inputs, "headBranch"),
+		Limit:      intMetadata(inputs, "limit"),
 	}
 }
 
@@ -4026,6 +4196,25 @@ func boolMetadata(metadata map[string]any, key string) bool {
 	}
 	value, _ := metadata[key].(bool)
 	return value
+}
+
+func intMetadata(metadata map[string]any, key string) int {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		number, _ := value.Int64()
+		return int(number)
+	default:
+		return 0
+	}
 }
 
 func stringSliceMetadata(metadata map[string]any, key string) []string {

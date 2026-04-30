@@ -36,6 +36,22 @@ type PullRequestPublisher interface {
 	Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error)
 }
 
+type PullRequestListSpec struct {
+	TaskID     string
+	Repo       string
+	Number     int
+	URL        string
+	State      string
+	Author     string
+	HeadBranch string
+	Limit      int
+	Metadata   map[string]any
+}
+
+type PullRequestLister interface {
+	List(ctx context.Context, spec PullRequestListSpec) ([]core.PullRequest, error)
+}
+
 type commandExecutor func(ctx context.Context, dir string, name string, args ...string) (string, error)
 
 type LocalPullRequestPublisher struct {
@@ -261,6 +277,100 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	return checked, nil
 }
 
+func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestListSpec) ([]core.PullRequest, error) {
+	exec := p.exec
+	if exec == nil {
+		exec = runCommand
+	}
+	repo := strings.TrimSpace(spec.Repo)
+	number := spec.Number
+	if repo == "" && strings.TrimSpace(spec.URL) != "" {
+		parsedRepo, parsedNumber := parsePullRequestURL(spec.URL)
+		repo = parsedRepo
+		if number == 0 {
+			number = parsedNumber
+		}
+	}
+	if repo == "" {
+		return nil, errors.New("watch pull requests requires repo or url")
+	}
+	if number > 0 || strings.TrimSpace(spec.URL) != "" {
+		pr := core.PullRequest{
+			ID:       newPullRequestID(),
+			TaskID:   spec.TaskID,
+			Repo:     repo,
+			Number:   number,
+			URL:      strings.TrimSpace(spec.URL),
+			Metadata: core.MustJSON(spec.Metadata),
+		}
+		inspected, err := p.Inspect(ctx, pr)
+		if err != nil {
+			return nil, err
+		}
+		inspected.ID = pr.ID
+		inspected.TaskID = spec.TaskID
+		if len(inspected.Metadata) == 0 {
+			inspected.Metadata = pr.Metadata
+		}
+		return []core.PullRequest{inspected}, nil
+	}
+	limit := spec.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	state := strings.ToLower(strings.TrimSpace(spec.State))
+	if state == "" {
+		state = "open"
+	}
+	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,statusCheckRollup,reviewDecision"
+	args := []string{"pr", "list", "--repo", repo, "--state", state, "--limit", strconv.Itoa(limit), "--json", jsonFields}
+	if strings.TrimSpace(spec.Author) != "" {
+		args = append(args, "--author", strings.TrimSpace(spec.Author))
+	}
+	if strings.TrimSpace(spec.HeadBranch) != "" {
+		args = append(args, "--head", strings.TrimSpace(spec.HeadBranch))
+	}
+	out, err := exec(ctx, "", "gh", args...)
+	if err != nil {
+		return nil, fmt.Errorf("list GitHub pull requests: %w", err)
+	}
+	var payload []struct {
+		Number            int             `json:"number"`
+		URL               string          `json:"url"`
+		State             string          `json:"state"`
+		Title             string          `json:"title"`
+		IsDraft           bool            `json:"isDraft"`
+		HeadRefName       string          `json:"headRefName"`
+		BaseRefName       string          `json:"baseRefName"`
+		MergeStateStatus  string          `json:"mergeStateStatus"`
+		ReviewDecision    string          `json:"reviewDecision"`
+		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil, fmt.Errorf("decode GitHub pull request list: %w", err)
+	}
+	prs := make([]core.PullRequest, 0, len(payload))
+	for _, item := range payload {
+		prs = append(prs, core.PullRequest{
+			ID:           newPullRequestID(),
+			TaskID:       spec.TaskID,
+			Repo:         repo,
+			Number:       item.Number,
+			URL:          item.URL,
+			Branch:       item.HeadRefName,
+			Base:         item.BaseRefName,
+			Title:        item.Title,
+			State:        item.State,
+			Draft:        item.IsDraft,
+			ChecksStatus: summarizeStatusCheckRollup(item.StatusCheckRollup),
+			MergeStatus:  item.MergeStateStatus,
+			ReviewStatus: item.ReviewDecision,
+			Metadata:     core.MustJSON(spec.Metadata),
+		})
+	}
+	return prs, nil
+}
+
 func defaultPRBranch(spec PullRequestPublishSpec) string {
 	suffix := spec.TaskID
 	if spec.WorkerID != "" {
@@ -271,6 +381,19 @@ func defaultPRBranch(spec PullRequestPublishSpec) string {
 		prefix = "codex/aged-"
 	}
 	return prefix + shortID(suffix)
+}
+
+func parsePullRequestURL(value string) (string, int) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return "", 0
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 4 || parts[2] != "pull" {
+		return "", 0
+	}
+	number, _ := strconv.Atoi(parts[3])
+	return parts[0] + "/" + parts[1], number
 }
 
 func prHeadRef(owner string, branch string) string {

@@ -442,6 +442,49 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 }
 
+func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "no worker should run",
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "immediate",
+			Reason: "standalone PR babysitting task",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 42},
+		}},
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "should not run"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Babysit PR", Prompt: "Watch owner/repo#42 until merged."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskWaiting || task.ObjectivePhase != "watching_pull_requests" {
+		t.Fatalf("task status = %q phase = %q", task.Status, task.ObjectivePhase)
+	}
+	if len(snapshot.Workers) != 0 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 42 {
+		t.Fatalf("list spec = %+v", publisher.listSpec)
+	}
+	if !hasMilestone(task.Milestones, "pull_requests_watched") || len(task.Artifacts) != 1 {
+		t.Fatalf("milestones=%+v artifacts=%+v", task.Milestones, task.Artifacts)
+	}
+}
+
 func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3149,6 +3192,8 @@ func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (
 type fakePullRequestPublisher struct {
 	published PullRequestPublishSpec
 	status    core.PullRequest
+	list      []core.PullRequest
+	listSpec  PullRequestListSpec
 }
 
 type fakeTitleGenerator struct {
@@ -3210,6 +3255,41 @@ func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullReques
 		p.status.Title = pr.Title
 	}
 	return p.status, nil
+}
+
+func (p *fakePullRequestPublisher) List(_ context.Context, spec PullRequestListSpec) ([]core.PullRequest, error) {
+	p.listSpec = spec
+	if len(p.list) > 0 {
+		out := make([]core.PullRequest, len(p.list))
+		copy(out, p.list)
+		for index := range out {
+			if out[index].TaskID == "" {
+				out[index].TaskID = spec.TaskID
+			}
+			if out[index].Repo == "" {
+				out[index].Repo = spec.Repo
+			}
+			if len(out[index].Metadata) == 0 {
+				out[index].Metadata = core.MustJSON(spec.Metadata)
+			}
+		}
+		return out, nil
+	}
+	return []core.PullRequest{{
+		ID:           "pr-watch-1",
+		TaskID:       spec.TaskID,
+		Repo:         spec.Repo,
+		Number:       12,
+		URL:          "https://github.com/" + spec.Repo + "/pull/12",
+		Branch:       "feature",
+		Base:         "main",
+		Title:        "Watch me",
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+		Metadata:     core.MustJSON(spec.Metadata),
+	}}, nil
 }
 
 type replanningBrain struct {

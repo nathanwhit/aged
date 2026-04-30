@@ -339,6 +339,16 @@ type PublishPullRequestRequest struct {
 	Draft    bool   `json:"draft,omitempty"`
 }
 
+type WatchPullRequestsRequest struct {
+	Repo       string `json:"repo,omitempty"`
+	Number     int    `json:"number,omitempty"`
+	URL        string `json:"url,omitempty"`
+	State      string `json:"state,omitempty"`
+	Author     string `json:"author,omitempty"`
+	HeadBranch string `json:"headBranch,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+}
+
 type SteeringRequest struct {
 	Message string `json:"message"`
 }

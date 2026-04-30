@@ -58,6 +58,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/apply", s.applyTaskResult)
 	mux.HandleFunc("POST /api/tasks/{id}/apply-policy", s.recommendApplyPolicy)
 	mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.publishTaskPullRequest)
+	mux.HandleFunc("POST /api/tasks/{id}/watch-pull-requests", s.watchTaskPullRequests)
 	mux.HandleFunc("POST /api/pull-requests/{id}/refresh", s.refreshPullRequest)
 	mux.HandleFunc("POST /api/pull-requests/{id}/babysit", s.startPullRequestBabysitter)
 	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
@@ -344,6 +345,20 @@ func (s *Server) publishTaskPullRequest(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	result, err := s.service.PublishTaskPullRequest(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) watchTaskPullRequests(w http.ResponseWriter, r *http.Request) {
+	var req core.WatchPullRequestsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.service.WatchPullRequests(r.Context(), r.PathValue("id"), req)
 	if err != nil {
 		writeError(w, err)
 		return

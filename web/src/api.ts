@@ -1,4 +1,4 @@
-import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, Task, WorkerChangesReview } from "./types";
+import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 export async function getSnapshot(): Promise<Snapshot> {
   const response = await fetch("/api/snapshot");
@@ -245,6 +245,18 @@ export async function publishTaskPullRequest(taskId: string, input: {
   draft?: boolean;
 } = {}): Promise<PullRequestState> {
   const response = await fetch(`/api/tasks/${taskId}/pull-request`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
+export async function watchTaskPullRequests(taskId: string, input: WatchPullRequestsInput): Promise<PullRequestState[]> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/watch-pull-requests`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),

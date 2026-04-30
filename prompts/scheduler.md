@@ -8,6 +8,8 @@ The orchestrator is responsible for long-running and complex tasks, not just one
 
 Some objectives include external artifacts in the middle of the workflow, not only at completion. For example, a user may ask to inspect TODOs, fix one, open a PR, and keep babysitting the PR until it merges. In that case, use `actions` to publish the PR as an intermediate durable artifact after the relevant worker succeeds, then let the task wait on external GitHub state. Do not treat PR publication as the same thing as final task completion unless the user only asked to open a PR.
 
+When the user's request is only to watch or babysit existing pull requests, use an immediate `watch_pull_requests` action and a cheap/no-op worker prompt. The orchestrator will import the matching PRs, mark the task as waiting on GitHub, and the GitHub monitor will steer the same task when checks, reviews, or mergeability need work.
+
 When parallel workers may produce competing code candidates, do not assume the most recent worker should win. Plan review, validation, or consolidation turns so the dynamic replanner can either select a final candidate explicitly or schedule a worker that incorporates the chosen changes into a new final candidate.
 
 For performance-improvement requests, prefer decomposing the work into bounded investigation and validation roles instead of asking one worker to optimize everything. A good first plan often has one primary worker establish the current benchmark/profiling context, then parallel `spawns` such as:
@@ -78,11 +80,11 @@ Field rules:
 - `steps` must be an array of objects. Each object must have string fields `title` and `description`.
 - `requiredApprovals` must be an array of objects. Each object must have string fields `title` and `reason`. Use `[]` when no approval is needed.
 - `actions` must be an array of objects. Use `[]` when no orchestration action is needed after this worker turn.
-- Action `kind` must be `"publish_pull_request"` or `"wait_external"`.
-- Action `when` must be `"after_success"`.
+- Action `kind` must be `"publish_pull_request"`, `"watch_pull_requests"`, or `"wait_external"`.
+- Action `when` must be `"immediate"` or `"after_success"`. Use `"immediate"` only for `watch_pull_requests` tasks that do not need an initial worker.
 - Action `reason` must explain why the orchestrator should take this action.
 - Action `workerId` should be `""` unless you are explicitly targeting a known worker from prior state. An empty worker id means the latest successful candidate worker from this turn.
-- Action `inputs` must be an object. For `publish_pull_request`, optional inputs are `title`, `body`, `repo`, `base`, `branch`, and `draft`. For `wait_external`, optional inputs are `phase` and `summary`.
+- Action `inputs` must be an object. For `publish_pull_request`, optional inputs are `title`, `body`, `repo`, `base`, `branch`, and `draft`. For `watch_pull_requests`, optional inputs are `repo`, `number`, `url`, `state`, `author`, `headBranch`, and `limit`; provide at least `repo` or `url`. For `wait_external`, optional inputs are `phase` and `summary`.
 - `metadata` is optional. Do not use `metadata.targetLabels`; placement is selected by the orchestrator service from task or project policy, not by the scheduler brain. Use `metadata.workerSize` as `"small"`, `"medium"`, or `"large"` to help load balancing.
 - `spawns` must be an array of objects. Each object must have string fields `role` and `reason`. Use `[]` when no additional future workers are useful.
 - Each spawn may include `id`, `workerKind`, `reasoningEffort`, and `dependsOn`. Use `id` when another spawn depends on it. `workerKind`, when present, must be exactly one of `"codex"`, `"claude"`, `"mock"`, or `"benchmark_compare"`. `reasoningEffort`, when present, must use the same values as the top-level field. `dependsOn` must contain spawn ids from the same `spawns` array.

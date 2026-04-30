@@ -878,6 +878,12 @@ small {
   gap: 10px;
 }
 
+.pr-watch-form {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(130px, 1fr) minmax(72px, 0.35fr) minmax(160px, 1.4fr) auto;
+}
+
 .pr-card {
   align-items: center;
   border: 1px solid #e0ddd5;
@@ -1951,6 +1957,10 @@ small {
 
   .pr-card {
     align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .pr-watch-form {
     grid-template-columns: 1fr;
   }
 

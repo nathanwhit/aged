@@ -274,6 +274,16 @@ export type PullRequestState = {
   metadata?: Record<string, unknown>;
 };
 
+export type WatchPullRequestsInput = {
+  repo?: string;
+  number?: number;
+  url?: string;
+  state?: string;
+  author?: string;
+  headBranch?: string;
+  limit?: number;
+};
+
 export type Snapshot = {
   tasks: Task[] | null;
   workers: Worker[] | null;

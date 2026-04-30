@@ -93,14 +93,14 @@ func (p Plan) Validate() error {
 
 func (a PlanAction) Validate() error {
 	switch strings.TrimSpace(a.Kind) {
-	case "publish_pull_request", "wait_external":
+	case "publish_pull_request", "watch_pull_requests", "wait_external":
 	default:
-		return errors.New("kind must be one of publish_pull_request or wait_external")
+		return errors.New("kind must be one of publish_pull_request, watch_pull_requests, or wait_external")
 	}
 	switch strings.TrimSpace(a.When) {
-	case "", "after_success":
+	case "", "after_success", "immediate":
 	default:
-		return errors.New("when must be after_success")
+		return errors.New("when must be immediate or after_success")
 	}
 	if strings.TrimSpace(a.Reason) == "" {
 		return errors.New("reason is required")

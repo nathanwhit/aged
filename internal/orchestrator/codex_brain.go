@@ -481,8 +481,8 @@ Field rules:
 - Use "wait" when user input or approval is needed.
 - Use "fail" when the task cannot continue.
 - When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
-- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. Use "wait_external" when the task should pause for an external event.
-- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success". Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed.
+- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event.
+- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed.
 - Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
 - When action is not "continue", "plan" must be null or omitted.

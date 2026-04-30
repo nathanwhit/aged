@@ -22,8 +22,8 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deletePlugin, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTask, deletePlugin, deleteProject, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, watchTaskPullRequests } from "./api";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -200,6 +200,7 @@ function App() {
               task={selectedTask}
               pullRequests={selectedPullRequests}
               onPublish={publishTaskPullRequest}
+              onWatch={watchTaskPullRequests}
               onRefresh={refreshPullRequest}
               onBabysit={babysitPullRequest}
               onDone={refresh}
@@ -1408,6 +1409,7 @@ function PullRequestPanel({
   task,
   pullRequests,
   onPublish,
+  onWatch,
   onRefresh,
   onBabysit,
   onDone,
@@ -1416,12 +1418,16 @@ function PullRequestPanel({
   task: Task;
   pullRequests: PullRequestState[];
   onPublish: (taskId: string) => Promise<PullRequestState>;
+  onWatch: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
   onRefresh: (id: string) => Promise<PullRequestState>;
   onBabysit: (id: string) => Promise<unknown>;
   onDone: () => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState("");
+  const [watchRepo, setWatchRepo] = useState("");
+  const [watchNumber, setWatchNumber] = useState("");
+  const [watchUrl, setWatchUrl] = useState("");
   const canPublish = canPublishPullRequest(task) && pullRequests.length === 0;
 
   async function run(action: string, fn: () => Promise<unknown>) {
@@ -1448,6 +1454,27 @@ function PullRequestPanel({
           {busy === "publish" ? "Opening" : "Open PR"}
         </button>
       </div>
+      <form
+        className="pr-watch-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const input: WatchPullRequestsInput = {
+            repo: watchRepo.trim() || undefined,
+            url: watchUrl.trim() || undefined,
+            number: watchNumber.trim() ? Number(watchNumber) : undefined,
+            state: "open",
+          };
+          run("watch", () => onWatch(task.id, input));
+        }}
+      >
+        <input value={watchRepo} onChange={(event) => setWatchRepo(event.target.value)} placeholder="owner/repo" />
+        <input value={watchNumber} onChange={(event) => setWatchNumber(event.target.value)} placeholder="PR #" inputMode="numeric" />
+        <input value={watchUrl} onChange={(event) => setWatchUrl(event.target.value)} placeholder="or PR URL" />
+        <button className="secondary compact" disabled={busy === "watch" || (!watchRepo.trim() && !watchUrl.trim())}>
+          <Eye size={16} />
+          {busy === "watch" ? "Watching" : "Watch Existing"}
+        </button>
+      </form>
       {pullRequests.length === 0 ? (
         <p className="empty">No pull request has been opened for this task.</p>
       ) : (

@@ -175,6 +175,18 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		if err == nil {
 			result, err = s.service.PublishTaskPullRequest(r.Context(), req.TaskID, req.PublishPullRequestRequest)
 		}
+	case "aged_watch_prs":
+		var req struct {
+			TaskID string `json:"taskId"`
+			core.WatchPullRequestsRequest
+		}
+		err = decodeMCPArgs(params.Arguments, &req)
+		if err == nil && strings.TrimSpace(req.TaskID) == "" {
+			err = errors.New("taskId is required")
+		}
+		if err == nil {
+			result, err = s.service.WatchPullRequests(r.Context(), req.TaskID, req.WatchPullRequestsRequest)
+		}
 	case "aged_refresh_pr":
 		var req struct {
 			PullRequestID string `json:"pullRequestId"`
@@ -407,6 +419,21 @@ func mcpTools() []mcpTool {
 				"title":    stringSchema("Optional PR title."),
 				"body":     stringSchema("Optional PR body."),
 				"draft":    map[string]any{"type": "boolean", "description": "Create as draft."},
+			}, []string{"taskId"}),
+		},
+		{
+			Name:        "aged_watch_prs",
+			Title:       "Watch existing PRs",
+			Description: "Import existing GitHub PRs into an aged task so the GitHub monitor can babysit them as a long-running objective.",
+			InputSchema: objectSchema(map[string]any{
+				"taskId":     stringSchema("Task id that should own the watched PRs."),
+				"repo":       stringSchema("GitHub repo, such as owner/name."),
+				"number":     map[string]any{"type": "integer", "description": "Optional PR number for a single PR."},
+				"url":        stringSchema("Optional PR URL. Can be used instead of repo plus number."),
+				"state":      stringSchema("PR state for list mode: open, closed, merged, or all."),
+				"author":     stringSchema("Optional author filter for list mode."),
+				"headBranch": stringSchema("Optional head branch filter for list mode."),
+				"limit":      map[string]any{"type": "integer", "description": "Optional max PR count for list mode."},
 			}, []string{"taskId"}),
 		},
 		{
