@@ -132,7 +132,8 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return err
 	}
 	var stdin io.WriteCloser
-	if r.SupportsSteering() && spec.Steering != nil {
+	promptOnStdin := CommandUsesPromptStdin(argv)
+	if promptOnStdin || (r.SupportsSteering() && spec.Steering != nil) {
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
 			return err
@@ -146,7 +147,12 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	parser := parserFunc(parseJSONWorkerLine)
 	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
 	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
-	if stdin != nil {
+	if promptOnStdin && stdin != nil {
+		go func() {
+			_, _ = io.WriteString(stdin, spec.Prompt)
+			_ = stdin.Close()
+		}()
+	} else if stdin != nil {
 		go forwardSteering(ctx, sink, spec.Steering, stdin, r.steeringFormatter)
 	}
 
@@ -161,6 +167,10 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return fmt.Errorf("worker command failed: %w", waitErr)
 	}
 	return nil
+}
+
+func CommandUsesPromptStdin(argv []string) bool {
+	return len(argv) > 0 && argv[len(argv)-1] == "-"
 }
 
 func forwardSteering(ctx context.Context, sink Sink, steering <-chan string, stdin io.WriteCloser, formatter func(string) string) {
@@ -292,16 +302,16 @@ func DefaultRunners() map[string]Runner {
 				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
 					args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
 				}
-				return append(args, strings.TrimSpace(spec.ResumeSessionID), spec.Prompt)
+				return append(args, strings.TrimSpace(spec.ResumeSessionID), "-")
 			}
 			args := []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir}
 			if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
 				args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
 			}
-			return append(args, spec.Prompt)
+			return append(args, "-")
 		}),
 		NewCommandRunner("claude", func(spec Spec) []string {
-			args := []string{"claude", "--print", "--output-format", "stream-json"}
+			args := []string{"claude", "--print", "--output-format", "stream-json", "--verbose"}
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args = append(args, "--resume", strings.TrimSpace(spec.ResumeSessionID))
 			}

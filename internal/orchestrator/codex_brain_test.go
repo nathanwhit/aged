@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"aged/internal/core"
@@ -35,17 +36,56 @@ func TestCodexBrainPlansFromAgentMessage(t *testing.T) {
 
 func TestCodexBrainExecArgsUseYoloPermissions(t *testing.T) {
 	brain := &CodexBrain{workDir: "/tmp/aged-work"}
-	got := brain.execArgs("schedule this")
+	got := brain.execArgs()
 	want := []string{
 		"exec",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--json",
 		"--cd",
 		"/tmp/aged-work",
-		"schedule this",
+		"-",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexBrainSendsSchedulerPromptOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	templatePath := filepath.Join(dir, "scheduler.md")
+	if err := os.WriteFile(templatePath, []byte("schedule the work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	codexPath := filepath.Join(dir, "codex")
+	script := "#!/bin/sh\n" +
+		"cat > " + shellQuoteTest(stdinPath) + "\n" +
+		"printf '%s\\n' " + strconv.Quote(testCodexBrainOutput(t, "valid")) + "\n"
+	if err := os.WriteFile(codexPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brain, err := NewCodexBrain(CodexBrainConfig{
+		CodexPath:    codexPath,
+		TemplatePath: templatePath,
+		WorkDir:      dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = brain.Plan(context.Background(), core.Task{
+		ID:     "task-stdin",
+		Title:  "Stdin",
+		Prompt: strings.Repeat("large prompt ", 1000),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stdin), "large prompt large prompt") {
+		t.Fatalf("scheduler prompt was not sent on stdin: %.200q", stdin)
 	}
 }
 

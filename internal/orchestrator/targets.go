@@ -386,3 +386,7 @@ func workerSize(metadata map[string]any, prompt string) string {
 type RemoteExecutor interface {
 	Run(ctx context.Context, argv []string) (string, error)
 }
+
+type RemoteInputExecutor interface {
+	RunInput(ctx context.Context, argv []string, input string) (string, error)
+}

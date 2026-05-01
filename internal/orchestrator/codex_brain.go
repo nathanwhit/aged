@@ -79,7 +79,9 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.replanPrompt(task, state))...)
+	prompt := b.replanPrompt(task, state)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -114,11 +116,12 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 
 	prompt := b.assistantPrompt(req)
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), b.workDir)
-	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, prompt}
+	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-"}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
-		args = []string{"exec", "resume", "--json", req.ProviderSessionID, prompt}
+		args = []string{"exec", "resume", "--json", req.ProviderSessionID, "-"}
 	}
 	cmd := exec.CommandContext(runCtx, b.codexPath, args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -148,7 +151,9 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs(b.prompt(task, steering))...)
+	prompt := b.prompt(task, steering)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -196,8 +201,8 @@ func (b *CodexBrain) assistantPrompt(req core.AssistantRequest) string {
 	return builder.String()
 }
 
-func (b *CodexBrain) execArgs(prompt string) []string {
-	return []string{"exec", codexYoloFlag, "--json", "--cd", b.workDir, prompt}
+func (b *CodexBrain) execArgs() []string {
+	return []string{"exec", codexYoloFlag, "--json", "--cd", b.workDir, "-"}
 }
 
 func decodeReplanDecision(data []byte) (ReplanDecision, error) {

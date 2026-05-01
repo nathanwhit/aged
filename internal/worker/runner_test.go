@@ -3,13 +3,19 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func shellQuoteTest(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
 
 func TestCommandRunnerStreamsStdoutAndStderr(t *testing.T) {
 	runner := NewCommandRunner("shell", func(spec Spec) []string {
@@ -189,17 +195,36 @@ func TestDefaultCodexRunnerUsesYoloPermissions(t *testing.T) {
 		"/tmp/aged-work",
 		"-c",
 		"model_reasoning_effort=\"low\"",
-		"do the work",
+		"-",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
 }
 
+func TestCommandRunnerWritesPromptToStdinForDashArgument(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "stdin.txt")
+	runner := NewCommandRunner("codex", func(Spec) []string {
+		return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath), "-"}
+	})
+	err := runner.Run(context.Background(), Spec{Prompt: "large prompt body"}, &recordingSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "large prompt body" {
+		t.Fatalf("stdin = %q", out)
+	}
+}
+
 func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "max"})
-	if !reflect.DeepEqual(got[len(got)-3:], []string{"-c", "model_reasoning_effort=\"xhigh\"", "do the work"}) {
+	if !reflect.DeepEqual(got[len(got)-3:], []string{"-c", "model_reasoning_effort=\"xhigh\"", "-"}) {
 		t.Fatalf("command = %#v", got)
 	}
 }
@@ -207,7 +232,7 @@ func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "continue", ResumeSessionID: "thread-1"})
-	want := []string{"codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "continue"}
+	want := []string{"codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
@@ -216,7 +241,7 @@ func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "review this", ReasoningEffort: "xhigh"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--effort", "xhigh", "review this"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--effort", "xhigh", "review this"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
@@ -225,7 +250,7 @@ func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 func TestDefaultClaudeRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "continue", ResumeSessionID: "session-1"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--resume", "session-1", "continue"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--resume", "session-1", "continue"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}

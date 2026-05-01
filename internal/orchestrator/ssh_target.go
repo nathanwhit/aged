@@ -49,6 +49,13 @@ func (execRemoteExecutor) Run(ctx context.Context, argv []string) (string, error
 	return string(out), err
 }
 
+func (execRemoteExecutor) RunInput(ctx context.Context, argv []string, input string) (string, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func NewSSHRunner() SSHRunner {
 	return SSHRunner{
 		Executor:     execRemoteExecutor{},
@@ -67,11 +74,23 @@ func NewRemoteRun(target TargetConfig, spec worker.Spec) remoteRun {
 	}
 }
 
-func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string) error {
+func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string, stdin string) error {
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
 	}
-	script := remoteStartScript(run, argv)
+	if _, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "mkdir -p "+shellQuote(run.RunDir)+" && printf %s "+shellQuote(`{"status":"running"}`)+" > "+shellQuote(path.Join(run.RunDir, "status.json")))); err != nil {
+		return err
+	}
+	if stdin != "" {
+		inputExecutor, ok := r.Executor.(RemoteInputExecutor)
+		if !ok {
+			return errors.New("remote executor does not support stdin prompt upload")
+		}
+		if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remotePromptPath(run))), stdin); err != nil {
+			return err
+		}
+	}
+	script := remoteStartScript(run, argv, stdin != "")
 	_, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", script))
 	return err
 }
@@ -276,17 +295,20 @@ func truncateArtifactContent(content string) string {
 	return content[:limit] + "\n[truncated]"
 }
 
-func remoteStartScript(run remoteRun, argv []string) string {
+func remoteStartScript(run remoteRun, argv []string, hasStdin bool) string {
 	command := shellJoin(argv)
-	statusRunning := shellQuote(`{"status":"running"}`)
+	stdinRedirect := ""
+	if hasStdin {
+		stdinRedirect = " < " + shellQuote(remotePromptPath(run))
+	}
 	return fmt.Sprintf(
-		`mkdir -p %[1]s && printf %%s %[2]s > %[1]s/status.json && tmux new-session -d -s %[3]s %s`,
-		shellQuote(run.RunDir),
-		statusRunning,
+		`tmux new-session -d -s %[1]s %s`,
 		shellQuote(run.Session),
-		shellQuote(fmt.Sprintf(`cd %s && (%s) > %s/stdout.log 2> %s/stderr.log; code=$?; %s; if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
+		shellQuote(fmt.Sprintf(`%s; cd %s && (%s)%s > %s/stdout.log 2> %s/stderr.log; code=$?; %s; if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
+			remoteWorkerEnvScript(),
 			shellQuote(run.WorkDir),
 			command,
+			stdinRedirect,
 			shellQuote(run.RunDir),
 			shellQuote(run.RunDir),
 			remoteChangeScript(run),
@@ -294,6 +316,14 @@ func remoteStartScript(run remoteRun, argv []string) string {
 			shellQuote(run.RunDir),
 		)),
 	)
+}
+
+func remotePromptPath(run remoteRun) string {
+	return path.Join(run.RunDir, "prompt.txt")
+}
+
+func remoteWorkerEnvScript() string {
+	return `export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.deno/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/snap/bin:$PATH"`
 }
 
 func remoteChangeScript(run remoteRun) string {

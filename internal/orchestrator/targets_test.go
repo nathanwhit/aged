@@ -66,10 +66,10 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	target := TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo", WorkRoot: "/runs"}
 	spec := worker.Spec{ID: "worker-1234567890", WorkDir: "/repo"}
 	run := NewRemoteRun(target, spec)
-	if err := runner.Start(context.Background(), run, []string{"sh", "-lc", "echo ok"}); err != nil {
+	if err := runner.Start(context.Background(), run, []string{"sh", "-lc", "echo ok"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.commands) == 0 || !strings.Contains(strings.Join(executor.commands[0], " "), "tmux new-session") {
+	if len(executor.commands) < 2 || !strings.Contains(strings.Join(executor.commands[1], " "), "tmux new-session") {
 		t.Fatalf("start command = %+v", executor.commands)
 	}
 	sink := &recordingWorkerSink{}
@@ -91,6 +91,37 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	}
 	if len(changes.Artifacts) != 1 || changes.Artifacts[0].Kind != "worker_log" || !strings.Contains(changes.Artifacts[0].Content, "remote output") {
 		t.Fatalf("artifacts = %+v", changes.Artifacts)
+	}
+}
+
+func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	run := NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker-stdin", WorkDir: "/repo"})
+
+	if err := runner.Start(context.Background(), run, []string{"codex", "exec", "--json", "-"}, "large prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if executor.input != "large prompt" {
+		t.Fatalf("input = %q", executor.input)
+	}
+	var sawPromptUpload bool
+	var sawPromptRedirect bool
+	var sawPathBootstrap bool
+	for _, argv := range executor.commands {
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, "cat >") && strings.Contains(joined, "prompt.txt") {
+			sawPromptUpload = true
+		}
+		if strings.Contains(joined, "<") && strings.Contains(joined, "prompt.txt") {
+			sawPromptRedirect = true
+		}
+		if strings.Contains(joined, ".local/share/mise/shims") {
+			sawPathBootstrap = true
+		}
+	}
+	if !sawPromptUpload || !sawPromptRedirect || !sawPathBootstrap {
+		t.Fatalf("commands did not upload prompt, redirect stdin, and bootstrap PATH: %+v", executor.commands)
 	}
 }
 
@@ -223,6 +254,7 @@ func TestServiceRunsWorkerOnRealSSHTarget(t *testing.T) {
 type fakeRemoteExecutor struct {
 	commands    [][]string
 	probeOutput string
+	input       string
 }
 
 func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
@@ -253,6 +285,12 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	default:
 		return "", nil
 	}
+}
+
+func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input string) (string, error) {
+	e.commands = append(e.commands, append([]string(nil), argv...))
+	e.input = input
+	return "", nil
 }
 
 type recordingWorkerSink struct {

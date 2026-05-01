@@ -203,6 +203,9 @@ The initial local-first vertical slice is implemented.
 - Fixed target selection so `retryFromWorkerID` and `baseWorkerID` inherit the prior worker's execution target unless an explicit retry target is present.
 - Added regression coverage for follow-up target inheritance and retry target inheritance.
 - Added an end-to-end dynamic replan regression where a local candidate is followed by a dependent worker while a higher-scored SSH target is available; the test fails if the dependent worker leaks to SSH.
+- Investigated VM failures where remote tmux workers reported `codex: command not found` even though Codex was installed under mise. Remote worker startup now bootstraps a predictable user tool PATH before launching tmux commands.
+- Codex scheduler/assistant/worker prompts now use stdin (`-`) instead of placing the full prompt in argv, preventing `argument list too long` on long-running tasks with large event histories. SSH workers upload the prompt to a remote file and redirect it into the CLI so the prompt is not embedded in the SSH command either.
+- Claude stream-json workers now include `--verbose`, matching the current Claude CLI requirement for `--print --output-format stream-json`.
 
 ## Running Locally
 

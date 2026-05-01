@@ -79,11 +79,12 @@ func (a *CLIAssistant) Ask(ctx context.Context, req core.AssistantRequest) (core
 
 func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
-	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, prompt}
+	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-"}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
-		args = []string{"exec", "resume", "--json", req.ProviderSessionID, prompt}
+		args = []string{"exec", "resume", "--json", req.ProviderSessionID, "-"}
 	}
 	cmd := exec.CommandContext(ctx, a.codexPath, args...)
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
