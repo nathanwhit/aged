@@ -87,7 +87,7 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return ReplanDecision{}, fmt.Errorf("codex replan command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return ReplanDecision{}, fmt.Errorf("codex replan command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
 	}
 
 	content, err := extractCodexAgentMessage(stdout.Bytes())
@@ -127,7 +127,7 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
 	}
 	content, sessionID, err := extractCodexAssistantOutput(stdout.Bytes())
 	if err != nil {
@@ -159,7 +159,7 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return Plan{}, fmt.Errorf("codex brain command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return Plan{}, fmt.Errorf("codex brain command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
 	}
 
 	content, err := extractCodexAgentMessage(stdout.Bytes())
@@ -180,6 +180,21 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	plan.Metadata["brain"] = "codex"
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
+}
+
+func commandFailureDetail(stdout string, stderr string) string {
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(stdout)
+	}
+	if detail == "" {
+		return "no command output"
+	}
+	const maxDetailBytes = 4000
+	if len(detail) <= maxDetailBytes {
+		return detail
+	}
+	return "..." + detail[len(detail)-maxDetailBytes:]
 }
 
 func (b *CodexBrain) assistantPrompt(req core.AssistantRequest) string {

@@ -805,21 +805,15 @@ func abortFailedGitMerge(ctx context.Context, dir string) error {
 }
 
 func copyGitWorkspaceChanges(ctx context.Context, source string, destination string) error {
-	diff, err := runGit(ctx, source, "diff", "--binary", "HEAD", "--")
+	copiedTracked, err := copyGitTrackedChanges(ctx, source, destination)
 	if err != nil {
-		return fmt.Errorf("read git base workspace diff: %w", err)
-	}
-	hasChanges := strings.TrimSpace(diff) != ""
-	if hasChanges {
-		if err := applyGitPatchToWorkspace(ctx, destination, diff); err != nil {
-			return fmt.Errorf("apply git base workspace diff: %w", err)
-		}
+		return err
 	}
 	copiedUntracked, err := copyGitUntrackedFiles(ctx, source, destination)
 	if err != nil {
 		return err
 	}
-	if !hasChanges && !copiedUntracked {
+	if !copiedTracked && !copiedUntracked {
 		return nil
 	}
 	if _, err := runGit(ctx, destination, "add", "-A"); err != nil {
@@ -829,6 +823,66 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil
+}
+
+func copyGitTrackedChanges(ctx context.Context, source string, destination string) (bool, error) {
+	nameStatus, err := runGit(ctx, source, "diff", "--name-status", "-z", "HEAD", "--")
+	if err != nil {
+		return false, fmt.Errorf("list git base workspace tracked changes: %w", err)
+	}
+	if nameStatus == "" {
+		return false, nil
+	}
+	fields := strings.Split(nameStatus, "\x00")
+	copied := false
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		i++
+		if status == "" {
+			continue
+		}
+		if i >= len(fields) {
+			return false, fmt.Errorf("parse git base workspace tracked changes: status %q missing path", status)
+		}
+		path := fields[i]
+		i++
+		if path == "" {
+			continue
+		}
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			if i >= len(fields) {
+				return false, fmt.Errorf("parse git base workspace tracked changes: status %q missing destination path", status)
+			}
+			nextPath := fields[i]
+			i++
+			if strings.HasPrefix(status, "R") {
+				if err := removeWorkspacePath(destination, path); err != nil {
+					return false, fmt.Errorf("copy git base workspace tracked rename %q: %w", path, err)
+				}
+			}
+			path = nextPath
+		}
+		if strings.HasPrefix(status, "D") {
+			if err := removeWorkspacePath(destination, path); err != nil {
+				return false, fmt.Errorf("copy git base workspace tracked delete %q: %w", path, err)
+			}
+			copied = true
+			continue
+		}
+		sourcePath, err := safeWorkspacePath(source, path)
+		if err != nil {
+			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
+		}
+		destinationPath, err := safeWorkspacePath(destination, path)
+		if err != nil {
+			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
+		}
+		if err := copyWorkspaceFile(sourcePath, destinationPath); err != nil {
+			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
+		}
+		copied = true
+	}
+	return copied, nil
 }
 
 func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) error {
@@ -902,6 +956,38 @@ func safeWorkspacePath(root string, relativePath string) (string, error) {
 		return "", errors.New("paths outside the workspace are not allowed")
 	}
 	return filepath.Join(root, clean), nil
+}
+
+func removeWorkspacePath(root string, relativePath string) error {
+	path, err := safeWorkspacePath(root, relativePath)
+	if err != nil {
+		return err
+	}
+	err = os.RemoveAll(path)
+	if err != nil {
+		return err
+	}
+	return pruneEmptyParents(root, filepath.Dir(path))
+}
+
+func pruneEmptyParents(root string, dir string) error {
+	root = filepath.Clean(root)
+	for {
+		dir = filepath.Clean(dir)
+		if dir == root || dir == "." || dir == string(os.PathSeparator) || !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
+			return nil
+		}
+		if err := os.Remove(dir); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if errors.Is(err, os.ErrPermission) {
+				return nil
+			}
+			return nil
+		}
+		dir = filepath.Dir(dir)
+	}
 }
 
 func copyWorkspaceFile(source string, destination string) error {

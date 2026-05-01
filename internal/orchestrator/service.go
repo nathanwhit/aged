@@ -2140,12 +2140,18 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
 		}
+		if s.recoverWorkerFailureWithReplan(ctx, task, plan, results, err) {
+			return
+		}
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
 	results = append(results, result)
 	if result.Status == core.WorkerWaiting {
 		s.handleWorkerQuestion(ctx, task, plan, results, result)
+		return
+	}
+	if result.Status == core.WorkerFailed && s.recoverWorkerFailureWithReplan(ctx, task, plan, results, nil) {
 		return
 	}
 	if !s.finishOrContinueTask(ctx, task.ID, result) {
@@ -2179,6 +2185,52 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	}
 
 	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
+func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, err error) bool {
+	if _, ok := s.brain.(ReplanProvider); !ok {
+		return false
+	}
+	if err != nil {
+		results = append(results, failedFollowUpResult(initial, err))
+	}
+	if len(results) == 0 {
+		return false
+	}
+	failure := results[len(results)-1]
+	if failure.Status != core.WorkerFailed {
+		return false
+	}
+	if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failure.Error, failure.Summary)); ok {
+		_ = s.waitForUserAction(ctx, task.ID, failure.WorkerID, blocker.Reason, blocker.Question, map[string]any{
+			"summary":    blocker.Summary,
+			"workerKind": failure.Kind,
+			"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
+			"error":      failure.Error,
+		})
+		return true
+	}
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "worker_failure_recovery",
+		"when":     "after_worker_failure",
+		"reason":   "Worker failed; asking the orchestrator to repair, retry, or consolidate instead of failing the task immediately.",
+		"workerId": failure.WorkerID,
+		"status":   "started",
+		"error":    failure.Error,
+	})
+	ok, selectedWorkerID, reason, results := s.replanLoop(ctx, task, initial, results)
+	if !ok {
+		return true
+	}
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "worker_failure_recovery",
+		"when":     "after_worker_failure",
+		"reason":   nonEmpty(reason, "Orchestrator selected a recovery result."),
+		"workerId": selectedWorkerID,
+		"status":   "completed",
+	})
+	_ = s.completeTask(ctx, task.ID, results, selectedWorkerID, reason)
+	return true
 }
 
 func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
@@ -3764,10 +3816,28 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				if s.waitForRecoverableError(ctx, task.ID, "", err) {
 					return false, "", "", results
 				}
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
+				results = append(results, failedFollowUpResult(next, err))
+				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":   "worker_failure_recovery",
+					"when":   "during_dynamic_replan",
+					"reason": "Dynamic replan worker setup failed; continuing the replan loop with the failure as context.",
+					"status": "continued",
+					"error":  err.Error(),
+				})
+				continue
 			}
 			results = append(results, result)
+			if result.Status == core.WorkerFailed {
+				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":     "worker_failure_recovery",
+					"when":     "during_dynamic_replan",
+					"reason":   "Dynamic replan worker failed; continuing the replan loop with the failure as context.",
+					"workerId": result.WorkerID,
+					"status":   "continued",
+					"error":    result.Error,
+				})
+				continue
+			}
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
 				return false, "", "", results
 			}
@@ -3822,6 +3892,29 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 		})
 		return true, candidateWorkerID, reason, results
 	}
+	if candidateWorkerID, candidateReason := latestCandidateLeaf(results); candidateWorkerID != "" {
+		reason := "fallback completion with latest candidate leaf after replanner error: " + replanErr.Error()
+		if candidateReason != "" {
+			reason += "; " + candidateReason
+		}
+		_, _ = s.append(ctx, core.Event{
+			Type:   core.EventTaskReplanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"turn": turn,
+				"decision": ReplanDecision{
+					Action:                 "complete",
+					FinalCandidateWorkerID: candidateWorkerID,
+					Rationale:              reason,
+					Message:                "The replanner failed and final-candidate fallback was ambiguous, so aged selected the latest successful candidate leaf.",
+				},
+				"fallback":       true,
+				"error":          replanErr.Error(),
+				"candidateError": candidateErr.Error(),
+			}),
+		})
+		return true, candidateWorkerID, reason, results
+	}
 	_, _ = s.append(ctx, core.Event{
 		Type:   core.EventTaskReplanned,
 		TaskID: task.ID,
@@ -3849,6 +3942,21 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
+}
+
+func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
+	leaves := candidateLeaves(candidateResults(results))
+	if len(leaves) == 0 {
+		return "", ""
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		for _, leaf := range leaves {
+			if results[i].WorkerID == leaf.WorkerID {
+				return leaf.WorkerID, "selected latest successful candidate leaf after ambiguous deterministic fallback"
+			}
+		}
+	}
+	return "", ""
 }
 
 type followUpNode struct {
