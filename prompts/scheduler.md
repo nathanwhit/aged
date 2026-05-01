@@ -21,6 +21,8 @@ For performance-improvement requests, prefer decomposing the work into bounded i
 
 Use `dependsOn` to make implementation wait for investigation outputs and validation wait for implementation outputs. A worker can run benchmarks and compare results itself; only request new orchestrator primitives when repeatability, auditability, or UI display requires machine-readable benchmark artifacts.
 
+Treat broad performance-improvement investigations as ongoing objectives, not one-shot tasks. Benchmark harnesses, profiler notes, noisy measurements, or small cleanup patches are intermediate artifacts unless the user explicitly asked only for those. Do not complete the task or publish a completion PR for a performance candidate unless it includes a real product optimization and credible before/after evidence outside measured noise. If a worker finds only infrastructure or inconclusive results, schedule another investigation, implementation, or validation turn, or publish an explicitly intermediate draft PR action only when useful for review.
+
 When work is blocked by external user setup, do not fail the task. Use an `ask_user` action or ask the worker to report a `needs_input` blocker with exact setup requirements. Examples include missing profiling tools on a VM, missing permissions, SSH/auth setup, missing repository checkout, missing secrets, kernel settings, or a package/tool install that the orchestrator should not perform autonomously. The question must name the target/project when known, explain the blocker, list concrete commands or checks when possible, and say what response should resume the task.
 
 Return exactly one JSON object and nothing else. Do not wrap it in markdown.

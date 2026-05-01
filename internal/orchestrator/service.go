@@ -3050,6 +3050,11 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 	if err != nil {
 		return s.waitForFinalCandidateResolution(ctx, taskID, err)
 	}
+	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
+		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
+			return recoverErr
+		}
+	}
 	if candidateWorkerID != "" {
 		if strings.TrimSpace(reason) == "" {
 			reason = candidateReason
@@ -3092,6 +3097,44 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, completionReason string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return true, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return true, eventstore.ErrNotFound
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok {
+		return false, nil
+	}
+	blockReason, blocked := performanceCandidatePublishBlockReason(task, candidate, completionReason)
+	if !blocked {
+		return false, nil
+	}
+	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), "completion_publish_readiness_recovery", "before_publish", "completion publish readiness failed")
+	if !recovery.Handled {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":     "completion_publish_readiness_recovery",
+			"when":     "before_publish",
+			"reason":   "Final candidate is not ready for publication.",
+			"workerId": candidateWorkerID,
+			"status":   "waiting",
+			"error":    blockReason,
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness", "The selected performance candidate is not ready to publish as a pull request.\n\n"+blockReason+"\n\nSteer the task to continue investigation, produce a real optimization with credible benchmark evidence, or explicitly publish anyway.", map[string]any{
+			"error": blockReason,
+		})
+		return true, nil
+	}
+	if recovery.Err != nil || !recovery.Completed {
+		return true, recovery.Err
+	}
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, 0)
 }
 
 func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, attempts int) (bool, error) {
@@ -3688,6 +3731,65 @@ func resultHasCandidateChanges(result WorkerTurnResult) bool {
 	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
 }
 
+func performanceCandidatePublishBlockReason(task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
+	taskText := strings.ToLower(task.Title + "\n" + task.Prompt)
+	if !strings.Contains(taskText, "performance") &&
+		!strings.Contains(taskText, "throughput") &&
+		!strings.Contains(taskText, "optim") &&
+		!strings.Contains(taskText, "benchmark") &&
+		!strings.Contains(taskText, "profil") {
+		return "", false
+	}
+	candidateText := strings.ToLower(strings.Join([]string{candidate.Summary, candidate.Error, completionReason}, "\n"))
+	weakEvidenceNeedles := []string{
+		"not credible",
+		"not a proven",
+		"not prove",
+		"do not claim",
+		"within noise",
+		"inside measured",
+		"mixed",
+		"low confidence",
+		"not strong enough",
+		"no measurable improvement",
+		"without evidence",
+		"not as a throughput",
+	}
+	for _, needle := range weakEvidenceNeedles {
+		if strings.Contains(candidateText, needle) {
+			return "performance candidate is not ready to publish: benchmark evidence is weak, noisy, or explicitly described as insufficient for a real throughput claim", true
+		}
+	}
+	if len(candidate.Changes.ChangedFiles) > 0 {
+		productFiles := 0
+		for _, file := range candidate.Changes.ChangedFiles {
+			if !performanceSupportFile(file.Path) {
+				productFiles++
+			}
+		}
+		if productFiles == 0 {
+			return "performance candidate is not ready to publish: it only changes benchmark, test, documentation, or tooling files and does not include a product optimization", true
+		}
+	}
+	return "", false
+}
+
+func performanceSupportFile(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case path == "":
+		return true
+	case strings.Contains(path, "bench"), strings.Contains(path, "benchmark"):
+		return true
+	case strings.HasPrefix(path, "tools/"), strings.HasPrefix(path, "test/"), strings.HasPrefix(path, "tests/"):
+		return true
+	case strings.HasPrefix(path, "docs/"), strings.HasSuffix(path, ".md"):
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Service) taskCompletionMode(ctx context.Context, taskID string) string {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -3756,6 +3858,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		switch decision.Action {
 		case "complete":
+			if reason := rejectPrematureLongRunningCompletion(task, decision, results); reason != "" {
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", "", results
+				}
+				continue
+			}
 			if len(options.BlockedFinalCandidates) > 0 {
 				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
 				if candidateErr != nil || candidateWorkerID == "" {
@@ -3942,6 +4051,51 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
+}
+
+func rejectPrematureLongRunningCompletion(task core.Task, decision ReplanDecision, results []WorkerTurnResult) string {
+	taskText := strings.ToLower(task.Title + "\n" + task.Prompt)
+	if !longRunningPerformanceObjective(taskText) || boundedOneShotObjective(taskText) {
+		return ""
+	}
+	if strings.Contains(taskText, "open pr") || strings.Contains(taskText, "open a pr") || strings.Contains(taskText, "pull request") {
+		return ""
+	}
+	decisionText := strings.ToLower(decision.Rationale + "\n" + decision.Message)
+	if strings.Contains(decisionText, "not credible") ||
+		strings.Contains(decisionText, "not strong enough") ||
+		strings.Contains(decisionText, "within noise") ||
+		strings.Contains(decisionText, "mixed") ||
+		strings.Contains(decisionText, "longer") ||
+		strings.Contains(decisionText, "next turn") {
+		return "long-running performance objective is not complete; the decision itself says more benchmarking, validation, or follow-up work is needed"
+	}
+	if len(results) < 3 {
+		return "long-running performance objective requires iterative investigation, implementation, and validation before completion"
+	}
+	return "long-running performance objective should continue looking for validated optimization PR candidates instead of completing the task"
+}
+
+func longRunningPerformanceObjective(taskText string) bool {
+	return (strings.Contains(taskText, "performance") ||
+		strings.Contains(taskText, "throughput") ||
+		strings.Contains(taskText, "optim") ||
+		strings.Contains(taskText, "benchmark") ||
+		strings.Contains(taskText, "profil")) &&
+		(strings.Contains(taskText, "investigate") ||
+			strings.Contains(taskText, "possible") ||
+			strings.Contains(taskText, "improvements") ||
+			strings.Contains(taskText, "long") ||
+			strings.Contains(taskText, "find") ||
+			strings.Contains(taskText, "finding"))
+}
+
+func boundedOneShotObjective(taskText string) bool {
+	return strings.Contains(taskText, "only") ||
+		strings.Contains(taskText, "just") ||
+		strings.Contains(taskText, "single") ||
+		strings.Contains(taskText, "one-shot") ||
+		strings.Contains(taskText, "one shot")
 }
 
 func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {

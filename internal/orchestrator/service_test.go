@@ -586,6 +586,67 @@ func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *
 	}
 }
 
+func TestServiceRejectsPrematureLongRunningPerformanceCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "establish benchmark harness and inspect Deno.serve throughput",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "Candidate only adds benchmark infrastructure and the measured throughput result is mixed and within noise; run longer validation next.",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "continue searching for a real Deno.serve optimization with credible benchmark evidence",
+			},
+		}, {
+			Action:  "wait",
+			Message: "continuing long-running performance investigation",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "benchmark harness added; no credible throughput win yet"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{
+				{Path: "tools/serve_bench.ts", Status: "added"},
+			},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Deno.serve Throughput",
+		Prompt: "Investigate possible performance improvements for Deno.serve http server throughput. Hello world and more real world cases are important. Memory usage is also important.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("missing rejected premature completion action")
+	}
+	if len(brain.states) < 2 {
+		t.Fatalf("replan states = %d, want rejection then continuation", len(brain.states))
+	}
+}
+
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
