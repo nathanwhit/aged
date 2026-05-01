@@ -195,6 +195,14 @@ The initial local-first vertical slice is implemented.
   - Current source workspace `@` is a merge revision with parents `rswvvtss` and worker revision `krozmvrk`, so the worker change was integrated with jj merge semantics rather than a squash.
   - Focused worker test passed; full worker-local package test hit the known sandbox limit when jj attempted to write parent repo objects.
 
+## 2026-04-30 VM Task Failure Follow-Up
+
+- Investigated the repeated VM failure for task `19991116-c659-4a07-8ca2-336c5ca1f2d1`.
+- The worker itself resumed and completed in the retained local Git worktree on the VM, but the next dynamically replanned follow-up carried `baseWorkerID` without a placement constraint.
+- Target selection then load-balanced the dependent follow-up onto an SSH target, where the previous local workspace path did not exist, causing `retry workspace ... is not available`.
+- Fixed target selection so `retryFromWorkerID` and `baseWorkerID` inherit the prior worker's execution target unless an explicit retry target is present.
+- Added regression coverage for follow-up target inheritance and retry target inheritance.
+
 ## Running Locally
 
 Current daemon command:

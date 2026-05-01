@@ -2236,7 +2236,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["targetLabels"] = project.TargetLabels
 		plan.Metadata["targetSelectionSource"] = "project"
 	}
-	target, err := s.selectExecutionTarget(plan)
+	target, err := s.selectExecutionTarget(ctx, plan)
 	if err != nil {
 		return WorkerTurnResult{}, err
 	}
@@ -2441,11 +2441,56 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
 }
 
-func (s *Service) selectExecutionTarget(plan Plan) (TargetConfig, error) {
+func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
 		return s.targets.SelectID(retryTargetID)
 	}
+	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
+		if target, ok, err := s.executionTargetForWorker(ctx, retryFromWorkerID); err != nil || ok {
+			return target, err
+		}
+	}
+	if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
+		if target, ok, err := s.executionTargetForWorker(ctx, baseWorkerID); err != nil || ok {
+			return target, err
+		}
+	}
 	return s.targets.Select(plan)
+}
+
+func (s *Service) executionTargetForWorker(ctx context.Context, workerID string) (TargetConfig, bool, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return TargetConfig{}, false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return TargetConfig{}, false, err
+	}
+	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
+		node := snapshot.ExecutionNodes[i]
+		if node.WorkerID != workerID || strings.TrimSpace(node.TargetID) == "" {
+			continue
+		}
+		target, err := s.targets.SelectID(node.TargetID)
+		if err != nil {
+			return TargetConfig{}, true, err
+		}
+		return target, true, nil
+	}
+	info := workerExecutionInfo(snapshot, workerID)
+	if info == nil {
+		return TargetConfig{}, false, nil
+	}
+	targetID, _ := info["targetId"].(string)
+	if strings.TrimSpace(targetID) == "" {
+		targetID, _ = info["targetID"].(string)
+	}
+	if strings.TrimSpace(targetID) == "" {
+		return TargetConfig{}, false, nil
+	}
+	target, err := s.targets.SelectID(targetID)
+	return target, true, err
 }
 
 func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan Plan, runner worker.Runner, target TargetConfig) (WorkerTurnResult, error) {

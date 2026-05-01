@@ -3240,6 +3240,92 @@ func TestServiceUsesTaskTargetLabels(t *testing.T) {
 	}
 }
 
+func TestServiceFollowUpInheritsBaseWorkerTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	baseWorkerID := "base-worker"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-target-inheritance",
+		WorkerID: baseWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   baseWorkerID,
+			"workerKind": "codex",
+			"nodeId":     "node-base",
+			"targetId":   "local",
+			"targetKind": "local",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-fast", Kind: TargetKindSSH, Host: "vm-fast", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	target, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "mock",
+		Prompt:     "follow up",
+		Metadata: map[string]any{
+			"baseWorkerID": baseWorkerID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %q, want local", target.ID)
+	}
+}
+
+func TestServiceRetryInheritsPreviousWorkerTargetWithoutRetryTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	previousWorkerID := "previous-worker"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-retry-target-inheritance",
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "codex",
+			"nodeId":     "node-previous",
+			"targetId":   "vm-previous",
+			"targetKind": "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-previous", Kind: TargetKindSSH, Host: "vm-previous", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	target, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryFromWorkerID": previousWorkerID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-previous" {
+		t.Fatalf("target = %q, want vm-previous", target.ID)
+	}
+}
+
 func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
