@@ -1585,6 +1585,9 @@ func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	if retried.ID != task.ID {
 		t.Fatalf("retry returned task %q, want %q", retried.ID, task.ID)
 	}
+	if retried.Error != "" || retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+		t.Fatalf("retried task did not reset failed objective state: %+v", retried)
+	}
 
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if runner.callsValue() != 2 {
@@ -1644,6 +1647,9 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	}
 	if retried.ID != taskID || retried.Status != core.TaskPlanning {
 		t.Fatalf("retried = %+v", retried)
+	}
+	if retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+		t.Fatalf("retried objective = %q/%q, want active/retrying", retried.ObjectiveStatus, retried.ObjectivePhase)
 	}
 
 	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
