@@ -175,6 +175,28 @@ func (r SSHRunner) PrepareCheckout(ctx context.Context, target TargetConfig, spe
 	return strings.TrimSpace(out), nil
 }
 
+func (r SSHRunner) ApplyPatch(ctx context.Context, target TargetConfig, workDir string, runDir string, patchText string) error {
+	if strings.TrimSpace(patchText) == "" {
+		return nil
+	}
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	inputExecutor, ok := r.Executor.(RemoteInputExecutor)
+	if !ok {
+		return errors.New("remote executor does not support base patch upload")
+	}
+	patchPath := path.Join(runDir, "base.patch")
+	if _, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", "mkdir -p "+shellQuote(runDir))); err != nil {
+		return err
+	}
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(target, "sh", "-lc", "cat > "+shellQuote(patchPath)), patchText); err != nil {
+		return err
+	}
+	_, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remoteApplyPatchScript(workDir, patchPath)))
+	return err
+}
+
 func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetHealth, core.TargetResources) {
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
@@ -397,6 +419,16 @@ if [ -n "$base" ]; then
   fi
 fi
 echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase))
+}
+
+func remoteApplyPatchScript(workDir string, patchPath string) string {
+	return fmt.Sprintf(`set -eu
+cd %[1]s
+if git apply --check --whitespace=nowarn %[2]s; then
+  git apply --whitespace=nowarn %[2]s
+else
+  git apply --3way --whitespace=nowarn %[2]s
+fi`, shellQuote(workDir), shellQuote(patchPath))
 }
 
 func remoteProbeScript(workDir string) string {

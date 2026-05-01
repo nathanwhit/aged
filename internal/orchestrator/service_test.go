@@ -2585,7 +2585,7 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 }
 
-func TestServiceDynamicReplanFollowUpInheritsBaseTargetEndToEnd(t *testing.T) {
+func TestServiceDynamicReplanFollowUpHandsOffLocalBaseToRemoteTarget(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -2633,6 +2633,7 @@ func TestServiceDynamicReplanFollowUpInheritsBaseTargetEndToEnd(t *testing.T) {
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.go", Status: "modified"}},
 		},
+		diff: "diff --git a/candidate.go b/candidate.go\n--- a/candidate.go\n+++ b/candidate.go\n@@ -1 +1 @@\n-old\n+new\n",
 	}, targets, SSHRunner{Executor: remoteExecutor, PollInterval: time.Millisecond})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -2646,13 +2647,21 @@ func TestServiceDynamicReplanFollowUpInheritsBaseTargetEndToEnd(t *testing.T) {
 	if len(snapshot.ExecutionNodes) != 2 {
 		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
 	}
-	for _, node := range snapshot.ExecutionNodes {
-		if node.TargetID != "local" || node.TargetKind != "local" {
-			t.Fatalf("dependent graph should stay on local target; node = %+v", node)
-		}
+	if snapshot.ExecutionNodes[0].TargetID != "local" || snapshot.ExecutionNodes[0].TargetKind != "local" {
+		t.Fatalf("first node should run locally; nodes = %+v", snapshot.ExecutionNodes)
 	}
-	if len(remoteExecutor.commands) != 0 {
-		t.Fatalf("dependent follow-up leaked to ssh target: %+v", remoteExecutor.commands)
+	if snapshot.ExecutionNodes[1].TargetID != "vm-fast" || snapshot.ExecutionNodes[1].TargetKind != "ssh" {
+		t.Fatalf("dependent follow-up should move to remote target; nodes = %+v", snapshot.ExecutionNodes)
+	}
+	joinedCommands := strings.Join(flattenCommands(remoteExecutor.commands), "\n")
+	if !strings.Contains(joinedCommands, "base.patch") || !strings.Contains(joinedCommands, "git apply") {
+		t.Fatalf("remote handoff did not upload/apply base patch: %+v", remoteExecutor.commands)
+	}
+	if remoteExecutor.input == "" || !strings.Contains(remoteExecutor.input, "candidate.go") {
+		t.Fatalf("uploaded base patch = %q", remoteExecutor.input)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"baseHandoff":"patch"`) {
+		t.Fatalf("missing base handoff metadata")
 	}
 }
 
@@ -3311,7 +3320,7 @@ func TestServiceUsesTaskTargetLabels(t *testing.T) {
 	}
 }
 
-func TestServiceFollowUpInheritsBaseWorkerTarget(t *testing.T) {
+func TestServiceFollowUpCanMoveAwayFromBaseWorkerTarget(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -3349,8 +3358,8 @@ func TestServiceFollowUpInheritsBaseWorkerTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.ID != "local" {
-		t.Fatalf("target = %q, want local", target.ID)
+	if target.ID != "vm-fast" {
+		t.Fatalf("target = %q, want vm-fast", target.ID)
 	}
 }
 
@@ -4232,6 +4241,14 @@ func eventPayloadContains(events []core.Event, eventType core.EventType, taskID 
 		}
 	}
 	return false
+}
+
+func flattenCommands(commands [][]string) []string {
+	flattened := make([]string, 0, len(commands))
+	for _, command := range commands {
+		flattened = append(flattened, strings.Join(command, " "))
+	}
+	return flattened
 }
 
 func hasEventPayloadValue(events []core.Event, eventType core.EventType, taskID string, key string, want string) bool {
