@@ -684,27 +684,46 @@ func isTerminalWorkerStatus(status core.WorkerStatus) bool {
 }
 
 func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNode, run remoteRun) {
+	workerCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancels[node.WorkerID] = cancel
+	s.tasks[node.WorkerID] = node.TaskID
+	s.remoteRuns[node.WorkerID] = run
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		delete(s.cancels, node.WorkerID)
+		delete(s.tasks, node.WorkerID)
+		delete(s.remoteRuns, node.WorkerID)
+		s.mu.Unlock()
+	}()
+
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: node.TaskID, workerID: node.WorkerID, state: runState}
-	status, err := s.sshRunner.Poll(ctx, run, worker.ParserForKind(node.WorkerKind), sink)
+	status, err := s.sshRunner.Poll(workerCtx, run, worker.ParserForKind(node.WorkerKind), sink)
 	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		statusErr = err
 		workerStatus = core.WorkerFailed
 	}
-	changes := WorkspaceChanges{
-		Root:     run.RunDir,
-		CWD:      run.WorkDir,
-		Mode:     "remote",
-		VCSType:  "ssh",
-		DiffStat: "remote worker changes are reported through worker output",
+	if errors.Is(workerCtx.Err(), context.Canceled) {
+		workerStatus = core.WorkerCanceled
+		statusErr = context.Canceled
 	}
+	changes := s.sshRunner.DescribeChanges(ctx, run)
 	_, _ = s.append(ctx, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   node.TaskID,
 		WorkerID: node.WorkerID,
 		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
 	})
+	_ = s.recordWorkerArtifacts(ctx, node.TaskID, node.WorkerID, node.WorkerKind, runState, changes)
+	if workerStatus == core.WorkerCanceled {
+		_ = s.setTaskStatus(ctx, node.TaskID, core.TaskCanceled)
+		return
+	}
+	go s.resumeRecoveredRemoteTask(context.Background(), node.TaskID)
 }
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
@@ -1659,6 +1678,46 @@ func (s *Service) retryFinalCandidateTask(ctx context.Context, task core.Task, r
 	}
 }
 
+func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || isTerminalTaskStatus(task.Status) || taskHasActiveWorkers(snapshot, taskID) {
+		return
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "recovering", "Resuming task after recovered remote worker completion."); err != nil {
+		return
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "recovering"
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+		s.retryFinalCandidateTask(ctx, task, results)
+		return
+	}
+	s.retryGraphTask(ctx, task, initial, results)
+}
+
+func taskHasActiveWorkers(snapshot core.Snapshot, taskID string) bool {
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.TaskID == taskID && !isTerminalWorkerStatus(activeWorker.Status) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
 		return err
@@ -1672,7 +1731,7 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	remote := s.remoteRuns[workerID]
 	s.mu.Unlock()
 	if cancel == nil {
-		return eventstore.ErrNotFound
+		return s.cancelPersistedRemoteWorker(ctx, workerID)
 	}
 	if remote.Session != "" {
 		_ = s.sshRunner.Cancel(ctx, remote)
@@ -1681,14 +1740,85 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	return nil
 }
 
+func (s *Service) cancelPersistedRemoteWorker(ctx context.Context, workerID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	node, run, ok := s.persistedRemoteRun(snapshot, workerID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if run.Session != "" {
+		_ = s.sshRunner.Cancel(ctx, run)
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   node.TaskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerCanceled,
+			"summary": "Remote worker was canceled from persisted daemon state.",
+			"error":   "remote worker did not have a live local cancellation handle",
+			"workspaceChanges": WorkspaceChanges{
+				Root:    run.RunDir,
+				CWD:     run.WorkDir,
+				Mode:    "remote",
+				VCSType: "ssh",
+			},
+		}),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (core.ExecutionNode, remoteRun, bool) {
+	if s.targets == nil {
+		return core.ExecutionNode{}, remoteRun{}, false
+	}
+	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
+		node := snapshot.ExecutionNodes[i]
+		if node.WorkerID != workerID || node.TargetKind != string(TargetKindSSH) || isTerminalWorkerStatus(node.Status) {
+			continue
+		}
+		target, ok := s.targets.Get(node.TargetID)
+		if !ok {
+			return core.ExecutionNode{}, remoteRun{}, false
+		}
+		return node, remoteRun{
+			Target:  target,
+			Session: node.RemoteSession,
+			RunDir:  node.RemoteRunDir,
+			WorkDir: node.RemoteWorkDir,
+			Status:  "running",
+		}, true
+	}
+	return core.ExecutionNode{}, remoteRun{}, false
+}
+
 func (s *Service) CancelTask(ctx context.Context, taskID string) error {
+	canceledWorkers := map[string]bool{}
+	var workerIDs []string
 	s.mu.Lock()
-	for workerID, cancel := range s.cancels {
+	for workerID := range s.cancels {
 		if s.tasks[workerID] == taskID {
-			cancel()
+			canceledWorkers[workerID] = true
+			workerIDs = append(workerIDs, workerID)
 		}
 	}
 	s.mu.Unlock()
+	for _, workerID := range workerIDs {
+		_ = s.CancelWorker(ctx, workerID)
+	}
+	if snapshot, err := s.store.Snapshot(ctx); err == nil {
+		for _, activeWorker := range snapshot.Workers {
+			if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) || canceledWorkers[activeWorker.ID] {
+				continue
+			}
+			_ = s.CancelWorker(ctx, activeWorker.ID)
+		}
+	}
 
 	_, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
