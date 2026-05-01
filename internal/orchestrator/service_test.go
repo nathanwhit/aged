@@ -906,6 +906,7 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
 	snapshot = waitForEvent(t, store, core.EventTaskArtifact, task.ID)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	task, ok := findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")
@@ -918,6 +919,77 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 	if publisher.published.WorkerID == "" || publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
 		t.Fatalf("published from wrong worker workspace: %+v", publisher.published)
+	}
+}
+
+func TestServicePlanActionDoesNotPublishRejectedCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	baseBrain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "find and implement a real throughput optimization",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "publish a useful optimization PR when one is ready",
+				Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "The worker correctly reported this is not ready to publish yet.",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "continue until there is an actual task-relevant optimization",
+			},
+		}, {
+			Action:  "wait",
+			Message: "continuing broader investigation",
+		}},
+	}
+	brain := &publicationReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []PublicationReview{{
+			Ready:  false,
+			Reason: "worker result says the requested optimization is not done and only produced setup",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "I added setup notes, but the requested throughput optimization is not done yet."}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "bench/throughput.md", Status: "added"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Deno Serve Throughput",
+		Prompt: "Keep working until you find real throughput optimizations and open PRs as useful complete units become ready.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want rejected candidate to stay unpublished", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("publication review calls = %d, want 1", brain.reviewCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_readiness_rejected", "rejected") {
+		t.Fatalf("missing publication readiness rejection event")
+	}
+	if len(baseBrain.states) == 0 {
+		t.Fatalf("replanner was not given a chance to continue after rejected publication")
 	}
 }
 
@@ -1330,6 +1402,87 @@ func TestServiceStartsNewTaskWorkspaceFromProjectDefaultBase(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if workspace.baseRevision != "refs/remotes/upstream/main" {
 		t.Fatalf("workspace base revision = %q, want upstream default base", workspace.baseRevision)
+	}
+}
+
+func TestServicePublishedPRContainsWorkerChangesNotDaemonBranch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	runTestGit(t, repo, "checkout", "-b", "daemon-feature")
+	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("do not publish\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "unrelated.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "unrelated daemon branch work")
+
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:           "repo",
+		Name:         "Repo",
+		LocalPath:    repo,
+		Repo:         "fork/repo",
+		UpstreamRepo: "owner/repo",
+		DefaultBase:  "main",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/owner/repo/pull/22", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":22,"url":"https://github.com/owner/repo/pull/22","state":"OPEN","title":"CI","isDraft":false,"headRefName":"ci-branch","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "add workflow",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish CI workflow",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main", "branch": "ci-branch", "title": "CI", "body": "Body"},
+		}},
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: ".github/workflows/ci.yml",
+		body: "name: CI\n",
+	}}, repo, NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain))
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Add CI",
+		Prompt:   "Implement CI that checks formatting and runs all the tests.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if contents := runTestGit(t, repo, "show", "ci-branch:.github/workflows/ci.yml"); contents != "name: CI\n" {
+		t.Fatalf("published branch missing worker workflow: %q", contents)
+	}
+	if _, err := runCommand(ctx, repo, "git", "cat-file", "-e", "ci-branch:unrelated.txt"); err == nil {
+		t.Fatalf("published branch included unrelated daemon branch file")
+	}
+	if base := strings.TrimSpace(runTestGit(t, repo, "merge-base", "ci-branch", "refs/remotes/upstream/main")); base != mainCommit {
+		t.Fatalf("branch merge-base = %q, want upstream main %q", base, mainCommit)
 	}
 }
 
@@ -3146,6 +3299,64 @@ func TestServiceTreatsRecoverableWorkerFailureAsUserAction(t *testing.T) {
 	}
 	if question, _ := payload["question"].(string); !strings.Contains(question, "perf: command not found") {
 		t.Fatalf("question = %q", question)
+	}
+}
+
+func TestServiceTreatsWorkflowScopePushRejectionAsRecoverable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("push git branch: refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope"),
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "add CI workflow",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish CI workflow",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+		}},
+	}}, map[string]worker.Runner{"writer": eventRunner{
+		kind:   "writer",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "added CI workflow"}},
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: ".github/workflows/ci.yml", Status: "added"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Add Formatting and Test CI",
+		Prompt:   "Add GitHub Actions CI.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser || snapshot.Tasks[0].ObjectivePhase != "approval_needed" {
+		t.Fatalf("objective = %q/%q, want user approval needed", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "github_workflow_scope_required" {
+		t.Fatalf("approval reason = %v", payload["reason"])
+	}
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want one blocked publish attempt", publisher.publishCalls)
 	}
 }
 
@@ -5196,6 +5407,23 @@ func (b *completionReviewBrain) ReviewCompletion(context.Context, core.Task, Wor
 	b.reviewCalls++
 	if len(b.reviews) == 0 {
 		return CompletionReview{Ready: true}, nil
+	}
+	review := b.reviews[0]
+	b.reviews = b.reviews[1:]
+	return review, nil
+}
+
+type publicationReviewBrain struct {
+	BrainProvider
+	ReplanProvider
+	reviews     []PublicationReview
+	reviewCalls int
+}
+
+func (b *publicationReviewBrain) ReviewPublication(context.Context, core.Task, WorkerTurnResult, PlanAction) (PublicationReview, error) {
+	b.reviewCalls++
+	if len(b.reviews) == 0 {
+		return PublicationReview{Ready: true}, nil
 	}
 	review := b.reviews[0]
 	b.reviews = b.reviews[1:]

@@ -142,6 +142,38 @@ func (b *CodexBrain) ReviewCompletion(ctx context.Context, task core.Task, candi
 	return review, nil
 }
 
+func (b *CodexBrain) ReviewPublication(ctx context.Context, task core.Task, candidate WorkerTurnResult, action PlanAction) (PublicationReview, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	prompt := b.publicationReviewPrompt(task, candidate, action)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return PublicationReview{}, fmt.Errorf("codex publication review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
+	}
+
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return PublicationReview{}, err
+	}
+	content = trimJSONFence(content)
+	review, err := decodePublicationReview([]byte(content))
+	if err != nil {
+		return PublicationReview{}, fmt.Errorf("decode codex publication review: %w", err)
+	}
+	if review.Metadata == nil {
+		review.Metadata = map[string]any{}
+	}
+	review.Metadata["brain"] = "codex"
+	review.Metadata["scheduler"] = "orchestrator"
+	return review, nil
+}
+
 func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -291,6 +323,22 @@ func decodeCompletionReview(data []byte) (CompletionReview, error) {
 		return CompletionReview{}, err
 	}
 	return CompletionReview{
+		Ready:    raw.Ready,
+		Reason:   raw.Reason,
+		Metadata: raw.Metadata,
+	}, nil
+}
+
+func decodePublicationReview(data []byte) (PublicationReview, error) {
+	var raw struct {
+		Ready    bool           `json:"ready"`
+		Reason   string         `json:"reason,omitempty"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	}
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
+		return PublicationReview{}, err
+	}
+	return PublicationReview{
 		Ready:    raw.Ready,
 		Reason:   raw.Reason,
 		Metadata: raw.Metadata,
@@ -600,6 +648,47 @@ Readiness rules:
 - Do not require perfection. This is a task-contract review, not a general code review.
 
 Completion review input:
+
+` + string(data)
+}
+
+func (b *CodexBrain) publicationReviewPrompt(task core.Task, candidate WorkerTurnResult, action PlanAction) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"candidate":         candidate,
+		"publicationAction": action,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return strings.TrimSpace(b.template) + `
+
+You are reviewing whether the orchestrator should publish the selected worker result as a pull request right now.
+
+Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
+
+The JSON object must have exactly these top-level fields:
+
+{
+  "ready": true,
+  "reason": "string"
+}
+
+Publication readiness rules:
+- Set "ready": true only when the candidate contains real, task-relevant changes that are appropriate to expose as a pull request now.
+- A candidate may be publishable even when the broader task should continue, but only if this PR would contain a coherent useful unit of work on its own.
+- Set "ready": false when the candidate summary says the requested work is not done, the work should continue before review, validation is missing for the claimed change, or the candidate is only diagnostic setup for a broader implementation task.
+- Set "ready": false when the changed files do not address the user's actual task objective, even if they are useful for another task.
+- Set "ready": false when the action would publish a branch without the worker's requested changes.
+- Do not perform a general code review. Decide only whether opening a PR now matches the task, candidate, and planned publication action.
+
+Publication review input:
 
 ` + string(data)
 }

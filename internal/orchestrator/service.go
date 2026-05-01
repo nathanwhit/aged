@@ -1015,16 +1015,16 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}); err != nil {
 		return core.PullRequest{}, err
 	}
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
-		return core.PullRequest{}, err
-	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
-		return core.PullRequest{}, err
-	}
 	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
 	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
 		return core.PullRequest{}, err
 	}
 	return pr, nil
@@ -3649,6 +3649,11 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
+		if ready, err := s.reviewPlanPublicationReadiness(ctx, task, action, results, workerID); err != nil {
+			return false, err
+		} else if !ready {
+			return true, nil
+		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":     action.Kind,
 			"when":     nonEmpty(action.When, "after_success"),
@@ -3745,6 +3750,47 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 	default:
 		return true, nil
 	}
+}
+
+func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
+	reviewer, ok := s.brain.(PublicationReviewProvider)
+	if !ok {
+		return true, nil
+	}
+	candidate, ok := workerResultByID(results, workerID)
+	if !ok {
+		return false, fmt.Errorf("publish_pull_request action selected unknown worker %s", workerID)
+	}
+	review, err := reviewer.ReviewPublication(ctx, task, candidate, action)
+	if err != nil {
+		if recordErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "publish_pull_request_readiness_review",
+			"when":     nonEmpty(action.When, "after_success"),
+			"reason":   "Publication readiness review failed; continuing with the planned action.",
+			"workerId": workerID,
+			"status":   "ignored",
+			"error":    err.Error(),
+		}); recordErr != nil {
+			return false, recordErr
+		}
+		return true, nil
+	}
+	if review.Ready {
+		return true, nil
+	}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "candidate is not ready to publish as a pull request"
+	}
+	return false, s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":            "publish_pull_request_readiness_rejected",
+		"when":            nonEmpty(action.When, "after_success"),
+		"reason":          reason,
+		"actionReason":    action.Reason,
+		"workerId":        workerID,
+		"status":          "rejected",
+		"candidateStatus": candidate.Status,
+	})
 }
 
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {
