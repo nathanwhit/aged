@@ -1842,7 +1842,7 @@ func (s *Service) recoverTaskApplyFailure(ctx context.Context, task core.Task, s
 	if attempts >= 1 || !isRecoverableApplyConflict(applyErr) {
 		return false, WorkerApplyResult{}, nil
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, task.ID, snapshot, task.FinalCandidateWorkerID, applyErr, "local_apply_recovery", "after_apply_conflict", "local apply failed")
+	recovery := s.recoverFinalCandidateWithReplan(ctx, task.ID, snapshot, task.FinalCandidateWorkerID, applyErr, "local_apply_recovery", "after_apply_conflict", "local apply failed", nil)
 	if !recovery.Handled {
 		return false, WorkerApplyResult{}, nil
 	}
@@ -3058,10 +3058,17 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 }
 
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
-	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, 0)
+	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, publishRecoveryState{})
 }
 
-func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, publishRecoveryAttempts int) error {
+const maxCompletionPublishRecoveryAttempts = maxDynamicReplanTurns
+
+type publishRecoveryState struct {
+	Attempts               int
+	BlockedFinalCandidates map[string]string
+}
+
+func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, recoveryState publishRecoveryState) error {
 	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
 	if err != nil {
 		return s.waitForFinalCandidateResolution(ctx, taskID, err)
@@ -3095,7 +3102,7 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
 			publishErr := fmt.Errorf("publish completion pull request: %w", err)
-			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, publishRecoveryAttempts); handled {
+			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, recoveryState); handled {
 				return recoverErr
 			}
 			_ = s.failTask(ctx, taskID, publishErr)
@@ -3132,7 +3139,7 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 	if !blocked {
 		return false, nil
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), "completion_publish_readiness_recovery", "before_publish", "completion publish readiness failed")
+	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), "completion_publish_readiness_recovery", "before_publish", "completion publish readiness failed", nil)
 	if !recovery.Handled {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":     "completion_publish_readiness_recovery",
@@ -3150,25 +3157,46 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 	if recovery.Err != nil || !recovery.Completed {
 		return true, recovery.Err
 	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, 0)
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
 }
 
-func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, attempts int) (bool, error) {
-	if attempts >= 1 || !isRecoverablePublishConflict(publishErr) {
+func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, recoveryState publishRecoveryState) (bool, error) {
+	if !isRecoverablePublishConflict(publishErr) {
 		return false, nil
+	}
+	if recoveryState.Attempts >= maxCompletionPublishRecoveryAttempts {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":     "completion_publish_recovery",
+			"when":     "after_publish_conflict",
+			"reason":   "Completion publish recovery reached the retry limit.",
+			"workerId": candidateWorkerID,
+			"status":   "waiting",
+			"error":    publishErr.Error(),
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_conflict_recovery_limit", "Publishing the completion pull request still conflicts after multiple orchestrated repair attempts. Steer the task with how to resolve the remaining conflicts or publish manually from the retained worker workspace.", map[string]any{
+			"error":                   publishErr.Error(),
+			"blockedFinalCandidates":  sortedMapKeys(recoveryState.BlockedFinalCandidates),
+			"publishRecoveryAttempts": recoveryState.Attempts,
+		})
+		return true, nil
 	}
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return false, err
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed")
+	blockedFinalCandidates := copyStringMap(recoveryState.BlockedFinalCandidates)
+	blockedFinalCandidates[candidateWorkerID] = publishErr.Error()
+	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed", blockedFinalCandidates)
 	if !recovery.Handled {
 		return false, nil
 	}
 	if recovery.Err != nil || !recovery.Completed {
 		return true, recovery.Err
 	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, attempts+1)
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{
+		Attempts:               recoveryState.Attempts + 1,
+		BlockedFinalCandidates: blockedFinalCandidates,
+	})
 }
 
 type finalCandidateRecoveryResult struct {
@@ -3180,7 +3208,7 @@ type finalCandidateRecoveryResult struct {
 	Err              error
 }
 
-func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, actionKind string, actionWhen string, failureLabel string) finalCandidateRecoveryResult {
+func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, actionKind string, actionWhen string, failureLabel string, blockedFinalCandidates map[string]string) finalCandidateRecoveryResult {
 	if _, ok := s.brain.(ReplanProvider); !ok {
 		return finalCandidateRecoveryResult{}
 	}
@@ -3207,9 +3235,8 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 	}); err != nil {
 		return finalCandidateRecoveryResult{Handled: true, Err: err}
 	}
-	blockedFinalCandidates := map[string]string{
-		candidateWorkerID: failureErr.Error(),
-	}
+	blockedFinalCandidates = copyStringMap(blockedFinalCandidates)
+	blockedFinalCandidates[candidateWorkerID] = failureErr.Error()
 	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
 		BlockedFinalCandidates:         blockedFinalCandidates,
 		AllowBlockedBasePatchConflicts: true,
@@ -3741,6 +3768,14 @@ func sortedMapKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func resultHasCandidateChanges(result WorkerTurnResult) bool {
