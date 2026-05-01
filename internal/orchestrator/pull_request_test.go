@@ -2,9 +2,12 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
+
+	"aged/internal/core"
 )
 
 func TestSanitizeGitHubCLIEnvDropsCertificateOverrides(t *testing.T) {
@@ -134,6 +137,62 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 	}
 	assertCommandContains(t, calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
 	assertCommandContains(t, calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
+}
+
+func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name != "gh" {
+				t.Fatalf("command = %q, want gh", name)
+			}
+			return `{"number":2,"url":"https://github.com/owner/repo/pull/2","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"","comments":[{"id":"IC_1","body":"Can you summarize the approach here?","createdAt":"2026-05-01T04:31:10Z","updatedAt":"2026-05-01T04:31:10Z","viewerDidAuthor":false,"author":{"login":"reviewer"}}]}`, nil
+		},
+	}
+
+	baseline, err := publisher.Inspect(context.Background(), core.PullRequest{
+		Repo: "owner/repo",
+		URL:  "https://github.com/owner/repo/pull/2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.ReviewStatus == "COMMENTED" {
+		t.Fatalf("baseline review status = %q", baseline.ReviewStatus)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(baseline.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	delete(metadata, "latestConversationCommentSignature")
+	delete(metadata, "latestConversationCommentId")
+	delete(metadata, "latestConversationCommentAuthor")
+	delete(metadata, "latestConversationCommentCreatedAt")
+	delete(metadata, "latestConversationCommentUpdatedAt")
+	delete(metadata, "latestConversationCommentBody")
+
+	withNewComment, err := publisher.Inspect(context.Background(), core.PullRequest{
+		Repo:     "owner/repo",
+		URL:      "https://github.com/owner/repo/pull/2",
+		Metadata: core.MustJSON(metadata),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withNewComment.ReviewStatus != "COMMENTED" {
+		t.Fatalf("review status = %q, want COMMENTED", withNewComment.ReviewStatus)
+	}
+	if !strings.Contains(string(withNewComment.Metadata), "Can you summarize") {
+		t.Fatalf("metadata missing comment body: %s", withNewComment.Metadata)
+	}
+
+	again, err := publisher.Inspect(context.Background(), withNewComment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ReviewStatus == "COMMENTED" {
+		t.Fatalf("already-seen comment triggered again")
+	}
 }
 
 func assertCommandContains(t *testing.T, calls [][]string, want []string) {
