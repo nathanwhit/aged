@@ -720,7 +720,9 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 	})
 	_ = s.recordWorkerArtifacts(ctx, node.TaskID, node.WorkerID, node.WorkerKind, runState, changes)
 	if workerStatus == core.WorkerCanceled {
-		_ = s.setTaskStatus(ctx, node.TaskID, core.TaskCanceled)
+		if snapshot, err := s.store.Snapshot(ctx); err == nil && !taskHasActiveWorkers(snapshot, node.TaskID) {
+			_ = s.setTaskStatus(ctx, node.TaskID, core.TaskCanceled)
+		}
 		return
 	}
 	go s.resumeRecoveredRemoteTask(context.Background(), node.TaskID)
