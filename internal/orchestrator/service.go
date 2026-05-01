@@ -4283,8 +4283,14 @@ func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, 
 		plan.Metadata = map[string]any{}
 	}
 	originalPrompt := strings.TrimSpace(plan.Prompt)
+	if len(plan.Spawns) > 0 {
+		plan.Metadata["suppressedConflictRepairSpawns"] = len(plan.Spawns)
+	}
 	plan.Prompt = buildConflictRepairPrompt(task, blockedWorkerID, repairReason, sortedMapKeys(blocked), originalPrompt)
 	plan.Rationale = nonEmpty(plan.Rationale, "Repair blocked final candidate so it applies cleanly.")
+	plan.RequiredApprovals = nil
+	plan.Actions = nil
+	plan.Spawns = nil
 	plan.Metadata["baseWorkerID"] = blockedWorkerID
 	plan.Metadata["allowBasePatchConflicts"] = true
 	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID

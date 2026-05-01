@@ -614,6 +614,12 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 			Plan: &Plan{
 				WorkerKind: "change",
 				Prompt:     "review the repaired candidate one more time",
+				Spawns: []SpawnRequest{{
+					ID:         "post-repair-review",
+					Role:       "Final regression reviewer",
+					Reason:     "review the repaired candidate before completion",
+					WorkerKind: "change",
+				}},
 			},
 		}, {
 			Action:    "complete",
@@ -661,6 +667,12 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 	}
 	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, "Your only job in this turn is to produce a new candidate") {
 		t.Fatalf("missing forced conflict repair prompt")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"spawnID":"post-repair-review"`) {
+		t.Fatalf("forced conflict repair should not run follow-up review spawns")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"suppressedConflictRepairSpawns":1`) {
+		t.Fatalf("missing suppressed conflict repair spawn metadata")
 	}
 	if len(brain.states) < 5 {
 		t.Fatalf("replan states = %d, want initial plus two recovery replans", len(brain.states))
@@ -1781,6 +1793,7 @@ func TestServiceRetriesFinalCandidateByPublishingWithoutRerunningWorker(t *testi
 			}
 			snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 			snapshot = waitForPullRequests(t, store, task.ID, 1)
+			snapshot = waitForTaskStatusEventCount(t, store, task.ID, core.TaskWaiting, 2)
 			if publisher.publishCalls != 1 {
 				t.Fatalf("initial publish calls = %d, want 1", publisher.publishCalls)
 			}
@@ -5496,6 +5509,39 @@ func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, co
 	}
 	snapshot, _ := store.Snapshot(context.Background())
 	t.Fatalf("task %s did not publish %d pull requests; pull requests = %+v", taskID, count, snapshot.PullRequests)
+	return core.Snapshot{}
+}
+
+func waitForTaskStatusEventCount(t *testing.T, store eventstore.Store, taskID string, status core.TaskStatus, count int) core.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, event := range snapshot.Events {
+			if event.Type != core.EventTaskStatus || event.TaskID != taskID {
+				continue
+			}
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Status == status {
+				found++
+			}
+		}
+		if found >= count {
+			return snapshot
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot, _ := store.Snapshot(context.Background())
+	t.Fatalf("task %s did not record %d %s status events; events = %+v", taskID, count, status, snapshot.Events)
 	return core.Snapshot{}
 }
 
