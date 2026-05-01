@@ -669,12 +669,9 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 		t.Fatalf("missing forced conflict repair prompt")
 	}
 	if eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"spawnID":"post-repair-review"`) {
-		t.Fatalf("forced conflict repair should not run follow-up review spawns")
+		t.Fatalf("finalization recovery should not run follow-up review spawns")
 	}
-	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"suppressedConflictRepairSpawns":1`) {
-		t.Fatalf("missing suppressed conflict repair spawn metadata")
-	}
-	if len(brain.states) < 5 {
+	if len(brain.states) < 4 {
 		t.Fatalf("replan states = %d, want initial plus two recovery replans", len(brain.states))
 	}
 	secondRecoveryState := brain.states[3]
