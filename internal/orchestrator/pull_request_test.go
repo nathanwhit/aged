@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"aged/internal/core"
 )
@@ -150,8 +151,9 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	}
 
 	baseline, err := publisher.Inspect(context.Background(), core.PullRequest{
-		Repo: "owner/repo",
-		URL:  "https://github.com/owner/repo/pull/2",
+		Repo:      "owner/repo",
+		URL:       "https://github.com/owner/repo/pull/2",
+		CreatedAt: time.Date(2026, 5, 1, 4, 32, 0, 0, time.UTC),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +194,39 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	}
 	if again.ReviewStatus == "COMMENTED" {
 		t.Fatalf("already-seen comment triggered again")
+	}
+}
+
+func TestInspectPullRequestFlagsCommentAfterWatchOnUpgrade(t *testing.T) {
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			return `{"number":2,"url":"https://github.com/owner/repo/pull/2","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"","comments":[{"id":"IC_1","body":"Can you summarize the approach here?","createdAt":"2026-05-01T04:31:10Z","updatedAt":"2026-05-01T04:31:10Z","viewerDidAuthor":false,"author":{"login":"reviewer"}}]}`, nil
+		},
+	}
+	metadata := core.MustJSON(map[string]any{
+		"conversationCommentBaselineEstablished": true,
+		"latestConversationCommentSignature":     "2026-05-01T04:31:10Z:IC_1",
+	})
+
+	checked, err := publisher.Inspect(context.Background(), core.PullRequest{
+		Repo:      "owner/repo",
+		URL:       "https://github.com/owner/repo/pull/2",
+		CreatedAt: time.Date(2026, 5, 1, 4, 30, 0, 0, time.UTC),
+		Metadata:  metadata,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked.ReviewStatus != "COMMENTED" {
+		t.Fatalf("review status = %q, want COMMENTED", checked.ReviewStatus)
+	}
+
+	again, err := publisher.Inspect(context.Background(), checked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ReviewStatus == "COMMENTED" {
+		t.Fatal("upgrade comment trigger repeated")
 	}
 }
 

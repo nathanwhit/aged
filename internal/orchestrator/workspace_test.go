@@ -266,6 +266,37 @@ func TestGitWorkspaceManagerAllowsLegacyAgedStateInSource(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerAllowsDirtySourceForIsolatedWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("dirty source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker-dirty-source",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !workspace.SourceDirty {
+		t.Fatalf("dirty source should be recorded")
+	}
+	if workspace.Dirty {
+		t.Fatalf("isolated workspace should start clean")
+	}
+	contents, err := os.ReadFile(filepath.Join(workspace.CWD, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "base\n" {
+		t.Fatalf("isolated workspace contents = %q, want committed source", contents)
+	}
+}
+
 func TestNativeWorkspaceApplyResultsPreserveMethodAndFiles(t *testing.T) {
 	changedFiles := []WorkspaceChangedFile{
 		{Path: "internal/orchestrator/workspace.go", Status: "modified"},
