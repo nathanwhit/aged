@@ -1599,10 +1599,13 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status == core.TaskFailed {
 		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
 		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
-			if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 				return core.Task{}, err
 			}
 			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
 			go s.retryGraphTask(context.Background(), task, initial, results)
 			return task, nil
 		}
@@ -1612,10 +1615,13 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		if err != nil {
 			return core.Task{}, err
 		}
-		if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 			return core.Task{}, err
 		}
 		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
 		go s.retryGraphTask(context.Background(), task, initial, results)
 		return task, nil
 	}
@@ -1623,12 +1629,22 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if err != nil {
 		return core.Task{}, err
 	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+	if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 		return core.Task{}, err
 	}
 	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "retrying"
 	go s.retryTask(context.Background(), task, plan)
 	return task, nil
+}
+
+func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
+		return err
+	}
+	return s.setTaskStatus(ctx, taskID, core.TaskPlanning)
 }
 
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
