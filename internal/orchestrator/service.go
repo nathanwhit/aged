@@ -3241,6 +3241,8 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 		BlockedFinalCandidates:         blockedFinalCandidates,
 		AllowBlockedBasePatchConflicts: true,
 		RecoveryHint:                   fmt.Sprintf("%s for worker %s. Do not complete with a blocked final candidate. Schedule a repair or consolidation worker that starts from the blocked worker changes, resolves conflicts against the current checkout, and produces a new candidate.", failureLabel, candidateWorkerID),
+		RequiredRepairWorkerID:         candidateWorkerID,
+		RequiredRepairReason:           failureErr.Error(),
 	})
 	if !ok {
 		return finalCandidateRecoveryResult{Handled: true, Results: results}
@@ -3870,6 +3872,8 @@ type replanLoopOptions struct {
 	BlockedFinalCandidates         map[string]string
 	AllowBlockedBasePatchConflicts bool
 	RecoveryHint                   string
+	RequiredRepairWorkerID         string
+	RequiredRepairReason           string
 }
 
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
@@ -3964,6 +3968,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
+			if strings.TrimSpace(options.RequiredRepairWorkerID) != "" {
+				next = forceConflictRepairPlan(task, next, options.RequiredRepairWorkerID, nonEmpty(options.RequiredRepairReason, recoveryHint), blockedFinalCandidates)
+			}
 			if stringMetadata(next.Metadata, "baseWorkerID") == "" {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
@@ -4120,6 +4127,56 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
+}
+
+func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, repairReason string, blocked map[string]string) Plan {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	originalPrompt := strings.TrimSpace(plan.Prompt)
+	plan.Prompt = buildConflictRepairPrompt(task, blockedWorkerID, repairReason, sortedMapKeys(blocked), originalPrompt)
+	plan.Rationale = nonEmpty(plan.Rationale, "Repair blocked final candidate so it applies cleanly.")
+	plan.Metadata["baseWorkerID"] = blockedWorkerID
+	plan.Metadata["allowBasePatchConflicts"] = true
+	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID
+	plan.Metadata["recoveryHint"] = repairReason
+	plan.Metadata["forcedConflictRepair"] = true
+	return plan
+}
+
+func buildConflictRepairPrompt(task core.Task, blockedWorkerID string, repairReason string, blockedWorkerIDs []string, originalPrompt string) string {
+	var builder strings.Builder
+	builder.WriteString("# Conflict Repair Task\n\n")
+	builder.WriteString("The previous final candidate could not be published or applied because its patch conflicts with the current checkout.\n\n")
+	builder.WriteString("Blocked worker ID: ")
+	builder.WriteString(blockedWorkerID)
+	builder.WriteString("\n")
+	if strings.TrimSpace(repairReason) != "" {
+		builder.WriteString("Failure:\n")
+		builder.WriteString(strings.TrimSpace(repairReason))
+		builder.WriteString("\n\n")
+	}
+	if len(blockedWorkerIDs) > 0 {
+		builder.WriteString("Already blocked final candidates:\n")
+		for _, id := range blockedWorkerIDs {
+			builder.WriteString("- ")
+			builder.WriteString(id)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("Original task:\n")
+	builder.WriteString(task.Title)
+	builder.WriteString("\n\n")
+	builder.WriteString(task.Prompt)
+	builder.WriteString("\n\n")
+	builder.WriteString("Your only job in this turn is to produce a new candidate that preserves the blocked worker's intended changes while resolving the conflicts against the current checkout. Do not run a review-only pass. Do not merely validate the old candidate. Make the code changes needed for the repaired candidate, remove conflict markers if any, and run the focused tests needed to show the repaired patch is applyable.\n")
+	if originalPrompt != "" {
+		builder.WriteString("\nScheduler's original recovery request, for context only:\n")
+		builder.WriteString(originalPrompt)
+		builder.WriteString("\n")
+	}
+	return builder.String()
 }
 
 func rejectPrematureLongRunningCompletion(task core.Task, decision ReplanDecision, results []WorkerTurnResult) string {

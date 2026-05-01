@@ -613,7 +613,7 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 			Action: "continue",
 			Plan: &Plan{
 				WorkerKind: "change",
-				Prompt:     "repair second publish conflict against current checkout",
+				Prompt:     "review the repaired candidate one more time",
 			},
 		}, {
 			Action:    "complete",
@@ -655,6 +655,12 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 	}
 	if got := countTaskActions(snapshot.Events, task.ID, "completion_publish_recovery", "completed"); got != 2 {
 		t.Fatalf("completed publish recoveries = %d, want 2", got)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"forcedConflictRepair":true`) {
+		t.Fatalf("missing forced conflict repair metadata")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, "Your only job in this turn is to produce a new candidate") {
+		t.Fatalf("missing forced conflict repair prompt")
 	}
 	if len(brain.states) < 5 {
 		t.Fatalf("replan states = %d, want initial plus two recovery replans", len(brain.states))
