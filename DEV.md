@@ -202,6 +202,7 @@ The initial local-first vertical slice is implemented.
 - Target selection then load-balanced the dependent follow-up onto an SSH target, where the previous local workspace path did not exist, causing `retry workspace ... is not available`.
 - Fixed target selection so `retryFromWorkerID` and `baseWorkerID` inherit the prior worker's execution target unless an explicit retry target is present.
 - Added regression coverage for follow-up target inheritance and retry target inheritance.
+- Added an end-to-end dynamic replan regression where a local candidate is followed by a dependent worker while a higher-scored SSH target is available; the test fails if the dependent worker leaks to SSH.
 
 ## Running Locally
 

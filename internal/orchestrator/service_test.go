@@ -2585,6 +2585,77 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 }
 
+func TestServiceDynamicReplanFollowUpInheritsBaseTargetEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	localRunner := &recordingEventRunner{
+		kind: "codex",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "local candidate ready",
+		}},
+	}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "produce the local candidate",
+			Metadata: map[string]any{
+				"retryTargetID": "local",
+			},
+		},
+		decisions: []ReplanDecision{
+			{
+				Action:    "continue",
+				Rationale: "validate on top of the candidate",
+				Plan: &Plan{
+					WorkerKind: "codex",
+					Prompt:     "validate the local candidate",
+				},
+			},
+			{
+				Action:    "complete",
+				Rationale: "validation completed",
+			},
+		},
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-fast", Kind: TargetKindSSH, Host: "vm-fast", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+	})
+	remoteExecutor := &fakeRemoteExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, brain, map[string]worker.Runner{
+		"codex": localRunner,
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "candidate.go", Status: "modified"}},
+		},
+	}, targets, SSHRunner{Executor: remoteExecutor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent target inheritance",
+		Prompt: "Run a dependent follow-up after a local candidate.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 2 {
+		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TargetID != "local" || node.TargetKind != "local" {
+			t.Fatalf("dependent graph should stay on local target; node = %+v", node)
+		}
+	}
+	if len(remoteExecutor.commands) != 0 {
+		t.Fatalf("dependent follow-up leaked to ssh target: %+v", remoteExecutor.commands)
+	}
+}
+
 func TestServiceCompletesWithFallbackWhenReplannerErrorsAfterSingleCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
