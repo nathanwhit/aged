@@ -797,7 +797,8 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 }
 
 func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) error {
-	if strings.TrimSpace(patch) == "" {
+	patch = normalizePatchText(patch)
+	if patch == "" {
 		return nil
 	}
 	apply := func(args ...string) error {
@@ -819,6 +820,16 @@ func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) err
 		return nil
 	}
 	return apply("apply", "--3way", "--whitespace=nowarn")
+}
+
+func normalizePatchText(patch string) string {
+	if strings.TrimSpace(patch) == "" {
+		return ""
+	}
+	if !strings.HasSuffix(patch, "\n") {
+		return patch + "\n"
+	}
+	return patch
 }
 
 func copyGitUntrackedFiles(ctx context.Context, source string, destination string) (bool, error) {

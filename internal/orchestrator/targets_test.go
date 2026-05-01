@@ -127,8 +127,31 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	if changes.VCSType != "git" || !changes.Dirty || len(changes.ChangedFiles) != 1 || changes.ChangedFiles[0].Path != "main.go" || !strings.Contains(changes.Diff, "diff --git") {
 		t.Fatalf("changes = %+v", changes)
 	}
+	if !strings.HasSuffix(changes.Diff, "\n") {
+		t.Fatalf("diff should be normalized with trailing newline: %q", changes.Diff)
+	}
 	if len(changes.Artifacts) != 1 || changes.Artifacts[0].Kind != "worker_log" || !strings.Contains(changes.Artifacts[0].Content, "remote output") {
 		t.Fatalf("artifacts = %+v", changes.Artifacts)
+	}
+}
+
+func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	target := TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}
+
+	if err := runner.ApplyPatch(context.Background(), target, "/repo", "/tmp/run", "diff --git a/main.go b/main.go"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(executor.input, "\n") {
+		t.Fatalf("uploaded patch should end with newline: %q", executor.input)
+	}
+}
+
+func TestRemoteChangeScriptIncludesUntrackedFilesInPatch(t *testing.T) {
+	script := remoteChangeScript(NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker", WorkDir: "/repo"}))
+	if !strings.Contains(script, "git ls-files --others --exclude-standard") || !strings.Contains(script, "git diff --no-index --binary") {
+		t.Fatalf("remote change script does not append untracked files:\n%s", script)
 	}
 }
 
