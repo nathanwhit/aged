@@ -229,6 +229,7 @@ func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
 		RepoURL:     "https://github.com/nathanwhit/aged.git",
 		WorkDir:     "/srv/aged/repos/aged",
 		DefaultBase: "main",
+		BaseRef:     "abc123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
 		t.Fatal("missing prepare command")
 	}
 	joined := strings.Join(executor.commands[0], " ")
-	for _, want := range []string{"git clone", "git fetch origin --prune", "git checkout --detach", "origin/$base"} {
+	for _, want := range []string{"git clone", "git fetch origin --prune", `git cat-file -e "$base_ref^{commit}"`, `git checkout --detach "$base_ref"`, "origin/$base"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("prepare command missing %q:\n%s", want, joined)
 		}
