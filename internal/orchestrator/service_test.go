@@ -395,6 +395,65 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubCompletionModeRepairsPublishConflict(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	applyCalls := 0
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply"),
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
+		},
+		applyCalls: &applyCalls,
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Collapsible Project Add Dialog",
+		Prompt:   "Make the project add dialog collapsible.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForPullRequests(t, store, task.ID, 1)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if publisher.publishCalls != 2 {
+		t.Fatalf("publish calls = %d, want 2", publisher.publishCalls)
+	}
+	if len(publisher.publishedWorkers) != 2 || publisher.publishedWorkers[0] == publisher.publishedWorkers[1] {
+		t.Fatalf("published workers = %+v, want original then repair", publisher.publishedWorkers)
+	}
+	task = snapshot.Tasks[0]
+	if task.FinalCandidateWorkerID != publisher.publishedWorkers[1] {
+		t.Fatalf("final candidate = %q, published repair = %q", task.FinalCandidateWorkerID, publisher.publishedWorkers[1])
+	}
+	if task.Status != core.TaskWaiting || task.Error != "" {
+		t.Fatalf("task status/error = %q/%q", task.Status, task.Error)
+	}
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0 for local PR publish", applyCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_recovery", "completed") {
+		t.Fatalf("missing completed publish recovery action")
+	}
+}
+
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3902,10 +3961,13 @@ func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (
 }
 
 type fakePullRequestPublisher struct {
-	published PullRequestPublishSpec
-	status    core.PullRequest
-	list      []core.PullRequest
-	listSpec  PullRequestListSpec
+	published        PullRequestPublishSpec
+	publishedWorkers []string
+	publishCalls     int
+	errOnce          error
+	status           core.PullRequest
+	list             []core.PullRequest
+	listSpec         PullRequestListSpec
 }
 
 type fakeTitleGenerator struct {
@@ -3919,6 +3981,11 @@ func (g fakeTitleGenerator) GenerateTitle(context.Context, string) (string, erro
 
 func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
 	p.published = spec
+	p.publishCalls++
+	p.publishedWorkers = append(p.publishedWorkers, spec.WorkerID)
+	if p.errOnce != nil && p.publishCalls == 1 {
+		return core.PullRequest{}, p.errOnce
+	}
 	branch := strings.TrimSpace(spec.Branch)
 	if branch == "" {
 		branch = defaultPRBranch(spec)
@@ -4615,6 +4682,25 @@ func taskWorkspaceCWD(snapshot core.Snapshot, taskID string) string {
 func hasEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {
 	for _, event := range events {
 		if event.Type == eventType && event.TaskID == taskID && (workerID == "" || event.WorkerID == workerID) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind   string `json:"kind"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == kind && payload.Status == status {
 			return true
 		}
 	}

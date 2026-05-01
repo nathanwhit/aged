@@ -2935,6 +2935,10 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 }
 
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
+	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, 0)
+}
+
+func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, publishRecoveryAttempts int) error {
 	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
 	if err != nil {
 		return s.waitForFinalCandidateResolution(ctx, taskID, err)
@@ -2962,7 +2966,11 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 	}
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
-			_ = s.failTask(ctx, taskID, fmt.Errorf("publish completion pull request: %w", err))
+			publishErr := fmt.Errorf("publish completion pull request: %w", err)
+			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, publishRecoveryAttempts); handled {
+				return recoverErr
+			}
+			_ = s.failTask(ctx, taskID, publishErr)
 			return err
 		}
 		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
@@ -2977,6 +2985,157 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, attempts int) (bool, error) {
+	if attempts >= 1 || !isRecoverablePublishConflict(publishErr) {
+		return false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return false, eventstore.ErrNotFound
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok || strings.TrimSpace(candidate.Kind) == "" {
+		return false, nil
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "completion_publish_recovery",
+		"when":     "after_publish_conflict",
+		"reason":   "Final candidate could not be published cleanly; scheduling a repair worker against the current checkout.",
+		"workerId": candidateWorkerID,
+		"status":   "started",
+		"error":    publishErr.Error(),
+	}); err != nil {
+		return true, err
+	}
+	plan := completionPublishRecoveryPlan(task, candidate, publishErr, attempts+1)
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return true, err
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, candidateWorkerID, err) {
+			return true, nil
+		}
+		_ = s.failTask(ctx, task.ID, err)
+		return true, err
+	}
+	if !s.finishOrContinueTask(ctx, task.ID, result) {
+		return true, nil
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":       "completion_publish_recovery",
+		"when":       "after_publish_conflict",
+		"reason":     "Repair worker completed; retrying completion pull request publish.",
+		"workerId":   result.WorkerID,
+		"baseWorker": candidateWorkerID,
+		"status":     "completed",
+	}); err != nil {
+		return true, err
+	}
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, append(results, result), result.WorkerID, "completion publish conflict recovered by repair worker", attempts+1)
+}
+
+func isRecoverablePublishConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "remote patch has conflicts") ||
+		strings.Contains(lower, "patch does not apply") ||
+		strings.Contains(lower, "3-way apply failed") ||
+		(strings.Contains(lower, "applied patch") && strings.Contains(lower, "conflicts"))
+}
+
+func workerResultByID(results []WorkerTurnResult, workerID string) (WorkerTurnResult, bool) {
+	for _, result := range results {
+		if result.WorkerID == workerID {
+			return result, true
+		}
+	}
+	return WorkerTurnResult{}, false
+}
+
+func completionPublishRecoveryPlan(task core.Task, candidate WorkerTurnResult, publishErr error, attempt int) Plan {
+	workerKind := candidate.Kind
+	if workerKind == "" {
+		workerKind = "codex"
+	}
+	return Plan{
+		WorkerKind:      workerKind,
+		Prompt:          buildCompletionPublishRecoveryPrompt(task, candidate, publishErr),
+		ReasoningEffort: "medium",
+		Rationale:       "Repair a final candidate that failed to publish because its patch conflicted with the current checkout.",
+		Steps: []PlanStep{{
+			Title:       "Inspect Conflict",
+			Description: "Review the failed publish error, prior candidate summary, and current checkout state.",
+		}, {
+			Title:       "Repair Changes",
+			Description: "Re-implement the intended task result directly on the current checkout without dropping newer code.",
+		}, {
+			Title:       "Validate",
+			Description: "Run the relevant checks for the repaired files.",
+		}},
+		Metadata: map[string]any{
+			"publishRecovery":        true,
+			"publishRecoveryAttempt": attempt,
+			"failedPublishWorkerID":  candidate.WorkerID,
+		},
+	}
+}
+
+func buildCompletionPublishRecoveryPrompt(task core.Task, candidate WorkerTurnResult, publishErr error) string {
+	var builder strings.Builder
+	builder.WriteString("# Completion Publish Conflict Recovery\n\n")
+	builder.WriteString("The task implementation completed, but aged could not publish the final candidate as a pull request because the candidate patch conflicted with the current checkout.\n\n")
+	builder.WriteString("Original task:\n")
+	builder.WriteString(task.Title)
+	builder.WriteString("\n\nOriginal user request:\n")
+	builder.WriteString(task.Prompt)
+	builder.WriteString("\n\nPublish failure:\n")
+	builder.WriteString(publishErr.Error())
+	builder.WriteString("\n\nFailed candidate worker: ")
+	builder.WriteString(candidate.WorkerID)
+	builder.WriteString("\n")
+	if candidate.Summary != "" {
+		builder.WriteString("\nCandidate summary:\n")
+		builder.WriteString(candidate.Summary)
+		builder.WriteString("\n")
+	}
+	if candidate.Error != "" {
+		builder.WriteString("\nCandidate error:\n")
+		builder.WriteString(candidate.Error)
+		builder.WriteString("\n")
+	}
+	if len(candidate.Changes.ChangedFiles) > 0 {
+		builder.WriteString("\nCandidate changed files:\n")
+		for _, file := range candidate.Changes.ChangedFiles {
+			builder.WriteString("- ")
+			if file.Status != "" {
+				builder.WriteString(file.Status)
+				builder.WriteString(" ")
+			}
+			builder.WriteString(file.Path)
+			builder.WriteString("\n")
+		}
+	}
+	if diff := strings.TrimSpace(candidate.Changes.Diff); diff != "" {
+		builder.WriteString("\nCandidate diff, for reference only:\n```diff\n")
+		builder.WriteString(truncateArtifactContent(diff))
+		builder.WriteString("\n```\n")
+	}
+	builder.WriteString("\nRepair the task result against the current working directory. Preserve current checkout behavior and newer edits; do not mechanically force the old patch over conflicting code. Run the relevant checks and report changed files and validation.\n")
+	return builder.String()
 }
 
 func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
