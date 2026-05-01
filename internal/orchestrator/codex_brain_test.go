@@ -89,6 +89,73 @@ func TestCodexBrainSendsSchedulerPromptOnStdin(t *testing.T) {
 	}
 }
 
+func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
+	brain := &CodexBrain{template: "schedule the work"}
+	results := make([]WorkerTurnResult, 120)
+	for index := range results {
+		changedFiles := make([]WorkspaceChangedFile, 120)
+		for fileIndex := range changedFiles {
+			changedFiles[fileIndex] = WorkspaceChangedFile{
+				Path:   "file-" + strconv.Itoa(index) + "-" + strconv.Itoa(fileIndex) + ".go",
+				Status: "modified",
+			}
+		}
+		results[index] = WorkerTurnResult{
+			WorkerID: "worker-" + strconv.Itoa(index),
+			Status:   core.WorkerSucceeded,
+			Kind:     "codex",
+			Summary:  "summary-marker-" + strconv.Itoa(index) + strings.Repeat("s", 50000),
+			Error:    "error-marker-" + strconv.Itoa(index) + strings.Repeat("e", 50000),
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				Status:       strings.Repeat("status", 2000),
+				DiffStat:     strings.Repeat("diffstat", 2000),
+				Diff:         "DIFF_SHOULD_NOT_BE_INCLUDED" + strings.Repeat("d", 50000),
+				ChangedFiles: changedFiles,
+				Artifacts: []WorkspaceArtifact{{
+					ID:      "artifact-" + strconv.Itoa(index),
+					Kind:    "log",
+					Content: "artifact-marker-" + strconv.Itoa(index) + strings.Repeat("a", 50000),
+				}},
+			},
+		}
+	}
+
+	prompt := brain.replanPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Improve Long-Term Planning Intelligence",
+		Prompt: strings.Repeat("plan better ", 1000),
+	}, OrchestrationState{
+		InitialPlan: Plan{
+			WorkerKind: "codex",
+			Prompt:     strings.Repeat("initial plan ", 5000),
+		},
+		Results:                  results,
+		Turn:                     2,
+		BlockedFinalCandidateIDs: []string{"worker-1"},
+		RecoveryHint:             "repair the blocked candidate" + strings.Repeat("h", 50000),
+	})
+
+	if len(prompt) >= 1_048_576 {
+		t.Fatalf("replan prompt length = %d, want below Codex input limit", len(prompt))
+	}
+	if !strings.Contains(prompt, "worker-119") {
+		t.Fatalf("prompt dropped latest result")
+	}
+	if !strings.Contains(prompt, "worker-1") {
+		t.Fatalf("prompt dropped blocked candidate result")
+	}
+	if strings.Contains(prompt, `"workerId": "worker-0"`) {
+		t.Fatalf("prompt kept older non-blocked result")
+	}
+	if strings.Contains(prompt, "DIFF_SHOULD_NOT_BE_INCLUDED") {
+		t.Fatalf("prompt included raw diff")
+	}
+	if !strings.Contains(prompt, "truncated for replanning prompt") {
+		t.Fatalf("prompt did not mark truncated context")
+	}
+}
+
 func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	brain := newTestCodexBrain(t, "invalid", StaticBrain{WorkerKind: "mock"})
 	plan, err := brain.Plan(context.Background(), core.Task{

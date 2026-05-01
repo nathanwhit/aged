@@ -586,6 +586,57 @@ func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *
 	}
 }
 
+func TestServicePublishRecoveryDoesNotRepublishBlockedCandidateAfterReplanError(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply"),
+	}
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		err: errors.New("turn/start failed: Input exceeds the maximum length"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Improve Long-Term Planning Intelligence",
+		Prompt:   "Improve long-term planning intelligence.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want only original failed publish", publisher.publishCalls)
+	}
+	task = snapshot.Tasks[0]
+	if task.Error != "" {
+		t.Fatalf("task error = %q, want waiting without fatal error", task.Error)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_recovery", "started") {
+		t.Fatalf("missing started publish recovery action")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing dynamic replan error approval")
+	}
+}
+
 func TestServiceRejectsPrematureLongRunningPerformanceCompletion(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3830,6 +3881,38 @@ func TestServiceWaitsOnAmbiguousCompetingCandidatesWithoutFinalSelection(t *test
 	}
 	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
 		t.Fatalf("missing approval-needed event")
+	}
+}
+
+func TestLatestCandidateLeafExcludingSkipsBlockedCandidates(t *testing.T) {
+	results := []WorkerTurnResult{{
+		WorkerID: "base",
+		Status:   core.WorkerSucceeded,
+		Changes:  WorkspaceChanges{Dirty: true},
+	}, {
+		WorkerID:     "blocked-repair",
+		BaseWorkerID: "base",
+		Status:       core.WorkerSucceeded,
+		Changes:      WorkspaceChanges{Dirty: true},
+	}, {
+		WorkerID: "alternative",
+		Status:   core.WorkerSucceeded,
+		Changes:  WorkspaceChanges{Dirty: true},
+	}}
+
+	workerID, _ := latestCandidateLeafExcluding(results, map[string]string{
+		"blocked-repair": "publish conflict",
+	})
+	if workerID != "alternative" {
+		t.Fatalf("workerID = %q, want alternative", workerID)
+	}
+
+	workerID, _ = latestCandidateLeafExcluding(results, map[string]string{
+		"blocked-repair": "publish conflict",
+		"alternative":    "publish conflict",
+	})
+	if workerID != "" {
+		t.Fatalf("workerID = %q, want no unblocked candidate leaf", workerID)
 	}
 }
 
