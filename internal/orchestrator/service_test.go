@@ -2998,6 +2998,63 @@ func TestServiceContinuesAfterFollowUpSetupError(t *testing.T) {
 	}
 }
 
+func TestServiceReplansAfterInitialWorkerSetupError(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	prepareCalls := 0
+	workspaceErr := errors.New("prepare workspace: apply base worker patch in local workspace: corrupt patch")
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the first attempt",
+		},
+		decisions: []ReplanDecision{{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "codex",
+				Prompt:     "retry with a repaired workspace handoff",
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented after recovery"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:              t.TempDir(),
+		prepareCalls:     &prepareCalls,
+		failPrepareUntil: 1,
+		prepareErr:       workspaceErr,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/recovered.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Recover primary setup",
+		Prompt: "Implement despite a setup failure.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(brain.states) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	firstFailure := brain.states[0].Results[0]
+	if firstFailure.Status != core.WorkerFailed || !strings.Contains(firstFailure.Error, "corrupt patch") {
+		t.Fatalf("first failure = %+v", firstFailure)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "worker_failure_recovery", "started") {
+		t.Fatalf("missing worker failure recovery action")
+	}
+}
+
 func TestServiceBasesFollowUpWorkspaceOnLatestCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -4665,6 +4722,7 @@ type fakeWorkspaceManager struct {
 	applyErr     error
 
 	failPrepareAfter int
+	failPrepareUntil int
 	failApplyUntil   int
 }
 
@@ -4743,8 +4801,13 @@ func (m *recordingWorkspaceManager) ApplyChanges(_ context.Context, workspace Pr
 func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (PreparedWorkspace, error) {
 	if m.prepareCalls != nil {
 		*m.prepareCalls = *m.prepareCalls + 1
-		if m.prepareErr != nil && m.failPrepareAfter > 0 && *m.prepareCalls > m.failPrepareAfter {
-			return PreparedWorkspace{}, m.prepareErr
+		if m.prepareErr != nil {
+			if m.failPrepareUntil > 0 && *m.prepareCalls <= m.failPrepareUntil {
+				return PreparedWorkspace{}, m.prepareErr
+			}
+			if m.failPrepareAfter > 0 && *m.prepareCalls > m.failPrepareAfter {
+				return PreparedWorkspace{}, m.prepareErr
+			}
 		}
 	}
 	sourceRoot := m.sourceRoot
