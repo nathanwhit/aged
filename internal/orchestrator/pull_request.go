@@ -98,7 +98,7 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if body == "" {
 		body = defaultPRBody(spec)
 	}
-	if err := p.pushBranch(ctx, exec, spec.WorkDir, branch, spec.PushRemote); err != nil {
+	if err := p.pushBranch(ctx, exec, spec.WorkDir, branch, spec.PushRemote, base); err != nil {
 		return core.PullRequest{}, err
 	}
 
@@ -201,7 +201,7 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 	return core.PullRequest{}, errors.New("no existing pull request found for branch")
 }
 
-func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string) error {
+func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string, base string) error {
 	remote = strings.TrimSpace(remote)
 	if _, err := exec(ctx, dir, "jj", "root"); err == nil {
 		if _, err := exec(ctx, dir, "jj", "bookmark", "create", branch, "--revision", "@"); err != nil {
@@ -219,6 +219,12 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		return nil
 	}
 	if _, err := exec(ctx, dir, "git", "rev-parse", "--show-toplevel"); err == nil {
+		if err := materializeGitPullRequestChanges(ctx, exec, dir, branch); err != nil {
+			return err
+		}
+		if err := ensureGitPullRequestHasChanges(ctx, exec, dir, base); err != nil {
+			return err
+		}
 		if _, err := exec(ctx, dir, "git", "branch", "-f", branch, "HEAD"); err != nil {
 			return fmt.Errorf("create git branch: %w", err)
 		}
@@ -231,6 +237,64 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		return nil
 	}
 	return errors.New("publish requires a jj or git repository")
+}
+
+func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor, dir string, branch string) error {
+	status, err := exec(ctx, dir, "git", "status", "--porcelain=v1")
+	if err != nil {
+		return fmt.Errorf("read git status before publish: %w", err)
+	}
+	if strings.TrimSpace(status) == "" {
+		return nil
+	}
+	if _, err := exec(ctx, dir, "git", "add", "-A"); err != nil {
+		return fmt.Errorf("stage git changes before publish: %w", err)
+	}
+	message := "Publish aged worker changes"
+	if strings.TrimSpace(branch) != "" {
+		message = "Publish " + strings.TrimSpace(branch)
+	}
+	if _, err := exec(ctx, dir, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
+		return fmt.Errorf("commit git changes before publish: %w", err)
+	}
+	return nil
+}
+
+func ensureGitPullRequestHasChanges(ctx context.Context, exec commandExecutor, dir string, base string) error {
+	baseRef := gitPublishBaseRef(ctx, exec, dir, base)
+	if baseRef == "" {
+		return nil
+	}
+	diff, err := exec(ctx, dir, "git", "diff", "--name-only", baseRef+"...HEAD", "--")
+	if err != nil {
+		return fmt.Errorf("inspect git changes against base before publish: %w", err)
+	}
+	if strings.TrimSpace(diff) == "" {
+		return errors.New("refusing to publish pull request with no changes against base")
+	}
+	return nil
+}
+
+func gitPublishBaseRef(ctx context.Context, exec commandExecutor, dir string, base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "main"
+	}
+	candidates := []string{
+		"refs/remotes/upstream/" + base,
+		"refs/remotes/origin/" + base,
+		"refs/heads/" + base,
+		base,
+	}
+	if strings.HasPrefix(base, "refs/") {
+		candidates = append([]string{base}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if _, err := exec(ctx, dir, "git", "rev-parse", "--verify", "--quiet", candidate+"^{commit}"); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error) {

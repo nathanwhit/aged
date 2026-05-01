@@ -2772,9 +2772,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["retryWorkspaceReused"] = false
 	}
 	workspaceSpec := WorkspaceSpec{
-		TaskID:   task.ID,
-		WorkerID: workerID,
-		WorkDir:  project.LocalPath,
+		TaskID:       task.ID,
+		WorkerID:     workerID,
+		WorkDir:      project.LocalPath,
+		BaseRevision: projectWorkspaceBaseRevision(ctx, project),
+	}
+	if strings.TrimSpace(workspaceSpec.BaseRevision) != "" {
+		plan.Metadata["workspaceBaseRevision"] = workspaceSpec.BaseRevision
 	}
 	if !reusedWorkspace {
 		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
@@ -3069,7 +3073,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			RepoURL:     projectCloneURL(project),
 			WorkDir:     remoteWorkDir,
 			DefaultBase: project.DefaultBase,
-			BaseRef:     sourceCheckoutCommit(ctx, project.LocalPath),
+			BaseRef:     projectWorkspaceBaseCommit(ctx, project),
 		})
 		if err != nil {
 			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
@@ -3862,6 +3866,11 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 			reason:  "repo_setup_required",
 			summary: "Repository checkout or access is missing on the target environment.",
 			any:     []string{"repository not found", "not a git repository", "workdir is not inside a supported vcs workspace", "missing repository", "clone"},
+		},
+		{
+			reason:  "github_workflow_scope_required",
+			summary: "GitHub rejected the push because the configured token cannot update workflow files.",
+			any:     []string{"refusing to allow an oauth app to create or update workflow", "without `workflow` scope", "without workflow scope"},
 		},
 	}
 	for _, check := range checks {
@@ -4775,7 +4784,7 @@ func (s *Service) projectForTask(task core.Task) core.Project {
 }
 
 func projectCloneURL(project core.Project) string {
-	repo := strings.TrimSpace(nonEmpty(project.Repo, project.UpstreamRepo))
+	repo := strings.TrimSpace(nonEmpty(project.UpstreamRepo, project.Repo))
 	if repo == "" {
 		return ""
 	}
@@ -4786,6 +4795,65 @@ func projectCloneURL(project core.Project) string {
 		return "https://github.com/" + repo + ".git"
 	}
 	return repo
+}
+
+func projectWorkspaceBaseRevision(ctx context.Context, project core.Project) string {
+	base := strings.TrimSpace(project.DefaultBase)
+	if base == "" || strings.TrimSpace(project.LocalPath) == "" {
+		return ""
+	}
+	if strings.HasPrefix(base, "refs/") || gitCommitRefExists(ctx, project.LocalPath, base) && !looksLikeBranchName(base) {
+		return base
+	}
+	for _, ref := range []string{
+		"refs/remotes/upstream/" + base,
+		"refs/remotes/origin/" + base,
+		"refs/heads/" + base,
+		base,
+	} {
+		if gitCommitRefExists(ctx, project.LocalPath, ref) {
+			return ref
+		}
+	}
+	return ""
+}
+
+func projectWorkspaceBaseCommit(ctx context.Context, project core.Project) string {
+	ref := projectWorkspaceBaseRevision(ctx, project)
+	if ref == "" {
+		return ""
+	}
+	out, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func gitCommitRefExists(ctx context.Context, dir string, ref string) bool {
+	if strings.TrimSpace(dir) == "" || strings.TrimSpace(ref) == "" {
+		return false
+	}
+	_, err := runCommand(ctx, dir, "git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil
+}
+
+func looksLikeBranchName(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	return ref != "" && !strings.Contains(ref, "/") && !looksLikeHexObjectID(ref)
+}
+
+func looksLikeHexObjectID(ref string) bool {
+	if len(ref) < 7 || len(ref) > 40 {
+		return false
+	}
+	for _, char := range ref {
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {

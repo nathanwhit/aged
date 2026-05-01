@@ -1286,6 +1286,53 @@ func TestServiceRoutesTaskToConfiguredProject(t *testing.T) {
 	}
 }
 
+func TestServiceStartsNewTaskWorkspaceFromProjectDefaultBase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "checkout", "-b", "feature")
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "unrelated feature")
+
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:           "repo",
+		Name:         "Repo",
+		LocalPath:    repo,
+		Repo:         "fork/repo",
+		UpstreamRepo: "owner/repo",
+		DefaultBase:  "main",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, repo, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "New task",
+		Prompt: "Do unrelated work.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if workspace.baseRevision != "refs/remotes/upstream/main" {
+		t.Fatalf("workspace base revision = %q, want upstream default base", workspace.baseRevision)
+	}
+}
+
 func TestServiceLoadsProjectsFromSQLiteBeforeSeed(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

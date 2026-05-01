@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -138,6 +140,90 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 	}
 	assertCommandContains(t, calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
 	assertCommandContains(t, calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
+}
+
+func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	runTestGit(t, repo, "checkout", "--detach", "main")
+	if err := os.MkdirAll(filepath.Join(repo, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".github", "workflows", "ci.yml"), []byte("name: CI\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			call := append([]string{name}, args...)
+			calls = append(calls, call)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/owner/repo/pull/10", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":10,"url":"https://github.com/owner/repo/pull/10","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+
+	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+		TaskID:  "task-1",
+		WorkDir: repo,
+		Repo:    "owner/repo",
+		Base:    "main",
+		Branch:  "feature",
+		Title:   "CI",
+		Body:    "Body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if status := strings.TrimSpace(runTestGit(t, repo, "status", "--porcelain=v1")); status != "" {
+		t.Fatalf("status = %q, want clean committed workspace", status)
+	}
+	if contents := runTestGit(t, repo, "show", "feature:.github/workflows/ci.yml"); contents != "name: CI\n" {
+		t.Fatalf("published branch missing workflow: %q", contents)
+	}
+	assertCommandContains(t, calls, []string{"git", "add", "-A"})
+	assertCommandContains(t, calls, []string{"git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Publish feature"})
+	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+}
+
+func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			if name == "git" && len(args) > 0 && args[0] == "push" {
+				t.Fatalf("push should not run for empty PR")
+			}
+			if name == "gh" {
+				t.Fatalf("gh should not run for empty PR")
+			}
+			return runCommand(ctx, dir, name, args...)
+		},
+	}
+
+	_, err := publisher.Publish(ctx, PullRequestPublishSpec{
+		TaskID:  "task-1",
+		WorkDir: repo,
+		Repo:    "owner/repo",
+		Base:    "main",
+		Branch:  "feature",
+		Title:   "Noop",
+		Body:    "Body",
+	})
+	if err == nil || !strings.Contains(err.Error(), "no changes against base") {
+		t.Fatalf("err = %v, want no changes error", err)
+	}
 }
 
 func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
