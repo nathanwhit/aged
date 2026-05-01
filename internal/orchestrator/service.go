@@ -2560,11 +2560,19 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			}
 			if strings.TrimSpace(patch) != "" {
 				if err := applyGitPatchToWorkspace(ctx, workspace.CWD, patch); err != nil {
-					_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
-					return WorkerTurnResult{}, fmt.Errorf("apply base worker patch in local workspace: %w", err)
+					if boolMetadata(plan.Metadata, "allowBasePatchConflicts") {
+						plan.Metadata["baseHandoff"] = "patch_conflict"
+						plan.Metadata["basePatchApplied"] = false
+						plan.Metadata["basePatchConflicted"] = true
+						plan.Metadata["basePatchConflictError"] = err.Error()
+					} else {
+						_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+						return WorkerTurnResult{}, fmt.Errorf("apply base worker patch in local workspace: %w", err)
+					}
+				} else {
+					plan.Metadata["baseHandoff"] = "patch"
+					plan.Metadata["basePatchApplied"] = true
 				}
-				plan.Metadata["baseHandoff"] = "patch"
-				plan.Metadata["basePatchApplied"] = true
 				plan.Metadata["baseChangedFiles"] = len(baseChanges.ChangedFiles)
 			} else {
 				plan.Metadata["baseHandoff"] = "empty_patch"
@@ -2805,10 +2813,18 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			}
 			if strings.TrimSpace(patch) != "" {
 				if err := s.sshRunner.ApplyPatch(ctx, target, remoteWorkDir, remoteRun.RunDir, patch); err != nil {
-					return WorkerTurnResult{}, fmt.Errorf("apply base worker patch on remote target: %w", err)
+					if boolMetadata(plan.Metadata, "allowBasePatchConflicts") {
+						plan.Metadata["baseHandoff"] = "patch_conflict"
+						plan.Metadata["basePatchApplied"] = false
+						plan.Metadata["basePatchConflicted"] = true
+						plan.Metadata["basePatchConflictError"] = err.Error()
+					} else {
+						return WorkerTurnResult{}, fmt.Errorf("apply base worker patch on remote target: %w", err)
+					}
+				} else {
+					plan.Metadata["baseHandoff"] = "patch"
+					plan.Metadata["basePatchApplied"] = true
 				}
-				plan.Metadata["baseHandoff"] = "patch"
-				plan.Metadata["basePatchApplied"] = true
 				plan.Metadata["baseChangedFiles"] = len(baseChanges.ChangedFiles)
 			} else {
 				plan.Metadata["baseHandoff"] = "empty_patch"
@@ -3080,7 +3096,14 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 	}); err != nil {
 		return finalCandidateRecoveryResult{Handled: true, Err: err}
 	}
-	ok, selectedWorkerID, reason, results := s.replanLoop(ctx, task, initial, results)
+	blockedFinalCandidates := map[string]string{
+		candidateWorkerID: failureErr.Error(),
+	}
+	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
+		BlockedFinalCandidates:         blockedFinalCandidates,
+		AllowBlockedBasePatchConflicts: true,
+		RecoveryHint:                   fmt.Sprintf("%s for worker %s. Do not complete with a blocked final candidate. Schedule a repair or consolidation worker that starts from the blocked worker changes, resolves conflicts against the current checkout, and produces a new candidate.", failureLabel, candidateWorkerID),
+	})
 	if !ok {
 		return finalCandidateRecoveryResult{Handled: true, Results: results}
 	}
@@ -3321,6 +3344,19 @@ func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload m
 		Payload: core.MustJSON(payload),
 	})
 	return err
+}
+
+func (s *Service) recordRejectedReplanCompletion(ctx context.Context, taskID string, turn int, decision ReplanDecision, reason string) error {
+	return s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":                   "replan_completion_rejected",
+		"status":                 "rejected",
+		"turn":                   turn,
+		"reason":                 reason,
+		"workerId":               decision.FinalCandidateWorkerID,
+		"replanAction":           decision.Action,
+		"replanRationale":        decision.Rationale,
+		"finalCandidateWorkerId": decision.FinalCandidateWorkerID,
+	})
 }
 
 func (s *Service) waitForUserAction(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {
@@ -3582,6 +3618,20 @@ func latestCandidateWorkerID(results []WorkerTurnResult) string {
 	return ""
 }
 
+func sortedMapKeys(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func resultHasCandidateChanges(result WorkerTurnResult) bool {
 	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
 }
@@ -3611,16 +3661,29 @@ func taskCompletionModeFromTask(task core.Task) string {
 	}
 }
 
+type replanLoopOptions struct {
+	BlockedFinalCandidates         map[string]string
+	AllowBlockedBasePatchConflicts bool
+	RecoveryHint                   string
+}
+
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
+	return s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{})
+}
+
+func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
 		return true, "", "", results
 	}
+	blockedFinalCandidateIDs := sortedMapKeys(options.BlockedFinalCandidates)
 	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
-			InitialPlan: initial,
-			Results:     results,
-			Turn:        turn,
+			InitialPlan:              initial,
+			Results:                  results,
+			Turn:                     turn,
+			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
+			RecoveryHint:             options.RecoveryHint,
 		})
 		if err != nil {
 			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err))
@@ -3641,6 +3704,23 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 		}
 		switch decision.Action {
 		case "complete":
+			if len(options.BlockedFinalCandidates) > 0 {
+				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
+				if candidateErr != nil || candidateWorkerID == "" {
+					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {
+						_ = s.failTask(ctx, task.ID, err)
+						return false, "", "", results
+					}
+					continue
+				}
+				if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "blocked final candidate "+candidateWorkerID+" already failed finalization: "+reason); err != nil {
+						_ = s.failTask(ctx, task.ID, err)
+						return false, "", "", results
+					}
+					continue
+				}
+			}
 			return true, decision.FinalCandidateWorkerID, decision.Rationale, results
 		case "wait":
 			_ = s.waitForUserAction(ctx, task.ID, "", "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, "The orchestrator needs user input before continuing."), map[string]any{
@@ -3660,6 +3740,14 @@ func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, 
 			if stringMetadata(next.Metadata, "baseWorkerID") == "" {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
+				}
+			}
+			if options.AllowBlockedBasePatchConflicts {
+				baseWorkerID := stringMetadata(next.Metadata, "baseWorkerID")
+				if _, blocked := options.BlockedFinalCandidates[baseWorkerID]; blocked {
+					next.Metadata["allowBasePatchConflicts"] = true
+					next.Metadata["recoveryBaseWorkerID"] = baseWorkerID
+					next.Metadata["recoveryHint"] = options.RecoveryHint
 				}
 			}
 			normalizePlanReasoning(&next)

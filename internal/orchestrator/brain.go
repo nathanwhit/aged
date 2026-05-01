@@ -62,9 +62,11 @@ type SpawnRequest struct {
 }
 
 type OrchestrationState struct {
-	InitialPlan Plan               `json:"initialPlan"`
-	Results     []WorkerTurnResult `json:"results"`
-	Turn        int                `json:"turn"`
+	InitialPlan              Plan               `json:"initialPlan"`
+	Results                  []WorkerTurnResult `json:"results"`
+	Turn                     int                `json:"turn"`
+	BlockedFinalCandidateIDs []string           `json:"blockedFinalCandidateIds,omitempty"`
+	RecoveryHint             string             `json:"recoveryHint,omitempty"`
 }
 
 type ReplanDecision struct {

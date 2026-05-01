@@ -511,6 +511,81 @@ func TestServiceGitHubCompletionModeRepairsPublishConflict(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply"),
+	}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "initial candidate is ready",
+		}, {
+			Action:    "complete",
+			Rationale: "same candidate is still ready",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "repair publish conflict against current checkout",
+			},
+		}, {
+			Action:    "complete",
+			Rationale: "repair worker is final",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Collapsible Project Add Dialog",
+		Prompt:   "Make the project add dialog collapsible.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 2 {
+		t.Fatalf("publish calls = %d, want original failure then repaired publish", publisher.publishCalls)
+	}
+	if len(publisher.publishedWorkers) != 2 || publisher.publishedWorkers[0] == publisher.publishedWorkers[1] {
+		t.Fatalf("published workers = %+v, want blocked original then new repair", publisher.publishedWorkers)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("missing rejected same-candidate completion action")
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_recovery", "completed") {
+		t.Fatalf("missing completed publish recovery action")
+	}
+	if len(brain.states) < 3 {
+		t.Fatalf("replan states = %d, want initial plus recovery turns", len(brain.states))
+	}
+	recoveryState := brain.states[1]
+	if len(recoveryState.BlockedFinalCandidateIDs) != 1 || recoveryState.BlockedFinalCandidateIDs[0] != publisher.publishedWorkers[0] {
+		t.Fatalf("blocked final candidates = %+v, want %q", recoveryState.BlockedFinalCandidateIDs, publisher.publishedWorkers[0])
+	}
+	if recoveryState.RecoveryHint == "" {
+		t.Fatalf("missing recovery hint")
+	}
+}
+
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
