@@ -47,7 +47,9 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 }
 
 func TestCLIAssistantUsesClaudeStreamResult(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	script := writeExecutable(t, `#!/bin/sh
+printf '%s\n' "$*" > `+shellQuoteTest(argsPath)+`
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}' '{"type":"assistant","message":{"content":[{"type":"text","text":"draft answer"}]}}' '{"type":"result","subtype":"success","result":"claude answer"}'
 `)
 	assistant, err := NewCLIAssistant(CLIAssistantConfig{
@@ -67,6 +69,13 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}' '{"t
 	}
 	if response.ProviderSessionID != "session-1" {
 		t.Fatalf("session = %q, want session-1", response.ProviderSessionID)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "--output-format stream-json --verbose") {
+		t.Fatalf("args = %s", args)
 	}
 }
 
@@ -125,7 +134,7 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"resumed claude"}'
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "--resume session-1") {
+	if !strings.Contains(string(args), "--resume session-1") || !strings.Contains(string(args), "--output-format stream-json --verbose") {
 		t.Fatalf("args = %s", args)
 	}
 }

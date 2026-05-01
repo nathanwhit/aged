@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
 const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
@@ -119,6 +120,7 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	}
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if spec.WorkDir != "" {
 		cmd.Dir = spec.WorkDir
 	}
@@ -142,6 +144,9 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	done := make(chan struct{})
+	defer close(done)
+	go killProcessGroupOnCancel(ctx, cmd, done)
 
 	errCh := make(chan error, 2)
 	parser := parserFunc(parseJSONWorkerLine)
@@ -223,6 +228,7 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return errors.New("empty plugin runner command")
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if spec.WorkDir != "" {
 		cmd.Dir = spec.WorkDir
 	}
@@ -241,6 +247,9 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	done := make(chan struct{})
+	defer close(done)
+	go killProcessGroupOnCancel(ctx, cmd, done)
 	payload := struct {
 		ID              string   `json:"id"`
 		TaskID          string   `json:"taskId"`
@@ -276,6 +285,16 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		}
 	}
 	return cmd.Wait()
+}
+
+func killProcessGroupOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
+	select {
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	case <-done:
+	}
 }
 
 func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, reader io.Reader, errCh chan<- error) {

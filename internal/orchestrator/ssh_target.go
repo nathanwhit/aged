@@ -301,20 +301,26 @@ func remoteStartScript(run remoteRun, argv []string, hasStdin bool) string {
 	if hasStdin {
 		stdinRedirect = " < " + shellQuote(remotePromptPath(run))
 	}
+	inner := fmt.Sprintf(`%s
+cd %s && (%s)%s > %s/stdout.log 2> %s/stderr.log
+code=$?
+%s
+if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
+		remoteWorkerEnvScript(),
+		shellQuote(run.WorkDir),
+		command,
+		stdinRedirect,
+		shellQuote(run.RunDir),
+		shellQuote(run.RunDir),
+		remoteChangeScript(run),
+		shellQuote(run.RunDir),
+		shellQuote(run.RunDir),
+	)
+	tmuxCommand := remoteShellCommand(inner)
 	return fmt.Sprintf(
 		`tmux new-session -d -s %[1]s %s`,
 		shellQuote(run.Session),
-		shellQuote(fmt.Sprintf(`%s; cd %s && (%s)%s > %s/stdout.log 2> %s/stderr.log; code=$?; %s; if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
-			remoteWorkerEnvScript(),
-			shellQuote(run.WorkDir),
-			command,
-			stdinRedirect,
-			shellQuote(run.RunDir),
-			shellQuote(run.RunDir),
-			remoteChangeScript(run),
-			shellQuote(run.RunDir),
-			shellQuote(run.RunDir),
-		)),
+		shellQuote(tmuxCommand),
 	)
 }
 
@@ -323,7 +329,17 @@ func remotePromptPath(run remoteRun) string {
 }
 
 func remoteWorkerEnvScript() string {
-	return `export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.deno/bin:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/snap/bin:$PATH"`
+	return `for dir in "$HOME"/.local/share/fnm/node-versions/*/installation/bin "$HOME"/.local/share/mise/installs/node/*/bin "$HOME"/.asdf/installs/nodejs/*/bin "$HOME"/.local/share/mise/shims "$HOME"/.npm-global/bin "$HOME"/.bun/bin "$HOME"/.local/bin "$HOME"/.cargo/bin "$HOME"/.deno/bin /bin /usr/bin /sbin /usr/sbin /usr/local/bin /snap/bin /exe.dev/bin; do
+  if [ -d "$dir" ]; then PATH="$dir:$PATH"; fi
+done
+export PATH`
+}
+
+func remoteShellCommand(script string) string {
+	if strings.TrimSpace(script) == "" {
+		return ""
+	}
+	return "if command -v bash >/dev/null 2>&1; then exec bash -l -c " + shellQuote(script) + "; else " + script + "; fi"
 }
 
 func remoteChangeScript(run remoteRun) string {
