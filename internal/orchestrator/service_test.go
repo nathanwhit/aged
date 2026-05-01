@@ -696,6 +696,62 @@ func TestServiceRejectsPrematureLongRunningPerformanceCompletion(t *testing.T) {
 	if len(brain.states) < 2 {
 		t.Fatalf("replan states = %d, want rejection then continuation", len(brain.states))
 	}
+	if got := brain.states[1].BlockedFinalCandidateIDs; len(got) != 1 {
+		t.Fatalf("blocked final candidates after rejection = %+v, want one blocked candidate", got)
+	}
+	if brain.states[1].RecoveryHint == "" {
+		t.Fatalf("missing recovery hint after rejected completion")
+	}
+}
+
+func TestServiceAllowsPerformanceRelatedPlanningCompletionWithSourceCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "improve planner behavior for performance optimization work",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "The candidate changes planner source code and adds regression coverage for performance-oriented planning decisions.",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "planner source changes with tests"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{
+				{Path: "internal/orchestrator/service.go", Status: "modified"},
+				{Path: "internal/orchestrator/service_test.go", Status: "modified"},
+			},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Long-Term Planning Intelligence",
+		Prompt: "Review aged for opportunities to improve intelligence of planning of longer term or more complex tasks. Particularly interested in performance optimization finding. Make improvements if you can.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want source candidate to publish", publisher.publishCalls)
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("source candidate completion was incorrectly rejected")
+	}
 }
 
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
