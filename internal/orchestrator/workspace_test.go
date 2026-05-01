@@ -240,6 +240,27 @@ func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
 	}
 }
 
+func TestApplyGitPatchAcceptsMissingTrailingNewline(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := strings.TrimRight(runTestGit(t, repo, "diff", "--binary", "HEAD", "--", "file.txt"), "\n")
+	runTestGit(t, repo, "checkout", "--", "file.txt")
+
+	if err := applyGitPatchToWorkspace(ctx, repo, patch); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "worker\n" {
+		t.Fatalf("file contents = %q", contents)
+	}
+}
+
 func TestGitWorkspaceManagerAllowsLegacyAgedStateInSource(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
