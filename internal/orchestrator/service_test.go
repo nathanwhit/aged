@@ -427,6 +427,7 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForEvent(t, store, core.EventTaskArtifact, task.ID)
 	task, ok := findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")
@@ -467,6 +468,7 @@ func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForEvent(t, store, core.EventTaskArtifact, task.ID)
 	task, ok := findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")

@@ -605,10 +605,6 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 			TaskID:        spec.TaskID,
 		}, nil
 	}
-	if sourceDirty {
-		return PreparedWorkspace{}, errors.New("isolated git workspaces require a clean source working tree")
-	}
-
 	destination, workspaceName := gitWorkspaceDestination(root, m.WorkspaceRoot, spec)
 	if _, err := os.Stat(destination); err == nil {
 		return PreparedWorkspace{}, fmt.Errorf("workspace destination already exists: %s", destination)
