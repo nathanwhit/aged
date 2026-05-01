@@ -2536,6 +2536,104 @@ func TestRecoverRemoteWorkerResumesTaskAfterCompletion(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkerCancelDoesNotCancelTaskWithOtherActiveWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-recover-remote"
+	canceledWorkerID := "worker-canceled"
+	activeWorkerID := "worker-active"
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, workerID := range []string{canceledWorkerID, activeWorkerID} {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":        "node-" + workerID,
+				"workerId":      workerID,
+				"workerKind":    "codex",
+				"targetId":      "vm-1",
+				"targetKind":    "ssh",
+				"remoteSession": "aged-" + workerID,
+				"remoteRunDir":  "/runs/aged-" + workerID,
+				"remoteWorkDir": "/repo",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerStarted,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-" + workerID}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: canceledWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.resumeRecoveredRemoteTask(ctx, taskID)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[0].Status != core.TaskRunning {
+		t.Fatalf("task status = %q, want running while another worker remains active", snapshot.Tasks[0].Status)
+	}
+}
+
 func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
