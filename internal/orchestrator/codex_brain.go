@@ -463,7 +463,7 @@ func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) stri
 			"title":  task.Title,
 			"prompt": task.Prompt,
 		},
-		"state": state,
+		"state": compactOrchestrationStateForPrompt(state),
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
 			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
@@ -513,6 +513,99 @@ Field rules:
 Dynamic replanning input:
 
 ` + string(data)
+}
+
+const (
+	maxReplanPromptResults      = 30
+	maxPromptPlanTextBytes      = 12000
+	maxPromptRationaleBytes     = 4000
+	maxPromptResultSummaryBytes = 3000
+	maxPromptResultErrorBytes   = 2000
+	maxPromptStatusBytes        = 1000
+	maxPromptDiffStatBytes      = 2000
+	maxPromptArtifactBytes      = 2000
+	maxPromptChangedFiles       = 40
+	maxPromptArtifacts          = 20
+)
+
+func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationState {
+	state.InitialPlan = compactPlanForPrompt(state.InitialPlan)
+	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
+
+	blocked := map[string]bool{}
+	for _, id := range state.BlockedFinalCandidateIDs {
+		blocked[id] = true
+	}
+	keepFrom := 0
+	if len(state.Results) > maxReplanPromptResults {
+		keepFrom = len(state.Results) - maxReplanPromptResults
+	}
+	results := make([]WorkerTurnResult, 0, len(state.Results)-keepFrom)
+	for index, result := range state.Results {
+		if index < keepFrom && !blocked[result.WorkerID] {
+			continue
+		}
+		results = append(results, compactWorkerTurnResultForPrompt(result))
+	}
+	state.Results = results
+	return state
+}
+
+func compactPlanForPrompt(plan Plan) Plan {
+	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
+	plan.Rationale = truncateStringForPrompt(plan.Rationale, maxPromptRationaleBytes)
+	for index := range plan.Steps {
+		plan.Steps[index].Title = truncateStringForPrompt(plan.Steps[index].Title, maxPromptRationaleBytes)
+		plan.Steps[index].Description = truncateStringForPrompt(plan.Steps[index].Description, maxPromptRationaleBytes)
+	}
+	for index := range plan.RequiredApprovals {
+		plan.RequiredApprovals[index].Title = truncateStringForPrompt(plan.RequiredApprovals[index].Title, maxPromptRationaleBytes)
+		plan.RequiredApprovals[index].Reason = truncateStringForPrompt(plan.RequiredApprovals[index].Reason, maxPromptRationaleBytes)
+	}
+	for index := range plan.Actions {
+		plan.Actions[index].Reason = truncateStringForPrompt(plan.Actions[index].Reason, maxPromptRationaleBytes)
+	}
+	for index := range plan.Spawns {
+		plan.Spawns[index].Role = truncateStringForPrompt(plan.Spawns[index].Role, maxPromptRationaleBytes)
+		plan.Spawns[index].Reason = truncateStringForPrompt(plan.Spawns[index].Reason, maxPromptRationaleBytes)
+	}
+	return plan
+}
+
+func compactWorkerTurnResultForPrompt(result WorkerTurnResult) WorkerTurnResult {
+	result.Summary = truncateStringForPrompt(result.Summary, maxPromptResultSummaryBytes)
+	result.Error = truncateStringForPrompt(result.Error, maxPromptResultErrorBytes)
+	result.Changes.Status = truncateStringForPrompt(result.Changes.Status, maxPromptStatusBytes)
+	result.Changes.DiffStat = truncateStringForPrompt(result.Changes.DiffStat, maxPromptDiffStatBytes)
+	result.Changes.Diff = ""
+	result.Changes.Error = truncateStringForPrompt(result.Changes.Error, maxPromptResultErrorBytes)
+	if len(result.Changes.ChangedFiles) > maxPromptChangedFiles {
+		omitted := len(result.Changes.ChangedFiles) - maxPromptChangedFiles
+		result.Changes.ChangedFiles = append(result.Changes.ChangedFiles[:maxPromptChangedFiles], WorkspaceChangedFile{
+			Path:   fmt.Sprintf("... %d additional changed files omitted ...", omitted),
+			Status: "omitted",
+		})
+	}
+	if len(result.Changes.Artifacts) > maxPromptArtifacts {
+		result.Changes.Artifacts = result.Changes.Artifacts[:maxPromptArtifacts]
+	}
+	for index := range result.Changes.Artifacts {
+		result.Changes.Artifacts[index].Content = truncateStringForPrompt(result.Changes.Artifacts[index].Content, maxPromptArtifactBytes)
+	}
+	return result
+}
+
+func truncateStringForPrompt(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	const marker = "\n... truncated for replanning prompt ...\n"
+	if maxBytes <= len(marker) {
+		return value[:maxBytes]
+	}
+	head := (maxBytes - len(marker)) / 2
+	tail := maxBytes - len(marker) - head
+	return value[:head] + marker + value[len(value)-tail:]
 }
 
 func extractCodexAgentMessage(output []byte) (string, error) {

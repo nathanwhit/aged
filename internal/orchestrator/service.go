@@ -3840,10 +3840,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			RecoveryHint:             options.RecoveryHint,
 		})
 		if err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err))
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err), options)
 		}
 		if err := decision.Validate(); err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err))
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err), options)
 		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
@@ -3977,9 +3977,35 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	return false, "", "", results
 }
 
-func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil {
+		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+			candidateErr = fmt.Errorf("fallback final candidate %s is blocked: %s", candidateWorkerID, reason)
+		} else {
+			reason := "fallback completion after replanner error: " + replanErr.Error()
+			if candidateReason != "" {
+				reason += "; " + candidateReason
+			}
+			_, _ = s.append(ctx, core.Event{
+				Type:   core.EventTaskReplanned,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"turn": turn,
+					"decision": ReplanDecision{
+						Action:                 "complete",
+						FinalCandidateWorkerID: candidateWorkerID,
+						Rationale:              reason,
+						Message:                "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
+					},
+					"fallback": true,
+					"error":    replanErr.Error(),
+				}),
+			})
+			return true, candidateWorkerID, reason, results
+		}
+	}
+	if candidateWorkerID, candidateReason := latestCandidateLeafExcluding(results, options.BlockedFinalCandidates); candidateWorkerID != "" {
 		reason := "fallback completion after replanner error: " + replanErr.Error()
 		if candidateReason != "" {
 			reason += "; " + candidateReason
@@ -3997,29 +4023,6 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 				},
 				"fallback": true,
 				"error":    replanErr.Error(),
-			}),
-		})
-		return true, candidateWorkerID, reason, results
-	}
-	if candidateWorkerID, candidateReason := latestCandidateLeaf(results); candidateWorkerID != "" {
-		reason := "fallback completion with latest candidate leaf after replanner error: " + replanErr.Error()
-		if candidateReason != "" {
-			reason += "; " + candidateReason
-		}
-		_, _ = s.append(ctx, core.Event{
-			Type:   core.EventTaskReplanned,
-			TaskID: task.ID,
-			Payload: core.MustJSON(map[string]any{
-				"turn": turn,
-				"decision": ReplanDecision{
-					Action:                 "complete",
-					FinalCandidateWorkerID: candidateWorkerID,
-					Rationale:              reason,
-					Message:                "The replanner failed and final-candidate fallback was ambiguous, so aged selected the latest successful candidate leaf.",
-				},
-				"fallback":       true,
-				"error":          replanErr.Error(),
-				"candidateError": candidateErr.Error(),
 			}),
 		})
 		return true, candidateWorkerID, reason, results
@@ -4099,12 +4102,19 @@ func boundedOneShotObjective(taskText string) bool {
 }
 
 func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
+	return latestCandidateLeafExcluding(results, nil)
+}
+
+func latestCandidateLeafExcluding(results []WorkerTurnResult, blocked map[string]string) (string, string) {
 	leaves := candidateLeaves(candidateResults(results))
 	if len(leaves) == 0 {
 		return "", ""
 	}
 	for i := len(results) - 1; i >= 0; i-- {
 		for _, leaf := range leaves {
+			if _, isBlocked := blocked[leaf.WorkerID]; isBlocked {
+				continue
+			}
 			if results[i].WorkerID == leaf.WorkerID {
 				return leaf.WorkerID, "selected latest successful candidate leaf after ambiguous deterministic fallback"
 			}
