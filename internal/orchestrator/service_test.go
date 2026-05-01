@@ -3386,7 +3386,7 @@ func TestServiceCompletesWithFallbackWhenReplannerErrorsAfterSingleCandidate(t *
 	}
 }
 
-func TestServiceWaitsWhenReplannerErrorsWithAmbiguousCandidates(t *testing.T) {
+func TestServiceSelectsLatestLeafWhenReplannerErrorsWithAmbiguousCandidates(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -3418,9 +3418,22 @@ func TestServiceWaitsWhenReplannerErrorsWithAmbiguousCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
-	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
-		t.Fatalf("missing approval-needed event")
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	var selectedRole string
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID == snapshot.Tasks[0].FinalCandidateWorkerID {
+			selectedRole = node.Role
+			break
+		}
+	}
+	if selectedRole != "right" {
+		t.Fatalf("selected role = %q, want latest candidate leaf right; final=%q", selectedRole, snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("unexpected approval-needed event")
 	}
 }
 

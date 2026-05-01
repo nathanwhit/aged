@@ -3822,6 +3822,29 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 		})
 		return true, candidateWorkerID, reason, results
 	}
+	if candidateWorkerID, candidateReason := latestCandidateLeaf(results); candidateWorkerID != "" {
+		reason := "fallback completion with latest candidate leaf after replanner error: " + replanErr.Error()
+		if candidateReason != "" {
+			reason += "; " + candidateReason
+		}
+		_, _ = s.append(ctx, core.Event{
+			Type:   core.EventTaskReplanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"turn": turn,
+				"decision": ReplanDecision{
+					Action:                 "complete",
+					FinalCandidateWorkerID: candidateWorkerID,
+					Rationale:              reason,
+					Message:                "The replanner failed and final-candidate fallback was ambiguous, so aged selected the latest successful candidate leaf.",
+				},
+				"fallback":       true,
+				"error":          replanErr.Error(),
+				"candidateError": candidateErr.Error(),
+			}),
+		})
+		return true, candidateWorkerID, reason, results
+	}
 	_, _ = s.append(ctx, core.Event{
 		Type:   core.EventTaskReplanned,
 		TaskID: task.ID,
@@ -3849,6 +3872,21 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
 	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
+}
+
+func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
+	leaves := candidateLeaves(candidateResults(results))
+	if len(leaves) == 0 {
+		return "", ""
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		for _, leaf := range leaves {
+			if results[i].WorkerID == leaf.WorkerID {
+				return leaf.WorkerID, "selected latest successful candidate leaf after ambiguous deterministic fallback"
+			}
+		}
+	}
+	return "", ""
 }
 
 type followUpNode struct {

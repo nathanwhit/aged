@@ -240,6 +240,60 @@ func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerCopiesStagedNewBaseCandidate(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	base, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "base-worker",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, "file.txt"), []byte("base candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base.CWD, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, "tools", "serve_bench.ts"), []byte("console.log('bench')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, base.CWD, "add", "tools/serve_bench.ts")
+
+	followUp, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:      "task",
+		WorkerID:    "followup-worker",
+		WorkDir:     repo,
+		BaseWorkDir: base.CWD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contents, err := os.ReadFile(filepath.Join(followUp.CWD, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "base candidate\n" {
+		t.Fatalf("tracked file contents = %q", contents)
+	}
+	stagedContents, err := os.ReadFile(filepath.Join(followUp.CWD, "tools", "serve_bench.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stagedContents) != "console.log('bench')\n" {
+		t.Fatalf("staged file contents = %q", stagedContents)
+	}
+	status := strings.TrimSpace(runTestGit(t, followUp.CWD, "status", "--porcelain=v1"))
+	if status != "" {
+		t.Fatalf("follow-up workspace status = %q, want clean committed base candidate", status)
+	}
+}
+
 func TestGitWorkspaceManagerApplyConflictAbortsSourceMerge(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
