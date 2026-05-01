@@ -3830,20 +3830,31 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	if !ok {
 		return true, "", "", results
 	}
-	blockedFinalCandidateIDs := sortedMapKeys(options.BlockedFinalCandidates)
+	blockedFinalCandidates := map[string]string{}
+	for workerID, reason := range options.BlockedFinalCandidates {
+		blockedFinalCandidates[workerID] = reason
+	}
+	recoveryHint := options.RecoveryHint
 	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
+		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
 			Results:                  results,
 			Turn:                     turn,
 			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
-			RecoveryHint:             options.RecoveryHint,
+			RecoveryHint:             recoveryHint,
 		})
 		if err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err), options)
+			recoveryOptions := options
+			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
+			recoveryOptions.RecoveryHint = recoveryHint
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err), recoveryOptions)
 		}
 		if err := decision.Validate(); err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err), options)
+			recoveryOptions := options
+			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
+			recoveryOptions.RecoveryHint = recoveryHint
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err), recoveryOptions)
 		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
@@ -3859,13 +3870,17 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		switch decision.Action {
 		case "complete":
 			if reason := rejectPrematureLongRunningCompletion(task, decision, results); reason != "" {
+				if candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID); err == nil && candidateWorkerID != "" {
+					blockedFinalCandidates[candidateWorkerID] = reason
+					recoveryHint = reason + " Do not complete with this blocked candidate. Continue with implementation or validation work that can produce a publishable optimization candidate, or wait if that objective is no longer appropriate."
+				}
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", "", results
 				}
 				continue
 			}
-			if len(options.BlockedFinalCandidates) > 0 {
+			if len(blockedFinalCandidates) > 0 {
 				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
 				if candidateErr != nil || candidateWorkerID == "" {
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {
@@ -3874,7 +3889,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					}
 					continue
 				}
-				if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+				if reason := blockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "blocked final candidate "+candidateWorkerID+" already failed finalization: "+reason); err != nil {
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
@@ -3905,10 +3920,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			if options.AllowBlockedBasePatchConflicts {
 				baseWorkerID := stringMetadata(next.Metadata, "baseWorkerID")
-				if _, blocked := options.BlockedFinalCandidates[baseWorkerID]; blocked {
+				if _, blocked := blockedFinalCandidates[baseWorkerID]; blocked {
 					next.Metadata["allowBasePatchConflicts"] = true
 					next.Metadata["recoveryBaseWorkerID"] = baseWorkerID
-					next.Metadata["recoveryHint"] = options.RecoveryHint
+					next.Metadata["recoveryHint"] = recoveryHint
 				}
 			}
 			normalizePlanReasoning(&next)
@@ -4073,10 +4088,18 @@ func rejectPrematureLongRunningCompletion(task core.Task, decision ReplanDecisio
 		strings.Contains(decisionText, "next turn") {
 		return "long-running performance objective is not complete; the decision itself says more benchmarking, validation, or follow-up work is needed"
 	}
-	if len(results) < 3 {
-		return "long-running performance objective requires iterative investigation, implementation, and validation before completion"
+	candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
+	if err != nil || candidateWorkerID == "" {
+		return ""
 	}
-	return "long-running performance objective should continue looking for validated optimization PR candidates instead of completing the task"
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok {
+		return ""
+	}
+	if reason := intermediatePerformanceCandidateReason(candidate, decisionText); reason != "" {
+		return reason
+	}
+	return ""
 }
 
 func longRunningPerformanceObjective(taskText string) bool {
@@ -4099,6 +4122,70 @@ func boundedOneShotObjective(taskText string) bool {
 		strings.Contains(taskText, "single") ||
 		strings.Contains(taskText, "one-shot") ||
 		strings.Contains(taskText, "one shot")
+}
+
+func intermediatePerformanceCandidateReason(candidate WorkerTurnResult, decisionText string) string {
+	candidateText := strings.ToLower(strings.Join([]string{
+		candidate.Summary,
+		candidate.Error,
+		candidate.Changes.DiffStat,
+		decisionText,
+	}, "\n"))
+	if strings.Contains(candidateText, "benchmark harness") ||
+		strings.Contains(candidateText, "benchmark script") ||
+		strings.Contains(candidateText, "only adds benchmark") ||
+		strings.Contains(candidateText, "profiling notes") ||
+		strings.Contains(candidateText, "profiler notes") {
+		return "long-running performance objective is not complete; the selected candidate appears to be benchmark or profiling infrastructure rather than a validated optimization"
+	}
+	if candidateChangesOnlyValidationArtifacts(candidate.Changes.ChangedFiles) {
+		return "long-running performance objective is not complete; the selected candidate only changes benchmark, profiling, test, documentation, or tooling artifacts"
+	}
+	return ""
+}
+
+func candidateChangesOnlyValidationArtifacts(files []WorkspaceChangedFile) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, file := range files {
+		if !isValidationArtifactPath(file.Path) {
+			return false
+		}
+	}
+	return true
+}
+
+func isValidationArtifactPath(path string) bool {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if path == "" {
+		return true
+	}
+	base := pathBase(path)
+	if strings.Contains(path, "bench") ||
+		strings.Contains(path, "benchmark") ||
+		strings.Contains(path, "profile") ||
+		strings.Contains(path, "profiler") ||
+		strings.Contains(path, "testdata/") ||
+		strings.Contains(path, "fixtures/") ||
+		strings.Contains(base, "_test.") ||
+		strings.Contains(base, ".test.") ||
+		strings.HasPrefix(path, "test/") ||
+		strings.HasPrefix(path, "tests/") ||
+		strings.HasPrefix(path, "docs/") ||
+		strings.HasPrefix(path, "tools/") ||
+		strings.HasPrefix(path, "scripts/") ||
+		strings.HasSuffix(path, ".md") {
+		return true
+	}
+	return false
+}
+
+func pathBase(path string) string {
+	if index := strings.LastIndex(path, "/"); index >= 0 {
+		return path[index+1:]
+	}
+	return path
 }
 
 func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
