@@ -68,6 +68,48 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	}
 }
 
+func TestSnapshotCarriesTaskStatusError(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-1"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Publish task",
+			"prompt": "Open a PR.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+			"error":  "publish completion pull request: patch does not apply",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 {
+		t.Fatalf("tasks = %d, want 1", len(snapshot.Tasks))
+	}
+	if snapshot.Tasks[0].Error != "publish completion pull request: patch does not apply" {
+		t.Fatalf("task error = %q", snapshot.Tasks[0].Error)
+	}
+}
+
 func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

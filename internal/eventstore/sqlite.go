@@ -634,12 +634,14 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		case core.EventTaskStatus:
 			var payload struct {
 				Status core.TaskStatus `json:"status"`
+				Error  string          `json:"error,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode task.status: %w", err)
 			}
 			task := tasks[event.TaskID]
 			task.Status = payload.Status
+			task.Error = payload.Error
 			switch payload.Status {
 			case core.TaskSucceeded, core.TaskFailed, core.TaskCanceled:
 				nextObjective := objectiveStatusForTaskStatus(payload.Status)
