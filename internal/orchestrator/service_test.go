@@ -586,6 +586,85 @@ func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *
 	}
 }
 
+func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{errCount: 2}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "initial candidate is ready",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "repair first publish conflict against current checkout",
+			},
+		}, {
+			Action:    "complete",
+			Rationale: "first repair is final",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "repair second publish conflict against current checkout",
+			},
+		}, {
+			Action:    "complete",
+			Rationale: "second repair is final",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Improve Long-Term Planning Intelligence",
+		Prompt:   "Improve long-term planning intelligence.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 3 {
+		t.Fatalf("publish calls = %d, want two failed publishes then success", publisher.publishCalls)
+	}
+	if len(publisher.publishedWorkers) != 3 ||
+		publisher.publishedWorkers[0] == publisher.publishedWorkers[1] ||
+		publisher.publishedWorkers[1] == publisher.publishedWorkers[2] {
+		t.Fatalf("published workers = %+v, want distinct candidates", publisher.publishedWorkers)
+	}
+	task = snapshot.Tasks[0]
+	if task.Error != "" || task.FinalCandidateWorkerID != publisher.publishedWorkers[2] {
+		t.Fatalf("task = %+v, published workers = %+v", task, publisher.publishedWorkers)
+	}
+	if got := countTaskActions(snapshot.Events, task.ID, "completion_publish_recovery", "completed"); got != 2 {
+		t.Fatalf("completed publish recoveries = %d, want 2", got)
+	}
+	if len(brain.states) < 5 {
+		t.Fatalf("replan states = %d, want initial plus two recovery replans", len(brain.states))
+	}
+	secondRecoveryState := brain.states[3]
+	if got := secondRecoveryState.BlockedFinalCandidateIDs; len(got) != 2 {
+		t.Fatalf("second recovery blocked final candidates = %+v, want two", got)
+	}
+}
+
 func TestServicePublishRecoveryDoesNotRepublishBlockedCandidateAfterReplanError(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -4452,6 +4531,7 @@ type fakePullRequestPublisher struct {
 	publishedWorkers []string
 	publishCalls     int
 	errOnce          error
+	errCount         int
 	status           core.PullRequest
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
@@ -4470,6 +4550,9 @@ func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPu
 	p.published = spec
 	p.publishCalls++
 	p.publishedWorkers = append(p.publishedWorkers, spec.WorkerID)
+	if p.errCount > 0 && p.publishCalls <= p.errCount {
+		return core.PullRequest{}, errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply")
+	}
 	if p.errOnce != nil && p.publishCalls == 1 {
 		return core.PullRequest{}, p.errOnce
 	}
@@ -5187,6 +5270,11 @@ func hasEvent(events []core.Event, eventType core.EventType, taskID string, work
 }
 
 func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {
+	return countTaskActions(events, taskID, kind, status) > 0
+}
+
+func countTaskActions(events []core.Event, taskID string, kind string, status string) int {
+	count := 0
 	for _, event := range events {
 		if event.Type != core.EventTaskAction || event.TaskID != taskID {
 			continue
@@ -5199,10 +5287,10 @@ func hasTaskAction(events []core.Event, taskID string, kind string, status strin
 			continue
 		}
 		if payload.Kind == kind && payload.Status == status {
-			return true
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 func resultErrorContains(results []WorkerTurnResult, needle string) bool {
