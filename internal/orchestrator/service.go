@@ -1596,6 +1596,19 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+				return core.Task{}, err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
+			go s.retryFinalCandidateTask(context.Background(), task, results)
+			return task, nil
+		}
+	}
 	if task.Status == core.TaskFailed {
 		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
 		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
@@ -1638,6 +1651,12 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	task.ObjectivePhase = "retrying"
 	go s.retryTask(context.Background(), task, plan)
 	return task, nil
+}
+
+func (s *Service) retryFinalCandidateTask(ctx context.Context, task core.Task, results []WorkerTurnResult) {
+	if err := s.completeTask(ctx, task.ID, results, task.FinalCandidateWorkerID, "retry final candidate publication"); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+	}
 }
 
 func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {

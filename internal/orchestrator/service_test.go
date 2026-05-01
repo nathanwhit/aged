@@ -1746,6 +1746,76 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesFinalCandidateByPublishingWithoutRerunningWorker(t *testing.T) {
+	for _, status := range []core.TaskStatus{core.TaskCanceled, core.TaskFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t)
+			defer store.Close()
+
+			publisher := &fakePullRequestPublisher{}
+			service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+				WorkerKind: "codex",
+				Prompt:     "implement the candidate",
+			}}, map[string]worker.Runner{
+				"codex": eventRunner{kind: "codex"},
+			}, t.TempDir(), fakeWorkspaceManager{
+				cwd:        t.TempDir(),
+				sourceRoot: t.TempDir(),
+				changes: WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+				},
+			})
+			service.SetPullRequestPublisher(publisher)
+
+			task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+				Title:  "Retry finalization",
+				Prompt: "Publish the existing candidate.",
+				Metadata: core.MustJSON(map[string]any{
+					"completionMode": "github",
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+			if publisher.publishCalls != 1 {
+				t.Fatalf("initial publish calls = %d, want 1", publisher.publishCalls)
+			}
+			workerID := publisher.published.WorkerID
+			payload := map[string]any{
+				"status": status,
+			}
+			if status == core.TaskFailed {
+				payload["error"] = "publication failed"
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:    core.EventTaskStatus,
+				TaskID:  task.ID,
+				Payload: core.MustJSON(payload),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			retried, err := service.RetryTask(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retried.Status != core.TaskPlanning || retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+				t.Fatalf("retried = %+v", retried)
+			}
+			snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+			if publisher.publishCalls != 2 || publisher.published.WorkerID != workerID {
+				t.Fatalf("publish calls = %d, spec = %+v", publisher.publishCalls, publisher.published)
+			}
+			if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 1 {
+				t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+			}
+		})
+	}
+}
+
 func TestServiceRetriesDynamicReplanFailureFromCompletedGraph(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
