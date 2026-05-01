@@ -2372,6 +2372,66 @@ func TestServiceAppliesFinalTaskCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceRepairsFinalTaskCandidateApplyConflict(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	changed := WorkspaceChangedFile{Path: "web/src/main.tsx", Status: "modified"}
+	applyCalls := 0
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: changed.Path,
+		body: "worker output\n",
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{changed},
+		},
+		applyCalls:     &applyCalls,
+		applyErr:       errors.New("merge git worker commit: conflict in web/src/main.tsx"),
+		failApplyUntil: 1,
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	originalCandidate := snapshot.Tasks[0].FinalCandidateWorkerID
+	if originalCandidate == "" {
+		t.Fatalf("task final candidate was empty: %+v", snapshot.Tasks[0])
+	}
+	result, err := service.ApplyTaskResult(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkerID == "" || result.WorkerID == originalCandidate {
+		t.Fatalf("applied worker = %q, want repaired worker distinct from %q", result.WorkerID, originalCandidate)
+	}
+	applied, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Tasks[0].FinalCandidateWorkerID != result.WorkerID {
+		t.Fatalf("final candidate = %q, want repaired worker %q", applied.Tasks[0].FinalCandidateWorkerID, result.WorkerID)
+	}
+	if applied.Tasks[0].AppliedWorkerID != result.WorkerID {
+		t.Fatalf("applied worker id = %q, want %q", applied.Tasks[0].AppliedWorkerID, result.WorkerID)
+	}
+	if applyCalls != 2 {
+		t.Fatalf("apply calls = %d, want failed original apply and repaired apply", applyCalls)
+	}
+	if !hasTaskAction(applied.Events, task.ID, "local_apply_recovery", "completed") {
+		t.Fatalf("missing completed local apply recovery action")
+	}
+}
+
 func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -4438,8 +4498,10 @@ type fakeWorkspaceManager struct {
 	diffCalls    *int
 	prepareCalls *int
 	prepareErr   error
+	applyErr     error
 
 	failPrepareAfter int
+	failApplyUntil   int
 }
 
 type recordingWorkspaceManager struct {
@@ -4585,6 +4647,9 @@ func (m fakeWorkspaceManager) DescribeDiff(context.Context, PreparedWorkspace) (
 func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
 	if m.applyCalls != nil {
 		*m.applyCalls = *m.applyCalls + 1
+		if m.applyErr != nil && m.failApplyUntil > 0 && *m.applyCalls <= m.failApplyUntil {
+			return WorkerApplyResult{}, m.applyErr
+		}
 	}
 	return WorkerApplyResult{
 		SourceRoot:    workspace.SourceRoot,

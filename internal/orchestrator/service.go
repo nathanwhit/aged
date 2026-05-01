@@ -1795,6 +1795,10 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 }
 
 func (s *Service) ApplyTaskResult(ctx context.Context, taskID string) (WorkerApplyResult, error) {
+	return s.applyTaskResultWithRecovery(ctx, taskID, 0)
+}
+
+func (s *Service) applyTaskResultWithRecovery(ctx context.Context, taskID string, attempts int) (WorkerApplyResult, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return WorkerApplyResult{}, err
@@ -1809,7 +1813,79 @@ func (s *Service) ApplyTaskResult(ctx context.Context, taskID string) (WorkerApp
 	if task.FinalCandidateWorkerID == "" {
 		return WorkerApplyResult{}, errors.New("task has no final candidate to apply")
 	}
-	return s.ApplyWorkerChanges(ctx, task.FinalCandidateWorkerID)
+	result, err := s.ApplyWorkerChanges(ctx, task.FinalCandidateWorkerID)
+	if err != nil {
+		if recovered, recoverResult, recoverErr := s.recoverTaskApplyFailure(ctx, task, snapshot, err, attempts); recovered {
+			return recoverResult, recoverErr
+		}
+	}
+	return result, err
+}
+
+func (s *Service) recoverTaskApplyFailure(ctx context.Context, task core.Task, snapshot core.Snapshot, applyErr error, attempts int) (bool, WorkerApplyResult, error) {
+	if attempts >= 1 || !isRecoverableApplyConflict(applyErr) {
+		return false, WorkerApplyResult{}, nil
+	}
+	_, results, err := retryGraphStateForTask(snapshot, task.ID)
+	if err != nil {
+		return false, WorkerApplyResult{}, nil
+	}
+	candidate, ok := workerResultByID(results, task.FinalCandidateWorkerID)
+	if !ok || strings.TrimSpace(candidate.Kind) == "" {
+		return false, WorkerApplyResult{}, nil
+	}
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "local_apply_recovery",
+		"when":     "after_apply_conflict",
+		"reason":   "Final candidate could not be applied cleanly; scheduling a repair worker against the current checkout.",
+		"workerId": candidate.WorkerID,
+		"status":   "started",
+		"error":    applyErr.Error(),
+	}); err != nil {
+		return true, WorkerApplyResult{}, err
+	}
+	plan := completionApplyRecoveryPlan(task, candidate, applyErr, attempts+1)
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return true, WorkerApplyResult{}, err
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, candidate.WorkerID, err) {
+			return true, WorkerApplyResult{}, err
+		}
+		_ = s.failTask(ctx, task.ID, err)
+		return true, WorkerApplyResult{}, err
+	}
+	if !s.finishOrContinueTask(ctx, task.ID, result) {
+		return true, WorkerApplyResult{}, errors.New("apply recovery worker did not produce an applyable result")
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskCandidate,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId": result.WorkerID,
+			"reason":   "local apply conflict recovered by repair worker",
+		}),
+	}); err != nil {
+		return true, WorkerApplyResult{}, err
+	}
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":       "local_apply_recovery",
+		"when":       "after_apply_conflict",
+		"reason":     "Repair worker completed; applying repaired task result.",
+		"workerId":   result.WorkerID,
+		"baseWorker": candidate.WorkerID,
+		"status":     "completed",
+	}); err != nil {
+		return true, WorkerApplyResult{}, err
+	}
+	applyResult, err := s.ApplyWorkerChanges(ctx, result.WorkerID)
+	return true, applyResult, err
 }
 
 func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (ApplyPolicyRecommendation, error) {
@@ -3057,6 +3133,20 @@ func isRecoverablePublishConflict(err error) bool {
 		(strings.Contains(lower, "applied patch") && strings.Contains(lower, "conflicts"))
 }
 
+func isRecoverableApplyConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRecoverablePublishConflict(err) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "conflict") ||
+		strings.Contains(lower, "could not apply") ||
+		strings.Contains(lower, "merge git worker commit") ||
+		strings.Contains(lower, "create jj merge revision")
+}
+
 func workerResultByID(results []WorkerTurnResult, workerID string) (WorkerTurnResult, bool) {
 	for _, result := range results {
 		if result.WorkerID == workerID {
@@ -3092,6 +3182,15 @@ func completionPublishRecoveryPlan(task core.Task, candidate WorkerTurnResult, p
 			"failedPublishWorkerID":  candidate.WorkerID,
 		},
 	}
+}
+
+func completionApplyRecoveryPlan(task core.Task, candidate WorkerTurnResult, applyErr error, attempt int) Plan {
+	plan := completionPublishRecoveryPlan(task, candidate, applyErr, attempt)
+	plan.Rationale = "Repair a final candidate that failed to apply because its changes conflicted with the current checkout."
+	plan.Metadata["localApplyRecovery"] = true
+	delete(plan.Metadata, "publishRecovery")
+	plan.Prompt = buildCompletionApplyRecoveryPrompt(task, candidate, applyErr)
+	return plan
 }
 
 func buildCompletionPublishRecoveryPrompt(task core.Task, candidate WorkerTurnResult, publishErr error) string {
@@ -3136,6 +3235,14 @@ func buildCompletionPublishRecoveryPrompt(task core.Task, candidate WorkerTurnRe
 	}
 	builder.WriteString("\nRepair the task result against the current working directory. Preserve current checkout behavior and newer edits; do not mechanically force the old patch over conflicting code. Run the relevant checks and report changed files and validation.\n")
 	return builder.String()
+}
+
+func buildCompletionApplyRecoveryPrompt(task core.Task, candidate WorkerTurnResult, applyErr error) string {
+	prompt := buildCompletionPublishRecoveryPrompt(task, candidate, applyErr)
+	prompt = strings.Replace(prompt, "Completion Publish Conflict Recovery", "Local Apply Conflict Recovery", 1)
+	prompt = strings.Replace(prompt, "could not publish the final candidate as a pull request because the candidate patch conflicted", "could not apply the final candidate locally because the candidate changes conflicted", 1)
+	prompt = strings.Replace(prompt, "Publish failure:", "Apply failure:", 1)
+	return prompt
 }
 
 func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
