@@ -401,6 +401,7 @@ function App() {
                     <span>
                       <strong>{task.title}</strong>
                       <small>{task.id.slice(0, 8)}</small>
+                      {task.error && <small className="task-row-error">{task.error}</small>}
                     </span>
                     <span className="task-row-status">
                       <Status value={task.status} />
@@ -907,6 +908,7 @@ function ProjectPanel({
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
+  const [projectFormOpen, setProjectFormOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
   const [healthBusy, setHealthBusy] = useState("");
@@ -925,6 +927,7 @@ function ProjectPanel({
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
+    setProjectFormOpen(true);
   }
 
   function resetForm() {
@@ -941,6 +944,7 @@ function ProjectPanel({
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
+    setProjectFormOpen(false);
   }
 
   async function submit(event: React.FormEvent) {
@@ -1021,61 +1025,64 @@ function ProjectPanel({
           </div>
         ))}
       </div>
-      <form className="project-form" onSubmit={submit}>
-        <label>
-          ID
-          <input value={id} onChange={(event) => setId(event.target.value)} placeholder="nodejs" required disabled={Boolean(editingId)} />
-        </label>
-        <label>
-          Name
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Node.js" />
-        </label>
-        <label>
-          Local path
-          <input value={localPath} onChange={(event) => setLocalPath(event.target.value)} placeholder="/Users/nathanwhit/Documents/Code/node" required />
-        </label>
-        <label>
-          Repo
-          <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="fork-owner/repo" />
-        </label>
-        <label>
-          Upstream repo
-          <input value={upstreamRepo} onChange={(event) => setUpstreamRepo(event.target.value)} placeholder="owner/repo" />
-        </label>
-        <label>
-          Head owner
-          <input value={headRepoOwner} onChange={(event) => setHeadRepoOwner(event.target.value)} placeholder="fork-owner" />
-        </label>
-        <label>
-          Push remote
-          <input value={pushRemote} onChange={(event) => setPushRemote(event.target.value)} placeholder="origin" />
-        </label>
-        <label>
-          Base
-          <input value={defaultBase} onChange={(event) => setDefaultBase(event.target.value)} placeholder="main" />
-        </label>
-        <label>
-          PR branch prefix
-          <input value={branchPrefix} onChange={(event) => setBranchPrefix(event.target.value)} placeholder="codex/aged-" />
-        </label>
-        <label className="checkbox-label">
-          <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
-          Draft PRs by default
-        </label>
-        <label className="checkbox-label">
-          <input type="checkbox" checked={allowMerge} onChange={(event) => setAllowMerge(event.target.checked)} />
-          Allow aged to merge
-        </label>
-        <label className="checkbox-label">
-          <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
-          Auto-merge when policy allows
-        </label>
-        <button disabled={busy}>
-          <FolderPlus size={16} />
-          {busy ? "Saving" : editingId ? "Save Project" : "Add Project"}
-        </button>
-        {editingId && <button type="button" className="secondary" onClick={resetForm}>Cancel Edit</button>}
-      </form>
+      <details className="project-add" open={projectFormOpen} onToggle={(event) => setProjectFormOpen(event.currentTarget.open)}>
+        <summary>{editingId ? "Edit project" : "Add project"}</summary>
+        <form className="project-form" onSubmit={submit}>
+          <label>
+            ID
+            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="nodejs" required disabled={Boolean(editingId)} />
+          </label>
+          <label>
+            Name
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Node.js" />
+          </label>
+          <label>
+            Local path
+            <input value={localPath} onChange={(event) => setLocalPath(event.target.value)} placeholder="/Users/nathanwhit/Documents/Code/node" required />
+          </label>
+          <label>
+            Repo
+            <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="fork-owner/repo" />
+          </label>
+          <label>
+            Upstream repo
+            <input value={upstreamRepo} onChange={(event) => setUpstreamRepo(event.target.value)} placeholder="owner/repo" />
+          </label>
+          <label>
+            Head owner
+            <input value={headRepoOwner} onChange={(event) => setHeadRepoOwner(event.target.value)} placeholder="fork-owner" />
+          </label>
+          <label>
+            Push remote
+            <input value={pushRemote} onChange={(event) => setPushRemote(event.target.value)} placeholder="origin" />
+          </label>
+          <label>
+            Base
+            <input value={defaultBase} onChange={(event) => setDefaultBase(event.target.value)} placeholder="main" />
+          </label>
+          <label>
+            PR branch prefix
+            <input value={branchPrefix} onChange={(event) => setBranchPrefix(event.target.value)} placeholder="codex/aged-" />
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
+            Draft PRs by default
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={allowMerge} onChange={(event) => setAllowMerge(event.target.checked)} />
+            Allow aged to merge
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
+            Auto-merge when policy allows
+          </label>
+          <button disabled={busy}>
+            <FolderPlus size={16} />
+            {busy ? "Saving" : editingId ? "Save Project" : "Add Project"}
+          </button>
+          {editingId && <button type="button" className="secondary" onClick={resetForm}>Cancel Edit</button>}
+        </form>
+      </details>
     </section>
   );
 }
@@ -1206,6 +1213,7 @@ function TaskDetail({
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
   const approvals = approvalStates(events);
+  const taskError = task.error || latestTaskStatusError(events);
 
   useEffect(() => {
     setDiff(undefined);
@@ -1292,6 +1300,12 @@ function TaskDetail({
       </div>
       {(task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} />
+      )}
+      {taskError && (
+        <div className="task-failure">
+          <strong>Failure details</strong>
+          <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
+        </div>
       )}
       {approvals.length > 0 && <ApprovalPanel approvals={approvals} onUseMessage={setMessage} />}
       <WorkerProgressSpotlight update={workerUpdate} />
@@ -2705,6 +2719,18 @@ function latestWorkerCompletion(events: EventRecord[], workerId: string): Worker
   return {};
 }
 
+function latestTaskStatusError(events: EventRecord[]): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "task.status") continue;
+    const payload = asRecord(event.payload);
+    const error = payloadValue(payload.error);
+    if (error) return error;
+    if (payloadValue(payload.status) !== "failed") return "";
+  }
+  return "";
+}
+
 function workerChangesApplied(events: EventRecord[], workerId: string): boolean {
   return events.some((event) => event.type === "worker.changes_applied" && event.workerId === workerId);
 }
@@ -3490,7 +3516,12 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     if (event.type === "task.status" && event.taskId) {
       const task = tasks.get(event.taskId);
       if (task) {
-        tasks.set(event.taskId, { ...task, status: String(payload.status) as Task["status"], updatedAt: event.at });
+        tasks.set(event.taskId, {
+          ...task,
+          status: String(payload.status) as Task["status"],
+          error: payloadValue(payload.error) || undefined,
+          updatedAt: event.at,
+        });
       }
     }
     if (event.type === "task.final_candidate_selected" && event.taskId) {

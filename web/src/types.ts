@@ -37,6 +37,7 @@ export type Task = {
   title: string;
   prompt: string;
   status: TaskStatus;
+  error?: string;
   objectiveStatus?: ObjectiveStatus;
   objectivePhase?: string;
   createdAt: string;

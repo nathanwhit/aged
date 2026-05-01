@@ -395,6 +395,65 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubCompletionModeRepairsPublishConflict(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	applyCalls := 0
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply"),
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
+		},
+		applyCalls: &applyCalls,
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Collapsible Project Add Dialog",
+		Prompt:   "Make the project add dialog collapsible.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForPullRequests(t, store, task.ID, 1)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if publisher.publishCalls != 2 {
+		t.Fatalf("publish calls = %d, want 2", publisher.publishCalls)
+	}
+	if len(publisher.publishedWorkers) != 2 || publisher.publishedWorkers[0] == publisher.publishedWorkers[1] {
+		t.Fatalf("published workers = %+v, want original then repair", publisher.publishedWorkers)
+	}
+	task = snapshot.Tasks[0]
+	if task.FinalCandidateWorkerID != publisher.publishedWorkers[1] {
+		t.Fatalf("final candidate = %q, published repair = %q", task.FinalCandidateWorkerID, publisher.publishedWorkers[1])
+	}
+	if task.Status != core.TaskWaiting || task.Error != "" {
+		t.Fatalf("task status/error = %q/%q", task.Status, task.Error)
+	}
+	if applyCalls != 0 {
+		t.Fatalf("apply calls = %d, want 0 for local PR publish", applyCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_recovery", "completed") {
+		t.Fatalf("missing completed publish recovery action")
+	}
+}
+
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2313,6 +2372,66 @@ func TestServiceAppliesFinalTaskCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceRepairsFinalTaskCandidateApplyConflict(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	changed := WorkspaceChangedFile{Path: "web/src/main.tsx", Status: "modified"}
+	applyCalls := 0
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: changed.Path,
+		body: "worker output\n",
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{changed},
+		},
+		applyCalls:     &applyCalls,
+		applyErr:       errors.New("merge git worker commit: conflict in web/src/main.tsx"),
+		failApplyUntil: 1,
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	originalCandidate := snapshot.Tasks[0].FinalCandidateWorkerID
+	if originalCandidate == "" {
+		t.Fatalf("task final candidate was empty: %+v", snapshot.Tasks[0])
+	}
+	result, err := service.ApplyTaskResult(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.WorkerID == "" || result.WorkerID == originalCandidate {
+		t.Fatalf("applied worker = %q, want repaired worker distinct from %q", result.WorkerID, originalCandidate)
+	}
+	applied, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Tasks[0].FinalCandidateWorkerID != result.WorkerID {
+		t.Fatalf("final candidate = %q, want repaired worker %q", applied.Tasks[0].FinalCandidateWorkerID, result.WorkerID)
+	}
+	if applied.Tasks[0].AppliedWorkerID != result.WorkerID {
+		t.Fatalf("applied worker id = %q, want %q", applied.Tasks[0].AppliedWorkerID, result.WorkerID)
+	}
+	if applyCalls != 2 {
+		t.Fatalf("apply calls = %d, want failed original apply and repaired apply", applyCalls)
+	}
+	if !hasTaskAction(applied.Events, task.ID, "local_apply_recovery", "completed") {
+		t.Fatalf("missing completed local apply recovery action")
+	}
+}
+
 func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3902,10 +4021,13 @@ func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (
 }
 
 type fakePullRequestPublisher struct {
-	published PullRequestPublishSpec
-	status    core.PullRequest
-	list      []core.PullRequest
-	listSpec  PullRequestListSpec
+	published        PullRequestPublishSpec
+	publishedWorkers []string
+	publishCalls     int
+	errOnce          error
+	status           core.PullRequest
+	list             []core.PullRequest
+	listSpec         PullRequestListSpec
 }
 
 type fakeTitleGenerator struct {
@@ -3919,6 +4041,11 @@ func (g fakeTitleGenerator) GenerateTitle(context.Context, string) (string, erro
 
 func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
 	p.published = spec
+	p.publishCalls++
+	p.publishedWorkers = append(p.publishedWorkers, spec.WorkerID)
+	if p.errOnce != nil && p.publishCalls == 1 {
+		return core.PullRequest{}, p.errOnce
+	}
 	branch := strings.TrimSpace(spec.Branch)
 	if branch == "" {
 		branch = defaultPRBranch(spec)
@@ -4371,8 +4498,10 @@ type fakeWorkspaceManager struct {
 	diffCalls    *int
 	prepareCalls *int
 	prepareErr   error
+	applyErr     error
 
 	failPrepareAfter int
+	failApplyUntil   int
 }
 
 type recordingWorkspaceManager struct {
@@ -4518,6 +4647,9 @@ func (m fakeWorkspaceManager) DescribeDiff(context.Context, PreparedWorkspace) (
 func (m fakeWorkspaceManager) ApplyChanges(_ context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
 	if m.applyCalls != nil {
 		*m.applyCalls = *m.applyCalls + 1
+		if m.applyErr != nil && m.failApplyUntil > 0 && *m.applyCalls <= m.failApplyUntil {
+			return WorkerApplyResult{}, m.applyErr
+		}
 	}
 	return WorkerApplyResult{
 		SourceRoot:    workspace.SourceRoot,
@@ -4615,6 +4747,25 @@ func taskWorkspaceCWD(snapshot core.Snapshot, taskID string) string {
 func hasEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {
 	for _, event := range events {
 		if event.Type == eventType && event.TaskID == taskID && (workerID == "" || event.WorkerID == workerID) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind   string `json:"kind"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == kind && payload.Status == status {
 			return true
 		}
 	}

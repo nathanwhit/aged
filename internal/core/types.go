@@ -87,6 +87,7 @@ type Task struct {
 	Title                  string          `json:"title"`
 	Prompt                 string          `json:"prompt"`
 	Status                 TaskStatus      `json:"status"`
+	Error                  string          `json:"error,omitempty"`
 	ObjectiveStatus        ObjectiveStatus `json:"objectiveStatus,omitempty"`
 	ObjectivePhase         string          `json:"objectivePhase,omitempty"`
 	CreatedAt              time.Time       `json:"createdAt"`
