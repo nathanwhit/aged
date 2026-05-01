@@ -780,16 +780,7 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 	}
 	hasChanges := strings.TrimSpace(diff) != ""
 	if hasChanges {
-		cmd := exec.CommandContext(ctx, "git", "apply", "--whitespace=nowarn")
-		cmd.Dir = destination
-		cmd.Stdin = strings.NewReader(diff)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			detail := strings.TrimSpace(stderr.String())
-			if detail != "" {
-				return fmt.Errorf("apply git base workspace diff: %w: %s", err, detail)
-			}
+		if err := applyGitPatchToWorkspace(ctx, destination, diff); err != nil {
 			return fmt.Errorf("apply git base workspace diff: %w", err)
 		}
 	}
@@ -807,6 +798,31 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil
+}
+
+func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) error {
+	if strings.TrimSpace(patch) == "" {
+		return nil
+	}
+	apply := func(args ...string) error {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(patch)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("%w: %s", err, detail)
+			}
+			return err
+		}
+		return nil
+	}
+	if err := apply("apply", "--whitespace=nowarn"); err == nil {
+		return nil
+	}
+	return apply("apply", "--3way", "--whitespace=nowarn")
 }
 
 func copyGitUntrackedFiles(ctx context.Context, source string, destination string) (bool, error) {

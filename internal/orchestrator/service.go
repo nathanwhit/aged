@@ -1645,7 +1645,9 @@ func (s *Service) reviewWorkerChanges(ctx context.Context, workerID string, incl
 	}
 	changes := s.describeWorkspaceChanges(ctx, workspace)
 	if includeDiff && changes.Error == "" {
-		if diff, err := s.describeWorkspaceDiff(ctx, workspace); err != nil {
+		if completed, err := s.completedWorkspaceChanges(ctx, workerID); err == nil && strings.TrimSpace(completed.Diff) != "" {
+			changes.Diff = completed.Diff
+		} else if diff, err := s.describeWorkspaceDiff(ctx, workspace); err != nil {
 			changes.Error = err.Error()
 		} else {
 			changes.Diff = strings.TrimSpace(diff)
@@ -2325,6 +2327,24 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 			return WorkerTurnResult{}, err
 		}
+		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" && workspaceSpec.BaseWorkDir == "" && workspaceSpec.BaseRevision == "" {
+			patch, baseChanges, err := s.workerHandoffPatch(ctx, baseWorkerID)
+			if err != nil {
+				_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+				return WorkerTurnResult{}, err
+			}
+			if strings.TrimSpace(patch) != "" {
+				if err := applyGitPatchToWorkspace(ctx, workspace.CWD, patch); err != nil {
+					_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+					return WorkerTurnResult{}, fmt.Errorf("apply base worker patch in local workspace: %w", err)
+				}
+				plan.Metadata["baseHandoff"] = "patch"
+				plan.Metadata["basePatchApplied"] = true
+				plan.Metadata["baseChangedFiles"] = len(baseChanges.ChangedFiles)
+			} else {
+				plan.Metadata["baseHandoff"] = "empty_patch"
+			}
+		}
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerWorkspace,
@@ -2408,7 +2428,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			status = core.WorkerCanceled
 			workspaceResult = WorkspaceResultCanceled
 		}
-		changes := s.describeWorkspaceChanges(ctx, workspace)
+		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 		_, _ = s.append(ctx, core.Event{
 			Type:     core.EventWorkerCompleted,
 			TaskID:   task.ID,
@@ -2421,7 +2441,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 
 	if runState.isWaitingForInput() {
-		changes := s.describeWorkspaceChanges(ctx, workspace)
+		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 		_, _ = s.append(ctx, core.Event{
 			Type:     core.EventWorkerCompleted,
 			TaskID:   task.ID,
@@ -2432,7 +2452,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		return runState.turnResult(workerID, plan, core.WorkerWaiting, nil, changes), nil
 	}
 
-	changes := s.describeWorkspaceChanges(ctx, workspace)
+	changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 	_, _ = s.append(ctx, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   task.ID,
@@ -2450,11 +2470,6 @@ func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetC
 	}
 	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
 		if target, ok, err := s.executionTargetForWorker(ctx, retryFromWorkerID); err != nil || ok {
-			return target, err
-		}
-	}
-	if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
-		if target, ok, err := s.executionTargetForWorker(ctx, baseWorkerID); err != nil || ok {
 			return target, err
 		}
 	}
@@ -2525,15 +2540,21 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			plan.Metadata["retryWorkspaceReused"] = true
 			plan.Metadata["retryWorkspaceCWD"] = remoteWorkDir
 		}
-	} else if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
-		if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err != nil {
-			return WorkerTurnResult{}, err
-		} else {
-			remoteWorkDir = baseWorkDir
-			plan.Metadata["baseWorkspaceCWD"] = remoteWorkDir
+	}
+	baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID")
+	if !reusedWorkspace && baseWorkerID != "" {
+		if sameTarget, _ := s.workerRanOnTarget(ctx, baseWorkerID, target.ID); sameTarget {
+			if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err == nil {
+				remoteWorkDir = baseWorkDir
+				reusedWorkspace = true
+				plan.Metadata["baseWorkspaceCWD"] = remoteWorkDir
+			} else {
+				plan.Metadata["baseWorkspaceReuseError"] = err.Error()
+			}
 		}
 	}
-	if !reusedWorkspace && stringMetadata(plan.Metadata, "baseWorkerID") == "" {
+	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, WorkDir: remoteWorkDir})
+	if !reusedWorkspace {
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
 			RepoURL:     projectCloneURL(project),
 			WorkDir:     remoteWorkDir,
@@ -2544,6 +2565,22 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		if checkoutLog != "" {
 			plan.Metadata["remoteCheckout"] = checkoutLog
+		}
+		if baseWorkerID != "" {
+			patch, baseChanges, err := s.workerHandoffPatch(ctx, baseWorkerID)
+			if err != nil {
+				return WorkerTurnResult{}, err
+			}
+			if strings.TrimSpace(patch) != "" {
+				if err := s.sshRunner.ApplyPatch(ctx, target, remoteWorkDir, remoteRun.RunDir, patch); err != nil {
+					return WorkerTurnResult{}, fmt.Errorf("apply base worker patch on remote target: %w", err)
+				}
+				plan.Metadata["baseHandoff"] = "patch"
+				plan.Metadata["basePatchApplied"] = true
+				plan.Metadata["baseChangedFiles"] = len(baseChanges.ChangedFiles)
+			} else {
+				plan.Metadata["baseHandoff"] = "empty_patch"
+			}
 		}
 	}
 	workspace := PreparedWorkspace{
@@ -2570,7 +2607,6 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID)
 	}
 	command := runner.BuildCommand(spec)
-	remoteRun := NewRemoteRun(target, spec)
 	workspace.Root = remoteRun.RunDir
 	workspace.CWD = remoteRun.WorkDir
 	workspace.SourceRoot = remoteRun.WorkDir
@@ -4052,6 +4088,20 @@ func (s *Service) describeWorkspaceChanges(ctx context.Context, workspace Prepar
 	return changes
 }
 
+func (s *Service) describeWorkspaceChangesForCompletion(ctx context.Context, workspace PreparedWorkspace) WorkspaceChanges {
+	changes := s.describeWorkspaceChanges(ctx, workspace)
+	if changes.Error != "" {
+		return changes
+	}
+	diff, err := s.describeWorkspaceDiff(ctx, workspace)
+	if err != nil {
+		changes.Error = err.Error()
+		return changes
+	}
+	changes.Diff = strings.TrimSpace(diff)
+	return changes
+}
+
 func (s *Service) describeWorkspaceDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
 	type workspaceDiffer interface {
 		DescribeDiff(context.Context, PreparedWorkspace) (string, error)
@@ -4096,6 +4146,9 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 	if strings.TrimSpace(base.CWD) == "" {
 		return spec, fmt.Errorf("base workspace for %s has no cwd", baseWorkerID)
 	}
+	if base.VCSType == "ssh" {
+		return spec, nil
+	}
 	spec.BaseWorkDir = base.CWD
 	switch base.VCSType {
 	case "jj":
@@ -4106,6 +4159,59 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 		spec.BaseRevision = ""
 	}
 	return spec, nil
+}
+
+func (s *Service) workerRanOnTarget(ctx context.Context, workerID string, targetID string) (bool, error) {
+	workerID = strings.TrimSpace(workerID)
+	targetID = strings.TrimSpace(targetID)
+	if workerID == "" || targetID == "" {
+		return false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventExecutionPlanned || event.WorkerID != workerID {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false, err
+		}
+		return stringMetadataValue(payload["targetId"]) == targetID || stringMetadataValue(payload["targetID"]) == targetID, nil
+	}
+	return false, nil
+}
+
+func (s *Service) workerHandoffPatch(ctx context.Context, workerID string) (string, WorkspaceChanges, error) {
+	changes, err := s.completedWorkspaceChanges(ctx, workerID)
+	if err != nil {
+		return "", WorkspaceChanges{}, err
+	}
+	if strings.TrimSpace(changes.Diff) != "" {
+		return changes.Diff, changes, nil
+	}
+	if len(changes.ChangedFiles) == 0 && !changes.Dirty {
+		return "", changes, nil
+	}
+	workspace, err := s.workspaceForWorker(ctx, workerID)
+	if err != nil {
+		return "", changes, fmt.Errorf("base worker %s has changes but no persisted patch: %w", workerID, err)
+	}
+	if workspace.VCSType == "ssh" {
+		return "", changes, fmt.Errorf("base worker %s has remote changes but no persisted diff.patch", workerID)
+	}
+	diff, err := s.describeWorkspaceDiff(ctx, workspace)
+	if err != nil {
+		return "", changes, fmt.Errorf("read base worker patch for %s: %w", workerID, err)
+	}
+	changes.Diff = strings.TrimSpace(diff)
+	if changes.Diff == "" {
+		return "", changes, fmt.Errorf("base worker %s has changes but generated an empty patch", workerID)
+	}
+	return changes.Diff, changes, nil
 }
 
 func (s *Service) remoteRetryWorkDir(ctx context.Context, target TargetConfig, previousWorkerID string) (string, error) {
@@ -4445,7 +4551,11 @@ func planMetadata(plan Plan) map[string]any {
 		"dependsOn",
 		"baseWorkerID",
 		"baseWorkspaceCWD",
+		"baseWorkspaceReuseError",
 		"baseRevision",
+		"baseHandoff",
+		"basePatchApplied",
+		"baseChangedFiles",
 		"nodeID",
 		"parentNodeID",
 		"planID",
