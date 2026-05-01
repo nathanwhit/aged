@@ -942,13 +942,9 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		if !workerBelongsToTask(snapshot, workerID, taskID) {
 			return core.PullRequest{}, errors.New("worker does not belong to task")
 		}
-		workspace, workspaceErr := s.workspaceForWorker(ctx, workerID)
-		if workspaceErr == nil && workspace.CWD != "" {
-			sourceRoot = workspace.CWD
-		} else if appliedRoot := appliedWorkerSourceRoot(snapshot, workerID); appliedRoot != "" {
-			sourceRoot = appliedRoot
-		} else if workspaceErr != nil {
-			return core.PullRequest{}, workspaceErr
+		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
+		if err != nil {
+			return core.PullRequest{}, err
 		}
 	}
 	title := strings.TrimSpace(req.Title)
@@ -1011,6 +1007,30 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
+}
+
+func (s *Service) pullRequestSourceRootForWorker(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, error) {
+	if appliedRoot := appliedWorkerSourceRoot(snapshot, workerID); appliedRoot != "" {
+		return appliedRoot, nil
+	}
+	workspace, err := s.workspaceForWorker(ctx, workerID)
+	if err != nil {
+		return "", err
+	}
+	if workspace.VCSType != "ssh" {
+		if workspace.CWD != "" {
+			return workspace.CWD, nil
+		}
+		return project.LocalPath, nil
+	}
+	result, err := s.ApplyWorkerChanges(ctx, workerID)
+	if err != nil {
+		if appliedRoot := appliedWorkerSourceRootFromStore(ctx, s.store, workerID); appliedRoot != "" {
+			return appliedRoot, nil
+		}
+		return "", err
+	}
+	return nonEmpty(result.SourceRoot, project.LocalPath), nil
 }
 
 func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core.WatchPullRequestsRequest) ([]core.PullRequest, error) {
@@ -1936,6 +1956,14 @@ func appliedWorkerSourceRoot(snapshot core.Snapshot, workerID string) string {
 	return ""
 }
 
+func appliedWorkerSourceRootFromStore(ctx context.Context, store eventstore.Store, workerID string) string {
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		return ""
+	}
+	return appliedWorkerSourceRoot(snapshot, workerID)
+}
+
 func (s *Service) workerChangesApplied(ctx context.Context, workerID string) (bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -2185,13 +2213,28 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
 		} else if s.finishOrContinueTask(ctx, task.ID, result) {
 			nextResults := append(results, result)
+			nextResults, ok, err := s.runFollowUpWorkers(ctx, task, *decision.Plan, nextResults, result.NodeID)
+			if err != nil {
+				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+					return
+				}
+				_ = s.failTask(ctx, task.ID, err)
+				return
+			}
+			if !ok {
+				return
+			}
 			if ok, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
 				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
 					return
 				}
 				_ = s.failTask(ctx, task.ID, err)
 			} else if ok {
-				_ = s.completeTask(ctx, task.ID, nextResults, decision.FinalCandidateWorkerID, decision.Rationale)
+				replanOK, finalCandidateWorkerID, finalCandidateReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
+				if !replanOK {
+					return
+				}
+				_ = s.completeTask(ctx, task.ID, nextResults, nonEmpty(decision.FinalCandidateWorkerID, finalCandidateWorkerID), nonEmpty(decision.Rationale, finalCandidateReason))
 			}
 		}
 	case "wait":
@@ -2263,13 +2306,28 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	}
 	if s.finishOrContinueTask(ctx, taskID, result) {
 		results := []WorkerTurnResult{result}
+		results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+		if err != nil {
+			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
+				return
+			}
+			_ = s.failTask(ctx, taskID, err)
+			return
+		}
+		if !ok {
+			return
+		}
 		if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
 			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
 				return
 			}
 			_ = s.failTask(ctx, taskID, err)
 		} else if ok {
-			_ = s.completeTask(ctx, taskID, results, "", "")
+			replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+			if !replanOK {
+				return
+			}
+			_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 		}
 	}
 }

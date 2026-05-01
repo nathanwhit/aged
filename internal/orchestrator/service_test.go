@@ -1949,6 +1949,59 @@ func TestServiceAutonomouslyContinuesWhenReplannerAnswersWorkerQuestion(t *testi
 	}
 }
 
+func TestServiceAutonomousQuestionContinuationRunsPlannedFollowUps(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "ask",
+			Prompt:     "ask for input",
+		},
+		decisions: []ReplanDecision{{
+			Action:  "continue",
+			Message: "Use the existing dependency.",
+			Plan: &Plan{
+				WorkerKind: "answer",
+				Prompt:     "continue with autonomous answer",
+				Spawns: []SpawnRequest{{
+					ID:         "review",
+					Role:       "reviewer",
+					Reason:     "Review the continuation output.",
+					WorkerKind: "reviewer",
+				}},
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "Which dependency should I use?",
+		}}},
+		"answer": eventRunner{kind: "answer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "continued after orchestrator answer",
+		}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "reviewed continuation",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "answer") {
+		t.Fatalf("missing continuation worker")
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "reviewer") {
+		t.Fatalf("missing planned follow-up worker")
+	}
+}
+
 func TestServiceResumesWaitingTaskWhenSteered(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1986,6 +2039,56 @@ func TestServiceResumesWaitingTaskWhenSteered(t *testing.T) {
 	}
 	if got := strings.Join(brain.steering, "\n"); !strings.Contains(got, "Should I install a dependency?") || !strings.Contains(got, "Use the existing package only.") {
 		t.Fatalf("resume steering = %q", got)
+	}
+}
+
+func TestServiceResumeWaitingTaskRunsPlannedFollowUps(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &sequenceBrain{plans: []Plan{
+		{WorkerKind: "ask", Prompt: "ask for input"},
+		{
+			WorkerKind: "answer",
+			Prompt:     "continue after feedback",
+			Spawns: []SpawnRequest{{
+				ID:         "review",
+				Role:       "reviewer",
+				Reason:     "Review the resumed output.",
+				WorkerKind: "reviewer",
+			}},
+		},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "Should I install a dependency?",
+		}}},
+		"answer": eventRunner{kind: "answer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "continued after user feedback",
+		}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "reviewed resumed work",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "Use the existing package only."}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "answer") {
+		t.Fatalf("missing resumed worker")
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "reviewer") {
+		t.Fatalf("missing planned follow-up worker")
 	}
 }
 
@@ -2305,6 +2408,115 @@ func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	}
 	if !hasEvent(snapshot.Events, core.EventWorkerApplied, taskID, workerID) {
 		t.Fatal("missing worker.changes_applied event")
+	}
+}
+
+func TestServicePublishesRemoteWorkerPullRequestAfterApplyingPatch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	sourceRoot := t.TempDir()
+	taskID := "task-remote-pr"
+	workerID := "worker-remote-pr"
+	changed := WorkspaceChangedFile{Path: "main.go", Status: "modified"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote PR",
+			"prompt": "Publish remote patch",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          "/runs/" + workerID,
+			CWD:           "/repo",
+			SourceRoot:    "/repo",
+			WorkspaceName: "aged-remote",
+			Mode:          "remote",
+			VCSType:       "ssh",
+			TaskID:        taskID,
+			WorkerID:      workerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerSucceeded,
+			"workspaceChanges": WorkspaceChanges{
+				Root:         "/runs/" + workerID,
+				CWD:          "/repo",
+				Mode:         "remote",
+				VCSType:      "git",
+				Dirty:        true,
+				Diff:         "diff --git a/main.go b/main.go\n",
+				ChangedFiles: []WorkspaceChangedFile{changed},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status":                 core.TaskSucceeded,
+			"finalCandidateWorkerId": workerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, sourceRoot, fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+	applied := 0
+	service.SetRemotePatchApplier(func(_ context.Context, project core.Project, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
+		applied++
+		if project.LocalPath != sourceRoot {
+			t.Fatalf("project local path = %q, want %q", project.LocalPath, sourceRoot)
+		}
+		if workspace.VCSType != "ssh" || workspace.CWD != "/repo" || changes.Diff == "" {
+			t.Fatalf("workspace=%+v changes=%+v", workspace, changes)
+		}
+		result := baseWorkerApplyResult(workspace, "remote_patch_apply")
+		result.SourceRoot = project.LocalPath
+		result.AppliedFiles = changes.ChangedFiles
+		return result, nil
+	})
+
+	if _, err := service.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
+		Repo:     "owner/repo",
+		Base:     "main",
+		WorkerID: workerID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied calls = %d, want 1", applied)
+	}
+	if publisher.published.WorkDir != sourceRoot {
+		t.Fatalf("published workDir = %q, want local source root %q", publisher.published.WorkDir, sourceRoot)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerApplied, taskID, workerID) {
+		t.Fatal("missing worker.changes_applied event")
+	}
+	if !hasEvent(snapshot.Events, core.EventPRPublished, taskID, "") {
+		t.Fatal("missing pr.published event")
 	}
 }
 
