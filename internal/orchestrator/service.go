@@ -2541,6 +2541,9 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
+	if resumingPullRequestFollowUp(snapshot, taskID) {
+		plan = normalizePullRequestFollowUpPlan(plan)
+	}
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
@@ -2588,6 +2591,53 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 			_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 		}
 	}
+}
+
+func resumingPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
+	latestFollowUp := int64(0)
+	latestWaitingStatus := int64(0)
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventPRFollowUp:
+			latestFollowUp = event.ID
+		case core.EventTaskStatus:
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == core.TaskWaiting {
+				latestWaitingStatus = event.ID
+			}
+		}
+	}
+	return latestFollowUp > 0 && latestFollowUp > latestWaitingStatus
+}
+
+func normalizePullRequestFollowUpPlan(plan Plan) Plan {
+	if len(plan.Spawns) == 0 {
+		return plan
+	}
+	if !planReturnsToPullRequestWatch(plan) {
+		return plan
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["suppressedSpawns"] = plan.Spawns
+	plan.Metadata["spawnsSuppressedReason"] = "pull_request_followup_returns_to_github_monitor"
+	plan.Spawns = nil
+	return plan
+}
+
+func planReturnsToPullRequestWatch(plan Plan) bool {
+	for _, action := range plan.Actions {
+		if strings.TrimSpace(action.Kind) == "watch_pull_requests" && strings.TrimSpace(action.When) != "immediate" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
@@ -3288,11 +3338,11 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 	if !ok {
 		return false, nil
 	}
-	blockReason, blocked := performanceCandidatePublishBlockReason(task, candidate, completionReason)
+	blockReason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, completionReason)
 	if !blocked {
 		return false, nil
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), "completion_publish_readiness_recovery", "before_publish", "completion publish readiness failed", nil)
+	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason))
 	if !recovery.Handled {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":     "completion_publish_readiness_recovery",
@@ -3302,7 +3352,7 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 			"status":   "waiting",
 			"error":    blockReason,
 		})
-		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness", "The selected performance candidate is not ready to publish as a pull request.\n\n"+blockReason+"\n\nSteer the task to continue investigation, produce a real optimization with credible benchmark evidence, or explicitly publish anyway.", map[string]any{
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness", "The selected final candidate is not ready to publish as a completion pull request.\n\n"+blockReason+"\n\nSteer the task to continue, select a different final candidate, or explicitly publish anyway.", map[string]any{
 			"error": blockReason,
 		})
 		return true, nil
@@ -3311,6 +3361,68 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 		return true, recovery.Err
 	}
 	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
+}
+
+func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error) finalCandidateRecoveryResult {
+	if _, ok := s.brain.(ReplanProvider); !ok {
+		return finalCandidateRecoveryResult{}
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return finalCandidateRecoveryResult{Handled: true, Err: eventstore.ErrNotFound}
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		return finalCandidateRecoveryResult{}
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok || strings.TrimSpace(candidate.Kind) == "" {
+		return finalCandidateRecoveryResult{}
+	}
+	results = annotateFinalCandidateFailure(results, candidateWorkerID, "completion publish readiness failed", failureErr)
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "completion_publish_readiness_recovery",
+		"when":     "before_publish",
+		"reason":   "Final candidate does not satisfy the task objective yet; asking the orchestrator to continue or select a different candidate.",
+		"workerId": candidateWorkerID,
+		"status":   "started",
+		"error":    failureErr.Error(),
+	}); err != nil {
+		return finalCandidateRecoveryResult{Handled: true, Err: err}
+	}
+	blockedFinalCandidates := map[string]string{candidateWorkerID: failureErr.Error()}
+	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
+		BlockedFinalCandidates: blockedFinalCandidates,
+		RecoveryHint:           fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
+	})
+	if !ok {
+		return finalCandidateRecoveryResult{Handled: true, Results: results}
+	}
+	if selectedWorkerID == "" {
+		if candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, ""); err == nil {
+			selectedWorkerID = candidateWorkerID
+			reason = nonEmpty(reason, candidateReason)
+		}
+	}
+	if selectedWorkerID == "" {
+		return finalCandidateRecoveryResult{Handled: true, Results: results}
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "completion_publish_readiness_recovery",
+		"when":     "before_publish",
+		"reason":   nonEmpty(reason, "Completion readiness recovery selected a new candidate."),
+		"workerId": selectedWorkerID,
+		"status":   "completed",
+	}); err != nil {
+		return finalCandidateRecoveryResult{Handled: true, Err: err}
+	}
+	return finalCandidateRecoveryResult{
+		Handled:          true,
+		Completed:        true,
+		SelectedWorkerID: selectedWorkerID,
+		Reason:           reason,
+		Results:          results,
+	}
 }
 
 func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, recoveryState publishRecoveryState) (bool, error) {
@@ -3938,63 +4050,31 @@ func resultHasCandidateChanges(result WorkerTurnResult) bool {
 	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
 }
 
-func performanceCandidatePublishBlockReason(task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
-	taskText := strings.ToLower(task.Title + "\n" + task.Prompt)
-	if !strings.Contains(taskText, "performance") &&
-		!strings.Contains(taskText, "throughput") &&
-		!strings.Contains(taskText, "optim") &&
-		!strings.Contains(taskText, "benchmark") &&
-		!strings.Contains(taskText, "profil") {
+func (s *Service) completionReadinessBlockReason(ctx context.Context, task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
+	reviewer, ok := s.brain.(CompletionReviewProvider)
+	if !ok {
 		return "", false
 	}
-	candidateText := strings.ToLower(strings.Join([]string{candidate.Summary, candidate.Error, completionReason}, "\n"))
-	weakEvidenceNeedles := []string{
-		"not credible",
-		"not a proven",
-		"not prove",
-		"do not claim",
-		"within noise",
-		"inside measured",
-		"mixed",
-		"low confidence",
-		"not strong enough",
-		"no measurable improvement",
-		"without evidence",
-		"not as a throughput",
+	review, err := reviewer.ReviewCompletion(ctx, task, candidate, completionReason)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "completion_readiness_review",
+			"when":     "before_finalization",
+			"reason":   "Completion readiness review failed; continuing with the replanner decision.",
+			"workerId": candidate.WorkerID,
+			"status":   "ignored",
+			"error":    err.Error(),
+		})
+		return "", false
 	}
-	for _, needle := range weakEvidenceNeedles {
-		if strings.Contains(candidateText, needle) {
-			return "performance candidate is not ready to publish: benchmark evidence is weak, noisy, or explicitly described as insufficient for a real throughput claim", true
-		}
+	if review.Ready {
+		return "", false
 	}
-	if len(candidate.Changes.ChangedFiles) > 0 {
-		productFiles := 0
-		for _, file := range candidate.Changes.ChangedFiles {
-			if !performanceSupportFile(file.Path) {
-				productFiles++
-			}
-		}
-		if productFiles == 0 {
-			return "performance candidate is not ready to publish: it only changes benchmark, test, documentation, or tooling files and does not include a product optimization", true
-		}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "selected final candidate does not satisfy the task objective yet"
 	}
-	return "", false
-}
-
-func performanceSupportFile(path string) bool {
-	path = strings.ToLower(strings.TrimSpace(path))
-	switch {
-	case path == "":
-		return true
-	case strings.Contains(path, "bench"), strings.Contains(path, "benchmark"):
-		return true
-	case strings.HasPrefix(path, "tools/"), strings.HasPrefix(path, "test/"), strings.HasPrefix(path, "tests/"):
-		return true
-	case strings.HasPrefix(path, "docs/"), strings.HasSuffix(path, ".md"):
-		return true
-	default:
-		return false
-	}
+	return reason, true
 }
 
 func (s *Service) taskCompletionMode(ctx context.Context, taskID string) string {
@@ -4079,16 +4159,20 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		switch decision.Action {
 		case "complete":
-			if reason := rejectPrematureLongRunningCompletion(task, decision, results); reason != "" {
+			if taskCompletionModeFromTask(task) != "github" {
 				if candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID); err == nil && candidateWorkerID != "" {
-					blockedFinalCandidates[candidateWorkerID] = reason
-					recoveryHint = reason + " Do not complete with this blocked candidate. Continue with implementation or validation work that can produce a publishable optimization candidate, or wait if that objective is no longer appropriate."
+					if candidate, ok := workerResultByID(results, candidateWorkerID); ok {
+						if reason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, decision.Rationale); blocked {
+							blockedFinalCandidates[candidateWorkerID] = reason
+							recoveryHint = reason + " Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable."
+							if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+								_ = s.failTask(ctx, task.ID, err)
+								return false, "", "", results
+							}
+							continue
+						}
+					}
 				}
-				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
-					_ = s.failTask(ctx, task.ID, err)
-					return false, "", "", results
-				}
-				continue
 			}
 			if len(blockedFinalCandidates) > 0 {
 				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
@@ -4337,123 +4421,6 @@ func buildConflictRepairPrompt(task core.Task, blockedWorkerID string, repairRea
 		builder.WriteString("\n")
 	}
 	return builder.String()
-}
-
-func rejectPrematureLongRunningCompletion(task core.Task, decision ReplanDecision, results []WorkerTurnResult) string {
-	taskText := strings.ToLower(task.Title + "\n" + task.Prompt)
-	if !longRunningPerformanceObjective(taskText) || boundedOneShotObjective(taskText) {
-		return ""
-	}
-	if strings.Contains(taskText, "open pr") || strings.Contains(taskText, "open a pr") || strings.Contains(taskText, "pull request") {
-		return ""
-	}
-	decisionText := strings.ToLower(decision.Rationale + "\n" + decision.Message)
-	if strings.Contains(decisionText, "not credible") ||
-		strings.Contains(decisionText, "not strong enough") ||
-		strings.Contains(decisionText, "within noise") ||
-		strings.Contains(decisionText, "mixed") ||
-		strings.Contains(decisionText, "longer") ||
-		strings.Contains(decisionText, "next turn") {
-		return "long-running performance objective is not complete; the decision itself says more benchmarking, validation, or follow-up work is needed"
-	}
-	candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
-	if err != nil || candidateWorkerID == "" {
-		return ""
-	}
-	candidate, ok := workerResultByID(results, candidateWorkerID)
-	if !ok {
-		return ""
-	}
-	if reason := intermediatePerformanceCandidateReason(candidate, decisionText); reason != "" {
-		return reason
-	}
-	return ""
-}
-
-func longRunningPerformanceObjective(taskText string) bool {
-	return (strings.Contains(taskText, "performance") ||
-		strings.Contains(taskText, "throughput") ||
-		strings.Contains(taskText, "optim") ||
-		strings.Contains(taskText, "benchmark") ||
-		strings.Contains(taskText, "profil")) &&
-		(strings.Contains(taskText, "investigate") ||
-			strings.Contains(taskText, "possible") ||
-			strings.Contains(taskText, "improvements") ||
-			strings.Contains(taskText, "long") ||
-			strings.Contains(taskText, "find") ||
-			strings.Contains(taskText, "finding"))
-}
-
-func boundedOneShotObjective(taskText string) bool {
-	return strings.Contains(taskText, "only") ||
-		strings.Contains(taskText, "just") ||
-		strings.Contains(taskText, "single") ||
-		strings.Contains(taskText, "one-shot") ||
-		strings.Contains(taskText, "one shot")
-}
-
-func intermediatePerformanceCandidateReason(candidate WorkerTurnResult, decisionText string) string {
-	candidateText := strings.ToLower(strings.Join([]string{
-		candidate.Summary,
-		candidate.Error,
-		candidate.Changes.DiffStat,
-		decisionText,
-	}, "\n"))
-	if strings.Contains(candidateText, "benchmark harness") ||
-		strings.Contains(candidateText, "benchmark script") ||
-		strings.Contains(candidateText, "only adds benchmark") ||
-		strings.Contains(candidateText, "profiling notes") ||
-		strings.Contains(candidateText, "profiler notes") {
-		return "long-running performance objective is not complete; the selected candidate appears to be benchmark or profiling infrastructure rather than a validated optimization"
-	}
-	if candidateChangesOnlyValidationArtifacts(candidate.Changes.ChangedFiles) {
-		return "long-running performance objective is not complete; the selected candidate only changes benchmark, profiling, test, documentation, or tooling artifacts"
-	}
-	return ""
-}
-
-func candidateChangesOnlyValidationArtifacts(files []WorkspaceChangedFile) bool {
-	if len(files) == 0 {
-		return false
-	}
-	for _, file := range files {
-		if !isValidationArtifactPath(file.Path) {
-			return false
-		}
-	}
-	return true
-}
-
-func isValidationArtifactPath(path string) bool {
-	path = strings.ToLower(strings.TrimSpace(path))
-	if path == "" {
-		return true
-	}
-	base := pathBase(path)
-	if strings.Contains(path, "bench") ||
-		strings.Contains(path, "benchmark") ||
-		strings.Contains(path, "profile") ||
-		strings.Contains(path, "profiler") ||
-		strings.Contains(path, "testdata/") ||
-		strings.Contains(path, "fixtures/") ||
-		strings.Contains(base, "_test.") ||
-		strings.Contains(base, ".test.") ||
-		strings.HasPrefix(path, "test/") ||
-		strings.HasPrefix(path, "tests/") ||
-		strings.HasPrefix(path, "docs/") ||
-		strings.HasPrefix(path, "tools/") ||
-		strings.HasPrefix(path, "scripts/") ||
-		strings.HasSuffix(path, ".md") {
-		return true
-	}
-	return false
-}
-
-func pathBase(path string) string {
-	if index := strings.LastIndex(path, "/"); index >= 0 {
-		return path[index+1:]
-	}
-	return path
 }
 
 func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {

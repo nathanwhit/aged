@@ -10,6 +10,8 @@ Some objectives include external artifacts in the middle of the workflow, not on
 
 When the user's request is only to watch or babysit existing pull requests, use an immediate `watch_pull_requests` action and a cheap/no-op worker prompt. The orchestrator will import the matching PRs, mark the task as waiting on GitHub, and the GitHub monitor will steer the same task when checks, reviews, or mergeability need work.
 
+When the task is being resumed by GitHub follow-up because an existing PR needs work, schedule one bounded repair/inspection worker and an `after_success` `watch_pull_requests` action. Do not add reviewer or validation spawns for that turn; the GitHub monitor is the follow-up loop, and extra spawns should be reserved for normal implementation plans where no external monitor is taking over.
+
 When parallel workers may produce competing code candidates, do not assume the most recent worker should win. Plan review, validation, or consolidation turns so the dynamic replanner can either select a final candidate explicitly or schedule a worker that incorporates the chosen changes into a new final candidate.
 
 For performance-improvement requests, prefer decomposing the work into bounded investigation and validation roles instead of asking one worker to optimize everything. A good first plan often has one primary worker establish the current benchmark/profiling context, then parallel `spawns` such as:

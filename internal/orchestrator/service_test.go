@@ -734,48 +734,56 @@ func TestServicePublishRecoveryDoesNotRepublishBlockedCandidateAfterReplanError(
 	}
 }
 
-func TestServiceRejectsPrematureLongRunningPerformanceCompletion(t *testing.T) {
+func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
 	publisher := &fakePullRequestPublisher{}
-	brain := &replanningBrain{
+	baseBrain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
-			Prompt:     "establish benchmark harness and inspect Deno.serve throughput",
+			Prompt:     "produce the first intermediate result for an ongoing investigation",
 		},
 		decisions: []ReplanDecision{{
 			Action:    "complete",
-			Rationale: "Candidate only adds benchmark infrastructure and the measured throughput result is mixed and within noise; run longer validation next.",
+			Rationale: "Candidate is useful but only an intermediate artifact.",
 		}, {
 			Action: "continue",
 			Plan: &Plan{
 				WorkerKind: "change",
-				Prompt:     "continue searching for a real Deno.serve optimization with credible benchmark evidence",
+				Prompt:     "continue toward a final result that satisfies the whole objective",
 			},
 		}, {
 			Action:  "wait",
-			Message: "continuing long-running performance investigation",
+			Message: "continuing ongoing investigation",
+		}},
+	}
+	brain := &completionReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []CompletionReview{{
+			Ready:  false,
+			Reason: "the selected candidate is only an intermediate artifact for this open-ended task",
 		}},
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "benchmark harness added; no credible throughput win yet"}}},
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "intermediate artifact produced; more work remains"}}},
 	}, t.TempDir(), fakeWorkspaceManager{
 		cwd:        t.TempDir(),
 		sourceRoot: t.TempDir(),
 		changes: WorkspaceChanges{
 			Dirty: true,
 			ChangedFiles: []WorkspaceChangedFile{
-				{Path: "tools/serve_bench.ts", Status: "added"},
+				{Path: "tools/investigation_notes.md", Status: "added"},
 			},
 		},
 	})
 	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
-		Title:  "Improve Deno.serve Throughput",
-		Prompt: "Investigate possible performance improvements for Deno.serve http server throughput. Hello world and more real world cases are important. Memory usage is also important.",
+		Title:  "Improve Subsystem",
+		Prompt: "Keep investigating possible improvements over multiple worker turns and open intermediate PRs when useful.",
 		Metadata: core.MustJSON(map[string]any{
 			"completionMode": "github",
 		}),
@@ -787,27 +795,30 @@ func TestServiceRejectsPrematureLongRunningPerformanceCompletion(t *testing.T) {
 	if publisher.publishCalls != 0 {
 		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
 	}
-	if !hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
-		t.Fatalf("missing rejected premature completion action")
+	if brain.reviewCalls != 1 {
+		t.Fatalf("review calls = %d, want 1", brain.reviewCalls)
 	}
-	if len(brain.states) < 2 {
-		t.Fatalf("replan states = %d, want rejection then continuation", len(brain.states))
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_readiness_recovery", "started") {
+		t.Fatalf("missing completion readiness recovery action")
 	}
-	if got := brain.states[1].BlockedFinalCandidateIDs; len(got) != 1 {
+	if len(baseBrain.states) < 2 {
+		t.Fatalf("replan states = %d, want rejection then continuation", len(baseBrain.states))
+	}
+	if got := baseBrain.states[1].BlockedFinalCandidateIDs; len(got) != 1 {
 		t.Fatalf("blocked final candidates after rejection = %+v, want one blocked candidate", got)
 	}
-	if brain.states[1].RecoveryHint == "" {
+	if baseBrain.states[1].RecoveryHint == "" {
 		t.Fatalf("missing recovery hint after rejected completion")
 	}
 }
 
-func TestServiceAllowsPerformanceRelatedPlanningCompletionWithSourceCandidate(t *testing.T) {
+func TestServicePublishesCompletionWhenCompletionReviewApprovesCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
 	publisher := &fakePullRequestPublisher{}
-	brain := &replanningBrain{
+	baseBrain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
 			Prompt:     "improve planner behavior for performance optimization work",
@@ -815,6 +826,14 @@ func TestServiceAllowsPerformanceRelatedPlanningCompletionWithSourceCandidate(t 
 		decisions: []ReplanDecision{{
 			Action:    "complete",
 			Rationale: "The candidate changes planner source code and adds regression coverage for performance-oriented planning decisions.",
+		}},
+	}
+	brain := &completionReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []CompletionReview{{
+			Ready:  true,
+			Reason: "candidate satisfies the bounded task objective",
 		}},
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
@@ -845,6 +864,9 @@ func TestServiceAllowsPerformanceRelatedPlanningCompletionWithSourceCandidate(t 
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	if publisher.publishCalls != 1 {
 		t.Fatalf("publish calls = %d, want source candidate to publish", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("review calls = %d, want 1", brain.reviewCalls)
 	}
 	if hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
 		t.Fatalf("source candidate completion was incorrectly rejected")
@@ -940,6 +962,79 @@ func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	}
 	if !hasMilestone(task.Milestones, "pull_requests_watched") || len(task.Artifacts) != 1 {
 		t.Fatalf("milestones=%+v artifacts=%+v", task.Milestones, task.Artifacts)
+	}
+}
+
+func TestServicePullRequestFollowUpSuppressesPlanSpawnsWhenReturningToWatch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-followup"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair PR",
+			"prompt": "Fix the pull request and keep watching it.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "repair dirty PR branch",
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return repaired PR to monitor",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+		Spawns: []SpawnRequest{{
+			ID:         "review-after-repair",
+			Role:       "post-repair reviewer",
+			Reason:     "review repaired PR",
+			WorkerKind: "reviewer",
+		}},
+	}}, map[string]worker.Runner{
+		"change":   eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "repaired"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if hasWorkerCreated(snapshot.Events, taskID, "reviewer") {
+		t.Fatalf("pull request follow-up should not run plan spawns before returning to watch")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"spawnsSuppressedReason":"pull_request_followup_returns_to_github_monitor"`) {
+		t.Fatalf("missing suppressed spawn metadata")
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
+		t.Fatalf("list spec = %+v", publisher.listSpec)
 	}
 }
 
@@ -5041,6 +5136,23 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return decision, nil
+}
+
+type completionReviewBrain struct {
+	BrainProvider
+	ReplanProvider
+	reviews     []CompletionReview
+	reviewCalls int
+}
+
+func (b *completionReviewBrain) ReviewCompletion(context.Context, core.Task, WorkerTurnResult, string) (CompletionReview, error) {
+	b.reviewCalls++
+	if len(b.reviews) == 0 {
+		return CompletionReview{Ready: true}, nil
+	}
+	review := b.reviews[0]
+	b.reviews = b.reviews[1:]
+	return review, nil
 }
 
 type continueThenSelectLatestBrain struct {

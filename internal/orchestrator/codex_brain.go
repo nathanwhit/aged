@@ -110,6 +110,38 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	return decision, nil
 }
 
+func (b *CodexBrain) ReviewCompletion(ctx context.Context, task core.Task, candidate WorkerTurnResult, reason string) (CompletionReview, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	prompt := b.completionReviewPrompt(task, candidate, reason)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return CompletionReview{}, fmt.Errorf("codex completion review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
+	}
+
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return CompletionReview{}, err
+	}
+	content = trimJSONFence(content)
+	review, err := decodeCompletionReview([]byte(content))
+	if err != nil {
+		return CompletionReview{}, fmt.Errorf("decode codex completion review: %w", err)
+	}
+	if review.Metadata == nil {
+		review.Metadata = map[string]any{}
+	}
+	review.Metadata["brain"] = "codex"
+	review.Metadata["scheduler"] = "orchestrator"
+	return review, nil
+}
+
 func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -247,6 +279,22 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		decision.Plan = &plan
 	}
 	return decision, nil
+}
+
+func decodeCompletionReview(data []byte) (CompletionReview, error) {
+	var raw struct {
+		Ready    bool           `json:"ready"`
+		Reason   string         `json:"reason,omitempty"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	}
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
+		return CompletionReview{}, err
+	}
+	return CompletionReview{
+		Ready:    raw.Ready,
+		Reason:   raw.Reason,
+		Metadata: raw.Metadata,
+	}, nil
 }
 
 func decodeCodexPlan(data []byte) (Plan, error) {
@@ -511,6 +559,47 @@ Field rules:
 - "steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects, never arrays of strings.
 
 Dynamic replanning input:
+
+` + string(data)
+}
+
+func (b *CodexBrain) completionReviewPrompt(task core.Task, candidate WorkerTurnResult, reason string) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"selectedCandidate": candidate,
+		"completionReason":  reason,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return strings.TrimSpace(b.template) + `
+
+You are reviewing whether the selected final candidate actually satisfies the user's task objective.
+
+Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
+
+The JSON object must have exactly these top-level fields:
+
+{
+  "ready": true,
+  "reason": "string"
+}
+
+Readiness rules:
+- Set "ready": true only when the selected candidate is an appropriate final result for the task as the user stated it.
+- Set "ready": false when the task describes an ongoing, multi-turn, keep-working, babysitting, monitoring, or open-ended objective and the candidate is only an intermediate artifact.
+- Set "ready": false when the candidate or completion reason says more implementation, validation, review response, benchmarking, or follow-up work is still needed.
+- Set "ready": false when the candidate does not address the actual task objective, even if it produced useful setup, test, benchmark, documentation, or diagnostic artifacts.
+- Set "ready": true for bounded one-shot tasks when the candidate appears to satisfy that bounded request, including tasks where tests, documentation, or diagnostic artifacts are the requested output.
+- Do not require perfection. This is a task-contract review, not a general code review.
+
+Completion review input:
 
 ` + string(data)
 }
