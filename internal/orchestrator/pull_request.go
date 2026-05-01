@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"aged/internal/core"
 
@@ -394,11 +395,17 @@ func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, 
 	}
 	baselineEstablished, _ := metadata["conversationCommentBaselineEstablished"].(bool)
 	previousSignature, _ := metadata["latestConversationCommentSignature"].(string)
+	triggeredSignature, _ := metadata["latestConversationCommentTriggeredSignature"].(string)
 	latest, ok := latestExternalConversationComment(comments)
 	if ok {
 		signature := latest.Signature()
-		if baselineEstablished && signature != previousSignature {
+		shouldTrigger := baselineEstablished && signature != previousSignature
+		if !shouldTrigger && triggeredSignature != signature && commentAfterPullRequestWatch(latest, checked.CreatedAt) {
+			shouldTrigger = true
+		}
+		if shouldTrigger {
 			checked.ReviewStatus = "COMMENTED"
+			metadata["latestConversationCommentTriggeredSignature"] = signature
 		}
 		metadata["latestConversationCommentSignature"] = signature
 		metadata["latestConversationCommentId"] = latest.ID
@@ -409,6 +416,24 @@ func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, 
 	}
 	metadata["conversationCommentBaselineEstablished"] = true
 	return core.MustJSON(metadata)
+}
+
+func commentAfterPullRequestWatch(comment prComment, watchedAt time.Time) bool {
+	if watchedAt.IsZero() {
+		return false
+	}
+	commentAt := strings.TrimSpace(comment.UpdatedAt)
+	if commentAt == "" {
+		commentAt = strings.TrimSpace(comment.CreatedAt)
+	}
+	if commentAt == "" {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339, commentAt)
+	if err != nil {
+		return false
+	}
+	return parsed.After(watchedAt)
 }
 
 func latestExternalConversationComment(comments []prComment) (prComment, bool) {
