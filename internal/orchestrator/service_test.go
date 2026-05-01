@@ -90,6 +90,44 @@ func TestServicePassesReasoningEffortToWorker(t *testing.T) {
 	}
 }
 
+func TestApplyRemotePatchConflictDoesNotDirtySource(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := runTestGit(t, repo, "diff", "--binary", "HEAD", "--", "file.txt")
+	runTestGit(t, repo, "checkout", "--", "file.txt")
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "source")
+
+	_, err := applyRemotePatch(ctx, core.Project{LocalPath: repo}, PreparedWorkspace{WorkerID: "remote-worker"}, WorkspaceChanges{
+		Diff:  patch,
+		Dirty: true,
+		ChangedFiles: []WorkspaceChangedFile{{
+			Path:   "file.txt",
+			Status: "modified",
+		}},
+	})
+	if err == nil {
+		t.Fatal("applyRemotePatch succeeded; want conflict")
+	}
+	status := strings.TrimSpace(runTestGit(t, repo, "status", "--porcelain=v1"))
+	if status != "" {
+		t.Fatalf("source status = %q, want clean after failed remote apply", status)
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "source\n" {
+		t.Fatalf("source file contents = %q, want committed source contents", contents)
+	}
+}
+
 func TestServiceDedupesExternalSourceTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

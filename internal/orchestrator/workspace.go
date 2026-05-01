@@ -763,10 +763,45 @@ func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepare
 	if err != nil {
 		return result, fmt.Errorf("read git worker commit: %w", err)
 	}
+	if err := ensureGitTrackedClean(ctx, workspace.SourceRoot, "merge git worker commit"); err != nil {
+		return result, err
+	}
 	if _, err := runGit(ctx, workspace.SourceRoot, "merge", "--no-ff", strings.TrimSpace(commit)); err != nil {
+		if cleanupErr := abortFailedGitMerge(ctx, workspace.SourceRoot); cleanupErr != nil {
+			return result, fmt.Errorf("merge git worker commit: %w; restore source checkout: %v", err, cleanupErr)
+		}
 		return result, fmt.Errorf("merge git worker commit: %w", err)
 	}
 	return result, nil
+}
+
+func ensureGitTrackedClean(ctx context.Context, dir string, operation string) error {
+	status, err := gitTrackedStatus(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("read git status before %s: %w", operation, err)
+	}
+	if status != "" {
+		return fmt.Errorf("%s requires a clean tracked checkout; commit, stash, or resolve tracked changes first:\n%s", operation, status)
+	}
+	return nil
+}
+
+func gitTrackedStatus(ctx context.Context, dir string) (string, error) {
+	status, err := runGit(ctx, dir, "status", "--porcelain=v1", "--untracked-files=no")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(status), nil
+}
+
+func abortFailedGitMerge(ctx context.Context, dir string) error {
+	if _, err := runGit(ctx, dir, "merge", "--abort"); err == nil {
+		return nil
+	}
+	if _, err := runGit(ctx, dir, "reset", "--hard", "HEAD"); err != nil {
+		return fmt.Errorf("git reset --hard HEAD: %w", err)
+	}
+	return nil
 }
 
 func copyGitWorkspaceChanges(ctx context.Context, source string, destination string) error {

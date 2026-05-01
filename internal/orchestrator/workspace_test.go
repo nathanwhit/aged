@@ -240,6 +240,52 @@ func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerApplyConflictAbortsSourceMerge(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "config", "user.name", "aged-test")
+	runTestGit(t, repo, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, repo, "config", "commit.gpgsign", "false")
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker-conflict",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.CWD, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := manager.DescribeChanges(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "commit", "-m", "source")
+
+	_, err = manager.ApplyChanges(ctx, workspace, changes)
+	if err == nil {
+		t.Fatal("ApplyChanges succeeded; want merge conflict")
+	}
+	status := strings.TrimSpace(runTestGit(t, repo, "status", "--porcelain=v1"))
+	if status != "" {
+		t.Fatalf("source status = %q, want clean after failed merge", status)
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "source\n" {
+		t.Fatalf("source file contents = %q, want committed source contents", contents)
+	}
+}
+
 func TestApplyGitPatchAcceptsMissingTrailingNewline(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
