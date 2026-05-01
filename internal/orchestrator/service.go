@@ -4699,10 +4699,19 @@ func applyRemotePatch(ctx context.Context, project core.Project, workspace Prepa
 	}
 	defer os.Remove(patchFile)
 	if _, err := runCommand(ctx, project.LocalPath, "git", "apply", "--check", "--whitespace=nowarn", patchFile); err != nil {
+		if cleanErr := ensureGitTrackedClean(ctx, project.LocalPath, "remote patch 3-way apply"); cleanErr != nil {
+			return result, fmt.Errorf("remote patch needs 3-way apply but source checkout is not safe to mutate; check failed: %w; source status: %v", err, cleanErr)
+		}
+		if threeWayErr := probeGitApplyThreeWay(ctx, project.LocalPath, patchFile); threeWayErr != nil {
+			return result, fmt.Errorf("remote patch has conflicts or no longer applies cleanly; check failed: %w; 3-way apply failed: %v", err, threeWayErr)
+		}
 		if _, threeWayErr := runCommand(ctx, project.LocalPath, "git", "apply", "--3way", "--whitespace=nowarn", patchFile); threeWayErr == nil {
 			result.Method = "remote_patch_apply_3way"
 			return result, nil
 		} else {
+			if cleanupErr := resetCleanGitApplyAttempt(ctx, project.LocalPath); cleanupErr != nil {
+				return result, fmt.Errorf("remote patch has conflicts or no longer applies cleanly; check failed: %w; 3-way apply failed: %v; restore source checkout: %v", err, threeWayErr, cleanupErr)
+			}
 			return result, fmt.Errorf("remote patch has conflicts or no longer applies cleanly; check failed: %w; 3-way apply failed: %v", err, threeWayErr)
 		}
 	}
@@ -4710,6 +4719,32 @@ func applyRemotePatch(ctx context.Context, project core.Project, workspace Prepa
 		return result, fmt.Errorf("apply checked remote patch: %w", err)
 	}
 	return result, nil
+}
+
+func probeGitApplyThreeWay(ctx context.Context, sourceRoot string, patchFile string) error {
+	tempRoot, err := os.MkdirTemp("", "aged-git-apply-probe-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempRoot)
+	probeDir := filepath.Join(tempRoot, "worktree")
+	if _, err := runCommand(ctx, sourceRoot, "git", "worktree", "add", "--detach", probeDir, "HEAD"); err != nil {
+		return fmt.Errorf("create apply probe worktree: %w", err)
+	}
+	defer func() {
+		_, _ = runCommand(context.Background(), sourceRoot, "git", "worktree", "remove", "--force", probeDir)
+	}()
+	if _, err := runCommand(ctx, probeDir, "git", "apply", "--3way", "--whitespace=nowarn", patchFile); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resetCleanGitApplyAttempt(ctx context.Context, dir string) error {
+	if _, err := runCommand(ctx, dir, "git", "reset", "--hard", "HEAD"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) cleanupWorkspace(ctx context.Context, taskID string, workerID string, workspace PreparedWorkspace, result WorkspaceResult) error {
