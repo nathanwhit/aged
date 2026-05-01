@@ -112,9 +112,9 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 
 func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
-	args := []string{"--print", "--output-format", "stream-json", prompt}
+	args := []string{"--print", "--output-format", "stream-json", "--verbose", prompt}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
-		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", prompt}
+		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", prompt}
 	}
 	cmd := exec.CommandContext(ctx, a.claudePath, args...)
 	cmd.Dir = workDir

@@ -989,12 +989,6 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		pr.ID = uuid.NewString()
 	}
 	pr.TaskID = taskID
-	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
-		return core.PullRequest{}, err
-	}
-	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
-		return core.PullRequest{}, err
-	}
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_opened", "pr_opened", "Pull request opened.", map[string]any{
 		"pullRequestId": pr.ID,
 		"url":           pr.URL,
@@ -1005,6 +999,15 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
 	return pr, nil
@@ -1072,6 +1075,18 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	if len(prs) == 0 {
 		return nil, errors.New("no pull requests matched watch request")
 	}
+	if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
+		"count": len(prs),
+		"repo":  repo,
+	}); err != nil {
+		return nil, err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "watching_pull_requests", fmt.Sprintf("Watching %d pull request(s) for GitHub state changes.", len(prs))); err != nil {
+		return nil, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+		return nil, err
+	}
 	for _, pr := range prs {
 		pr.ID = watchedPullRequestID(pr)
 		pr.TaskID = taskID
@@ -1087,18 +1102,6 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
 			return nil, err
 		}
-	}
-	if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
-		"count": len(prs),
-		"repo":  repo,
-	}); err != nil {
-		return nil, err
-	}
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "watching_pull_requests", fmt.Sprintf("Watching %d pull request(s) for GitHub state changes.", len(prs))); err != nil {
-		return nil, err
-	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
-		return nil, err
 	}
 	return prs, nil
 }
@@ -2802,6 +2805,15 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     action.Kind,
+			"when":     nonEmpty(action.When, "after_success"),
+			"reason":   action.Reason,
+			"workerId": workerID,
+			"status":   "started",
+		}); err != nil {
+			return false, err
+		}
 		pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
 		if err != nil {
 			return false, err
@@ -2819,6 +2831,15 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "watch_pull_requests":
 		req := watchPullRequestsRequestFromAction(action)
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   action.Kind,
+			"when":   nonEmpty(action.When, "after_success"),
+			"reason": action.Reason,
+			"inputs": action.Inputs,
+			"status": "started",
+		}); err != nil {
+			return false, err
+		}
 		prs, err := s.WatchPullRequests(ctx, task.ID, req)
 		if err != nil {
 			return false, err

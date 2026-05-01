@@ -10,6 +10,9 @@ import (
 )
 
 func TestJJWorkspaceManagerPreparesCurrentRepo(t *testing.T) {
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj is not installed")
+	}
 	workspace, err := NewJJWorkspaceManager(WorkspaceModeShared, "", WorkspaceCleanupRetain).Prepare(context.Background(), WorkspaceSpec{
 		TaskID:   "task",
 		WorkerID: "worker",
@@ -47,8 +50,14 @@ func TestAutoWorkspaceManagerUsesCurrentRepoVCS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if workspace.VCSType != "jj" {
-		t.Fatalf("VCSType = %q", workspace.VCSType)
+	want := "git"
+	if _, err := exec.LookPath("jj"); err == nil {
+		if out, err := exec.Command("jj", "root").CombinedOutput(); err == nil && strings.TrimSpace(string(out)) != "" {
+			want = "jj"
+		}
+	}
+	if workspace.VCSType != want {
+		t.Fatalf("VCSType = %q, want %q", workspace.VCSType, want)
 	}
 }
 

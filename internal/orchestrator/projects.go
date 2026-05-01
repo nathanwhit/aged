@@ -330,6 +330,14 @@ func repoOwner(repo string) string {
 
 func detectGitHubRepo(ctx context.Context, dir string) string {
 	out, err := runCommand(ctx, dir, "jj", "git", "remote", "list")
+	if err == nil {
+		for _, line := range strings.Split(out, "\n") {
+			if repo := githubRepoFromRemote(line); repo != "" {
+				return repo
+			}
+		}
+	}
+	out, err = runCommand(ctx, dir, "git", "remote", "-v")
 	if err != nil {
 		return ""
 	}
