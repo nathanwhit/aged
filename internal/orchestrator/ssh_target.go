@@ -385,8 +385,10 @@ base=%[3]s
 if [ -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(git status --porcelain)" ]; then
-    echo "remote checkout is dirty: $work_dir"
-    exit 20
+    stash_message="aged remote checkout backup $(date -u +%%Y%%m%%dT%%H%%M%%SZ)"
+    git stash push --include-untracked -m "$stash_message"
+    stash_ref=$(git rev-parse --short stash@{0} 2>/dev/null || true)
+    echo "stashed dirty remote checkout ${stash_ref:-stash@{0}}: $stash_message"
   fi
   if [ -n "$repo_url" ] && ! git remote get-url origin >/dev/null 2>&1; then
     git remote add origin "$repo_url"
@@ -395,8 +397,7 @@ if [ -d "$work_dir/.git" ]; then
 elif [ -d "$work_dir/.jj" ] && [ ! -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(jj diff --stat)" ]; then
-    echo "remote jj checkout is dirty: $work_dir"
-    exit 20
+    echo "remote jj checkout is dirty; preserving current checkout: $work_dir"
   fi
   jj git fetch || true
   echo "prepared jj checkout $work_dir"
