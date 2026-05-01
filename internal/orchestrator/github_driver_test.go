@@ -327,6 +327,12 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 	}
 }
 
+func TestPullRequestNeedsBabysitterForNewConversationComment(t *testing.T) {
+	if !pullRequestNeedsBabysitter(core.PullRequest{State: "OPEN", ReviewStatus: "COMMENTED"}) {
+		t.Fatal("COMMENTED PR should need babysitter follow-up")
+	}
+}
+
 func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

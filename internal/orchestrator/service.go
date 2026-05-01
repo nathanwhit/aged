@@ -1908,6 +1908,10 @@ Repeatedly inspect CI status, review comments, and mergeability. If checks fail 
 }
 
 func pullRequestFollowUpPrompt(pr core.PullRequest) string {
+	comment := pullRequestCommentPromptContext(pr)
+	if comment != "" {
+		comment = "\nLatest PR conversation comment:\n" + comment + "\n"
+	}
 	return fmt.Sprintf(`GitHub pull request %s#%d needs follow-up work on the existing task.
 
 Pull request URL: %s
@@ -1917,9 +1921,40 @@ State: %s
 Checks: %s
 Merge status: %s
 Review status: %s
+%s
 
 Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. Keep this as the same long-running task objective; do not start a separate babysitter task.
-`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus)
+`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment)
+}
+
+func pullRequestCommentPromptContext(pr core.PullRequest) string {
+	var metadata map[string]any
+	if len(pr.Metadata) == 0 {
+		return ""
+	}
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		return ""
+	}
+	body := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentBody"]))
+	if body == "" {
+		return ""
+	}
+	author := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentAuthor"]))
+	createdAt := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentCreatedAt"]))
+	prefix := ""
+	if author != "" {
+		prefix = "@" + author
+	}
+	if createdAt != "" {
+		if prefix != "" {
+			prefix += " "
+		}
+		prefix += "(" + createdAt + ")"
+	}
+	if prefix == "" {
+		return body
+	}
+	return prefix + ":\n" + body
 }
 
 func (s *Service) runTask(ctx context.Context, task core.Task) {

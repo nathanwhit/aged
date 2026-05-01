@@ -244,7 +244,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	if ref == "" {
 		return core.PullRequest{}, errors.New("inspect requires pull request url or number")
 	}
-	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,statusCheckRollup,reviewDecision")
+	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,statusCheckRollup,reviewDecision,comments")
 	if err != nil {
 		return core.PullRequest{}, fmt.Errorf("inspect GitHub pull request: %w", err)
 	}
@@ -259,6 +259,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 		MergeStateStatus  string          `json:"mergeStateStatus"`
 		ReviewDecision    string          `json:"reviewDecision"`
 		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
+		Comments          []prComment     `json:"comments"`
 	}
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return core.PullRequest{}, fmt.Errorf("decode GitHub pull request: %w", err)
@@ -274,6 +275,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	checked.MergeStatus = payload.MergeStateStatus
 	checked.ReviewStatus = payload.ReviewDecision
 	checked.ChecksStatus = summarizeStatusCheckRollup(payload.StatusCheckRollup)
+	checked.Metadata = pullRequestMetadataWithComments(pr.Metadata, payload.Comments, &checked)
 	return checked, nil
 }
 
@@ -369,6 +371,74 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 		})
 	}
 	return prs, nil
+}
+
+type prComment struct {
+	ID              string `json:"id"`
+	Body            string `json:"body"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+	ViewerDidAuthor bool   `json:"viewerDidAuthor"`
+	Author          struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, checked *core.PullRequest) json.RawMessage {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	baselineEstablished, _ := metadata["conversationCommentBaselineEstablished"].(bool)
+	previousSignature, _ := metadata["latestConversationCommentSignature"].(string)
+	latest, ok := latestExternalConversationComment(comments)
+	if ok {
+		signature := latest.Signature()
+		if baselineEstablished && signature != previousSignature {
+			checked.ReviewStatus = "COMMENTED"
+		}
+		metadata["latestConversationCommentSignature"] = signature
+		metadata["latestConversationCommentId"] = latest.ID
+		metadata["latestConversationCommentAuthor"] = latest.Author.Login
+		metadata["latestConversationCommentCreatedAt"] = latest.CreatedAt
+		metadata["latestConversationCommentUpdatedAt"] = latest.UpdatedAt
+		metadata["latestConversationCommentBody"] = truncatePRCommentBody(latest.Body)
+	}
+	metadata["conversationCommentBaselineEstablished"] = true
+	return core.MustJSON(metadata)
+}
+
+func latestExternalConversationComment(comments []prComment) (prComment, bool) {
+	var latest prComment
+	for _, comment := range comments {
+		if comment.ID == "" || comment.ViewerDidAuthor {
+			continue
+		}
+		if latest.ID == "" || comment.Signature() > latest.Signature() {
+			latest = comment
+		}
+	}
+	return latest, latest.ID != ""
+}
+
+func (c prComment) Signature() string {
+	updated := strings.TrimSpace(c.UpdatedAt)
+	if updated == "" {
+		updated = strings.TrimSpace(c.CreatedAt)
+	}
+	return updated + ":" + strings.TrimSpace(c.ID)
+}
+
+func truncatePRCommentBody(body string) string {
+	body = strings.TrimSpace(body)
+	const limit = 2000
+	if len(body) <= limit {
+		return body
+	}
+	return body[:limit] + "\n[truncated]"
 }
 
 func defaultPRBranch(spec PullRequestPublishSpec) string {
