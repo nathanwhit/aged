@@ -3394,6 +3394,7 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 		RecoveryHint:                   fmt.Sprintf("%s for worker %s. Do not complete with a blocked final candidate. Schedule a repair or consolidation worker that starts from the blocked worker changes, resolves conflicts against the current checkout, and produces a new candidate.", failureLabel, candidateWorkerID),
 		RequiredRepairWorkerID:         candidateWorkerID,
 		RequiredRepairReason:           failureErr.Error(),
+		FinalizationRecovery:           true,
 	})
 	if !ok {
 		return finalCandidateRecoveryResult{Handled: true, Results: results}
@@ -4025,6 +4026,7 @@ type replanLoopOptions struct {
 	RecoveryHint                   string
 	RequiredRepairWorkerID         string
 	RequiredRepairReason           string
+	FinalizationRecovery           bool
 }
 
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
@@ -4174,6 +4176,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
 				return false, "", "", results
 			}
+			if options.FinalizationRecovery {
+				reason := nonEmpty(result.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
+				return true, result.WorkerID, reason, results
+			}
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
@@ -4285,14 +4291,8 @@ func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, 
 		plan.Metadata = map[string]any{}
 	}
 	originalPrompt := strings.TrimSpace(plan.Prompt)
-	if len(plan.Spawns) > 0 {
-		plan.Metadata["suppressedConflictRepairSpawns"] = len(plan.Spawns)
-	}
 	plan.Prompt = buildConflictRepairPrompt(task, blockedWorkerID, repairReason, sortedMapKeys(blocked), originalPrompt)
 	plan.Rationale = nonEmpty(plan.Rationale, "Repair blocked final candidate so it applies cleanly.")
-	plan.RequiredApprovals = nil
-	plan.Actions = nil
-	plan.Spawns = nil
 	plan.Metadata["baseWorkerID"] = blockedWorkerID
 	plan.Metadata["allowBasePatchConflicts"] = true
 	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID
