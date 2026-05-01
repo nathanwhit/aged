@@ -665,6 +665,9 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"forcedConflictRepair":true`) {
 		t.Fatalf("missing forced conflict repair metadata")
 	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"workspaceReusePolicy":"fresh"`) {
+		t.Fatalf("missing fresh recovery workspace policy")
+	}
 	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, "Your only job in this turn is to produce a new candidate") {
 		t.Fatalf("missing forced conflict repair prompt")
 	}

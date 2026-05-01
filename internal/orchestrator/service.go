@@ -2986,8 +2986,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	remoteWorkDir := nonEmpty(target.WorkDir, project.LocalPath)
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
 	reusedWorkspace := false
-	if retryFromWorkerID != "" {
+	if retryFromWorkerID != "" && !requireFreshWorkspace {
 		if retryWorkDir, err := s.remoteRetryWorkDir(ctx, target, retryFromWorkerID); err != nil {
 			plan.Metadata["retryWorkspaceReused"] = false
 			plan.Metadata["retryWorkspaceError"] = err.Error()
@@ -3001,7 +3002,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 	}
 	baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID")
-	if !reusedWorkspace && baseWorkerID != "" {
+	if !reusedWorkspace && baseWorkerID != "" && !requireFreshWorkspace {
 		if sameTarget, _ := s.workerRanOnTarget(ctx, baseWorkerID, target.ID); sameTarget {
 			if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err == nil {
 				remoteWorkDir = baseWorkDir
@@ -3018,6 +3019,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			RepoURL:     projectCloneURL(project),
 			WorkDir:     remoteWorkDir,
 			DefaultBase: project.DefaultBase,
+			BaseRef:     sourceCheckoutCommit(ctx, project.LocalPath),
 		})
 		if err != nil {
 			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
@@ -4298,6 +4300,7 @@ func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, 
 	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID
 	plan.Metadata["recoveryHint"] = repairReason
 	plan.Metadata["forcedConflictRepair"] = true
+	plan.Metadata["workspaceReusePolicy"] = "fresh"
 	return plan
 }
 
@@ -5431,6 +5434,18 @@ func applyRemotePatch(ctx context.Context, project core.Project, workspace Prepa
 		return result, fmt.Errorf("apply checked remote patch: %w", err)
 	}
 	return result, nil
+}
+
+func sourceCheckoutCommit(ctx context.Context, sourceRoot string) string {
+	sourceRoot = strings.TrimSpace(sourceRoot)
+	if sourceRoot == "" {
+		return ""
+	}
+	out, err := runCommand(ctx, sourceRoot, "git", "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func probeGitApplyThreeWay(ctx context.Context, sourceRoot string, patchFile string) error {
