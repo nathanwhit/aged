@@ -328,7 +328,7 @@ func initGitTestRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	runTestGit(t, repo, "add", "file.txt")
-	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "commit", "-m", "base")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "base")
 	return repo
 }
 

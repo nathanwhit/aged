@@ -803,7 +803,7 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 	if _, err := runGit(ctx, destination, "add", "-A"); err != nil {
 		return fmt.Errorf("stage git base workspace diff: %w", err)
 	}
-	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "commit", "-m", "Base worker candidate"); err != nil {
+	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Base worker candidate"); err != nil {
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil

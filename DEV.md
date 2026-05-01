@@ -206,6 +206,8 @@ The initial local-first vertical slice is implemented.
 - Investigated VM failures where remote tmux workers reported `codex: command not found` even though Codex was installed under mise. Remote worker startup now bootstraps a predictable user tool PATH before launching tmux commands.
 - Codex scheduler/assistant/worker prompts now use stdin (`-`) instead of placing the full prompt in argv, preventing `argument list too long` on long-running tasks with large event histories. SSH workers upload the prompt to a remote file and redirect it into the CLI so the prompt is not embedded in the SSH command either.
 - Claude stream-json workers now include `--verbose`, matching the current Claude CLI requirement for `--print --output-format stream-json`.
+- SSH health probes now report runner tool availability (`codex`, `claude`, `git`, `jj`), and target selection skips SSH targets that have probed as missing the requested worker CLI. This keeps Codex work off targets where Codex is not installed.
+- Git candidate-base commits disable GPG signing so VM/test environments with signing helpers do not block internal worktree commits.
 
 ## Running Locally
 

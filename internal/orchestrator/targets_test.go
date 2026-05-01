@@ -60,6 +60,44 @@ func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
 	}
 }
 
+func TestTargetRegistrySkipsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm", Kind: TargetKindSSH, Host: "vm", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+	})
+	registry.UpdateHealth("vm", core.TargetHealth{
+		Status: "ok",
+		Tools:  map[string]bool{"codex": false},
+	}, core.TargetResources{})
+
+	target, err := registry.Select(Plan{WorkerKind: "codex", Prompt: "run codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %s, want local", target.ID)
+	}
+}
+
+func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"tmux=true",
+		"repoPresent=true",
+		"tool.codex=false",
+		"tool.claude=true",
+		"cpuCount=4",
+	}, "\n")}
+	runner := SSHRunner{Executor: executor}
+
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo"})
+	if health.Tools["codex"] {
+		t.Fatalf("codex should be unavailable: %+v", health.Tools)
+	}
+	if !health.Tools["claude"] {
+		t.Fatalf("claude should be available: %+v", health.Tools)
+	}
+}
+
 func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}

@@ -179,12 +179,13 @@ type TargetState struct {
 }
 
 type TargetHealth struct {
-	Status      string    `json:"status,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	CheckedAt   time.Time `json:"checkedAt,omitempty"`
-	Reachable   bool      `json:"reachable,omitempty"`
-	Tmux        bool      `json:"tmux,omitempty"`
-	RepoPresent bool      `json:"repoPresent,omitempty"`
+	Status      string          `json:"status,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	CheckedAt   time.Time       `json:"checkedAt,omitempty"`
+	Reachable   bool            `json:"reachable,omitempty"`
+	Tmux        bool            `json:"tmux,omitempty"`
+	RepoPresent bool            `json:"repoPresent,omitempty"`
+	Tools       map[string]bool `json:"tools,omitempty"`
 }
 
 type TargetResources struct {

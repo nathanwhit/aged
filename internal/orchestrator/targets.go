@@ -207,17 +207,33 @@ func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
 	size := workerSize(plan.Metadata, plan.Prompt)
 	candidates := make([]TargetConfig, 0, len(r.targets))
 	for _, target := range r.targets {
-		if labelsMatch(target.Labels, required) && r.isAvailableLocked(target) {
+		if labelsMatch(target.Labels, required) && r.isAvailableLocked(target) && r.supportsWorkerLocked(target, plan.WorkerKind) {
 			candidates = append(candidates, target)
 		}
 	}
 	if len(candidates) == 0 {
-		return TargetConfig{}, fmt.Errorf("no execution target matches labels %v", required)
+		return TargetConfig{}, fmt.Errorf("no execution target matches labels %v and worker kind %q", required, plan.WorkerKind)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return r.scoreLocked(candidates[i], size) > r.scoreLocked(candidates[j], size)
 	})
 	return candidates[0], nil
+}
+
+func (r *TargetRegistry) supportsWorkerLocked(target TargetConfig, workerKind string) bool {
+	if target.Kind != TargetKindSSH {
+		return true
+	}
+	workerKind = strings.TrimSpace(workerKind)
+	if workerKind == "" || workerKind == "mock" || workerKind == "shell" || workerKind == "benchmark_compare" {
+		return true
+	}
+	health := r.health[target.ID]
+	if len(health.Tools) == 0 {
+		return true
+	}
+	available, known := health.Tools[workerKind]
+	return !known || available
 }
 
 func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {

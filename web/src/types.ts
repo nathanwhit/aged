@@ -251,6 +251,7 @@ export type TargetState = {
     reachable?: boolean;
     tmux?: boolean;
     repoPresent?: boolean;
+    tools?: Record<string, boolean>;
   };
   resources?: {
     load1?: number;

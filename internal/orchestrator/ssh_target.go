@@ -202,6 +202,13 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 	health.Reachable = true
 	health.Tmux = parseProbeBool(values["tmux"])
 	health.RepoPresent = parseProbeBool(values["repoPresent"])
+	health.Tools = map[string]bool{}
+	for key, value := range values {
+		name, ok := strings.CutPrefix(key, "tool.")
+		if ok {
+			health.Tools[name] = parseProbeBool(value)
+		}
+	}
 	if health.Tmux {
 		health.Status = "ok"
 	} else {
@@ -377,13 +384,18 @@ echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(sp
 }
 
 func remoteProbeScript(workDir string) string {
-	return fmt.Sprintf(`printf 'tmux=%%s\n' "$(command -v tmux >/dev/null 2>&1 && echo true || echo false)"
+	return fmt.Sprintf(`%s
+printf 'tmux=%%s\n' "$(command -v tmux >/dev/null 2>&1 && echo true || echo false)"
+printf 'tool.codex=%%s\n' "$(command -v codex >/dev/null 2>&1 && echo true || echo false)"
+printf 'tool.claude=%%s\n' "$(command -v claude >/dev/null 2>&1 && echo true || echo false)"
+printf 'tool.git=%%s\n' "$(command -v git >/dev/null 2>&1 && echo true || echo false)"
+printf 'tool.jj=%%s\n' "$(command -v jj >/dev/null 2>&1 && echo true || echo false)"
 printf 'repoPresent=%%s\n' "$(test -d %s && echo true || echo false)"
 df -Pk %s 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
 if [ -r /proc/meminfo ]; then awk '/MemTotal:/ { print "memoryTotalKB="$2 } /MemAvailable:/ { print "memoryAvailableKB="$2 }' /proc/meminfo; fi
 if [ -r /proc/loadavg ]; then awk '{ print "load1="$1 }' /proc/loadavg; else uptime | sed -n 's/.*load averages*: *\([0-9.]*\).*/load1=\1/p'; fi
 cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
-printf 'cpuCount=%%s\n' "$cpu_count"`, shellQuote(workDir), shellQuote(workDir))
+printf 'cpuCount=%%s\n' "$cpu_count"`, remoteWorkerEnvScript(), shellQuote(workDir), shellQuote(workDir))
 }
 
 func parseProbeValues(out string) map[string]string {

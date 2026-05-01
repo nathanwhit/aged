@@ -2967,7 +2967,7 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 		{
 			reason:  "missing_tool",
 			summary: "A required command or tool is missing from the execution environment.",
-			any:     []string{"command not found", "executable file not found", "no such file or directory: \"perf\"", "exec: \"perf\"", "exec: \"go\"", "exec: \"npm\"", "exec: \"deno\"", "exec: \"cargo\""},
+			any:     []string{"command not found", "executable file not found", "no execution target matches labels", "no such file or directory: \"perf\"", "exec: \"perf\"", "exec: \"go\"", "exec: \"npm\"", "exec: \"deno\"", "exec: \"cargo\""},
 		},
 		{
 			reason:  "permission_denied",
