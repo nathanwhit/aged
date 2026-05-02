@@ -566,6 +566,20 @@ func TestDiscordDriverPublishesPullRequest(t *testing.T) {
 	}
 }
 
+func TestDiscordAssistantPromptDescribesPublishConfirmation(t *testing.T) {
+	prompt := discordAssistantPrompt("publish a PR")
+
+	for _, want := range []string{
+		`"publish_pr", "apply_task_result", and "apply_worker_changes"`,
+		"set confirmed true only when the user explicitly confirms publishing or applying changes",
+		"otherwise leave confirmed false so the bot can ask for confirmation",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("discord assistant prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestDiscordDecisionResolvesNaturalReferences(t *testing.T) {
 	now := time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC)
 	snapshot := core.Snapshot{
