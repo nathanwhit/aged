@@ -392,6 +392,58 @@ LIMIT ?`, afterID, limit)
 	return events, rows.Err()
 }
 
+func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
+	}
+	if limit <= 0 {
+		rows, err := s.db.QueryContext(ctx, `
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE task_id = ?
+ORDER BY id ASC`, taskID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return scanEvents(rows)
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+WITH recent_output AS (
+	SELECT id
+	FROM events
+	WHERE task_id = ? AND type = 'worker.output'
+	ORDER BY id DESC
+	LIMIT ?
+)
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE task_id = ?
+	AND (type != 'worker.output' OR id IN (SELECT id FROM recent_output))
+ORDER BY id ASC`, taskID, limit, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
+func scanEvents(rows *sql.Rows) ([]core.Event, error) {
+	var events []core.Event
+	for rows.Next() {
+		event, err := scanEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy
@@ -593,6 +645,25 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	events, err := s.allEvents(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
+	}
+	return s.snapshotFromEvents(ctx, events, true)
+}
+
+func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
+	events, err := s.projectionEvents(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	return s.snapshotFromEvents(ctx, events, false)
+}
+
+func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {
+	lastEventID, err := s.latestEventID(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	if lastEventID == 0 {
+		lastEventID = maxEventID(events)
 	}
 
 	tasks := map[string]core.Task{}
@@ -964,7 +1035,8 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
 		PullRequests:        orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
 		OrchestrationGraphs: orchestrationGraphs(filteredTasks, filteredNodes),
-		Events:              events,
+		LastEventID:         lastEventID,
+		Events:              snapshotResponseEvents(events, includeEvents),
 	}, nil
 }
 
@@ -1154,6 +1226,65 @@ func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
 			return events, nil
 		}
 	}
+}
+
+func (s *SQLiteStore) projectionEvents(ctx context.Context) ([]core.Event, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE type IN (
+	'task.created',
+	'task.status',
+	'task.final_candidate_selected',
+	'task.objective_updated',
+	'task.milestone_reached',
+	'task.artifact_recorded',
+	'task.cleared',
+	'execution.node_planned',
+	'execution.node_status',
+	'worker.workspace_prepared',
+	'worker.created',
+	'worker.started',
+	'worker.completed',
+	'worker.changes_applied',
+	'pull_request.published',
+	'pull_request.status_checked',
+	'pull_request.babysitter_started'
+)
+ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
+func (s *SQLiteStore) latestEventID(ctx context.Context) (int64, error) {
+	var id sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
+}
+
+func maxEventID(events []core.Event) int64 {
+	var max int64
+	for _, event := range events {
+		if event.ID > max {
+			max = event.ID
+		}
+	}
+	return max
+}
+
+func snapshotResponseEvents(events []core.Event, includeEvents bool) []core.Event {
+	if includeEvents {
+		return events
+	}
+	return nil
 }
 
 func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {

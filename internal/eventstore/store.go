@@ -9,7 +9,9 @@ import (
 type Store interface {
 	Append(ctx context.Context, event core.Event) (core.Event, error)
 	ListEvents(ctx context.Context, afterID int64, limit int) ([]core.Event, error)
+	ListTaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error)
 	Snapshot(ctx context.Context) (core.Snapshot, error)
+	SnapshotSummary(ctx context.Context) (core.Snapshot, error)
 	ListPlugins(ctx context.Context) ([]core.Plugin, error)
 	SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error)
 	DeletePlugin(ctx context.Context, id string) error

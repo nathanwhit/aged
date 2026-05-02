@@ -2,7 +2,9 @@ package eventstore
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"aged/internal/core"
@@ -66,6 +68,180 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	if snapshot.Tasks[0].Status != core.TaskSucceeded {
 		t.Fatalf("task status = %q, want %q", snapshot.Tasks[0].Status, core.TaskSucceeded)
 	}
+}
+
+func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-summary"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Summary task",
+			"prompt": "Keep initial payload small.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   taskID,
+			WorkerID: "worker-summary",
+			Payload:  core.MustJSON(map[string]any{"text": "verbose output"}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summary, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Events) != 0 {
+		t.Fatalf("summary events = %d, want 0", len(summary.Events))
+	}
+	if summary.LastEventID != 21 {
+		t.Fatalf("last event id = %d, want 21", summary.LastEventID)
+	}
+	if len(summary.Tasks) != 1 || summary.Tasks[0].ID != taskID {
+		t.Fatalf("tasks = %+v", summary.Tasks)
+	}
+}
+
+func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-events"
+	events := []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Events", "prompt": "Load detail lazily"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+	}
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   taskID,
+			WorkerID: "worker-events",
+			Payload:  core.MustJSON(map[string]any{"text": i}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: "worker-events",
+		Payload:  core.MustJSON(map[string]any{"status": core.WorkerSucceeded}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	limited, err := store.ListTaskEvents(ctx, taskID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 5 {
+		t.Fatalf("events = %d, want 5", len(limited))
+	}
+	var outputCount int
+	for _, event := range limited {
+		if event.Type == core.EventWorkerOutput {
+			outputCount++
+		}
+	}
+	if outputCount != 2 {
+		t.Fatalf("worker.output events = %d, want 2; events = %+v", outputCount, limited)
+	}
+	if limited[len(limited)-1].Type != core.EventWorkerCompleted {
+		t.Fatalf("last event type = %q, want worker.completed", limited[len(limited)-1].Type)
+	}
+}
+
+func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(b.TempDir(), "aged.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-bench"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Benchmark task",
+			"prompt": "Measure snapshot payload size.",
+		}),
+	}); err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   taskID,
+			WorkerID: "worker-bench",
+			Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 512)}),
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("full", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			snapshot, err := store.Snapshot(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if i == 0 {
+				payload, err := json.Marshal(snapshot)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportMetric(float64(len(payload)), "payload_bytes")
+			}
+		}
+	})
+	b.Run("summary", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			snapshot, err := store.SnapshotSummary(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if i == 0 {
+				payload, err := json.Marshal(snapshot)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportMetric(float64(len(payload)), "payload_bytes")
+			}
+		}
+	})
 }
 
 func TestSnapshotCarriesTaskStatusError(t *testing.T) {
