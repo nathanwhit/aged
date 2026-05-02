@@ -369,6 +369,15 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	if publisher.published.WorkerID == "" {
 		t.Fatalf("publisher worker id was empty")
 	}
+	if !strings.Contains(publisher.published.Body, "## Summary") || !strings.Contains(publisher.published.Body, "implemented") {
+		t.Fatalf("published body missing worker summary: %q", publisher.published.Body)
+	}
+	if !strings.Contains(publisher.published.Body, "## Changed Files") || !strings.Contains(publisher.published.Body, "`README.md` (modified)") {
+		t.Fatalf("published body missing changed files: %q", publisher.published.Body)
+	}
+	if strings.Contains(publisher.published.Body, "Do it.") {
+		t.Fatalf("published body echoed only the task prompt: %q", publisher.published.Body)
+	}
 
 	snapshot, err = store.Snapshot(ctx)
 	if err != nil {
@@ -382,6 +391,17 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	}
 	if !hasEvent(snapshot.Events, core.EventPRPublished, task.ID, "") {
 		t.Fatalf("missing pr published event")
+	}
+}
+
+func TestDefaultTaskPullRequestBodyFallsBackToTaskPromptWithoutWorkerDetails(t *testing.T) {
+	task := core.Task{
+		ID:     "task-1",
+		Prompt: "Original task prompt.",
+	}
+	body := defaultTaskPullRequestBody(core.Snapshot{}, task, "worker-1")
+	if body != "Task: `task-1`\n\nOriginal task prompt." {
+		t.Fatalf("body = %q", body)
 	}
 }
 
