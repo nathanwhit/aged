@@ -16,19 +16,21 @@ import (
 )
 
 type CLIAssistantConfig struct {
-	Kind       string
-	CodexPath  string
-	ClaudePath string
-	WorkDir    string
-	Timeout    time.Duration
+	Kind            string
+	CodexPath       string
+	ClaudePath      string
+	WorkDir         string
+	ReasoningEffort string
+	Timeout         time.Duration
 }
 
 type CLIAssistant struct {
-	kind       string
-	codexPath  string
-	claudePath string
-	workDir    string
-	timeout    time.Duration
+	kind            string
+	codexPath       string
+	claudePath      string
+	workDir         string
+	reasoningEffort string
+	timeout         time.Duration
 }
 
 func NewCLIAssistant(config CLIAssistantConfig) (*CLIAssistant, error) {
@@ -47,16 +49,21 @@ func NewCLIAssistant(config CLIAssistantConfig) (*CLIAssistant, error) {
 	if claudePath == "" {
 		claudePath = "claude"
 	}
+	reasoningEffort, ok := assistantReasoningEffort(config.ReasoningEffort)
+	if !ok {
+		return nil, fmt.Errorf("assistant reasoning effort must be one of default, low, medium, high, xhigh, or max")
+	}
 	timeout := config.Timeout
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
 	return &CLIAssistant{
-		kind:       kind,
-		codexPath:  codexPath,
-		claudePath: claudePath,
-		workDir:    config.WorkDir,
-		timeout:    timeout,
+		kind:            kind,
+		codexPath:       codexPath,
+		claudePath:      claudePath,
+		workDir:         config.WorkDir,
+		reasoningEffort: reasoningEffort,
+		timeout:         timeout,
 	}, nil
 }
 
@@ -80,8 +87,14 @@ func (a *CLIAssistant) Ask(ctx context.Context, req core.AssistantRequest) (core
 func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
 	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-"}
+	if effort := worker.CodexReasoningEffort(a.reasoningEffort); effort != "" {
+		args = []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-c", "model_reasoning_effort=\"" + effort + "\"", "-"}
+	}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
 		args = []string{"exec", "resume", "--json", req.ProviderSessionID, "-"}
+		if effort := worker.CodexReasoningEffort(a.reasoningEffort); effort != "" {
+			args = []string{"exec", "resume", "--json", "-c", "model_reasoning_effort=\"" + effort + "\"", req.ProviderSessionID, "-"}
+		}
 	}
 	cmd := exec.CommandContext(ctx, a.codexPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
@@ -105,6 +118,7 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 		Metadata: core.MustJSON(map[string]any{
 			"assistant":         "codex",
 			"providerSessionId": sessionID,
+			"reasoningEffort":   a.reasoningEffort,
 			"resumed":           req.ProviderSessionID != "",
 		}),
 	}, nil
@@ -113,8 +127,14 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
 	args := []string{"--print", "--output-format", "stream-json", "--verbose", prompt}
+	if effort := worker.ReasoningEffort(a.reasoningEffort); effort != "" {
+		args = []string{"--print", "--output-format", "stream-json", "--verbose", "--effort", effort, prompt}
+	}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
 		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", prompt}
+		if effort := worker.ReasoningEffort(a.reasoningEffort); effort != "" {
+			args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", "--effort", effort, prompt}
+		}
 	}
 	cmd := exec.CommandContext(ctx, a.claudePath, args...)
 	cmd.Dir = workDir
@@ -139,6 +159,7 @@ func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest,
 		Metadata: core.MustJSON(map[string]any{
 			"assistant":         "claude",
 			"providerSessionId": sessionID,
+			"reasoningEffort":   a.reasoningEffort,
 			"resumed":           req.ProviderSessionID != "",
 		}),
 	}, nil
@@ -161,6 +182,19 @@ func interactiveAssistantPrompt(req core.AssistantRequest) string {
 	builder.WriteString("User message:\n")
 	builder.WriteString(req.Message)
 	return builder.String()
+}
+
+func assistantReasoningEffort(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "medium", true
+	case "default":
+		return "", true
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(value)), true
+	default:
+		return "", false
+	}
 }
 
 func extractLastParsedResult(kind string, output string) string {
