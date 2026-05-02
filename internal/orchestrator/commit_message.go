@@ -41,13 +41,20 @@ func normalizeCommitMessageTitle(value string) string {
 	if value == "" {
 		return ""
 	}
-	for _, marker := range []string{"\n\n", "\r\n\r\n"} {
-		if before, _, ok := strings.Cut(value, marker); ok {
-			value = before
-			break
+	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+		if content, ok := workerReportHeadingInlineContent(line); ok {
+			line = content
 		}
+		title := normalizeCommitMessageTitleLine(line)
+		if title == "" || isWorkerReportHeadingTitle(title) {
+			continue
+		}
+		return title
 	}
-	value = strings.Split(value, "\n")[0]
+	return ""
+}
+
+func normalizeCommitMessageTitleLine(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.TrimLeft(value, "#*- \t")
 	value = strings.Trim(value, "`\"' \t\r\n")
@@ -68,6 +75,50 @@ func normalizeCommitMessageTitle(value string) string {
 		trimmed = trimmed[:lastSpace]
 	}
 	return strings.TrimSpace(trimmed)
+}
+
+func workerReportHeadingInlineContent(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	value = strings.TrimLeft(value, "> \t")
+	value = strings.TrimLeft(value, "# \t")
+	value = strings.TrimLeft(value, "-+ \t")
+	value = strings.Trim(value, "`\"' \t\r\n")
+	value = strings.Trim(value, "*_ ")
+	label, content, ok := strings.Cut(value, ":")
+	if !ok || !isWorkerReportHeadingTitle(label) {
+		return "", false
+	}
+	return strings.TrimSpace(content), true
+}
+
+func isWorkerReportHeadingTitle(value string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(value), " "))
+	normalized = strings.Trim(normalized, " .:-_#*`")
+	switch normalized {
+	case "findings",
+		"summary",
+		"change summary",
+		"implementation summary",
+		"commands",
+		"command run",
+		"commands run",
+		"tests",
+		"testing",
+		"benchmark results",
+		"changed files",
+		"files changed",
+		"file changes",
+		"blockers",
+		"recommended next turns",
+		"recommendations",
+		"next steps",
+		"open questions",
+		"assumptions",
+		"notes":
+		return true
+	default:
+		return false
+	}
 }
 
 func isGenericCommitMessageTitle(value string) bool {
