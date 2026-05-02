@@ -1,17 +1,7 @@
-import type { EventRecord, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
-export async function getSnapshot(options: { events?: "all" | "none" } = {}): Promise<Snapshot> {
-  const query = options.events === "none" ? "?events=none" : "";
-  const response = await fetch(`/api/snapshot${query}`);
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
-}
-
-export async function getTaskEvents(taskId: string, options: { limit?: number } = {}): Promise<EventRecord[]> {
-  const query = options.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/events${query}`);
+export async function getSnapshot(): Promise<Snapshot> {
+  const response = await fetch("/api/snapshot");
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }

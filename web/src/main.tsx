@@ -22,12 +22,22 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import { applyTaskHistoryEvents, emptySnapshot, normalizeSnapshot, reduceEvent, upsertTask } from "./state";
-import type { AppSnapshot } from "./state";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
+
+type AppSnapshot = {
+  tasks: Task[];
+  workers: Worker[];
+  executionNodes: ExecutionNode[];
+  targets: TargetState[];
+  plugins: Plugin[];
+  projects: Project[];
+  pullRequests: PullRequestState[];
+  orchestrationGraphs: OrchestrationGraph[];
+  events: EventRecord[];
+};
 
 type TaskStartInput = {
   projectId?: string;
@@ -37,6 +47,18 @@ type TaskStartInput = {
 };
 
 type InitialSnapshotStatus = "loading" | "ready" | "error";
+
+const emptySnapshot: AppSnapshot = {
+  tasks: [],
+  workers: [],
+  executionNodes: [],
+  targets: [],
+  plugins: [],
+  projects: [],
+  pullRequests: [],
+  orchestrationGraphs: [],
+  events: [],
+};
 
 type DashboardPaneId =
   | "task-detail"
@@ -66,12 +88,12 @@ const DASHBOARD_MAX_SPAN = 12;
 const DASHBOARD_MIN_HEIGHT = 0;
 const DASHBOARD_MAX_HEIGHT = 900;
 const DASHBOARD_HEIGHT_STEP = 48;
-const SELECTED_TASK_OUTPUT_EVENT_LIMIT = 250;
 const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "task-detail", span: 12, minHeight: 0 },
   { id: "pull-requests", span: 6, minHeight: 0 },
   { id: "current-state", span: 6, minHeight: 0 },
   { id: "workers", span: 12, minHeight: 0 },
+  { id: "worker-detail", span: 8, minHeight: 0 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "plugins", span: 8, minHeight: 0 },
   { id: "timeline", span: 12, minHeight: 360 },
@@ -88,7 +110,7 @@ function App() {
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
 
   async function refresh() {
-    const next = normalizeSnapshot(await getSnapshot({ events: "none" }));
+    const next = normalizeSnapshot(await getSnapshot());
     setSnapshot(next);
     setInitialSnapshotStatus("ready");
     setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : next.tasks.at(-1)?.id || ""));
@@ -101,16 +123,11 @@ function App() {
     });
   }, []);
 
-  const selectedTask = useMemo(
-    () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? snapshot.tasks.at(-1),
-    [selectedTaskId, snapshot.tasks],
-  );
-
   useEffect(() => {
     if (initialSnapshotStatus !== "ready") {
       return;
     }
-    const lastID = snapshot.lastEventId || snapshot.events.at(-1)?.id || 0;
+    const lastID = snapshot.events.at(-1)?.id ?? 0;
     const source = new EventSource(`/api/events/stream?after=${lastID}`);
     source.addEventListener("open", () => setConnected(true));
     source.addEventListener("error", () => setConnected(false));
@@ -121,29 +138,18 @@ function App() {
     return () => source.close();
   }, [initialSnapshotStatus]);
 
-  useEffect(() => {
-    if (!selectedTask?.id || initialSnapshotStatus !== "ready") {
-      return;
-    }
-    let active = true;
-    getTaskEvents(selectedTask.id, { limit: SELECTED_TASK_OUTPUT_EVENT_LIMIT })
-      .then((events) => {
-        if (!active) return;
-        setSnapshot((current) => applyTaskHistoryEvents(current, events));
-      })
-      .catch((err: Error) => {
-        if (active) setError(err.message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [initialSnapshotStatus, selectedTask?.id]);
-
+  const selectedTask = useMemo(
+    () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? snapshot.tasks.at(-1),
+    [selectedTaskId, snapshot.tasks],
+  );
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
   const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
+  const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
+  const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
+  const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
 
@@ -286,6 +292,15 @@ function App() {
             />
           ),
         },
+        ...(selectedWorker
+          ? [
+              {
+                id: "worker-detail" as const,
+                title: "Worker Detail",
+                element: <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />,
+              },
+            ]
+          : []),
         {
           id: "timeline",
           title: "Timeline",
@@ -779,7 +794,7 @@ function TaskComposer({
   const [projectId, setProjectId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [completionMode, setCompletionMode] = useState<"local" | "github">("github");
+  const [completionMode, setCompletionMode] = useState<"local" | "github">("local");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
@@ -791,7 +806,7 @@ function TaskComposer({
       await onCreate(input);
       setTitle("");
       setPrompt("");
-      setCompletionMode("github");
+      setCompletionMode("local");
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -1641,21 +1656,12 @@ function WorkerList({
       {workers.length === 0 && nodes.length === 0 ? (
         <p className="empty">No workers have been spawned.</p>
       ) : (
-        <div className="worker-table" role="table" aria-label="Workers">
-          <div className="worker-table-head" role="row">
-            <span>Worker</span>
-            <span>Status</span>
-            <span>Latest</span>
-            <span>Target</span>
-            <span>Updated</span>
-            <span>Actions</span>
-          </div>
+        <div className="worker-grid">
           {orchestrationRows(workers, nodes, graph).map(({ worker, node, graphNode }) => {
             const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
             const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
             const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
             const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
-            const title = node?.role || graphNode?.role || kind;
             const completion = workerId ? latestWorkerCompletion(events, workerId) : {};
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
             const applied = workerId ? workerChangesApplied(events, workerId) : false;
@@ -1669,82 +1675,63 @@ function WorkerList({
               return dependency && dependency.status !== "succeeded";
             });
             const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
-            const updatedAt = worker?.updatedAt ?? node?.updatedAt ?? graph?.updatedAt ?? "";
-            const isSelected = workerId === selectedWorkerId || (!selectedWorkerId && !workerId && rowId === selectedWorkerId);
             return (
-              <article key={rowId} className={isSelected ? "worker-row selected" : "worker-row"} role="row">
-                <button className="worker-row-main" disabled={!workerId} onClick={() => onSelect(workerId)} title={workerId ? "Inspect worker" : undefined}>
-                  <span className="worker-row-title">
-                    <strong>{title}</strong>
-                    <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)} · {kind}</small>
-                  </span>
+              <article key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
+                <div>
+                  <strong>{node?.role || graphNode?.role || kind}</strong>
+                  <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
+                </div>
+                <Status value={status} />
+                <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
+                  <Eye size={16} />
                 </button>
-                <span className="worker-row-status">
-                  <Status value={status} />
-                </span>
-                <span className="worker-row-latest" title={latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}>
-                  {latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}
-                </span>
-                <span className="worker-row-target">{targetLabel(node, graphNode)}</span>
-                <span className="worker-row-updated">{updatedAt ? new Date(updatedAt).toLocaleTimeString() : ""}</span>
-                <span className="worker-row-actions">
-                  {changes.length > 0 && <span className="pill">{changes.length} files</span>}
-                  {isFinalCandidate && <span className="pill ok">Final</span>}
-                  <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
-                    <Eye size={16} />
-                  </button>
-                  <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
-                    <CircleStop size={16} />
-                  </button>
-                </span>
-                {isSelected && (
-                  <div className="worker-row-detail">
-                    <div className="worker-context">
-                      <WorkerContextItem label="Kind" value={kind} />
-                      <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
-                      <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
-                      <WorkerContextItem label="Updated" value={updatedAt ? new Date(updatedAt).toLocaleTimeString() : ""} />
-                      {duration && <WorkerContextItem label="Duration" value={duration} />}
-                      {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
+                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
+                  <CircleStop size={16} />
+                </button>
+                <div className="worker-context">
+                  <WorkerContextItem label="Kind" value={kind} />
+                  <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
+                  <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
+                  <WorkerContextItem label="Updated" value={worker ? new Date(worker.updatedAt).toLocaleTimeString() : node ? new Date(node.updatedAt).toLocaleTimeString() : ""} />
+                  {duration && <WorkerContextItem label="Duration" value={duration} />}
+                  {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
+                </div>
+                {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
+                  <div className="worker-graph-context">
+                    {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                    {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                    {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
+                  </div>
+                )}
+                <div className="worker-current">
+                  <span>Latest</span>
+                  <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
+                </div>
+                <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
+                {changes.length > 0 && (
+                  <div className="worker-review">
+                    <details>
+                      <summary>{changes.length} changed files</summary>
+                      <ul>
+                        {changes.slice(0, 8).map((file) => (
+                          <li key={`${file.status}-${file.path}`}>
+                            <code>{file.status ?? "changed"}</code>
+                            <span>{file.path}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                    <div className="worker-review-actions">
+                      <button className="secondary compact" disabled={!workerId || diff?.loading} onClick={() => toggleDiff(workerId)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
+                        <FileText size={16} />
+                        {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
+                      </button>
+                      <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
+                        <Check size={16} />
+                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
+                      </button>
                     </div>
-                    {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
-                      <div className="worker-graph-context">
-                        {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
-                        {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
-                        {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
-                      </div>
-                    )}
-                    <div className="worker-current">
-                      <span>Latest</span>
-                      <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
-                    </div>
-                    <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
-                    {changes.length > 0 && (
-                      <div className="worker-review">
-                        <details>
-                          <summary>{changes.length} changed files</summary>
-                          <ul>
-                            {changes.slice(0, 8).map((file) => (
-                              <li key={`${file.status}-${file.path}`}>
-                                <code>{file.status ?? "changed"}</code>
-                                <span>{file.path}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </details>
-                        <div className="worker-review-actions">
-                          <button className="secondary compact" disabled={!workerId || diff?.loading} onClick={() => toggleDiff(workerId)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
-                            <FileText size={16} />
-                            {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
-                          </button>
-                          <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
-                            <Check size={16} />
-                            {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
-                          </button>
-                        </div>
-                        {diff?.open && <DiffViewer state={diff} />}
-                      </div>
-                    )}
+                    {diff?.open && <DiffViewer state={diff} />}
                   </div>
                 )}
               </article>
@@ -1810,26 +1797,7 @@ function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: Orc
   for (const worker of workers) {
     rows.set(worker.id, { ...rows.get(worker.id), worker });
   }
-  return [...rows.values()].sort((left, right) => {
-    const priorityDelta = orchestrationRowPriority(left) - orchestrationRowPriority(right);
-    if (priorityDelta !== 0) return priorityDelta;
-    return orchestrationRowUpdatedAt(right, graph) - orchestrationRowUpdatedAt(left, graph);
-  });
-}
-
-function orchestrationRowPriority(row: OrchestrationRow): number {
-  const status = row.worker?.status ?? row.node?.status ?? row.graphNode?.status ?? "queued";
-  if (status === "failed") return 0;
-  if (status === "running") return 1;
-  if (status === "waiting" || status === "queued") return 2;
-  if (status === "canceled") return 3;
-  return 4;
-}
-
-function orchestrationRowUpdatedAt(row: OrchestrationRow, graph: OrchestrationGraph | undefined): number {
-  const updatedAt = row.worker?.updatedAt ?? row.node?.updatedAt ?? graph?.updatedAt ?? "";
-  const timestamp = Date.parse(updatedAt);
-  return Number.isFinite(timestamp) ? timestamp : 0;
+  return [...rows.values()];
 }
 
 function WorkerContextItem({ label, value }: { label: string; value: string }) {
@@ -1979,20 +1947,18 @@ function WorkerPrompt({ worker, created }: { worker: Worker; created: EventRecor
   const prompt = payloadValue(worker.prompt) || payloadValue(payload.prompt);
   const promptPath = payloadValue(worker.promptPath) || payloadValue(payload.promptPath);
   const promptError = payloadValue(worker.promptError) || payloadValue(payload.promptError);
-  const promptSummary = prompt ? `${prompt.length.toLocaleString()} chars` : "Unavailable";
   return (
-    <details className="worker-section-card worker-prompt-section">
-      <summary className="section-title-row">
+    <section className="worker-section-card">
+      <div className="section-title-row">
         <strong>Prompt</strong>
-        <span className="tool-status neutral">{promptSummary}</span>
         {promptPath && <span className="tool-status neutral">{promptPath}</span>}
-      </summary>
+      </div>
       {prompt ? (
-        <TruncatedBlock label="prompt" value={prompt} className="worker-prompt-block" limit={4000} />
+        <CodeBlock label="prompt" value={prompt} className="worker-prompt-block" />
       ) : (
         <p className="empty">{promptError ? `Prompt unavailable: ${promptError}` : "Prompt unavailable for this worker."}</p>
       )}
-    </details>
+    </section>
   );
 }
 
@@ -3515,6 +3481,256 @@ function humanizeKey(key: string): string {
 
 function Status({ value }: { value: string }) {
   return <span className={`status ${value}`}>{value}</span>;
+}
+
+function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
+  const executionNodes = snapshot.executionNodes ?? [];
+  const tasks = snapshot.tasks ?? [];
+  return {
+    tasks,
+    workers: snapshot.workers ?? [],
+    executionNodes,
+    targets: snapshot.targets ?? [],
+    plugins: snapshot.plugins ?? [],
+    projects: snapshot.projects ?? [],
+    pullRequests: snapshot.pullRequests ?? [],
+    orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
+    events: snapshot.events ?? [],
+  };
+}
+
+function upsertTask(snapshot: AppSnapshot, task: Task): AppSnapshot {
+  const tasks = snapshot.tasks.some((candidate) => candidate.id === task.id)
+    ? snapshot.tasks.map((candidate) => (candidate.id === task.id ? task : candidate))
+    : [...snapshot.tasks, task];
+  return { ...snapshot, tasks };
+}
+
+function reduceEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {
+  if (snapshot.events.some((existing) => existing.id === event.id)) {
+    return snapshot;
+  }
+  return rebuildSnapshot({ ...snapshot, events: [...snapshot.events, event] });
+}
+
+function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
+  const tasks = new Map<string, Task>();
+  const workers = new Map<string, Worker>();
+  const executionNodes = new Map<string, ExecutionNode>();
+  const pullRequests = new Map<string, PullRequestState>();
+  const clearedTasks = new Set<string>();
+
+  for (const event of snapshot.events) {
+    const payload = event.payload as Record<string, unknown>;
+    if (event.type === "task.created" && event.taskId) {
+      tasks.set(event.taskId, {
+        id: event.taskId,
+        projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
+        title: String(payload.title ?? "Untitled task"),
+        prompt: String(payload.prompt ?? ""),
+        status: "queued",
+        createdAt: event.at,
+        updatedAt: event.at,
+        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+      });
+    }
+    if (event.type === "task.status" && event.taskId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        tasks.set(event.taskId, {
+          ...task,
+          status: String(payload.status) as Task["status"],
+          error: payloadValue(payload.error) || undefined,
+          updatedAt: event.at,
+        });
+      }
+    }
+    if (event.type === "task.final_candidate_selected" && event.taskId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        tasks.set(event.taskId, { ...task, finalCandidateWorkerId: String(payload.workerId ?? "") || undefined, updatedAt: event.at });
+      }
+    }
+    if (event.type === "task.cleared" && event.taskId) {
+      clearedTasks.add(event.taskId);
+    }
+    if (event.type === "execution.node_planned" && event.taskId) {
+      const nodeId = String(payload.nodeId ?? "");
+      if (nodeId) {
+        executionNodes.set(nodeId, {
+          id: nodeId,
+          taskId: event.taskId,
+          workerId: String(payload.workerId ?? event.workerId ?? "") || undefined,
+          workerKind: String(payload.workerKind ?? "unknown"),
+          status: "queued",
+          planId: String(payload.planId ?? "") || undefined,
+          parentNodeId: String(payload.parentNodeId ?? "") || undefined,
+          spawnId: String(payload.spawnId ?? "") || undefined,
+          role: String(payload.role ?? "") || undefined,
+          reason: String(payload.reason ?? "") || undefined,
+          targetId: String(payload.targetId ?? "") || undefined,
+          targetKind: String(payload.targetKind ?? "") || undefined,
+          remoteSession: String(payload.remoteSession ?? "") || undefined,
+          remoteRunDir: String(payload.remoteRunDir ?? "") || undefined,
+          remoteWorkDir: String(payload.remoteWorkDir ?? "") || undefined,
+          dependsOn: Array.isArray(payload.dependsOn) ? payload.dependsOn.map(String) : undefined,
+          createdAt: event.at,
+          updatedAt: event.at,
+        });
+      }
+    }
+    if (event.type === "execution.node_status") {
+      const nodeId = String(payload.nodeId ?? "");
+      const node = executionNodes.get(nodeId);
+      if (node) {
+        executionNodes.set(nodeId, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+      }
+    }
+    if (event.type === "worker.created" && event.workerId && event.taskId) {
+      workers.set(event.workerId, {
+        id: event.workerId,
+        taskId: event.taskId,
+        kind: String(payload.kind ?? "unknown"),
+        status: "queued",
+        command: Array.isArray(payload.command) ? payload.command.map(String) : undefined,
+        prompt: payloadValue(payload.prompt) || undefined,
+        promptPath: payloadValue(payload.promptPath) || undefined,
+        promptError: payloadValue(payload.promptError) || undefined,
+        createdAt: event.at,
+        updatedAt: event.at,
+        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+      });
+    }
+    if (event.type === "worker.started" && event.workerId) {
+      const worker = workers.get(event.workerId);
+      if (worker) workers.set(event.workerId, { ...worker, status: "running", updatedAt: event.at });
+      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
+      if (node) executionNodes.set(node.id, { ...node, status: "running", updatedAt: event.at });
+    }
+    if (event.type === "worker.completed" && event.workerId) {
+      const worker = workers.get(event.workerId);
+      if (worker) workers.set(event.workerId, { ...worker, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
+      if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+    }
+    if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        tasks.set(event.taskId, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at });
+      }
+    }
+    if (event.type === "pull_request.published" && event.taskId) {
+      const prId = String(payload.id ?? "");
+      if (prId) {
+        pullRequests.set(prId, {
+          id: prId,
+          taskId: event.taskId,
+          repo: String(payload.repo ?? ""),
+          number: typeof payload.number === "number" ? payload.number : undefined,
+          url: String(payload.url ?? ""),
+          branch: String(payload.branch ?? ""),
+          base: String(payload.base ?? ""),
+          title: String(payload.title ?? ""),
+          state: String(payload.state ?? "") || undefined,
+          draft: Boolean(payload.draft),
+          checksStatus: String(payload.checksStatus ?? "") || undefined,
+          mergeStatus: String(payload.mergeStatus ?? "") || undefined,
+          reviewStatus: String(payload.reviewStatus ?? "") || undefined,
+          createdAt: event.at,
+          updatedAt: event.at,
+          metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+        });
+      }
+    }
+    if (event.type === "pull_request.status_checked") {
+      const prId = String(payload.id ?? "");
+      const pr = pullRequests.get(prId);
+      if (pr) {
+        pullRequests.set(prId, {
+          ...pr,
+          state: String(payload.state ?? "") || pr.state,
+          draft: Boolean(payload.draft),
+          checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus,
+          mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus,
+          reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus,
+          updatedAt: event.at,
+          metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata,
+        });
+      }
+    }
+    if (event.type === "pull_request.babysitter_started") {
+      const prId = String(payload.id ?? "");
+      const pr = pullRequests.get(prId);
+      if (pr) {
+        pullRequests.set(prId, {
+          ...pr,
+          babysitterTaskId: String(payload.babysitterTaskId ?? "") || pr.babysitterTaskId,
+          updatedAt: event.at,
+        });
+      }
+    }
+  }
+
+  return {
+    tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
+    workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
+    executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    orchestrationGraphs: deriveOrchestrationGraphs(
+      [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
+      [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
+    ),
+    projects: snapshot.projects,
+    plugins: snapshot.plugins,
+    pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
+    targets: snapshot.targets,
+    events: snapshot.events,
+  };
+}
+
+function deriveOrchestrationGraphs(tasks: Task[], nodes: ExecutionNode[]): OrchestrationGraph[] {
+  const tasksById = new Map(tasks.map((task) => [task.id, task]));
+  const byTask = new Map<string, ExecutionNode[]>();
+  for (const node of nodes) {
+    byTask.set(node.taskId, [...(byTask.get(node.taskId) ?? []), node]);
+  }
+  return [...byTask.entries()].map(([taskId, taskNodes]) => {
+    const spawnToNode = new Map(taskNodes.filter((node) => node.spawnId).map((node) => [node.spawnId!, node.id]));
+    const edges = taskNodes.flatMap((node) => {
+      const items = [];
+      if (node.parentNodeId) items.push({ from: node.parentNodeId, to: node.id, reason: "parent" });
+      for (const dep of node.dependsOn ?? []) {
+        const from = spawnToNode.get(dep);
+        if (from) items.push({ from, to: node.id, reason: `depends_on:${dep}` });
+      }
+      return items;
+    });
+    const summary = {
+      total: taskNodes.length,
+      running: taskNodes.filter((node) => node.status === "running").length,
+      waiting: taskNodes.filter((node) => node.status === "waiting" || node.status === "queued").length,
+      done: taskNodes.filter((node) => node.status === "succeeded").length,
+      failed: taskNodes.filter((node) => node.status === "failed").length,
+      canceled: taskNodes.filter((node) => node.status === "canceled").length,
+    };
+    return {
+      taskId,
+      status: tasksById.get(taskId)?.status ?? "queued",
+      nodes: taskNodes.map((node) => ({
+        id: node.id,
+        workerId: node.workerId,
+        workerKind: node.workerKind,
+        status: node.status,
+        role: node.role,
+        reason: node.reason,
+        spawnId: node.spawnId,
+        targetId: node.targetId,
+        targetKind: node.targetKind,
+      })),
+      edges,
+      summary,
+      updatedAt: taskNodes.map((node) => node.updatedAt).sort().at(-1) ?? "",
+    };
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

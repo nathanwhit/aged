@@ -84,6 +84,15 @@ func waitForHTTPTaskStatus(t *testing.T, store eventstore.Store, taskID string, 
 	t.Fatalf("task %s did not reach %s", taskID, status)
 }
 
+func hasAvailableAction(actions []orchestrator.AvailableAction, name string) bool {
+	for _, action := range actions {
+		if action.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
@@ -130,153 +139,6 @@ func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
 
 	if res.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d", res.StatusCode)
-	}
-}
-
-func TestSnapshotCanOmitEventsAndExposeLastEventID(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	for _, event := range []core.Event{
-		{
-			Type:   core.EventTaskCreated,
-			TaskID: "task-mobile",
-			Payload: core.MustJSON(map[string]any{
-				"title":  "Mobile task",
-				"prompt": "Load quickly.",
-			}),
-		},
-		{
-			Type:     core.EventWorkerOutput,
-			TaskID:   "task-mobile",
-			WorkerID: "worker-mobile",
-			Payload: core.MustJSON(map[string]any{
-				"stream": "stdout",
-				"text":   strings.Repeat("x", 1024),
-			}),
-		},
-		{
-			Type:   core.EventTaskStatus,
-			TaskID: "task-mobile",
-			Payload: core.MustJSON(map[string]any{
-				"status": core.TaskSucceeded,
-			}),
-		},
-	} {
-		if _, err := store.Append(ctx, event); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
-
-	res, err := http.Get(server.URL + "/api/snapshot?events=none")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", res.StatusCode)
-	}
-	var snapshot core.Snapshot
-	if err := json.NewDecoder(res.Body).Decode(&snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.Events) != 0 {
-		t.Fatalf("events = %d, want 0", len(snapshot.Events))
-	}
-	if snapshot.LastEventID != 3 {
-		t.Fatalf("last event id = %d, want 3", snapshot.LastEventID)
-	}
-	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskSucceeded {
-		t.Fatalf("tasks = %+v", snapshot.Tasks)
-	}
-}
-
-func TestTaskEventsReturnsSelectedTaskHistory(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	for _, event := range []core.Event{
-		{
-			Type:   core.EventTaskCreated,
-			TaskID: "task-a",
-			Payload: core.MustJSON(map[string]any{
-				"title":  "Task A",
-				"prompt": "A",
-			}),
-		},
-		{
-			Type:   core.EventTaskCreated,
-			TaskID: "task-b",
-			Payload: core.MustJSON(map[string]any{
-				"title":  "Task B",
-				"prompt": "B",
-			}),
-		},
-		{
-			Type:     core.EventWorkerOutput,
-			TaskID:   "task-a",
-			WorkerID: "worker-a",
-			Payload: core.MustJSON(map[string]any{
-				"text": "progress",
-			}),
-		},
-	} {
-		if _, err := store.Append(ctx, event); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
-
-	res, err := http.Get(server.URL + "/api/tasks/task-a/events")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", res.StatusCode)
-	}
-	var events []core.Event
-	if err := json.NewDecoder(res.Body).Decode(&events); err != nil {
-		t.Fatal(err)
-	}
-	if len(events) != 2 {
-		t.Fatalf("events = %d, want 2: %+v", len(events), events)
-	}
-	for _, event := range events {
-		if event.TaskID != "task-a" {
-			t.Fatalf("unexpected task event: %+v", event)
-		}
-	}
-	if events[1].Type != core.EventWorkerOutput {
-		t.Fatalf("second event = %q, want worker output", events[1].Type)
-	}
-
-	limitedRes, err := http.Get(server.URL + "/api/tasks/task-a/events?limit=1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer limitedRes.Body.Close()
-	var limited []core.Event
-	if err := json.NewDecoder(limitedRes.Body).Decode(&limited); err != nil {
-		t.Fatal(err)
-	}
-	if len(limited) != 2 || limited[0].Type != core.EventTaskCreated || limited[1].Type != core.EventWorkerOutput {
-		t.Fatalf("limited events = %+v, want lifecycle events plus latest worker output", limited)
 	}
 }
 
@@ -373,6 +235,62 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	text := contents[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "MCP task") {
 		t.Fatalf("resource text = %s", text)
+	}
+}
+
+func TestMCPTaskDetailIncludesWorkersEventsAndActions(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	taskID := "task-detail"
+	workerID := "worker-detail"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Detail task", "prompt": "Expose task detail through MCP"})},
+		{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"nodeId": "node-detail", "workerId": workerID, "workerKind": "mock", "role": "implementation"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock", "prompt": "do it"})},
+		{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})},
+		{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "result", "text": "detail done"})},
+		{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded, "summary": "detail done"})},
+		{Type: core.EventTaskStatus, TaskID: taskID, Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	detailResult := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_task_detail",
+			"arguments": {"taskId": "`+taskID+`"}
+		}
+	}`)
+	content := detailResult["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var detail orchestrator.TaskDetail
+	if err := json.Unmarshal([]byte(content["text"].(string)), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Task.ID != taskID {
+		t.Fatalf("detail task = %+v", detail.Task)
+	}
+	if len(detail.Workers) == 0 {
+		t.Fatalf("detail workers missing: %+v", detail)
+	}
+	if len(detail.RecentEvents) == 0 {
+		t.Fatalf("detail events missing: %+v", detail)
+	}
+	if !hasAvailableAction(detail.AvailableActions, "aged_clear_task") || !hasAvailableAction(detail.AvailableActions, "aged_publish_pr") {
+		t.Fatalf("detail actions = %+v", detail.AvailableActions)
 	}
 }
 
@@ -509,7 +427,14 @@ func TestMCPProjectTools(t *testing.T) {
 				"localPath": %q,
 				"repo": "nodejs/node",
 				"vcs": "auto",
-				"defaultBase": "main"
+				"defaultBase": "main",
+				"targetLabels": {"role": "ci"},
+				"pullRequestPolicy": {
+					"branchPrefix": "aged/",
+					"draft": true,
+					"allowMerge": true,
+					"autoMerge": true
+				}
 			}
 		}
 	}`, projectDir))
@@ -521,10 +446,24 @@ func TestMCPProjectTools(t *testing.T) {
 	if project.ID != "node" {
 		t.Fatalf("create project result = %+v", project)
 	}
+	_ = postMCP(t, server.URL, fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_create_project",
+			"arguments": {
+				"id": "keep",
+				"name": "Keep",
+				"localPath": %q,
+				"defaultBase": "main"
+			}
+		}
+	}`, t.TempDir()))
 
 	listed := postMCP(t, server.URL, `{
 		"jsonrpc": "2.0",
-		"id": 2,
+		"id": 3,
 		"method": "tools/call",
 		"params": {
 			"name": "aged_list_projects",
@@ -544,6 +483,357 @@ func TestMCPProjectTools(t *testing.T) {
 	}
 	if !foundNode {
 		t.Fatalf("list projects result = %+v", projects)
+	}
+
+	updated := postMCP(t, server.URL, fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"id": 4,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_project",
+			"arguments": {
+				"id": "node",
+				"name": "Node Runtime",
+				"defaultBase": "trunk"
+			}
+		}
+	}`))
+	updateContent := updated["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var updatedProject core.Project
+	if err := json.Unmarshal([]byte(updateContent["text"].(string)), &updatedProject); err != nil {
+		t.Fatal(err)
+	}
+	if updatedProject.Name != "Node Runtime" || updatedProject.DefaultBase != "trunk" || updatedProject.LocalPath != projectDir || updatedProject.Repo != "nodejs/node" || updatedProject.TargetLabels["role"] != "ci" || updatedProject.PullRequestPolicy.BranchPrefix != "aged/" || !updatedProject.PullRequestPolicy.Draft || !updatedProject.PullRequestPolicy.AllowMerge || !updatedProject.PullRequestPolicy.AutoMerge {
+		t.Fatalf("update project result = %+v", updatedProject)
+	}
+
+	cleared := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 41,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_project",
+			"arguments": {
+				"id": "node",
+				"repo": "",
+				"defaultBase": "",
+				"targetLabels": {},
+				"pullRequestPolicy": {
+					"branchPrefix": "",
+					"draft": false,
+					"allowMerge": false,
+					"autoMerge": false
+				}
+			}
+		}
+	}`)
+	clearContent := cleared["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var clearedProject core.Project
+	if err := json.Unmarshal([]byte(clearContent["text"].(string)), &clearedProject); err != nil {
+		t.Fatal(err)
+	}
+	if clearedProject.Repo != "" || clearedProject.DefaultBase != "main" || len(clearedProject.TargetLabels) != 0 || clearedProject.PullRequestPolicy.BranchPrefix != "codex/aged-" || clearedProject.PullRequestPolicy.Draft || clearedProject.PullRequestPolicy.AllowMerge || clearedProject.PullRequestPolicy.AutoMerge {
+		t.Fatalf("cleared project result = %+v", clearedProject)
+	}
+
+	checked := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 5,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_project_health",
+			"arguments": {"projectId": "node"}
+		}
+	}`)
+	healthContent := checked["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var health core.ProjectHealth
+	if err := json.Unmarshal([]byte(healthContent["text"].(string)), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.ProjectID != "node" || health.PathStatus != "ok" {
+		t.Fatalf("health result = %+v", health)
+	}
+
+	deleted := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 6,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_delete_project",
+			"arguments": {"projectId": "node"}
+		}
+	}`)
+	deleteContent := deleted["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var deleteResult map[string]bool
+	if err := json.Unmarshal([]byte(deleteContent["text"].(string)), &deleteResult); err != nil {
+		t.Fatal(err)
+	}
+	if !deleteResult["ok"] {
+		t.Fatalf("delete project result = %+v", deleteResult)
+	}
+}
+
+func TestMCPTargetAndPluginTools(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	createdTarget := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 1,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_create_target",
+			"arguments": {
+				"id": "local-small",
+				"kind": "local",
+				"port": 2222,
+				"insecureIgnoreHostKey": true,
+				"labels": {"role": "small"},
+				"capacity": {"maxWorkers": 2, "cpuWeight": 3, "memoryGB": 16}
+			}
+		}
+	}`)
+	targetContent := createdTarget["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var target core.TargetConfig
+	if err := json.Unmarshal([]byte(targetContent["text"].(string)), &target); err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local-small" || target.Capacity.MaxWorkers != 2 {
+		t.Fatalf("create target result = %+v", target)
+	}
+
+	listedTargets := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "tools/call",
+		"params": {"name": "aged_list_targets", "arguments": {}}
+	}`)
+	targetListContent := listedTargets["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var targets []core.TargetState
+	if err := json.Unmarshal([]byte(targetListContent["text"].(string)), &targets); err != nil {
+		t.Fatal(err)
+	}
+	var foundTarget bool
+	for _, target := range targets {
+		if target.ID == "local-small" {
+			foundTarget = true
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("list targets result = %+v", targets)
+	}
+
+	updatedTarget := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 3,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_target",
+			"arguments": {
+				"id": "local-small",
+				"labels": {"role": "large"},
+				"capacity": {"maxWorkers": 4}
+			}
+		}
+	}`)
+	updateTargetContent := updatedTarget["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var updatedTargetConfig core.TargetConfig
+	if err := json.Unmarshal([]byte(updateTargetContent["text"].(string)), &updatedTargetConfig); err != nil {
+		t.Fatal(err)
+	}
+	if updatedTargetConfig.Labels["role"] != "large" || updatedTargetConfig.Capacity.MaxWorkers != 4 || updatedTargetConfig.Kind != "local" || updatedTargetConfig.Port != 2222 || !updatedTargetConfig.InsecureIgnoreHostKey || updatedTargetConfig.Capacity.CPUWeight != 3 || updatedTargetConfig.Capacity.MemoryGB != 16 {
+		t.Fatalf("update target result = %+v", updatedTargetConfig)
+	}
+
+	clearedTarget := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 31,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_target",
+			"arguments": {
+				"id": "local-small",
+				"port": 0,
+				"insecureIgnoreHostKey": false,
+				"labels": {},
+				"capacity": {"memoryGB": 0}
+			}
+		}
+	}`)
+	clearTargetContent := clearedTarget["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var clearedTargetConfig core.TargetConfig
+	if err := json.Unmarshal([]byte(clearTargetContent["text"].(string)), &clearedTargetConfig); err != nil {
+		t.Fatal(err)
+	}
+	if clearedTargetConfig.Port != 0 || clearedTargetConfig.InsecureIgnoreHostKey || len(clearedTargetConfig.Labels) != 0 || clearedTargetConfig.Capacity.MemoryGB != 0 || clearedTargetConfig.Capacity.MaxWorkers != 4 || clearedTargetConfig.Capacity.CPUWeight != 3 {
+		t.Fatalf("cleared target result = %+v", clearedTargetConfig)
+	}
+
+	zeroCapacityTarget := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 32,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_target",
+			"arguments": {
+				"id": "local-small",
+				"capacity": {"maxWorkers": 0, "cpuWeight": 0}
+			}
+		}
+	}`)
+	zeroCapacityTargetContent := zeroCapacityTarget["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var zeroCapacityTargetConfig core.TargetConfig
+	if err := json.Unmarshal([]byte(zeroCapacityTargetContent["text"].(string)), &zeroCapacityTargetConfig); err != nil {
+		t.Fatal(err)
+	}
+	if zeroCapacityTargetConfig.Capacity.MaxWorkers != 1 || zeroCapacityTargetConfig.Capacity.CPUWeight != 1 || zeroCapacityTargetConfig.Capacity.MemoryGB != 0 {
+		t.Fatalf("zero capacity target result = %+v", zeroCapacityTargetConfig)
+	}
+
+	healthResult := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 4,
+		"method": "tools/call",
+		"params": {"name": "aged_target_health", "arguments": {"targetId": "local-small"}}
+	}`)
+	healthContent := healthResult["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var targetHealth core.TargetState
+	if err := json.Unmarshal([]byte(healthContent["text"].(string)), &targetHealth); err != nil {
+		t.Fatal(err)
+	}
+	if targetHealth.ID != "local-small" || targetHealth.Health.Status != "ok" {
+		t.Fatalf("target health result = %+v", targetHealth)
+	}
+
+	createdPlugin := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 5,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_create_plugin",
+			"arguments": {
+				"id": "integration:test",
+				"name": "Test Integration",
+				"kind": "integration",
+				"enabled": false,
+				"endpoint": "https://example.invalid/plugin",
+				"capabilities": ["inspect"],
+				"config": {"env": "test"}
+			}
+		}
+	}`)
+	pluginContent := createdPlugin["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var plugin core.Plugin
+	if err := json.Unmarshal([]byte(pluginContent["text"].(string)), &plugin); err != nil {
+		t.Fatal(err)
+	}
+	if plugin.ID != "integration:test" || plugin.Config["env"] != "test" {
+		t.Fatalf("create plugin result = %+v", plugin)
+	}
+
+	listedPlugins := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 6,
+		"method": "tools/call",
+		"params": {"name": "aged_list_plugins", "arguments": {}}
+	}`)
+	pluginListContent := listedPlugins["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var plugins []core.Plugin
+	if err := json.Unmarshal([]byte(pluginListContent["text"].(string)), &plugins); err != nil {
+		t.Fatal(err)
+	}
+	var foundPlugin bool
+	for _, plugin := range plugins {
+		if plugin.ID == "integration:test" {
+			foundPlugin = true
+		}
+	}
+	if !foundPlugin {
+		t.Fatalf("list plugins result = %+v", plugins)
+	}
+
+	updatedPlugin := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 7,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_plugin",
+			"arguments": {
+				"id": "integration:test",
+				"enabled": true,
+				"config": {"env": "updated"}
+			}
+		}
+	}`)
+	updatePluginContent := updatedPlugin["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var updatedPluginConfig core.Plugin
+	if err := json.Unmarshal([]byte(updatePluginContent["text"].(string)), &updatedPluginConfig); err != nil {
+		t.Fatal(err)
+	}
+	if updatedPluginConfig.Name != "Test Integration" || updatedPluginConfig.Kind != "integration" || !updatedPluginConfig.Enabled || updatedPluginConfig.Endpoint == "" || len(updatedPluginConfig.Capabilities) != 1 || updatedPluginConfig.Capabilities[0] != "inspect" || updatedPluginConfig.Config["env"] != "updated" {
+		t.Fatalf("update plugin result = %+v", updatedPluginConfig)
+	}
+
+	clearedPlugin := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 71,
+		"method": "tools/call",
+		"params": {
+			"name": "aged_update_plugin",
+			"arguments": {
+				"id": "integration:test",
+				"enabled": false,
+				"endpoint": "",
+				"capabilities": [],
+				"config": {}
+			}
+		}
+	}`)
+	clearPluginContent := clearedPlugin["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var clearedPluginConfig core.Plugin
+	if err := json.Unmarshal([]byte(clearPluginContent["text"].(string)), &clearedPluginConfig); err != nil {
+		t.Fatal(err)
+	}
+	if clearedPluginConfig.Enabled || clearedPluginConfig.Status != "disabled" || clearedPluginConfig.Endpoint != "" || len(clearedPluginConfig.Capabilities) != 0 || len(clearedPluginConfig.Config) != 0 || clearedPluginConfig.Name != "Test Integration" {
+		t.Fatalf("cleared plugin result = %+v", clearedPluginConfig)
+	}
+
+	deletedPlugin := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 8,
+		"method": "tools/call",
+		"params": {"name": "aged_delete_plugin", "arguments": {"pluginId": "integration:test"}}
+	}`)
+	deletePluginContent := deletedPlugin["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var deletePluginResult map[string]bool
+	if err := json.Unmarshal([]byte(deletePluginContent["text"].(string)), &deletePluginResult); err != nil {
+		t.Fatal(err)
+	}
+	if !deletePluginResult["ok"] {
+		t.Fatalf("delete plugin result = %+v", deletePluginResult)
+	}
+
+	deletedTarget := postMCP(t, server.URL, `{
+		"jsonrpc": "2.0",
+		"id": 9,
+		"method": "tools/call",
+		"params": {"name": "aged_delete_target", "arguments": {"targetId": "local-small"}}
+	}`)
+	deleteTargetContent := deletedTarget["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	var deleteTargetResult map[string]bool
+	if err := json.Unmarshal([]byte(deleteTargetContent["text"].(string)), &deleteTargetResult); err != nil {
+		t.Fatal(err)
+	}
+	if !deleteTargetResult["ok"] {
+		t.Fatalf("delete target result = %+v", deleteTargetResult)
 	}
 }
 

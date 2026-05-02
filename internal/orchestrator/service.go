@@ -589,20 +589,6 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	if err != nil {
 		return core.Snapshot{}, err
 	}
-	s.hydrateSnapshotRuntimeState(&snapshot)
-	return snapshot, nil
-}
-
-func (s *Service) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
-	snapshot, err := s.store.SnapshotSummary(ctx)
-	if err != nil {
-		return core.Snapshot{}, err
-	}
-	s.hydrateSnapshotRuntimeState(&snapshot)
-	return snapshot, nil
-}
-
-func (s *Service) hydrateSnapshotRuntimeState(snapshot *core.Snapshot) {
 	if s.targets != nil {
 		snapshot.Targets = s.targets.Snapshot()
 	}
@@ -612,6 +598,7 @@ func (s *Service) hydrateSnapshotRuntimeState(snapshot *core.Snapshot) {
 	if s.plugins != nil {
 		snapshot.Plugins = s.plugins.Snapshot()
 	}
+	return snapshot, nil
 }
 
 func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
@@ -743,10 +730,6 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
 	return s.store.ListEvents(ctx, afterID, limit)
-}
-
-func (s *Service) TaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error) {
-	return s.store.ListTaskEvents(ctx, taskID, limit)
 }
 
 func (s *Service) Subscribe() (int, <-chan core.Event) {
@@ -991,7 +974,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
-		body = defaultTaskPullRequestBody(snapshot, task, workerID)
+		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
 		TaskID:        taskID,
@@ -1045,94 +1028,6 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
-}
-
-func defaultTaskPullRequestBody(snapshot core.Snapshot, task core.Task, workerID string) string {
-	summary, changes, ok := completedWorkerDetails(snapshot, task.ID, workerID)
-	if !ok || !hasPullRequestChangeDetails(summary, changes) {
-		return fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
-	}
-
-	var builder strings.Builder
-	builder.WriteString("## Summary\n\n")
-	if strings.TrimSpace(summary) != "" {
-		builder.WriteString(truncatePullRequestBodySection(summary, 4000))
-	} else {
-		builder.WriteString("Implemented task changes in worker `")
-		builder.WriteString(workerID)
-		builder.WriteString("`.")
-	}
-
-	changedFiles := changes.ChangedFiles
-	if len(changedFiles) > 0 {
-		builder.WriteString("\n\n## Changed Files\n\n")
-		maxFiles := 30
-		for index, file := range changedFiles {
-			if index >= maxFiles {
-				builder.WriteString(fmt.Sprintf("- ... %d additional file(s) omitted\n", len(changedFiles)-maxFiles))
-				break
-			}
-			builder.WriteString("- `")
-			builder.WriteString(file.Path)
-			builder.WriteString("`")
-			if strings.TrimSpace(file.Status) != "" {
-				builder.WriteString(" (")
-				builder.WriteString(file.Status)
-				builder.WriteString(")")
-			}
-			builder.WriteString("\n")
-		}
-	}
-
-	if diffStat := strings.TrimSpace(changes.DiffStat); diffStat != "" {
-		builder.WriteString("\n## Diff Stat\n\n```text\n")
-		builder.WriteString(truncatePullRequestBodySection(diffStat, 2000))
-		builder.WriteString("\n```")
-	}
-
-	return strings.TrimSpace(builder.String())
-}
-
-func completedWorkerDetails(snapshot core.Snapshot, taskID string, workerID string) (string, WorkspaceChanges, bool) {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return "", WorkspaceChanges{}, false
-	}
-	for i := len(snapshot.Events) - 1; i >= 0; i-- {
-		event := snapshot.Events[i]
-		if event.Type != core.EventWorkerCompleted || event.TaskID != taskID || event.WorkerID != workerID {
-			continue
-		}
-		var payload struct {
-			Summary          string                 `json:"summary,omitempty"`
-			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
-			WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges,omitempty"`
-		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return "", WorkspaceChanges{}, false
-		}
-		changes := payload.WorkspaceChanges
-		if len(changes.ChangedFiles) == 0 {
-			changes.ChangedFiles = payload.ChangedFiles
-		}
-		return strings.TrimSpace(payload.Summary), changes, true
-	}
-	return "", WorkspaceChanges{}, false
-}
-
-func hasPullRequestChangeDetails(summary string, changes WorkspaceChanges) bool {
-	return strings.TrimSpace(summary) != "" ||
-		strings.TrimSpace(changes.DiffStat) != "" ||
-		len(changes.ChangedFiles) > 0 ||
-		strings.TrimSpace(changes.Diff) != ""
-}
-
-func truncatePullRequestBodySection(value string, maxBytes int) string {
-	value = strings.TrimSpace(value)
-	if maxBytes <= 0 || len(value) <= maxBytes {
-		return value
-	}
-	return value[:maxBytes] + "\n[truncated]"
 }
 
 func (s *Service) pullRequestSourceRootForWorker(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, error) {
@@ -4187,18 +4082,6 @@ func latestCandidateWorkerID(results []WorkerTurnResult) string {
 	return ""
 }
 
-func replanMadeProgress(before []WorkerTurnResult, after []WorkerTurnResult) bool {
-	if len(after) <= len(before) {
-		return false
-	}
-	for _, result := range after[len(before):] {
-		if result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
-			return true
-		}
-	}
-	return false
-}
-
 func sortedMapKeys(values map[string]string) []string {
 	if len(values) == 0 {
 		return nil
@@ -4300,14 +4183,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		blockedFinalCandidates[workerID] = reason
 	}
 	recoveryHint := options.RecoveryHint
-	stalledTurns := 0
-	for turn := 1; ; turn++ {
-		if stalledTurns >= maxDynamicReplanTurns {
-			recoveryOptions := options
-			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
-			recoveryOptions.RecoveryHint = recoveryHint
-			return s.recoverReplanLimit(ctx, task, turn, results, recoveryOptions)
-		}
+	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
 		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
@@ -4351,7 +4227,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 								_ = s.failTask(ctx, task.ID, err)
 								return false, "", "", results
 							}
-							stalledTurns++
 							continue
 						}
 					}
@@ -4364,7 +4239,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
 					}
-					stalledTurns++
 					continue
 				}
 				if reason := blockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
@@ -4372,7 +4246,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
 					}
-					stalledTurns++
 					continue
 				}
 			}
@@ -4387,7 +4260,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
 			return false, "", "", results
 		case "continue":
-			beforeResults := results
 			next := *decision.Plan
 			if next.Metadata == nil {
 				next.Metadata = map[string]any{}
@@ -4431,7 +4303,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					"status": "continued",
 					"error":  err.Error(),
 				})
-				stalledTurns++
 				continue
 			}
 			results = append(results, result)
@@ -4444,7 +4315,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					"status":   "continued",
 					"error":    result.Error,
 				})
-				stalledTurns++
 				continue
 			}
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
@@ -4475,58 +4345,23 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			} else if !ok {
 				return false, "", "", results
 			}
-			if replanMadeProgress(beforeResults, results) {
-				stalledTurns = 0
-			} else {
-				stalledTurns++
-			}
 		}
 	}
+	_ = s.failTask(ctx, task.ID, fmt.Errorf("dynamic replanning exceeded %d turns", maxDynamicReplanTurns))
+	return false, "", "", results
 }
 
 func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
-	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
-		CompleteReasonPrefix: "fallback completion after replanner error",
-		CompleteMessage:      "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
-		WaitRationale:        "replanner returned an invalid decision and deterministic final-candidate fallback is ambiguous",
-		WaitQuestion:         "Dynamic replanning failed and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
-		WaitReason:           "dynamic_replan_error",
-		WaitObjective:        "Dynamic replanning needs user steering before continuing.",
-	})
-}
-
-func (s *Service) recoverReplanLimit(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
-	replanErr := fmt.Errorf("dynamic replanning reached %d consecutive turns without productive progress", maxDynamicReplanTurns)
-	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
-		CompleteReasonPrefix: "fallback completion after dynamic replanning stalled",
-		CompleteMessage:      "Dynamic replanning stopped making productive progress, so aged used the deterministic final-candidate fallback instead of failing the task.",
-		WaitRationale:        "dynamic replanning stopped making productive progress and deterministic final-candidate fallback is ambiguous",
-		WaitQuestion:         "Dynamic replanning stopped making productive progress and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
-		WaitReason:           "dynamic_replan_limit",
-		WaitObjective:        "Dynamic replanning stopped making productive progress and needs user steering before continuing.",
-	})
-}
-
-type replanFallbackConfig struct {
-	CompleteReasonPrefix string
-	CompleteMessage      string
-	WaitRationale        string
-	WaitQuestion         string
-	WaitReason           string
-	WaitObjective        string
-}
-
-func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, string, []WorkerTurnResult) {
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil {
 		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
 			candidateErr = fmt.Errorf("fallback final candidate %s is blocked: %s", candidateWorkerID, reason)
 		} else {
-			reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
+			reason := "fallback completion after replanner error: " + replanErr.Error()
 			if candidateReason != "" {
 				reason += "; " + candidateReason
 			}
-			if _, err := s.append(ctx, core.Event{
+			_, _ = s.append(ctx, core.Event{
 				Type:   core.EventTaskReplanned,
 				TaskID: task.ID,
 				Payload: core.MustJSON(map[string]any{
@@ -4535,24 +4370,21 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 						Action:                 "complete",
 						FinalCandidateWorkerID: candidateWorkerID,
 						Rationale:              reason,
-						Message:                config.CompleteMessage,
+						Message:                "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
 					},
 					"fallback": true,
 					"error":    replanErr.Error(),
 				}),
-			}); err != nil {
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			}
+			})
 			return true, candidateWorkerID, reason, results
 		}
 	}
 	if candidateWorkerID, candidateReason := latestCandidateLeafExcluding(results, options.BlockedFinalCandidates); candidateWorkerID != "" {
-		reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
+		reason := "fallback completion after replanner error: " + replanErr.Error()
 		if candidateReason != "" {
 			reason += "; " + candidateReason
 		}
-		if _, err := s.append(ctx, core.Event{
+		_, _ = s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
 			TaskID: task.ID,
 			Payload: core.MustJSON(map[string]any{
@@ -4561,46 +4393,40 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 					Action:                 "complete",
 					FinalCandidateWorkerID: candidateWorkerID,
 					Rationale:              reason,
-					Message:                config.CompleteMessage,
+					Message:                "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
 				},
 				"fallback": true,
 				"error":    replanErr.Error(),
 			}),
-		}); err != nil {
-			_ = s.failTask(ctx, task.ID, err)
-			return false, "", "", results
-		}
+		})
 		return true, candidateWorkerID, reason, results
 	}
-	candidateError := "no deterministic final candidate available"
-	if candidateErr != nil {
-		candidateError = candidateErr.Error()
-	}
-	if _, err := s.append(ctx, core.Event{
+	_, _ = s.append(ctx, core.Event{
 		Type:   core.EventTaskReplanned,
 		TaskID: task.ID,
 		Payload: core.MustJSON(map[string]any{
 			"turn": turn,
 			"decision": ReplanDecision{
 				Action:    "wait",
-				Rationale: config.WaitRationale,
+				Rationale: "replanner returned an invalid decision and deterministic final-candidate fallback is ambiguous",
 				Message:   replanErr.Error(),
 			},
 			"fallback":       true,
 			"error":          replanErr.Error(),
-			"candidateError": candidateError,
+			"candidateError": candidateErr.Error(),
 		}),
-	}); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-		return false, "", "", results
-	}
-	if err := s.waitForUserAction(ctx, task.ID, "", config.WaitReason, config.WaitQuestion, map[string]any{
-		"error":          replanErr.Error(),
-		"candidateError": candidateError,
-		"objective":      config.WaitObjective,
-	}); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-	}
+	})
+	_, _ = s.append(ctx, core.Event{
+		Type:   core.EventApprovalNeeded,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"question": "Dynamic replanning failed and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
+			"reason":   "dynamic_replan_error",
+			"error":    replanErr.Error(),
+		}),
+	})
+	_ = s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingUser, "approval_needed", "Dynamic replanning needs user steering before continuing.")
+	_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	return false, "", "", results
 }
 

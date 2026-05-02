@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS events_task_idx ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS events_worker_idx ON events(worker_id, id);
-CREATE INDEX IF NOT EXISTS events_type_idx ON events(type, id);
 
 CREATE TABLE IF NOT EXISTS projects (
 	id TEXT PRIMARY KEY,
@@ -393,58 +392,6 @@ LIMIT ?`, afterID, limit)
 	return events, rows.Err()
 }
 
-func (s *SQLiteStore) ListTaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error) {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return nil, errors.New("task id is required")
-	}
-	if limit <= 0 {
-		rows, err := s.db.QueryContext(ctx, `
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE task_id = ?
-ORDER BY id ASC`, taskID)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		return scanEvents(rows)
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-	rows, err := s.db.QueryContext(ctx, `
-WITH recent_output AS (
-	SELECT id
-	FROM events
-	WHERE task_id = ? AND type = 'worker.output'
-	ORDER BY id DESC
-	LIMIT ?
-)
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE task_id = ?
-	AND (type != 'worker.output' OR id IN (SELECT id FROM recent_output))
-ORDER BY id ASC`, taskID, limit, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanEvents(rows)
-}
-
-func scanEvents(rows *sql.Rows) ([]core.Event, error) {
-	var events []core.Event
-	for rows.Next() {
-		event, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
-}
-
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy
@@ -643,15 +590,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, nextID); err != nil {
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
-	return s.snapshot(ctx, true)
-}
-
-func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
-	return s.snapshot(ctx, false)
-}
-
-func (s *SQLiteStore) snapshot(ctx context.Context, includeEvents bool) (core.Snapshot, error) {
-	events, lastEventID, err := s.snapshotEvents(ctx, includeEvents)
+	events, err := s.allEvents(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
 	}
@@ -1025,8 +964,7 @@ func (s *SQLiteStore) snapshot(ctx context.Context, includeEvents bool) (core.Sn
 		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
 		PullRequests:        orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
 		OrchestrationGraphs: orchestrationGraphs(filteredTasks, filteredNodes),
-		LastEventID:         lastEventID,
-		Events:              snapshotResponseEvents(events, includeEvents),
+		Events:              events,
 	}, nil
 }
 
@@ -1199,11 +1137,11 @@ func orchestrationGraphs(tasks map[string]core.Task, nodes map[string]core.Execu
 	return graphs
 }
 
-func allEvents(ctx context.Context, tx *sql.Tx) ([]core.Event, error) {
+func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
 	var events []core.Event
 	var afterID int64
 	for {
-		batch, err := listEvents(ctx, tx, afterID, 1000)
+		batch, err := s.ListEvents(ctx, afterID, 1000)
 		if err != nil {
 			return nil, err
 		}
@@ -1216,108 +1154,6 @@ func allEvents(ctx context.Context, tx *sql.Tx) ([]core.Event, error) {
 			return events, nil
 		}
 	}
-}
-
-func (s *SQLiteStore) snapshotEvents(ctx context.Context, includeEvents bool) ([]core.Event, int64, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, 0, err
-	}
-	defer tx.Rollback()
-
-	var events []core.Event
-	if includeEvents {
-		events, err = allEvents(ctx, tx)
-	} else {
-		events, err = projectionEvents(ctx, tx)
-	}
-	if err != nil {
-		return nil, 0, err
-	}
-	lastEventID, err := lastEventID(ctx, tx)
-	if err != nil {
-		return nil, 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, 0, err
-	}
-	return events, lastEventID, nil
-}
-
-func snapshotResponseEvents(events []core.Event, includeEvents bool) []core.Event {
-	if includeEvents {
-		return events
-	}
-	return nil
-}
-
-func lastEventID(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var id sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&id); err != nil {
-		return 0, err
-	}
-	if !id.Valid {
-		return 0, nil
-	}
-	return id.Int64, nil
-}
-
-func listEvents(ctx context.Context, tx *sql.Tx, afterID int64, limit int) ([]core.Event, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 200
-	}
-
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE id > ?
-ORDER BY id ASC
-LIMIT ?`, afterID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanEvents(rows)
-}
-
-func projectionEvents(ctx context.Context, tx *sql.Tx) ([]core.Event, error) {
-	rows, err := tx.QueryContext(ctx, `
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE type IN (
-	'task.created',
-	'task.status',
-	'task.final_candidate_selected',
-	'task.objective_updated',
-	'task.milestone_reached',
-	'task.artifact_recorded',
-	'task.cleared',
-	'execution.node_planned',
-	'execution.node_status',
-	'worker.workspace_prepared',
-	'worker.created',
-	'worker.started',
-	'worker.completed',
-	'worker.changes_applied',
-	'pull_request.published',
-	'pull_request.status_checked',
-	'pull_request.babysitter_started'
-)
-ORDER BY id ASC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var events []core.Event
-	for rows.Next() {
-		event, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
 }
 
 func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {
