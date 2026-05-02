@@ -21,11 +21,13 @@ type WorkspaceManager interface {
 }
 
 type WorkspaceSpec struct {
-	TaskID       string
-	WorkerID     string
-	WorkDir      string
-	BaseWorkDir  string
-	BaseRevision string
+	TaskID        string
+	WorkerID      string
+	WorkDir       string
+	BaseWorkDir   string
+	BaseRevision  string
+	TaskTitle     string
+	WorkerSummary string
 }
 
 type PreparedWorkspace struct {
@@ -461,7 +463,10 @@ func (m JJWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepared
 		return result, nil
 	}
 	workerRevision := workspace.WorkspaceName + "@"
-	message := "Apply worker " + shortID(workspace.WorkerID)
+	message := changeCommitMessage(changeCommitMessageContext{
+		Fallback:     "Apply worker " + shortID(workspace.WorkerID),
+		ChangedFiles: workspaceChangedFilePaths(changes.ChangedFiles),
+	})
 	if _, err := runJJRefreshingStale(ctx, workspace.CWD, "status"); err != nil {
 		return result, fmt.Errorf("refresh jj worker workspace: %w", err)
 	}
@@ -618,7 +623,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 		return PreparedWorkspace{}, fmt.Errorf("create isolated git worktree: %w", err)
 	}
 	if strings.TrimSpace(spec.BaseWorkDir) != "" {
-		if err := copyGitWorkspaceChanges(ctx, spec.BaseWorkDir, destination); err != nil {
+		if err := copyGitWorkspaceChanges(ctx, spec.BaseWorkDir, destination, spec); err != nil {
 			return PreparedWorkspace{}, err
 		}
 	}
@@ -788,7 +793,19 @@ func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepare
 	if _, err := runGit(ctx, workspace.Root, "add", "-A"); err != nil {
 		return result, fmt.Errorf("stage git worker changes: %w", err)
 	}
-	if _, err := runGit(ctx, workspace.Root, "commit", "-m", "Apply worker "+shortID(workspace.WorkerID)); err != nil {
+	changedFiles := workspaceChangedFilePaths(changes.ChangedFiles)
+	if len(changedFiles) == 0 {
+		var err error
+		changedFiles, err = gitIndexChangedFiles(ctx, workspace.Root)
+		if err != nil {
+			return result, fmt.Errorf("list staged git worker changes: %w", err)
+		}
+	}
+	message := changeCommitMessage(changeCommitMessageContext{
+		Fallback:     "Apply worker " + shortID(workspace.WorkerID),
+		ChangedFiles: changedFiles,
+	})
+	if _, err := runGit(ctx, workspace.Root, "commit", "-m", message); err != nil {
 		return result, fmt.Errorf("commit git worker changes: %w", err)
 	}
 	commit, err := runGit(ctx, workspace.Root, "rev-parse", "HEAD")
@@ -805,6 +822,16 @@ func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepare
 		return result, fmt.Errorf("merge git worker commit: %w", err)
 	}
 	return result, nil
+}
+
+func workspaceChangedFilePaths(files []WorkspaceChangedFile) []string {
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.Path) != "" {
+			paths = append(paths, file.Path)
+		}
+	}
+	return paths
 }
 
 func ensureGitTrackedClean(ctx context.Context, dir string, operation string) error {
@@ -836,7 +863,7 @@ func abortFailedGitMerge(ctx context.Context, dir string) error {
 	return nil
 }
 
-func copyGitWorkspaceChanges(ctx context.Context, source string, destination string) error {
+func copyGitWorkspaceChanges(ctx context.Context, source string, destination string, spec WorkspaceSpec) error {
 	copiedTracked, err := copyGitTrackedChanges(ctx, source, destination)
 	if err != nil {
 		return err
@@ -851,10 +878,40 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 	if _, err := runGit(ctx, destination, "add", "-A"); err != nil {
 		return fmt.Errorf("stage git base workspace diff: %w", err)
 	}
-	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Base worker candidate"); err != nil {
+	changedFiles, err := gitIndexChangedFiles(ctx, destination)
+	if err != nil {
+		return fmt.Errorf("list staged git base workspace diff: %w", err)
+	}
+	message := changeCommitMessage(changeCommitMessageContext{
+		Fallback:      "Base worker candidate",
+		TaskTitle:     spec.TaskTitle,
+		WorkerSummary: spec.WorkerSummary,
+		ChangedFiles:  changedFiles,
+	})
+	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil
+}
+
+func gitIndexChangedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := runGit(ctx, dir, "diff", "--cached", "--name-only", "-z", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+	return splitNULFields(out), nil
+}
+
+func splitNULFields(value string) []string {
+	fields := strings.Split(value, "\x00")
+	result := []string{}
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			result = append(result, field)
+		}
+	}
+	return result
 }
 
 func copyGitTrackedChanges(ctx context.Context, source string, destination string) (bool, error) {

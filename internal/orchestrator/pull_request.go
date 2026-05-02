@@ -98,7 +98,7 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if body == "" {
 		body = defaultPRBody(spec)
 	}
-	if err := p.pushBranch(ctx, exec, spec.WorkDir, branch, spec.PushRemote, base); err != nil {
+	if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
 		return core.PullRequest{}, err
 	}
 
@@ -201,7 +201,9 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 	return core.PullRequest{}, errors.New("no existing pull request found for branch")
 }
 
-func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string, base string) error {
+func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandExecutor, spec PullRequestPublishSpec, branch string, base string) error {
+	dir := spec.WorkDir
+	remote := spec.PushRemote
 	remote = strings.TrimSpace(remote)
 	if _, err := exec(ctx, dir, "jj", "root"); err == nil {
 		if _, err := exec(ctx, dir, "jj", "bookmark", "create", branch, "--revision", "@"); err != nil {
@@ -219,7 +221,7 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		return nil
 	}
 	if _, err := exec(ctx, dir, "git", "rev-parse", "--show-toplevel"); err == nil {
-		if err := materializeGitPullRequestChanges(ctx, exec, dir, branch); err != nil {
+		if err := materializeGitPullRequestChanges(ctx, exec, dir, branch, spec); err != nil {
 			return err
 		}
 		if err := ensureGitPullRequestHasChanges(ctx, exec, dir, base); err != nil {
@@ -239,7 +241,7 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 	return errors.New("publish requires a jj or git repository")
 }
 
-func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor, dir string, branch string) error {
+func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor, dir string, branch string, spec PullRequestPublishSpec) error {
 	status, err := exec(ctx, dir, "git", "status", "--porcelain=v1")
 	if err != nil {
 		return fmt.Errorf("read git status before publish: %w", err)
@@ -250,14 +252,32 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 	if _, err := exec(ctx, dir, "git", "add", "-A"); err != nil {
 		return fmt.Errorf("stage git changes before publish: %w", err)
 	}
-	message := "Publish aged worker changes"
-	if strings.TrimSpace(branch) != "" {
-		message = "Publish " + strings.TrimSpace(branch)
+	changedFiles, err := gitIndexChangedFilesWithExec(ctx, exec, dir)
+	if err != nil {
+		return fmt.Errorf("list staged git changes before publish: %w", err)
 	}
+	fallback := "Publish aged worker changes"
+	if strings.TrimSpace(branch) != "" {
+		fallback = "Publish " + strings.TrimSpace(branch)
+	}
+	message := changeCommitMessage(changeCommitMessageContext{
+		Fallback:     fallback,
+		PullTitle:    spec.Title,
+		Metadata:     spec.Metadata,
+		ChangedFiles: changedFiles,
+	})
 	if _, err := exec(ctx, dir, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return fmt.Errorf("commit git changes before publish: %w", err)
 	}
 	return nil
+}
+
+func gitIndexChangedFilesWithExec(ctx context.Context, exec commandExecutor, dir string) ([]string, error) {
+	out, err := exec(ctx, dir, "git", "diff", "--cached", "--name-only", "-z", "HEAD", "--")
+	if err != nil {
+		return nil, err
+	}
+	return splitNULFields(out), nil
 }
 
 func ensureGitPullRequestHasChanges(ctx context.Context, exec commandExecutor, dir string, base string) error {

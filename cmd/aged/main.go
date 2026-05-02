@@ -28,7 +28,6 @@ func main() {
 		pluginsPath       = flag.String("plugins", envOr("AGED_PLUGINS", ""), "JSON plugin manifest config")
 		workerKind        = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
 		assistantMode     = flag.String("assistant", envOr("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
-		assistantReason   = flag.String("assistant-reasoning", envOr("AGED_ASSISTANT_REASONING", "medium"), "interactive assistant reasoning effort: default, low, medium, high, xhigh, or max")
 		brainMode         = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
 		promptPath        = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
 		schedulerPrompt   = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
@@ -157,10 +156,9 @@ func main() {
 		os.Exit(1)
 	}
 	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
-		CodexPath:       *codexPath,
-		ClaudePath:      *claudePath,
-		WorkDir:         absWorkDir,
-		ReasoningEffort: *assistantReason,
+		CodexPath:  *codexPath,
+		ClaudePath: *claudePath,
+		WorkDir:    absWorkDir,
 	})
 	if err != nil {
 		slog.Error("configure assistant", "error", err)

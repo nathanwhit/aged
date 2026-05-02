@@ -57,7 +57,6 @@ func main() {
 		pluginsPath       = flag.String("plugins", envOr("AGED_PLUGINS", ""), "aged daemon plugin manifest config")
 		workerKind        = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "codex"), "aged daemon fallback worker kind")
 		assistantMode     = flag.String("assistant", envOr("AGED_ASSISTANT", "auto"), "aged daemon assistant provider")
-		assistantReason   = flag.String("assistant-reasoning", envOr("AGED_ASSISTANT_REASONING", "medium"), "aged daemon assistant reasoning effort")
 		brainMode         = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "aged daemon brain provider")
 		workspaceVCS      = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "aged daemon workspace VCS")
 		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
@@ -90,7 +89,6 @@ func main() {
 			"-db", *dbPath,
 			"-worker", *workerKind,
 			"-assistant", *assistantMode,
-			"-assistant-reasoning", *assistantReason,
 			"-brain", *brainMode,
 			"-workdir", *workDir,
 			"-projects", *projectsPath,

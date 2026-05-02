@@ -197,7 +197,7 @@ func TestJJWorkspaceManagerApplyBackfillsWorkerDescription(t *testing.T) {
 		t.Fatalf("worker description = %q", workerDescription)
 	}
 	sourceDescription := strings.TrimSpace(runTestJJ(t, repo, "log", "-r", "@", "--no-graph", "-T", "description"))
-	if sourceDescription != "Apply worker worker1" {
+	if sourceDescription != "Update file" {
 		t.Fatalf("source description = %q", sourceDescription)
 	}
 }
@@ -254,7 +254,7 @@ func TestGitWorkspaceManagerCopiesUntrackedBaseCandidate(t *testing.T) {
 		t.Fatalf("follow-up workspace status = %q, want clean committed base candidate", status)
 	}
 	subject := strings.TrimSpace(runTestGit(t, followUp.CWD, "log", "-1", "--pretty=%s"))
-	if subject != "Base worker candidate" {
+	if subject != "Update file and 1 other file" {
 		t.Fatalf("follow-up base commit subject = %q", subject)
 	}
 }
@@ -433,6 +433,41 @@ func TestGitWorkspaceManagerDescribesCommittedBaseCandidateChanges(t *testing.T)
 	}
 	if !strings.Contains(diff, "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml") {
 		t.Fatalf("diff does not include committed candidate file:\n%s", diff)
+	}
+}
+
+func TestGitWorkspaceManagerApplyUsesChangedFilesCommitMessage(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "config", "user.name", "aged-test")
+	runTestGit(t, repo, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, repo, "config", "commit.gpgsign", "false")
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker1",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace.CWD, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.CWD, ".github", "workflows", "ci.yml"), []byte("name: CI\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := manager.DescribeChanges(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyChanges(ctx, workspace, changes); err != nil {
+		t.Fatal(err)
+	}
+	subject := strings.TrimSpace(runTestGit(t, workspace.Root, "log", "-1", "--pretty=%s"))
+	if subject != "Update GitHub workflows" {
+		t.Fatalf("worker commit subject = %q", subject)
 	}
 }
 

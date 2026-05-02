@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1006,27 +1005,25 @@ func TestDiscordDriverContextIncludesTargetsAndPlugins(t *testing.T) {
 		t.Fatalf("assistant requests = %+v", assistant.requests)
 	}
 	var contextPayload struct {
-		Index struct {
-			Targets []map[string]any `json:"targets"`
-			Plugins []map[string]any `json:"plugins"`
-		} `json:"index"`
+		Targets []core.TargetState `json:"targets"`
+		Plugins []core.Plugin      `json:"plugins"`
 	}
 	if err := json.Unmarshal(assistant.requests[0].Context, &contextPayload); err != nil {
 		t.Fatal(err)
 	}
 	var foundTarget, foundPlugin bool
-	for _, target := range contextPayload.Index.Targets {
-		if target["id"] == "local-small" {
+	for _, target := range contextPayload.Targets {
+		if target.ID == "local-small" {
 			foundTarget = true
 		}
 	}
-	for _, plugin := range contextPayload.Index.Plugins {
-		if plugin["id"] == "integration:test" {
+	for _, plugin := range contextPayload.Plugins {
+		if plugin.ID == "integration:test" {
 			foundPlugin = true
 		}
 	}
 	if !foundTarget || !foundPlugin {
-		t.Fatalf("context targets=%+v plugins=%+v", contextPayload.Index.Targets, contextPayload.Index.Plugins)
+		t.Fatalf("context targets=%+v plugins=%+v", contextPayload.Targets, contextPayload.Plugins)
 	}
 }
 
@@ -1371,85 +1368,6 @@ func TestDiscordDriverAssistantFallbackStillAllowsDoIt(t *testing.T) {
 	}
 	if !ok || task.Prompt != "add Discord support" {
 		t.Fatalf("task = %+v ok=%v", task, ok)
-	}
-}
-
-func TestDiscordAssistantContextIsBounded(t *testing.T) {
-	hugePrompt := strings.Repeat("large prompt ", 2000)
-	hugePayload := core.MustJSON(map[string]any{
-		"summary": strings.Repeat("large event ", 2000),
-	})
-	var snapshot core.Snapshot
-	for i := 0; i < 120; i++ {
-		taskID := fmt.Sprintf("task-%03d", i)
-		workerID := fmt.Sprintf("worker-%03d", i)
-		snapshot.Tasks = append(snapshot.Tasks, core.Task{
-			ID:        taskID,
-			ProjectID: "default",
-			Title:     fmt.Sprintf("Task %03d", i),
-			Prompt:    hugePrompt,
-			Status:    core.TaskSucceeded,
-			UpdatedAt: time.Unix(int64(i), 0),
-		})
-		snapshot.Workers = append(snapshot.Workers, core.Worker{
-			ID:        workerID,
-			TaskID:    taskID,
-			Kind:      "codex",
-			Status:    core.WorkerSucceeded,
-			Prompt:    hugePrompt,
-			UpdatedAt: time.Unix(int64(i), 0),
-		})
-		snapshot.ExecutionNodes = append(snapshot.ExecutionNodes, core.ExecutionNode{
-			ID:         fmt.Sprintf("node-%03d", i),
-			TaskID:     taskID,
-			WorkerID:   workerID,
-			WorkerKind: "codex",
-			Status:     core.WorkerSucceeded,
-			Reason:     hugePrompt,
-			UpdatedAt:  time.Unix(int64(i), 0),
-		})
-		snapshot.Events = append(snapshot.Events, core.Event{
-			ID:       int64(i),
-			Type:     core.EventWorkerOutput,
-			TaskID:   taskID,
-			WorkerID: workerID,
-			At:       time.Unix(int64(i), 0),
-			Payload:  hugePayload,
-		})
-	}
-	snapshot.Projects = []core.Project{{ID: "default", Name: "aged", LocalPath: "/home/exedev/aged"}}
-
-	raw := core.MustJSON(discordAssistantIndex("chan", "user", snapshot.Projects[0], snapshot))
-	if len(raw) > 180_000 {
-		t.Fatalf("context too large: %d bytes", len(raw))
-	}
-	if strings.Contains(string(raw), strings.Repeat("large prompt ", 100)) {
-		t.Fatalf("context contains unbounded prompt content")
-	}
-	var decoded struct {
-		Tasks         []map[string]any  `json:"tasks"`
-		Workers       []map[string]any  `json:"workers"`
-		ExecutionNode []map[string]any  `json:"executionNodes"`
-		RecentEvents  []map[string]any  `json:"recentEvents"`
-		DetailActions map[string]string `json:"detailActions"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decoded.Tasks) != discordAssistantTaskLimit {
-		t.Fatalf("tasks = %d, want %d", len(decoded.Tasks), discordAssistantTaskLimit)
-	}
-	if len(decoded.Workers) != discordAssistantWorkerLimit {
-		t.Fatalf("workers = %d, want %d", len(decoded.Workers), discordAssistantWorkerLimit)
-	}
-	if len(decoded.ExecutionNode) != discordAssistantNodeLimit {
-		t.Fatalf("nodes = %d, want %d", len(decoded.ExecutionNode), discordAssistantNodeLimit)
-	}
-	if len(decoded.RecentEvents) != discordAssistantEventLimit {
-		t.Fatalf("events = %d, want %d", len(decoded.RecentEvents), discordAssistantEventLimit)
-	}
-	if decoded.DetailActions["show_task"] == "" || decoded.DetailActions["review_worker_changes"] == "" {
-		t.Fatalf("missing detail actions: %+v", decoded.DetailActions)
 	}
 }
 

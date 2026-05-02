@@ -353,8 +353,18 @@ func (d *DiscordDriver) answerDiscordMessage(ctx context.Context, channel Discor
 		Message:        discordAssistantPrompt(content),
 		WorkDir:        project.LocalPath,
 		Context: core.MustJSON(map[string]any{
-			"source": "discord",
-			"index":  discordAssistantIndex(channel.ID, message.Author.ID, project, snapshot),
+			"source":          "discord",
+			"channelId":       channel.ID,
+			"userId":          message.Author.ID,
+			"selectedProject": project,
+			"projects":        snapshot.Projects,
+			"tasks":           snapshot.Tasks,
+			"workers":         snapshot.Workers,
+			"executionNodes":  snapshot.ExecutionNodes,
+			"targets":         snapshot.Targets,
+			"plugins":         snapshot.Plugins,
+			"pullRequests":    snapshot.PullRequests,
+			"recentEvents":    compactDiscordEvents(snapshot.Events, 80),
 		}),
 	})
 	if err != nil {
@@ -884,9 +894,7 @@ func (d *DiscordDriver) createDiscordTask(ctx context.Context, channel DiscordCh
 func discordAssistantPrompt(content string) string {
 	return fmt.Sprintf(`You are the natural-language Discord interface for aged, a durable autonomous development orchestrator.
 
-Answer the user's question using the provided aged index context and, when useful, by inspecting files in the current read-only project checkout. Do not edit files from chat; create a task instead when code changes are needed.
-
-The context is an index, not the full daemon state. It intentionally contains compact recent IDs, statuses, and summaries. When the user needs deeper task logs, worker prompts, worker diffs, project health, target health, or PR refresh data, return the appropriate structured action such as "show_task", "show_worker", "review_worker_changes", "project_health", "target_health", or "refresh_pr". The Discord driver will run that detail fetch and send the result. Do not guess details that are not present in the index.
+Answer the user's question using the provided aged snapshot context and, when useful, by inspecting files in the current read-only project checkout. Do not edit files from chat; create a task instead when code changes are needed.
 
 Return exactly one JSON object with this schema and no Markdown fence:
 
@@ -1709,211 +1717,6 @@ func discordPullRequestList(title string, prs []core.PullRequest) string {
 		builder.WriteString(discordPullRequestSummary(pr))
 	}
 	return strings.TrimSpace(builder.String())
-}
-
-const (
-	discordAssistantTaskLimit    = 50
-	discordAssistantWorkerLimit  = 80
-	discordAssistantNodeLimit    = 80
-	discordAssistantPRLimit      = 50
-	discordAssistantEventLimit   = 30
-	discordAssistantPromptLimit  = 600
-	discordAssistantSummaryLimit = 320
-)
-
-func discordAssistantIndex(channelID string, userID string, selectedProject core.Project, snapshot core.Snapshot) map[string]any {
-	return map[string]any{
-		"channelId":       channelID,
-		"userId":          userID,
-		"selectedProject": selectedProject,
-		"detailActions": map[string]string{
-			"show_task":             "Fetch detailed task status, prompt, workers, pull requests, recent events, and available actions by taskId.",
-			"show_worker":           "Fetch detailed worker command, prompt, changed files, recent events, and available actions by workerId.",
-			"review_worker_changes": "Fetch worker workspace and diff summary by workerId.",
-			"project_health":        "Fetch project checkout/readiness details by projectId.",
-			"target_health":         "Fetch target reachability/resource details by targetId.",
-			"refresh_pr":            "Refresh and fetch pull request status by pullRequestId.",
-		},
-		"counts": map[string]int{
-			"projects":        len(snapshot.Projects),
-			"tasks":           len(snapshot.Tasks),
-			"workers":         len(snapshot.Workers),
-			"executionNodes":  len(snapshot.ExecutionNodes),
-			"targets":         len(snapshot.Targets),
-			"plugins":         len(snapshot.Plugins),
-			"pullRequests":    len(snapshot.PullRequests),
-			"events":          len(snapshot.Events),
-			"includedTasks":   min(len(snapshot.Tasks), discordAssistantTaskLimit),
-			"includedWorkers": min(len(snapshot.Workers), discordAssistantWorkerLimit),
-			"includedEvents":  min(len(snapshot.Events), discordAssistantEventLimit),
-		},
-		"projects":       snapshot.Projects,
-		"targets":        compactDiscordTargets(snapshot.Targets),
-		"plugins":        compactDiscordPlugins(snapshot.Plugins),
-		"tasks":          compactDiscordTasks(snapshot.Tasks, discordAssistantTaskLimit),
-		"workers":        compactDiscordWorkers(snapshot.Workers, discordAssistantWorkerLimit),
-		"executionNodes": compactDiscordExecutionNodes(snapshot.ExecutionNodes, discordAssistantNodeLimit),
-		"pullRequests":   compactDiscordPullRequests(snapshot.PullRequests, discordAssistantPRLimit),
-		"recentEvents":   compactDiscordEventSummaries(snapshot.Events, discordAssistantEventLimit),
-	}
-}
-
-func compactDiscordTasks(tasks []core.Task, limit int) []map[string]any {
-	if limit > 0 && len(tasks) > limit {
-		tasks = tasks[len(tasks)-limit:]
-	}
-	out := make([]map[string]any, 0, len(tasks))
-	for _, task := range tasks {
-		out = append(out, map[string]any{
-			"id":                     task.ID,
-			"shortId":                shortDiscordID(task.ID),
-			"projectId":              task.ProjectID,
-			"title":                  task.Title,
-			"prompt":                 truncateText(task.Prompt, discordAssistantPromptLimit),
-			"status":                 task.Status,
-			"error":                  truncateText(task.Error, discordAssistantSummaryLimit),
-			"objectiveStatus":        task.ObjectiveStatus,
-			"objectivePhase":         task.ObjectivePhase,
-			"finalCandidateWorkerId": task.FinalCandidateWorkerID,
-			"appliedWorkerId":        task.AppliedWorkerID,
-			"updatedAt":              task.UpdatedAt,
-		})
-	}
-	return out
-}
-
-func compactDiscordWorkers(workers []core.Worker, limit int) []map[string]any {
-	if limit > 0 && len(workers) > limit {
-		workers = workers[len(workers)-limit:]
-	}
-	out := make([]map[string]any, 0, len(workers))
-	for _, worker := range workers {
-		prompt := strings.TrimSpace(worker.Prompt)
-		out = append(out, map[string]any{
-			"id":              worker.ID,
-			"shortId":         shortDiscordID(worker.ID),
-			"taskId":          worker.TaskID,
-			"kind":            worker.Kind,
-			"status":          worker.Status,
-			"command":         worker.Command,
-			"prompt":          truncateText(prompt, discordAssistantPromptLimit),
-			"promptTruncated": len(prompt) > discordAssistantPromptLimit,
-			"promptPath":      worker.PromptPath,
-			"promptError":     truncateText(worker.PromptError, discordAssistantSummaryLimit),
-			"createdAt":       worker.CreatedAt,
-			"updatedAt":       worker.UpdatedAt,
-		})
-	}
-	return out
-}
-
-func compactDiscordExecutionNodes(nodes []core.ExecutionNode, limit int) []map[string]any {
-	if limit > 0 && len(nodes) > limit {
-		nodes = nodes[len(nodes)-limit:]
-	}
-	out := make([]map[string]any, 0, len(nodes))
-	for _, node := range nodes {
-		out = append(out, map[string]any{
-			"id":           node.ID,
-			"taskId":       node.TaskID,
-			"workerId":     node.WorkerID,
-			"workerKind":   node.WorkerKind,
-			"status":       node.Status,
-			"parentNodeId": node.ParentNodeID,
-			"spawnId":      node.SpawnID,
-			"role":         node.Role,
-			"reason":       truncateText(node.Reason, discordAssistantSummaryLimit),
-			"targetId":     node.TargetID,
-			"targetKind":   node.TargetKind,
-			"updatedAt":    node.UpdatedAt,
-		})
-	}
-	return out
-}
-
-func compactDiscordPullRequests(prs []core.PullRequest, limit int) []map[string]any {
-	if limit > 0 && len(prs) > limit {
-		prs = prs[len(prs)-limit:]
-	}
-	out := make([]map[string]any, 0, len(prs))
-	for _, pr := range prs {
-		out = append(out, map[string]any{
-			"id":               pr.ID,
-			"shortId":          shortDiscordID(pr.ID),
-			"taskId":           pr.TaskID,
-			"repo":             pr.Repo,
-			"number":           pr.Number,
-			"url":              pr.URL,
-			"branch":           pr.Branch,
-			"base":             pr.Base,
-			"title":            pr.Title,
-			"state":            pr.State,
-			"draft":            pr.Draft,
-			"checksStatus":     pr.ChecksStatus,
-			"mergeStatus":      pr.MergeStatus,
-			"reviewStatus":     pr.ReviewStatus,
-			"babysitterTaskId": pr.BabysitterTaskID,
-			"updatedAt":        pr.UpdatedAt,
-		})
-	}
-	return out
-}
-
-func compactDiscordTargets(targets []core.TargetState) []map[string]any {
-	out := make([]map[string]any, 0, len(targets))
-	for _, target := range targets {
-		out = append(out, map[string]any{
-			"id":        target.ID,
-			"kind":      target.Kind,
-			"host":      target.Host,
-			"labels":    target.Labels,
-			"running":   target.Running,
-			"available": target.Available,
-			"health": map[string]any{
-				"status":    target.Health.Status,
-				"error":     truncateText(target.Health.Error, discordAssistantSummaryLimit),
-				"reachable": target.Health.Reachable,
-			},
-		})
-	}
-	return out
-}
-
-func compactDiscordPlugins(plugins []core.Plugin) []map[string]any {
-	out := make([]map[string]any, 0, len(plugins))
-	for _, plugin := range plugins {
-		out = append(out, map[string]any{
-			"id":           plugin.ID,
-			"name":         plugin.Name,
-			"kind":         plugin.Kind,
-			"protocol":     plugin.Protocol,
-			"enabled":      plugin.Enabled,
-			"builtIn":      plugin.BuiltIn,
-			"status":       plugin.Status,
-			"error":        truncateText(plugin.Error, discordAssistantSummaryLimit),
-			"capabilities": plugin.Capabilities,
-		})
-	}
-	return out
-}
-
-func compactDiscordEventSummaries(events []core.Event, limit int) []map[string]any {
-	if limit > 0 && len(events) > limit {
-		events = events[len(events)-limit:]
-	}
-	out := make([]map[string]any, 0, len(events))
-	for _, event := range events {
-		out = append(out, map[string]any{
-			"id":               event.ID,
-			"at":               event.At,
-			"type":             event.Type,
-			"taskId":           event.TaskID,
-			"workerId":         event.WorkerID,
-			"summary":          truncateText(discordEventSummary(event), discordAssistantSummaryLimit),
-			"payloadTruncated": len(event.Payload) > 0,
-		})
-	}
-	return out
 }
 
 func discordApplyResult(prefix string, result WorkerApplyResult) string {

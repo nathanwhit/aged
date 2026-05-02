@@ -991,6 +991,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		Draft:         req.Draft || project.PullRequestPolicy.Draft,
 		Metadata: map[string]any{
 			"workerId":          workerID,
+			"taskTitle":         task.Title,
 			"workDir":           sourceRoot,
 			"projectId":         project.ID,
 			"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
@@ -2776,6 +2777,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		WorkerID:     workerID,
 		WorkDir:      project.LocalPath,
 		BaseRevision: projectWorkspaceBaseRevision(ctx, project),
+		TaskTitle:    task.Title,
 	}
 	if strings.TrimSpace(workspaceSpec.BaseRevision) != "" {
 		plan.Metadata["workspaceBaseRevision"] = workspaceSpec.BaseRevision
@@ -2815,11 +2817,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	if !reusedWorkspace {
 		workspace, err = s.workspaces.Prepare(ctx, WorkspaceSpec{
-			TaskID:       workspaceSpec.TaskID,
-			WorkerID:     workspaceSpec.WorkerID,
-			WorkDir:      workspaceSpec.WorkDir,
-			BaseWorkDir:  workspaceSpec.BaseWorkDir,
-			BaseRevision: workspaceSpec.BaseRevision,
+			TaskID:        workspaceSpec.TaskID,
+			WorkerID:      workspaceSpec.WorkerID,
+			WorkDir:       workspaceSpec.WorkDir,
+			BaseWorkDir:   workspaceSpec.BaseWorkDir,
+			BaseRevision:  workspaceSpec.BaseRevision,
+			TaskTitle:     workspaceSpec.TaskTitle,
+			WorkerSummary: workspaceSpec.WorkerSummary,
 		})
 		if err != nil {
 			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -5413,6 +5417,9 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 		return spec, nil
 	}
 	spec.BaseWorkDir = base.CWD
+	if summary, err := s.workerCompletionSummary(ctx, baseWorkerID); err == nil {
+		spec.WorkerSummary = summary
+	}
 	switch base.VCSType {
 	case "jj":
 		if strings.TrimSpace(base.WorkspaceName) != "" {
@@ -5422,6 +5429,30 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 		spec.BaseRevision = ""
 	}
 	return spec, nil
+}
+
+func (s *Service) workerCompletionSummary(ctx context.Context, workerID string) (string, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventWorkerCompleted || event.WorkerID != workerID {
+			continue
+		}
+		var payload struct {
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return "", fmt.Errorf("decode worker completion: %w", err)
+		}
+		if strings.TrimSpace(payload.Summary) == "" {
+			return "", eventstore.ErrNotFound
+		}
+		return payload.Summary, nil
+	}
+	return "", eventstore.ErrNotFound
 }
 
 func (s *Service) workerRanOnTarget(ctx context.Context, workerID string, targetID string) (bool, error) {

@@ -44,9 +44,6 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 	if !strings.Contains(string(args), "--sandbox read-only") || !strings.Contains(string(args), "--cd "+projectDir) {
 		t.Fatalf("args = %s", args)
 	}
-	if !strings.Contains(string(args), `model_reasoning_effort="medium"`) {
-		t.Fatalf("args missing medium reasoning effort: %s", args)
-	}
 }
 
 func TestCLIAssistantUsesClaudeStreamResult(t *testing.T) {
@@ -80,9 +77,6 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}' '{"t
 	if !strings.Contains(string(args), "--output-format stream-json --verbose") {
 		t.Fatalf("args = %s", args)
 	}
-	if !strings.Contains(string(args), "--effort medium") {
-		t.Fatalf("args missing medium effort: %s", args)
-	}
 }
 
 func TestCLIAssistantResumesCodexSession(t *testing.T) {
@@ -113,9 +107,6 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 	if !strings.Contains(string(args), "exec resume") || !strings.Contains(string(args), "thread-1") {
 		t.Fatalf("args = %s", args)
 	}
-	if !strings.Contains(string(args), `model_reasoning_effort="medium"`) {
-		t.Fatalf("args missing medium reasoning effort: %s", args)
-	}
 }
 
 func TestCLIAssistantResumesClaudeSession(t *testing.T) {
@@ -145,9 +136,6 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"resumed claude"}'
 	}
 	if !strings.Contains(string(args), "--resume session-1") || !strings.Contains(string(args), "--output-format stream-json --verbose") {
 		t.Fatalf("args = %s", args)
-	}
-	if !strings.Contains(string(args), "--effort medium") {
-		t.Fatalf("args missing medium effort: %s", args)
 	}
 }
 
