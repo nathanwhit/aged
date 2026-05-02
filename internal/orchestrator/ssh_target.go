@@ -33,6 +33,7 @@ type RemoteCheckoutSpec struct {
 	RepoURL     string
 	WorkDir     string
 	DefaultBase string
+	BaseRef     string
 }
 
 type remoteStatus struct {
@@ -382,6 +383,7 @@ func remotePrepareCheckoutScript(spec RemoteCheckoutSpec) string {
 work_dir=%[1]s
 repo_url=%[2]s
 base=%[3]s
+base_ref=%[4]s
 if [ -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(git status --porcelain)" ]; then
@@ -412,7 +414,9 @@ else
   cd "$work_dir"
   git fetch origin --prune
 fi
-if [ -n "$base" ]; then
+if [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
+  git checkout --detach "$base_ref"
+elif [ -n "$base" ]; then
   if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
     git checkout --detach "origin/$base"
   else
@@ -420,7 +424,7 @@ if [ -n "$base" ]; then
     git pull --ff-only
   fi
 fi
-echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase))
+echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase), shellQuote(spec.BaseRef))
 }
 
 func remoteApplyPatchScript(workDir string, patchPath string) string {

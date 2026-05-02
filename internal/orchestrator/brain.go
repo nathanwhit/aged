@@ -18,6 +18,14 @@ type ReplanProvider interface {
 	Replan(ctx context.Context, task core.Task, state OrchestrationState) (ReplanDecision, error)
 }
 
+type CompletionReviewProvider interface {
+	ReviewCompletion(ctx context.Context, task core.Task, candidate WorkerTurnResult, reason string) (CompletionReview, error)
+}
+
+type PublicationReviewProvider interface {
+	ReviewPublication(ctx context.Context, task core.Task, candidate WorkerTurnResult, action PlanAction) (PublicationReview, error)
+}
+
 type AssistantProvider interface {
 	Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error)
 }
@@ -76,6 +84,18 @@ type ReplanDecision struct {
 	Rationale              string         `json:"rationale,omitempty"`
 	Message                string         `json:"message,omitempty"`
 	Metadata               map[string]any `json:"metadata,omitempty"`
+}
+
+type CompletionReview struct {
+	Ready    bool           `json:"ready"`
+	Reason   string         `json:"reason,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type PublicationReview struct {
+	Ready    bool           `json:"ready"`
+	Reason   string         `json:"reason,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 func (p Plan) Validate() error {

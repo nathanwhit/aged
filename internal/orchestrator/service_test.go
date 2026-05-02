@@ -586,6 +586,293 @@ func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *
 	}
 }
 
+func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandidates(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{errCount: 2}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "initial candidate is ready",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "repair first publish conflict against current checkout",
+			},
+		}, {
+			Action:    "complete",
+			Rationale: "first repair is final",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "review the repaired candidate one more time",
+				Spawns: []SpawnRequest{{
+					ID:         "post-repair-review",
+					Role:       "Final regression reviewer",
+					Reason:     "review the repaired candidate before completion",
+					WorkerKind: "change",
+				}},
+			},
+		}, {
+			Action:    "complete",
+			Rationale: "second repair is final",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Improve Long-Term Planning Intelligence",
+		Prompt:   "Improve long-term planning intelligence.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 3 {
+		t.Fatalf("publish calls = %d, want two failed publishes then success", publisher.publishCalls)
+	}
+	if len(publisher.publishedWorkers) != 3 ||
+		publisher.publishedWorkers[0] == publisher.publishedWorkers[1] ||
+		publisher.publishedWorkers[1] == publisher.publishedWorkers[2] {
+		t.Fatalf("published workers = %+v, want distinct candidates", publisher.publishedWorkers)
+	}
+	task = snapshot.Tasks[0]
+	if task.Error != "" || task.FinalCandidateWorkerID != publisher.publishedWorkers[2] {
+		t.Fatalf("task = %+v, published workers = %+v", task, publisher.publishedWorkers)
+	}
+	if got := countTaskActions(snapshot.Events, task.ID, "completion_publish_recovery", "completed"); got != 2 {
+		t.Fatalf("completed publish recoveries = %d, want 2", got)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"forcedConflictRepair":true`) {
+		t.Fatalf("missing forced conflict repair metadata")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, `"workspaceReusePolicy":"fresh"`) {
+		t.Fatalf("missing fresh recovery workspace policy")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, task.ID, "Your only job in this turn is to produce a new candidate") {
+		t.Fatalf("missing forced conflict repair prompt")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"spawnID":"post-repair-review"`) {
+		t.Fatalf("finalization recovery should not run follow-up review spawns")
+	}
+	if len(brain.states) < 4 {
+		t.Fatalf("replan states = %d, want initial plus two recovery replans", len(brain.states))
+	}
+	secondRecoveryState := brain.states[3]
+	if got := secondRecoveryState.BlockedFinalCandidateIDs; len(got) != 2 {
+		t.Fatalf("second recovery blocked final candidates = %+v, want two", got)
+	}
+}
+
+func TestServicePublishRecoveryDoesNotRepublishBlockedCandidateAfterReplanError(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply"),
+	}
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		err: errors.New("turn/start failed: Input exceeds the maximum length"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Improve Long-Term Planning Intelligence",
+		Prompt:   "Improve long-term planning intelligence.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want only original failed publish", publisher.publishCalls)
+	}
+	task = snapshot.Tasks[0]
+	if task.Error != "" {
+		t.Fatalf("task error = %q, want waiting without fatal error", task.Error)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_recovery", "started") {
+		t.Fatalf("missing started publish recovery action")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing dynamic replan error approval")
+	}
+}
+
+func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	baseBrain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "produce the first intermediate result for an ongoing investigation",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "Candidate is useful but only an intermediate artifact.",
+		}, {
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "continue toward a final result that satisfies the whole objective",
+			},
+		}, {
+			Action:  "wait",
+			Message: "continuing ongoing investigation",
+		}},
+	}
+	brain := &completionReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []CompletionReview{{
+			Ready:  false,
+			Reason: "the selected candidate is only an intermediate artifact for this open-ended task",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "intermediate artifact produced; more work remains"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{
+				{Path: "tools/investigation_notes.md", Status: "added"},
+			},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Subsystem",
+		Prompt: "Keep investigating possible improvements over multiple worker turns and open intermediate PRs when useful.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("review calls = %d, want 1", brain.reviewCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "completion_publish_readiness_recovery", "started") {
+		t.Fatalf("missing completion readiness recovery action")
+	}
+	if len(baseBrain.states) < 2 {
+		t.Fatalf("replan states = %d, want rejection then continuation", len(baseBrain.states))
+	}
+	if got := baseBrain.states[1].BlockedFinalCandidateIDs; len(got) != 1 {
+		t.Fatalf("blocked final candidates after rejection = %+v, want one blocked candidate", got)
+	}
+	if baseBrain.states[1].RecoveryHint == "" {
+		t.Fatalf("missing recovery hint after rejected completion")
+	}
+}
+
+func TestServicePublishesCompletionWhenCompletionReviewApprovesCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	baseBrain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "improve planner behavior for performance optimization work",
+		},
+		decisions: []ReplanDecision{{
+			Action:    "complete",
+			Rationale: "The candidate changes planner source code and adds regression coverage for performance-oriented planning decisions.",
+		}},
+	}
+	brain := &completionReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []CompletionReview{{
+			Ready:  true,
+			Reason: "candidate satisfies the bounded task objective",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "planner source changes with tests"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{
+				{Path: "internal/orchestrator/service.go", Status: "modified"},
+				{Path: "internal/orchestrator/service_test.go", Status: "modified"},
+			},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Long-Term Planning Intelligence",
+		Prompt: "Review aged for opportunities to improve intelligence of planning of longer term or more complex tasks. Particularly interested in performance optimization finding. Make improvements if you can.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want source candidate to publish", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("review calls = %d, want 1", brain.reviewCalls)
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("source candidate completion was incorrectly rejected")
+	}
+}
+
 func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -619,6 +906,7 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
 	snapshot = waitForEvent(t, store, core.EventTaskArtifact, task.ID)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	task, ok := findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")
@@ -631,6 +919,77 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 	if publisher.published.WorkerID == "" || publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
 		t.Fatalf("published from wrong worker workspace: %+v", publisher.published)
+	}
+}
+
+func TestServicePlanActionDoesNotPublishRejectedCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	baseBrain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "find and implement a real throughput optimization",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "publish a useful optimization PR when one is ready",
+				Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "The worker correctly reported this is not ready to publish yet.",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "continue until there is an actual task-relevant optimization",
+			},
+		}, {
+			Action:  "wait",
+			Message: "continuing broader investigation",
+		}},
+	}
+	brain := &publicationReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []PublicationReview{{
+			Ready:  false,
+			Reason: "worker result says the requested optimization is not done and only produced setup",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "I added setup notes, but the requested throughput optimization is not done yet."}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "bench/throughput.md", Status: "added"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Deno Serve Throughput",
+		Prompt: "Keep working until you find real throughput optimizations and open PRs as useful complete units become ready.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want rejected candidate to stay unpublished", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("publication review calls = %d, want 1", brain.reviewCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_readiness_rejected", "rejected") {
+		t.Fatalf("missing publication readiness rejection event")
+	}
+	if len(baseBrain.states) == 0 {
+		t.Fatalf("replanner was not given a chance to continue after rejected publication")
 	}
 }
 
@@ -675,6 +1034,79 @@ func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	}
 	if !hasMilestone(task.Milestones, "pull_requests_watched") || len(task.Artifacts) != 1 {
 		t.Fatalf("milestones=%+v artifacts=%+v", task.Milestones, task.Artifacts)
+	}
+}
+
+func TestServicePullRequestFollowUpSuppressesPlanSpawnsWhenReturningToWatch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-followup"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair PR",
+			"prompt": "Fix the pull request and keep watching it.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "repair dirty PR branch",
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return repaired PR to monitor",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+		Spawns: []SpawnRequest{{
+			ID:         "review-after-repair",
+			Role:       "post-repair reviewer",
+			Reason:     "review repaired PR",
+			WorkerKind: "reviewer",
+		}},
+	}}, map[string]worker.Runner{
+		"change":   eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "repaired"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if hasWorkerCreated(snapshot.Events, taskID, "reviewer") {
+		t.Fatalf("pull request follow-up should not run plan spawns before returning to watch")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"spawnsSuppressedReason":"pull_request_followup_returns_to_github_monitor"`) {
+		t.Fatalf("missing suppressed spawn metadata")
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
+		t.Fatalf("list spec = %+v", publisher.listSpec)
 	}
 }
 
@@ -923,6 +1355,134 @@ func TestServiceRoutesTaskToConfiguredProject(t *testing.T) {
 	}
 	if snapshot.Tasks[0].ProjectID == "" {
 		t.Fatalf("snapshot task missing project id: %+v", snapshot.Tasks[0])
+	}
+}
+
+func TestServiceStartsNewTaskWorkspaceFromProjectDefaultBase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "checkout", "-b", "feature")
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "unrelated feature")
+
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:           "repo",
+		Name:         "Repo",
+		LocalPath:    repo,
+		Repo:         "fork/repo",
+		UpstreamRepo: "owner/repo",
+		DefaultBase:  "main",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, repo, workspace)
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "New task",
+		Prompt: "Do unrelated work.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if workspace.baseRevision != "refs/remotes/upstream/main" {
+		t.Fatalf("workspace base revision = %q, want upstream default base", workspace.baseRevision)
+	}
+}
+
+func TestServicePublishedPRContainsWorkerChangesNotDaemonBranch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	runTestGit(t, repo, "checkout", "-b", "daemon-feature")
+	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("do not publish\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "unrelated.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "unrelated daemon branch work")
+
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:           "repo",
+		Name:         "Repo",
+		LocalPath:    repo,
+		Repo:         "fork/repo",
+		UpstreamRepo: "owner/repo",
+		DefaultBase:  "main",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/owner/repo/pull/22", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":22,"url":"https://github.com/owner/repo/pull/22","state":"OPEN","title":"CI","isDraft":false,"headRefName":"ci-branch","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "add workflow",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish CI workflow",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main", "branch": "ci-branch", "title": "CI", "body": "Body"},
+		}},
+	}}, map[string]worker.Runner{"writer": fileWritingRunner{
+		kind: "writer",
+		path: ".github/workflows/ci.yml",
+		body: "name: CI\n",
+	}}, repo, NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain))
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Add CI",
+		Prompt:   "Implement CI that checks formatting and runs all the tests.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	if contents := runTestGit(t, repo, "show", "ci-branch:.github/workflows/ci.yml"); contents != "name: CI\n" {
+		t.Fatalf("published branch missing worker workflow: %q", contents)
+	}
+	if _, err := runCommand(ctx, repo, "git", "cat-file", "-e", "ci-branch:unrelated.txt"); err == nil {
+		t.Fatalf("published branch included unrelated daemon branch file")
+	}
+	if base := strings.TrimSpace(runTestGit(t, repo, "merge-base", "ci-branch", "refs/remotes/upstream/main")); base != mainCommit {
+		t.Fatalf("branch merge-base = %q, want upstream main %q", base, mainCommit)
 	}
 }
 
@@ -1417,6 +1977,9 @@ func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	if retried.ID != task.ID {
 		t.Fatalf("retry returned task %q, want %q", retried.ID, task.ID)
 	}
+	if retried.Error != "" || retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+		t.Fatalf("retried task did not reset failed objective state: %+v", retried)
+	}
 
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if runner.callsValue() != 2 {
@@ -1477,6 +2040,9 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	if retried.ID != taskID || retried.Status != core.TaskPlanning {
 		t.Fatalf("retried = %+v", retried)
 	}
+	if retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+		t.Fatalf("retried objective = %q/%q, want active/retrying", retried.ObjectiveStatus, retried.ObjectivePhase)
+	}
 
 	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
 	if countEvents(snapshot.Events, core.EventTaskPlanned, taskID) != 2 {
@@ -1484,6 +2050,79 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	}
 	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
 		t.Fatalf("worker.created count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
+func TestServiceRetriesFinalCandidateByPublishingWithoutRerunningWorker(t *testing.T) {
+	for _, status := range []core.TaskStatus{core.TaskCanceled, core.TaskFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t)
+			defer store.Close()
+
+			publisher := &fakePullRequestPublisher{}
+			service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+				WorkerKind: "codex",
+				Prompt:     "implement the candidate",
+			}}, map[string]worker.Runner{
+				"codex": eventRunner{kind: "codex"},
+			}, t.TempDir(), fakeWorkspaceManager{
+				cwd:        t.TempDir(),
+				sourceRoot: t.TempDir(),
+				changes: WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+				},
+			})
+			service.SetPullRequestPublisher(publisher)
+
+			task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+				Title:  "Retry finalization",
+				Prompt: "Publish the existing candidate.",
+				Metadata: core.MustJSON(map[string]any{
+					"completionMode": "github",
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+			snapshot = waitForPullRequests(t, store, task.ID, 1)
+			snapshot = waitForTaskStatusEventCount(t, store, task.ID, core.TaskWaiting, 2)
+			if publisher.publishCalls != 1 {
+				t.Fatalf("initial publish calls = %d, want 1", publisher.publishCalls)
+			}
+			workerID := publisher.published.WorkerID
+			payload := map[string]any{
+				"status": status,
+			}
+			if status == core.TaskFailed {
+				payload["error"] = "publication failed"
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:    core.EventTaskStatus,
+				TaskID:  task.ID,
+				Payload: core.MustJSON(payload),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot = waitForTaskStatus(t, store, task.ID, status)
+
+			retried, err := service.RetryTask(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retried.Status != core.TaskPlanning || retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+				t.Fatalf("retried = %+v", retried)
+			}
+			snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+			if publisher.publishCalls != 2 || publisher.published.WorkerID != workerID {
+				t.Fatalf("publish calls = %d, spec = %+v", publisher.publishCalls, publisher.published)
+			}
+			if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 1 {
+				t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+			}
+		})
 	}
 }
 
@@ -1999,6 +2638,297 @@ func TestRecoverRemoteWorkersCancelsStaleLocalWorkers(t *testing.T) {
 	}
 }
 
+func TestCancelWorkerFallsBackToPersistedRemoteRun(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-remote"
+	workerID := "worker-remote"
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+	}})
+	executor := &fakeRemoteExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-remote",
+			"workerId":      workerID,
+			"workerKind":    "codex",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-worker",
+			"remoteRunDir":  "/runs/aged-worker",
+			"remoteWorkDir": "/repo",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-worker"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.CancelWorker(ctx, workerID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Workers[0].Status != core.WorkerCanceled {
+		t.Fatalf("worker status = %q, want canceled", snapshot.Workers[0].Status)
+	}
+	foundKill := false
+	for _, command := range executor.commands {
+		joined := strings.Join(command, " ")
+		if strings.Contains(joined, "kill-session") && strings.Contains(joined, "aged-worker") {
+			foundKill = true
+			break
+		}
+	}
+	if !foundKill {
+		t.Fatalf("expected remote tmux kill command, got %+v", executor.commands)
+	}
+}
+
+func TestRecoverRemoteWorkerResumesTaskAfterCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-recover-remote"
+	workerID := "worker-recover-remote"
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "run remotely"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-remote",
+			"workerId":      workerID,
+			"workerKind":    "codex",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-worker",
+			"remoteRunDir":  "/runs/aged-worker",
+			"remoteWorkDir": "/repo",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+			"metadata": map[string]any{
+				"nodeID": "node-remote",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-worker"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+	}
+}
+
+func TestRecoverRemoteWorkerCancelDoesNotCancelTaskWithOtherActiveWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-recover-remote"
+	canceledWorkerID := "worker-canceled"
+	activeWorkerID := "worker-active"
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, workerID := range []string{canceledWorkerID, activeWorkerID} {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":        "node-" + workerID,
+				"workerId":      workerID,
+				"workerKind":    "codex",
+				"targetId":      "vm-1",
+				"targetKind":    "ssh",
+				"remoteSession": "aged-" + workerID,
+				"remoteRunDir":  "/runs/aged-" + workerID,
+				"remoteWorkDir": "/repo",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerStarted,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-" + workerID}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: canceledWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.resumeRecoveredRemoteTask(ctx, taskID)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tasks[0].Status != core.TaskRunning {
+		t.Fatalf("task status = %q, want running while another worker remains active", snapshot.Tasks[0].Status)
+	}
+}
+
 func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2369,6 +3299,64 @@ func TestServiceTreatsRecoverableWorkerFailureAsUserAction(t *testing.T) {
 	}
 	if question, _ := payload["question"].(string); !strings.Contains(question, "perf: command not found") {
 		t.Fatalf("question = %q", question)
+	}
+}
+
+func TestServiceTreatsWorkflowScopePushRejectionAsRecoverable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New("push git branch: refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope"),
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "writer",
+		Prompt:     "add CI workflow",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish CI workflow",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+		}},
+	}}, map[string]worker.Runner{"writer": eventRunner{
+		kind:   "writer",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "added CI workflow"}},
+	}}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: ".github/workflows/ci.yml", Status: "added"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Add Formatting and Test CI",
+		Prompt:   "Add GitHub Actions CI.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser || snapshot.Tasks[0].ObjectivePhase != "approval_needed" {
+		t.Fatalf("objective = %q/%q, want user approval needed", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "github_workflow_scope_required" {
+		t.Fatalf("approval reason = %v", payload["reason"])
+	}
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want one blocked publish attempt", publisher.publishCalls)
 	}
 }
 
@@ -3772,6 +4760,38 @@ func TestServiceWaitsOnAmbiguousCompetingCandidatesWithoutFinalSelection(t *test
 	}
 }
 
+func TestLatestCandidateLeafExcludingSkipsBlockedCandidates(t *testing.T) {
+	results := []WorkerTurnResult{{
+		WorkerID: "base",
+		Status:   core.WorkerSucceeded,
+		Changes:  WorkspaceChanges{Dirty: true},
+	}, {
+		WorkerID:     "blocked-repair",
+		BaseWorkerID: "base",
+		Status:       core.WorkerSucceeded,
+		Changes:      WorkspaceChanges{Dirty: true},
+	}, {
+		WorkerID: "alternative",
+		Status:   core.WorkerSucceeded,
+		Changes:  WorkspaceChanges{Dirty: true},
+	}}
+
+	workerID, _ := latestCandidateLeafExcluding(results, map[string]string{
+		"blocked-repair": "publish conflict",
+	})
+	if workerID != "alternative" {
+		t.Fatalf("workerID = %q, want alternative", workerID)
+	}
+
+	workerID, _ = latestCandidateLeafExcluding(results, map[string]string{
+		"blocked-repair": "publish conflict",
+		"alternative":    "publish conflict",
+	})
+	if workerID != "" {
+		t.Fatalf("workerID = %q, want no unblocked candidate leaf", workerID)
+	}
+}
+
 func TestServiceUsesExplicitReplanFinalCandidateForCompetingBranches(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -4246,6 +5266,7 @@ type fakePullRequestPublisher struct {
 	publishedWorkers []string
 	publishCalls     int
 	errOnce          error
+	errCount         int
 	status           core.PullRequest
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
@@ -4264,6 +5285,9 @@ func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPu
 	p.published = spec
 	p.publishCalls++
 	p.publishedWorkers = append(p.publishedWorkers, spec.WorkerID)
+	if p.errCount > 0 && p.publishCalls <= p.errCount {
+		return core.PullRequest{}, errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply")
+	}
 	if p.errOnce != nil && p.publishCalls == 1 {
 		return core.PullRequest{}, p.errOnce
 	}
@@ -4370,6 +5394,40 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return decision, nil
+}
+
+type completionReviewBrain struct {
+	BrainProvider
+	ReplanProvider
+	reviews     []CompletionReview
+	reviewCalls int
+}
+
+func (b *completionReviewBrain) ReviewCompletion(context.Context, core.Task, WorkerTurnResult, string) (CompletionReview, error) {
+	b.reviewCalls++
+	if len(b.reviews) == 0 {
+		return CompletionReview{Ready: true}, nil
+	}
+	review := b.reviews[0]
+	b.reviews = b.reviews[1:]
+	return review, nil
+}
+
+type publicationReviewBrain struct {
+	BrainProvider
+	ReplanProvider
+	reviews     []PublicationReview
+	reviewCalls int
+}
+
+func (b *publicationReviewBrain) ReviewPublication(context.Context, core.Task, WorkerTurnResult, PlanAction) (PublicationReview, error) {
+	b.reviewCalls++
+	if len(b.reviews) == 0 {
+		return PublicationReview{Ready: true}, nil
+	}
+	review := b.reviews[0]
+	b.reviews = b.reviews[1:]
+	return review, nil
 }
 
 type continueThenSelectLatestBrain struct {
@@ -4939,6 +5997,39 @@ func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, co
 	return core.Snapshot{}
 }
 
+func waitForTaskStatusEventCount(t *testing.T, store eventstore.Store, taskID string, status core.TaskStatus, count int) core.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := 0
+		for _, event := range snapshot.Events {
+			if event.Type != core.EventTaskStatus || event.TaskID != taskID {
+				continue
+			}
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Status == status {
+				found++
+			}
+		}
+		if found >= count {
+			return snapshot
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot, _ := store.Snapshot(context.Background())
+	t.Fatalf("task %s did not record %d %s status events; events = %+v", taskID, count, status, snapshot.Events)
+	return core.Snapshot{}
+}
+
 func waitForEvent(t *testing.T, store eventstore.Store, eventType core.EventType, taskID string) core.Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -4981,6 +6072,11 @@ func hasEvent(events []core.Event, eventType core.EventType, taskID string, work
 }
 
 func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {
+	return countTaskActions(events, taskID, kind, status) > 0
+}
+
+func countTaskActions(events []core.Event, taskID string, kind string, status string) int {
+	count := 0
 	for _, event := range events {
 		if event.Type != core.EventTaskAction || event.TaskID != taskID {
 			continue
@@ -4993,10 +6089,10 @@ func hasTaskAction(events []core.Event, taskID string, kind string, status strin
 			continue
 		}
 		if payload.Kind == kind && payload.Status == status {
-			return true
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 func resultErrorContains(results []WorkerTurnResult, needle string) bool {

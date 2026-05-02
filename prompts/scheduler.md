@@ -10,6 +10,8 @@ Some objectives include external artifacts in the middle of the workflow, not on
 
 When the user's request is only to watch or babysit existing pull requests, use an immediate `watch_pull_requests` action and a cheap/no-op worker prompt. The orchestrator will import the matching PRs, mark the task as waiting on GitHub, and the GitHub monitor will steer the same task when checks, reviews, or mergeability need work.
 
+When the task is being resumed by GitHub follow-up because an existing PR needs work, schedule one bounded repair/inspection worker and an `after_success` `watch_pull_requests` action. Do not add reviewer or validation spawns for that turn; the GitHub monitor is the follow-up loop, and extra spawns should be reserved for normal implementation plans where no external monitor is taking over.
+
 When parallel workers may produce competing code candidates, do not assume the most recent worker should win. Plan review, validation, or consolidation turns so the dynamic replanner can either select a final candidate explicitly or schedule a worker that incorporates the chosen changes into a new final candidate.
 
 For performance-improvement requests, prefer decomposing the work into bounded investigation and validation roles instead of asking one worker to optimize everything. A good first plan often has one primary worker establish the current benchmark/profiling context, then parallel `spawns` such as:
@@ -20,6 +22,8 @@ For performance-improvement requests, prefer decomposing the work into bounded i
 - later validation workers that rerun the benchmark command and compare before/after results
 
 Use `dependsOn` to make implementation wait for investigation outputs and validation wait for implementation outputs. A worker can run benchmarks and compare results itself; only request new orchestrator primitives when repeatability, auditability, or UI display requires machine-readable benchmark artifacts.
+
+Treat broad performance-improvement investigations as ongoing objectives, not one-shot tasks. Benchmark harnesses, profiler notes, noisy measurements, or small cleanup patches are intermediate artifacts unless the user explicitly asked only for those. Do not complete the task or publish a completion PR for a performance candidate unless it includes a real product optimization and credible before/after evidence outside measured noise. If a worker finds only infrastructure or inconclusive results, schedule another investigation, implementation, or validation turn, or publish an explicitly intermediate draft PR action only when useful for review.
 
 When work is blocked by external user setup, do not fail the task. Use an `ask_user` action or ask the worker to report a `needs_input` blocker with exact setup requirements. Examples include missing profiling tools on a VM, missing permissions, SSH/auth setup, missing repository checkout, missing secrets, kernel settings, or a package/tool install that the orchestrator should not perform autonomously. The question must name the target/project when known, explain the blocker, list concrete commands or checks when possible, and say what response should resume the task.
 

@@ -684,27 +684,48 @@ func isTerminalWorkerStatus(status core.WorkerStatus) bool {
 }
 
 func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNode, run remoteRun) {
+	workerCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.cancels[node.WorkerID] = cancel
+	s.tasks[node.WorkerID] = node.TaskID
+	s.remoteRuns[node.WorkerID] = run
+	s.mu.Unlock()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		delete(s.cancels, node.WorkerID)
+		delete(s.tasks, node.WorkerID)
+		delete(s.remoteRuns, node.WorkerID)
+		s.mu.Unlock()
+	}()
+
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: node.TaskID, workerID: node.WorkerID, state: runState}
-	status, err := s.sshRunner.Poll(ctx, run, worker.ParserForKind(node.WorkerKind), sink)
+	status, err := s.sshRunner.Poll(workerCtx, run, worker.ParserForKind(node.WorkerKind), sink)
 	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		statusErr = err
 		workerStatus = core.WorkerFailed
 	}
-	changes := WorkspaceChanges{
-		Root:     run.RunDir,
-		CWD:      run.WorkDir,
-		Mode:     "remote",
-		VCSType:  "ssh",
-		DiffStat: "remote worker changes are reported through worker output",
+	if errors.Is(workerCtx.Err(), context.Canceled) {
+		workerStatus = core.WorkerCanceled
+		statusErr = context.Canceled
 	}
+	changes := s.sshRunner.DescribeChanges(ctx, run)
 	_, _ = s.append(ctx, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   node.TaskID,
 		WorkerID: node.WorkerID,
 		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
 	})
+	_ = s.recordWorkerArtifacts(ctx, node.TaskID, node.WorkerID, node.WorkerKind, runState, changes)
+	if workerStatus == core.WorkerCanceled {
+		if snapshot, err := s.store.Snapshot(ctx); err == nil && !taskHasActiveWorkers(snapshot, node.TaskID) {
+			_ = s.setTaskStatus(ctx, node.TaskID, core.TaskCanceled)
+		}
+		return
+	}
+	go s.resumeRecoveredRemoteTask(context.Background(), node.TaskID)
 }
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
@@ -994,16 +1015,16 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}); err != nil {
 		return core.PullRequest{}, err
 	}
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
-		return core.PullRequest{}, err
-	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
-		return core.PullRequest{}, err
-	}
 	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
 	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
 		return core.PullRequest{}, err
 	}
 	return pr, nil
@@ -1596,13 +1617,29 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
-	if task.Status == core.TaskFailed {
-		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
-		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
-			if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 				return core.Task{}, err
 			}
 			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
+			go s.retryFinalCandidateTask(context.Background(), task, results)
+			return task, nil
+		}
+	}
+	if task.Status == core.TaskFailed {
+		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
+		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+				return core.Task{}, err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
 			go s.retryGraphTask(context.Background(), task, initial, results)
 			return task, nil
 		}
@@ -1612,10 +1649,13 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		if err != nil {
 			return core.Task{}, err
 		}
-		if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 			return core.Task{}, err
 		}
 		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
 		go s.retryGraphTask(context.Background(), task, initial, results)
 		return task, nil
 	}
@@ -1623,12 +1663,68 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if err != nil {
 		return core.Task{}, err
 	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+	if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 		return core.Task{}, err
 	}
 	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "retrying"
 	go s.retryTask(context.Background(), task, plan)
 	return task, nil
+}
+
+func (s *Service) retryFinalCandidateTask(ctx context.Context, task core.Task, results []WorkerTurnResult) {
+	if err := s.completeTask(ctx, task.ID, results, task.FinalCandidateWorkerID, "retry final candidate publication"); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+	}
+}
+
+func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || isTerminalTaskStatus(task.Status) || taskHasActiveWorkers(snapshot, taskID) {
+		return
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "recovering", "Resuming task after recovered remote worker completion."); err != nil {
+		return
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "recovering"
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+		s.retryFinalCandidateTask(ctx, task, results)
+		return
+	}
+	s.retryGraphTask(ctx, task, initial, results)
+}
+
+func taskHasActiveWorkers(snapshot core.Snapshot, taskID string) bool {
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.TaskID == taskID && !isTerminalWorkerStatus(activeWorker.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
+		return err
+	}
+	return s.setTaskStatus(ctx, taskID, core.TaskPlanning)
 }
 
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
@@ -1637,7 +1733,7 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	remote := s.remoteRuns[workerID]
 	s.mu.Unlock()
 	if cancel == nil {
-		return eventstore.ErrNotFound
+		return s.cancelPersistedRemoteWorker(ctx, workerID)
 	}
 	if remote.Session != "" {
 		_ = s.sshRunner.Cancel(ctx, remote)
@@ -1646,14 +1742,85 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	return nil
 }
 
+func (s *Service) cancelPersistedRemoteWorker(ctx context.Context, workerID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	node, run, ok := s.persistedRemoteRun(snapshot, workerID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if run.Session != "" {
+		_ = s.sshRunner.Cancel(ctx, run)
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   node.TaskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerCanceled,
+			"summary": "Remote worker was canceled from persisted daemon state.",
+			"error":   "remote worker did not have a live local cancellation handle",
+			"workspaceChanges": WorkspaceChanges{
+				Root:    run.RunDir,
+				CWD:     run.WorkDir,
+				Mode:    "remote",
+				VCSType: "ssh",
+			},
+		}),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (core.ExecutionNode, remoteRun, bool) {
+	if s.targets == nil {
+		return core.ExecutionNode{}, remoteRun{}, false
+	}
+	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
+		node := snapshot.ExecutionNodes[i]
+		if node.WorkerID != workerID || node.TargetKind != string(TargetKindSSH) || isTerminalWorkerStatus(node.Status) {
+			continue
+		}
+		target, ok := s.targets.Get(node.TargetID)
+		if !ok {
+			return core.ExecutionNode{}, remoteRun{}, false
+		}
+		return node, remoteRun{
+			Target:  target,
+			Session: node.RemoteSession,
+			RunDir:  node.RemoteRunDir,
+			WorkDir: node.RemoteWorkDir,
+			Status:  "running",
+		}, true
+	}
+	return core.ExecutionNode{}, remoteRun{}, false
+}
+
 func (s *Service) CancelTask(ctx context.Context, taskID string) error {
+	canceledWorkers := map[string]bool{}
+	var workerIDs []string
 	s.mu.Lock()
-	for workerID, cancel := range s.cancels {
+	for workerID := range s.cancels {
 		if s.tasks[workerID] == taskID {
-			cancel()
+			canceledWorkers[workerID] = true
+			workerIDs = append(workerIDs, workerID)
 		}
 	}
 	s.mu.Unlock()
+	for _, workerID := range workerIDs {
+		_ = s.CancelWorker(ctx, workerID)
+	}
+	if snapshot, err := s.store.Snapshot(ctx); err == nil {
+		for _, activeWorker := range snapshot.Workers {
+			if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) || canceledWorkers[activeWorker.ID] {
+				continue
+			}
+			_ = s.CancelWorker(ctx, activeWorker.ID)
+		}
+	}
 
 	_, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
@@ -1826,7 +1993,7 @@ func (s *Service) recoverTaskApplyFailure(ctx context.Context, task core.Task, s
 	if attempts >= 1 || !isRecoverableApplyConflict(applyErr) {
 		return false, WorkerApplyResult{}, nil
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, task.ID, snapshot, task.FinalCandidateWorkerID, applyErr, "local_apply_recovery", "after_apply_conflict", "local apply failed")
+	recovery := s.recoverFinalCandidateWithReplan(ctx, task.ID, snapshot, task.FinalCandidateWorkerID, applyErr, "local_apply_recovery", "after_apply_conflict", "local apply failed", nil)
 	if !recovery.Handled {
 		return false, WorkerApplyResult{}, nil
 	}
@@ -2374,6 +2541,9 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
+	if resumingPullRequestFollowUp(snapshot, taskID) {
+		plan = normalizePullRequestFollowUpPlan(plan)
+	}
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
@@ -2421,6 +2591,53 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 			_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 		}
 	}
+}
+
+func resumingPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
+	latestFollowUp := int64(0)
+	latestWaitingStatus := int64(0)
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventPRFollowUp:
+			latestFollowUp = event.ID
+		case core.EventTaskStatus:
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == core.TaskWaiting {
+				latestWaitingStatus = event.ID
+			}
+		}
+	}
+	return latestFollowUp > 0 && latestFollowUp > latestWaitingStatus
+}
+
+func normalizePullRequestFollowUpPlan(plan Plan) Plan {
+	if len(plan.Spawns) == 0 {
+		return plan
+	}
+	if !planReturnsToPullRequestWatch(plan) {
+		return plan
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["suppressedSpawns"] = plan.Spawns
+	plan.Metadata["spawnsSuppressedReason"] = "pull_request_followup_returns_to_github_monitor"
+	plan.Spawns = nil
+	return plan
+}
+
+func planReturnsToPullRequestWatch(plan Plan) bool {
+	for _, action := range plan.Actions {
+		if strings.TrimSpace(action.Kind) == "watch_pull_requests" && strings.TrimSpace(action.When) != "immediate" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
@@ -2555,9 +2772,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["retryWorkspaceReused"] = false
 	}
 	workspaceSpec := WorkspaceSpec{
-		TaskID:   task.ID,
-		WorkerID: workerID,
-		WorkDir:  project.LocalPath,
+		TaskID:       task.ID,
+		WorkerID:     workerID,
+		WorkDir:      project.LocalPath,
+		BaseRevision: projectWorkspaceBaseRevision(ctx, project),
+	}
+	if strings.TrimSpace(workspaceSpec.BaseRevision) != "" {
+		plan.Metadata["workspaceBaseRevision"] = workspaceSpec.BaseRevision
 	}
 	if !reusedWorkspace {
 		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
@@ -2819,8 +3040,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	remoteWorkDir := nonEmpty(target.WorkDir, project.LocalPath)
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
 	reusedWorkspace := false
-	if retryFromWorkerID != "" {
+	if retryFromWorkerID != "" && !requireFreshWorkspace {
 		if retryWorkDir, err := s.remoteRetryWorkDir(ctx, target, retryFromWorkerID); err != nil {
 			plan.Metadata["retryWorkspaceReused"] = false
 			plan.Metadata["retryWorkspaceError"] = err.Error()
@@ -2834,7 +3056,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 	}
 	baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID")
-	if !reusedWorkspace && baseWorkerID != "" {
+	if !reusedWorkspace && baseWorkerID != "" && !requireFreshWorkspace {
 		if sameTarget, _ := s.workerRanOnTarget(ctx, baseWorkerID, target.ID); sameTarget {
 			if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err == nil {
 				remoteWorkDir = baseWorkDir
@@ -2851,6 +3073,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			RepoURL:     projectCloneURL(project),
 			WorkDir:     remoteWorkDir,
 			DefaultBase: project.DefaultBase,
+			BaseRef:     projectWorkspaceBaseCommit(ctx, project),
 		})
 		if err != nil {
 			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
@@ -3042,13 +3265,25 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 }
 
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
-	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, 0)
+	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, publishRecoveryState{})
 }
 
-func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, publishRecoveryAttempts int) error {
+const maxCompletionPublishRecoveryAttempts = maxDynamicReplanTurns
+
+type publishRecoveryState struct {
+	Attempts               int
+	BlockedFinalCandidates map[string]string
+}
+
+func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, recoveryState publishRecoveryState) error {
 	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
 	if err != nil {
 		return s.waitForFinalCandidateResolution(ctx, taskID, err)
+	}
+	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
+		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
+			return recoverErr
+		}
 	}
 	if candidateWorkerID != "" {
 		if strings.TrimSpace(reason) == "" {
@@ -3074,7 +3309,7 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
 			publishErr := fmt.Errorf("publish completion pull request: %w", err)
-			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, publishRecoveryAttempts); handled {
+			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, recoveryState); handled {
 				return recoverErr
 			}
 			_ = s.failTask(ctx, taskID, publishErr)
@@ -3094,22 +3329,143 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
 }
 
-func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, attempts int) (bool, error) {
-	if attempts >= 1 || !isRecoverablePublishConflict(publishErr) {
+func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, completionReason string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return true, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return true, eventstore.ErrNotFound
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok {
 		return false, nil
+	}
+	blockReason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, completionReason)
+	if !blocked {
+		return false, nil
+	}
+	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason))
+	if !recovery.Handled {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":     "completion_publish_readiness_recovery",
+			"when":     "before_publish",
+			"reason":   "Final candidate is not ready for publication.",
+			"workerId": candidateWorkerID,
+			"status":   "waiting",
+			"error":    blockReason,
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness", "The selected final candidate is not ready to publish as a completion pull request.\n\n"+blockReason+"\n\nSteer the task to continue, select a different final candidate, or explicitly publish anyway.", map[string]any{
+			"error": blockReason,
+		})
+		return true, nil
+	}
+	if recovery.Err != nil || !recovery.Completed {
+		return true, recovery.Err
+	}
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
+}
+
+func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error) finalCandidateRecoveryResult {
+	if _, ok := s.brain.(ReplanProvider); !ok {
+		return finalCandidateRecoveryResult{}
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return finalCandidateRecoveryResult{Handled: true, Err: eventstore.ErrNotFound}
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		return finalCandidateRecoveryResult{}
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok || strings.TrimSpace(candidate.Kind) == "" {
+		return finalCandidateRecoveryResult{}
+	}
+	results = annotateFinalCandidateFailure(results, candidateWorkerID, "completion publish readiness failed", failureErr)
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "completion_publish_readiness_recovery",
+		"when":     "before_publish",
+		"reason":   "Final candidate does not satisfy the task objective yet; asking the orchestrator to continue or select a different candidate.",
+		"workerId": candidateWorkerID,
+		"status":   "started",
+		"error":    failureErr.Error(),
+	}); err != nil {
+		return finalCandidateRecoveryResult{Handled: true, Err: err}
+	}
+	blockedFinalCandidates := map[string]string{candidateWorkerID: failureErr.Error()}
+	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
+		BlockedFinalCandidates: blockedFinalCandidates,
+		RecoveryHint:           fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
+	})
+	if !ok {
+		return finalCandidateRecoveryResult{Handled: true, Results: results}
+	}
+	if selectedWorkerID == "" {
+		if candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, ""); err == nil {
+			selectedWorkerID = candidateWorkerID
+			reason = nonEmpty(reason, candidateReason)
+		}
+	}
+	if selectedWorkerID == "" {
+		return finalCandidateRecoveryResult{Handled: true, Results: results}
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "completion_publish_readiness_recovery",
+		"when":     "before_publish",
+		"reason":   nonEmpty(reason, "Completion readiness recovery selected a new candidate."),
+		"workerId": selectedWorkerID,
+		"status":   "completed",
+	}); err != nil {
+		return finalCandidateRecoveryResult{Handled: true, Err: err}
+	}
+	return finalCandidateRecoveryResult{
+		Handled:          true,
+		Completed:        true,
+		SelectedWorkerID: selectedWorkerID,
+		Reason:           reason,
+		Results:          results,
+	}
+}
+
+func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, recoveryState publishRecoveryState) (bool, error) {
+	if !isRecoverablePublishConflict(publishErr) {
+		return false, nil
+	}
+	if recoveryState.Attempts >= maxCompletionPublishRecoveryAttempts {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":     "completion_publish_recovery",
+			"when":     "after_publish_conflict",
+			"reason":   "Completion publish recovery reached the retry limit.",
+			"workerId": candidateWorkerID,
+			"status":   "waiting",
+			"error":    publishErr.Error(),
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_conflict_recovery_limit", "Publishing the completion pull request still conflicts after multiple orchestrated repair attempts. Steer the task with how to resolve the remaining conflicts or publish manually from the retained worker workspace.", map[string]any{
+			"error":                   publishErr.Error(),
+			"blockedFinalCandidates":  sortedMapKeys(recoveryState.BlockedFinalCandidates),
+			"publishRecoveryAttempts": recoveryState.Attempts,
+		})
+		return true, nil
 	}
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return false, err
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed")
+	blockedFinalCandidates := copyStringMap(recoveryState.BlockedFinalCandidates)
+	blockedFinalCandidates[candidateWorkerID] = publishErr.Error()
+	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed", blockedFinalCandidates)
 	if !recovery.Handled {
 		return false, nil
 	}
 	if recovery.Err != nil || !recovery.Completed {
 		return true, recovery.Err
 	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, attempts+1)
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{
+		Attempts:               recoveryState.Attempts + 1,
+		BlockedFinalCandidates: blockedFinalCandidates,
+	})
 }
 
 type finalCandidateRecoveryResult struct {
@@ -3121,7 +3477,7 @@ type finalCandidateRecoveryResult struct {
 	Err              error
 }
 
-func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, actionKind string, actionWhen string, failureLabel string) finalCandidateRecoveryResult {
+func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, actionKind string, actionWhen string, failureLabel string, blockedFinalCandidates map[string]string) finalCandidateRecoveryResult {
 	if _, ok := s.brain.(ReplanProvider); !ok {
 		return finalCandidateRecoveryResult{}
 	}
@@ -3148,13 +3504,15 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 	}); err != nil {
 		return finalCandidateRecoveryResult{Handled: true, Err: err}
 	}
-	blockedFinalCandidates := map[string]string{
-		candidateWorkerID: failureErr.Error(),
-	}
+	blockedFinalCandidates = copyStringMap(blockedFinalCandidates)
+	blockedFinalCandidates[candidateWorkerID] = failureErr.Error()
 	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
 		BlockedFinalCandidates:         blockedFinalCandidates,
 		AllowBlockedBasePatchConflicts: true,
 		RecoveryHint:                   fmt.Sprintf("%s for worker %s. Do not complete with a blocked final candidate. Schedule a repair or consolidation worker that starts from the blocked worker changes, resolves conflicts against the current checkout, and produces a new candidate.", failureLabel, candidateWorkerID),
+		RequiredRepairWorkerID:         candidateWorkerID,
+		RequiredRepairReason:           failureErr.Error(),
+		FinalizationRecovery:           true,
 	})
 	if !ok {
 		return finalCandidateRecoveryResult{Handled: true, Results: results}
@@ -3291,6 +3649,11 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
+		if ready, err := s.reviewPlanPublicationReadiness(ctx, task, action, results, workerID); err != nil {
+			return false, err
+		} else if !ready {
+			return true, nil
+		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":     action.Kind,
 			"when":     nonEmpty(action.When, "after_success"),
@@ -3387,6 +3750,47 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 	default:
 		return true, nil
 	}
+}
+
+func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
+	reviewer, ok := s.brain.(PublicationReviewProvider)
+	if !ok {
+		return true, nil
+	}
+	candidate, ok := workerResultByID(results, workerID)
+	if !ok {
+		return false, fmt.Errorf("publish_pull_request action selected unknown worker %s", workerID)
+	}
+	review, err := reviewer.ReviewPublication(ctx, task, candidate, action)
+	if err != nil {
+		if recordErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "publish_pull_request_readiness_review",
+			"when":     nonEmpty(action.When, "after_success"),
+			"reason":   "Publication readiness review failed; continuing with the planned action.",
+			"workerId": workerID,
+			"status":   "ignored",
+			"error":    err.Error(),
+		}); recordErr != nil {
+			return false, recordErr
+		}
+		return true, nil
+	}
+	if review.Ready {
+		return true, nil
+	}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "candidate is not ready to publish as a pull request"
+	}
+	return false, s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":            "publish_pull_request_readiness_rejected",
+		"when":            nonEmpty(action.When, "after_success"),
+		"reason":          reason,
+		"actionReason":    action.Reason,
+		"workerId":        workerID,
+		"status":          "rejected",
+		"candidateStatus": candidate.Status,
+	})
 }
 
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {
@@ -3508,6 +3912,11 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 			reason:  "repo_setup_required",
 			summary: "Repository checkout or access is missing on the target environment.",
 			any:     []string{"repository not found", "not a git repository", "workdir is not inside a supported vcs workspace", "missing repository", "clone"},
+		},
+		{
+			reason:  "github_workflow_scope_required",
+			summary: "GitHub rejected the push because the configured token cannot update workflow files.",
+			any:     []string{"refusing to allow an oauth app to create or update workflow", "without `workflow` scope", "without workflow scope"},
 		},
 	}
 	for _, check := range checks {
@@ -3684,8 +4093,43 @@ func sortedMapKeys(values map[string]string) []string {
 	return keys
 }
 
+func copyStringMap(values map[string]string) map[string]string {
+	out := map[string]string{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
 func resultHasCandidateChanges(result WorkerTurnResult) bool {
 	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
+}
+
+func (s *Service) completionReadinessBlockReason(ctx context.Context, task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
+	reviewer, ok := s.brain.(CompletionReviewProvider)
+	if !ok {
+		return "", false
+	}
+	review, err := reviewer.ReviewCompletion(ctx, task, candidate, completionReason)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "completion_readiness_review",
+			"when":     "before_finalization",
+			"reason":   "Completion readiness review failed; continuing with the replanner decision.",
+			"workerId": candidate.WorkerID,
+			"status":   "ignored",
+			"error":    err.Error(),
+		})
+		return "", false
+	}
+	if review.Ready {
+		return "", false
+	}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "selected final candidate does not satisfy the task objective yet"
+	}
+	return reason, true
 }
 
 func (s *Service) taskCompletionMode(ctx context.Context, taskID string) string {
@@ -3717,6 +4161,9 @@ type replanLoopOptions struct {
 	BlockedFinalCandidates         map[string]string
 	AllowBlockedBasePatchConflicts bool
 	RecoveryHint                   string
+	RequiredRepairWorkerID         string
+	RequiredRepairReason           string
+	FinalizationRecovery           bool
 }
 
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
@@ -3728,20 +4175,31 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	if !ok {
 		return true, "", "", results
 	}
-	blockedFinalCandidateIDs := sortedMapKeys(options.BlockedFinalCandidates)
+	blockedFinalCandidates := map[string]string{}
+	for workerID, reason := range options.BlockedFinalCandidates {
+		blockedFinalCandidates[workerID] = reason
+	}
+	recoveryHint := options.RecoveryHint
 	for turn := 1; turn <= maxDynamicReplanTurns; turn++ {
+		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
 			Results:                  results,
 			Turn:                     turn,
 			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
-			RecoveryHint:             options.RecoveryHint,
+			RecoveryHint:             recoveryHint,
 		})
 		if err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err))
+			recoveryOptions := options
+			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
+			recoveryOptions.RecoveryHint = recoveryHint
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err), recoveryOptions)
 		}
 		if err := decision.Validate(); err != nil {
-			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err))
+			recoveryOptions := options
+			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
+			recoveryOptions.RecoveryHint = recoveryHint
+			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err), recoveryOptions)
 		}
 		if _, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskReplanned,
@@ -3756,7 +4214,22 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		switch decision.Action {
 		case "complete":
-			if len(options.BlockedFinalCandidates) > 0 {
+			if taskCompletionModeFromTask(task) != "github" {
+				if candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID); err == nil && candidateWorkerID != "" {
+					if candidate, ok := workerResultByID(results, candidateWorkerID); ok {
+						if reason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, decision.Rationale); blocked {
+							blockedFinalCandidates[candidateWorkerID] = reason
+							recoveryHint = reason + " Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable."
+							if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+								_ = s.failTask(ctx, task.ID, err)
+								return false, "", "", results
+							}
+							continue
+						}
+					}
+				}
+			}
+			if len(blockedFinalCandidates) > 0 {
 				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
 				if candidateErr != nil || candidateWorkerID == "" {
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {
@@ -3765,7 +4238,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					}
 					continue
 				}
-				if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+				if reason := blockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "blocked final candidate "+candidateWorkerID+" already failed finalization: "+reason); err != nil {
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
@@ -3789,6 +4262,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
+			if strings.TrimSpace(options.RequiredRepairWorkerID) != "" {
+				next = forceConflictRepairPlan(task, next, options.RequiredRepairWorkerID, nonEmpty(options.RequiredRepairReason, recoveryHint), blockedFinalCandidates)
+			}
 			if stringMetadata(next.Metadata, "baseWorkerID") == "" {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
@@ -3796,10 +4272,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			if options.AllowBlockedBasePatchConflicts {
 				baseWorkerID := stringMetadata(next.Metadata, "baseWorkerID")
-				if _, blocked := options.BlockedFinalCandidates[baseWorkerID]; blocked {
+				if _, blocked := blockedFinalCandidates[baseWorkerID]; blocked {
 					next.Metadata["allowBasePatchConflicts"] = true
 					next.Metadata["recoveryBaseWorkerID"] = baseWorkerID
-					next.Metadata["recoveryHint"] = options.RecoveryHint
+					next.Metadata["recoveryHint"] = recoveryHint
 				}
 			}
 			normalizePlanReasoning(&next)
@@ -3841,6 +4317,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if !s.finishOrContinueTask(ctx, task.ID, result) {
 				return false, "", "", results
 			}
+			if options.FinalizationRecovery {
+				reason := nonEmpty(result.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
+				return true, result.WorkerID, reason, results
+			}
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
@@ -3868,9 +4348,35 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	return false, "", "", results
 }
 
-func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil {
+		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+			candidateErr = fmt.Errorf("fallback final candidate %s is blocked: %s", candidateWorkerID, reason)
+		} else {
+			reason := "fallback completion after replanner error: " + replanErr.Error()
+			if candidateReason != "" {
+				reason += "; " + candidateReason
+			}
+			_, _ = s.append(ctx, core.Event{
+				Type:   core.EventTaskReplanned,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"turn": turn,
+					"decision": ReplanDecision{
+						Action:                 "complete",
+						FinalCandidateWorkerID: candidateWorkerID,
+						Rationale:              reason,
+						Message:                "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
+					},
+					"fallback": true,
+					"error":    replanErr.Error(),
+				}),
+			})
+			return true, candidateWorkerID, reason, results
+		}
+	}
+	if candidateWorkerID, candidateReason := latestCandidateLeafExcluding(results, options.BlockedFinalCandidates); candidateWorkerID != "" {
 		reason := "fallback completion after replanner error: " + replanErr.Error()
 		if candidateReason != "" {
 			reason += "; " + candidateReason
@@ -3888,29 +4394,6 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 				},
 				"fallback": true,
 				"error":    replanErr.Error(),
-			}),
-		})
-		return true, candidateWorkerID, reason, results
-	}
-	if candidateWorkerID, candidateReason := latestCandidateLeaf(results); candidateWorkerID != "" {
-		reason := "fallback completion with latest candidate leaf after replanner error: " + replanErr.Error()
-		if candidateReason != "" {
-			reason += "; " + candidateReason
-		}
-		_, _ = s.append(ctx, core.Event{
-			Type:   core.EventTaskReplanned,
-			TaskID: task.ID,
-			Payload: core.MustJSON(map[string]any{
-				"turn": turn,
-				"decision": ReplanDecision{
-					Action:                 "complete",
-					FinalCandidateWorkerID: candidateWorkerID,
-					Rationale:              reason,
-					Message:                "The replanner failed and final-candidate fallback was ambiguous, so aged selected the latest successful candidate leaf.",
-				},
-				"fallback":       true,
-				"error":          replanErr.Error(),
-				"candidateError": candidateErr.Error(),
 			}),
 		})
 		return true, candidateWorkerID, reason, results
@@ -3944,13 +4427,71 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 	return false, "", "", results
 }
 
+func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, repairReason string, blocked map[string]string) Plan {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	originalPrompt := strings.TrimSpace(plan.Prompt)
+	plan.Prompt = buildConflictRepairPrompt(task, blockedWorkerID, repairReason, sortedMapKeys(blocked), originalPrompt)
+	plan.Rationale = nonEmpty(plan.Rationale, "Repair blocked final candidate so it applies cleanly.")
+	plan.Metadata["baseWorkerID"] = blockedWorkerID
+	plan.Metadata["allowBasePatchConflicts"] = true
+	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID
+	plan.Metadata["recoveryHint"] = repairReason
+	plan.Metadata["forcedConflictRepair"] = true
+	plan.Metadata["workspaceReusePolicy"] = "fresh"
+	return plan
+}
+
+func buildConflictRepairPrompt(task core.Task, blockedWorkerID string, repairReason string, blockedWorkerIDs []string, originalPrompt string) string {
+	var builder strings.Builder
+	builder.WriteString("# Conflict Repair Task\n\n")
+	builder.WriteString("The previous final candidate could not be published or applied because its patch conflicts with the current checkout.\n\n")
+	builder.WriteString("Blocked worker ID: ")
+	builder.WriteString(blockedWorkerID)
+	builder.WriteString("\n")
+	if strings.TrimSpace(repairReason) != "" {
+		builder.WriteString("Failure:\n")
+		builder.WriteString(strings.TrimSpace(repairReason))
+		builder.WriteString("\n\n")
+	}
+	if len(blockedWorkerIDs) > 0 {
+		builder.WriteString("Already blocked final candidates:\n")
+		for _, id := range blockedWorkerIDs {
+			builder.WriteString("- ")
+			builder.WriteString(id)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("Original task:\n")
+	builder.WriteString(task.Title)
+	builder.WriteString("\n\n")
+	builder.WriteString(task.Prompt)
+	builder.WriteString("\n\n")
+	builder.WriteString("Your only job in this turn is to produce a new candidate that preserves the blocked worker's intended changes while resolving the conflicts against the current checkout. Do not run a review-only pass. Do not merely validate the old candidate. Make the code changes needed for the repaired candidate, remove conflict markers if any, and run the focused tests needed to show the repaired patch is applyable.\n")
+	if originalPrompt != "" {
+		builder.WriteString("\nScheduler's original recovery request, for context only:\n")
+		builder.WriteString(originalPrompt)
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
 func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
+	return latestCandidateLeafExcluding(results, nil)
+}
+
+func latestCandidateLeafExcluding(results []WorkerTurnResult, blocked map[string]string) (string, string) {
 	leaves := candidateLeaves(candidateResults(results))
 	if len(leaves) == 0 {
 		return "", ""
 	}
 	for i := len(results) - 1; i >= 0; i-- {
 		for _, leaf := range leaves {
+			if _, isBlocked := blocked[leaf.WorkerID]; isBlocked {
+				continue
+			}
 			if results[i].WorkerID == leaf.WorkerID {
 				return leaf.WorkerID, "selected latest successful candidate leaf after ambiguous deterministic fallback"
 			}
@@ -4289,7 +4830,7 @@ func (s *Service) projectForTask(task core.Task) core.Project {
 }
 
 func projectCloneURL(project core.Project) string {
-	repo := strings.TrimSpace(nonEmpty(project.Repo, project.UpstreamRepo))
+	repo := strings.TrimSpace(nonEmpty(project.UpstreamRepo, project.Repo))
 	if repo == "" {
 		return ""
 	}
@@ -4300,6 +4841,65 @@ func projectCloneURL(project core.Project) string {
 		return "https://github.com/" + repo + ".git"
 	}
 	return repo
+}
+
+func projectWorkspaceBaseRevision(ctx context.Context, project core.Project) string {
+	base := strings.TrimSpace(project.DefaultBase)
+	if base == "" || strings.TrimSpace(project.LocalPath) == "" {
+		return ""
+	}
+	if strings.HasPrefix(base, "refs/") || gitCommitRefExists(ctx, project.LocalPath, base) && !looksLikeBranchName(base) {
+		return base
+	}
+	for _, ref := range []string{
+		"refs/remotes/upstream/" + base,
+		"refs/remotes/origin/" + base,
+		"refs/heads/" + base,
+		base,
+	} {
+		if gitCommitRefExists(ctx, project.LocalPath, ref) {
+			return ref
+		}
+	}
+	return ""
+}
+
+func projectWorkspaceBaseCommit(ctx context.Context, project core.Project) string {
+	ref := projectWorkspaceBaseRevision(ctx, project)
+	if ref == "" {
+		return ""
+	}
+	out, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func gitCommitRefExists(ctx context.Context, dir string, ref string) bool {
+	if strings.TrimSpace(dir) == "" || strings.TrimSpace(ref) == "" {
+		return false
+	}
+	_, err := runCommand(ctx, dir, "git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil
+}
+
+func looksLikeBranchName(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	return ref != "" && !strings.Contains(ref, "/") && !looksLikeHexObjectID(ref)
+}
+
+func looksLikeHexObjectID(ref string) bool {
+	if len(ref) < 7 || len(ref) > 40 {
+		return false
+	}
+	for _, char := range ref {
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
@@ -4915,6 +5515,18 @@ func applyRemotePatch(ctx context.Context, project core.Project, workspace Prepa
 		return result, fmt.Errorf("apply checked remote patch: %w", err)
 	}
 	return result, nil
+}
+
+func sourceCheckoutCommit(ctx context.Context, sourceRoot string) string {
+	sourceRoot = strings.TrimSpace(sourceRoot)
+	if sourceRoot == "" {
+		return ""
+	}
+	out, err := runCommand(ctx, sourceRoot, "git", "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func probeGitApplyThreeWay(ctx context.Context, sourceRoot string, patchFile string) error {

@@ -110,6 +110,70 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	return decision, nil
 }
 
+func (b *CodexBrain) ReviewCompletion(ctx context.Context, task core.Task, candidate WorkerTurnResult, reason string) (CompletionReview, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	prompt := b.completionReviewPrompt(task, candidate, reason)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return CompletionReview{}, fmt.Errorf("codex completion review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
+	}
+
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return CompletionReview{}, err
+	}
+	content = trimJSONFence(content)
+	review, err := decodeCompletionReview([]byte(content))
+	if err != nil {
+		return CompletionReview{}, fmt.Errorf("decode codex completion review: %w", err)
+	}
+	if review.Metadata == nil {
+		review.Metadata = map[string]any{}
+	}
+	review.Metadata["brain"] = "codex"
+	review.Metadata["scheduler"] = "orchestrator"
+	return review, nil
+}
+
+func (b *CodexBrain) ReviewPublication(ctx context.Context, task core.Task, candidate WorkerTurnResult, action PlanAction) (PublicationReview, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	prompt := b.publicationReviewPrompt(task, candidate, action)
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return PublicationReview{}, fmt.Errorf("codex publication review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
+	}
+
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return PublicationReview{}, err
+	}
+	content = trimJSONFence(content)
+	review, err := decodePublicationReview([]byte(content))
+	if err != nil {
+		return PublicationReview{}, fmt.Errorf("decode codex publication review: %w", err)
+	}
+	if review.Metadata == nil {
+		review.Metadata = map[string]any{}
+	}
+	review.Metadata["brain"] = "codex"
+	review.Metadata["scheduler"] = "orchestrator"
+	return review, nil
+}
+
 func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -247,6 +311,38 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		decision.Plan = &plan
 	}
 	return decision, nil
+}
+
+func decodeCompletionReview(data []byte) (CompletionReview, error) {
+	var raw struct {
+		Ready    bool           `json:"ready"`
+		Reason   string         `json:"reason,omitempty"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	}
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
+		return CompletionReview{}, err
+	}
+	return CompletionReview{
+		Ready:    raw.Ready,
+		Reason:   raw.Reason,
+		Metadata: raw.Metadata,
+	}, nil
+}
+
+func decodePublicationReview(data []byte) (PublicationReview, error) {
+	var raw struct {
+		Ready    bool           `json:"ready"`
+		Reason   string         `json:"reason,omitempty"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	}
+	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
+		return PublicationReview{}, err
+	}
+	return PublicationReview{
+		Ready:    raw.Ready,
+		Reason:   raw.Reason,
+		Metadata: raw.Metadata,
+	}, nil
 }
 
 func decodeCodexPlan(data []byte) (Plan, error) {
@@ -463,7 +559,7 @@ func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) stri
 			"title":  task.Title,
 			"prompt": task.Prompt,
 		},
-		"state": state,
+		"state": compactOrchestrationStateForPrompt(state),
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
 			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
@@ -498,6 +594,7 @@ Field rules:
 - When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id that should be the final task result. If no existing candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
 - When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty.
 - Use "continue" when another worker turn is needed.
+- For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
 - When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
@@ -512,6 +609,181 @@ Field rules:
 Dynamic replanning input:
 
 ` + string(data)
+}
+
+func (b *CodexBrain) completionReviewPrompt(task core.Task, candidate WorkerTurnResult, reason string) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"selectedCandidate": candidate,
+		"completionReason":  reason,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return strings.TrimSpace(b.template) + `
+
+You are reviewing whether the selected final candidate actually satisfies the user's task objective.
+
+Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
+
+The JSON object must have exactly these top-level fields:
+
+{
+  "ready": true,
+  "reason": "string"
+}
+
+Readiness rules:
+- Set "ready": true only when the selected candidate is an appropriate final result for the task as the user stated it.
+- Set "ready": false when the task describes an ongoing, multi-turn, keep-working, babysitting, monitoring, or open-ended objective and the candidate is only an intermediate artifact.
+- Set "ready": false when the candidate or completion reason says more implementation, validation, review response, benchmarking, or follow-up work is still needed.
+- Set "ready": false when the candidate does not address the actual task objective, even if it produced useful setup, test, benchmark, documentation, or diagnostic artifacts.
+- Set "ready": true for bounded one-shot tasks when the candidate appears to satisfy that bounded request, including tasks where tests, documentation, or diagnostic artifacts are the requested output.
+- Do not require perfection. This is a task-contract review, not a general code review.
+
+Completion review input:
+
+` + string(data)
+}
+
+func (b *CodexBrain) publicationReviewPrompt(task core.Task, candidate WorkerTurnResult, action PlanAction) string {
+	payload := map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"candidate":         candidate,
+		"publicationAction": action,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return task.Prompt
+	}
+	return strings.TrimSpace(b.template) + `
+
+You are reviewing whether the orchestrator should publish the selected worker result as a pull request right now.
+
+Return exactly one JSON object and nothing else. Do not wrap it in markdown.
+The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
+
+The JSON object must have exactly these top-level fields:
+
+{
+  "ready": true,
+  "reason": "string"
+}
+
+Publication readiness rules:
+- Set "ready": true only when the candidate contains real, task-relevant changes that are appropriate to expose as a pull request now.
+- A candidate may be publishable even when the broader task should continue, but only if this PR would contain a coherent useful unit of work on its own.
+- Set "ready": false when the candidate summary says the requested work is not done, the work should continue before review, validation is missing for the claimed change, or the candidate is only diagnostic setup for a broader implementation task.
+- Set "ready": false when the changed files do not address the user's actual task objective, even if they are useful for another task.
+- Set "ready": false when the action would publish a branch without the worker's requested changes.
+- Do not perform a general code review. Decide only whether opening a PR now matches the task, candidate, and planned publication action.
+
+Publication review input:
+
+` + string(data)
+}
+
+const (
+	maxReplanPromptResults      = 30
+	maxPromptPlanTextBytes      = 12000
+	maxPromptRationaleBytes     = 4000
+	maxPromptResultSummaryBytes = 3000
+	maxPromptResultErrorBytes   = 2000
+	maxPromptStatusBytes        = 1000
+	maxPromptDiffStatBytes      = 2000
+	maxPromptArtifactBytes      = 2000
+	maxPromptChangedFiles       = 40
+	maxPromptArtifacts          = 20
+)
+
+func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationState {
+	state.InitialPlan = compactPlanForPrompt(state.InitialPlan)
+	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
+
+	blocked := map[string]bool{}
+	for _, id := range state.BlockedFinalCandidateIDs {
+		blocked[id] = true
+	}
+	keepFrom := 0
+	if len(state.Results) > maxReplanPromptResults {
+		keepFrom = len(state.Results) - maxReplanPromptResults
+	}
+	results := make([]WorkerTurnResult, 0, len(state.Results)-keepFrom)
+	for index, result := range state.Results {
+		if index < keepFrom && !blocked[result.WorkerID] {
+			continue
+		}
+		results = append(results, compactWorkerTurnResultForPrompt(result))
+	}
+	state.Results = results
+	return state
+}
+
+func compactPlanForPrompt(plan Plan) Plan {
+	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
+	plan.Rationale = truncateStringForPrompt(plan.Rationale, maxPromptRationaleBytes)
+	for index := range plan.Steps {
+		plan.Steps[index].Title = truncateStringForPrompt(plan.Steps[index].Title, maxPromptRationaleBytes)
+		plan.Steps[index].Description = truncateStringForPrompt(plan.Steps[index].Description, maxPromptRationaleBytes)
+	}
+	for index := range plan.RequiredApprovals {
+		plan.RequiredApprovals[index].Title = truncateStringForPrompt(plan.RequiredApprovals[index].Title, maxPromptRationaleBytes)
+		plan.RequiredApprovals[index].Reason = truncateStringForPrompt(plan.RequiredApprovals[index].Reason, maxPromptRationaleBytes)
+	}
+	for index := range plan.Actions {
+		plan.Actions[index].Reason = truncateStringForPrompt(plan.Actions[index].Reason, maxPromptRationaleBytes)
+	}
+	for index := range plan.Spawns {
+		plan.Spawns[index].Role = truncateStringForPrompt(plan.Spawns[index].Role, maxPromptRationaleBytes)
+		plan.Spawns[index].Reason = truncateStringForPrompt(plan.Spawns[index].Reason, maxPromptRationaleBytes)
+	}
+	return plan
+}
+
+func compactWorkerTurnResultForPrompt(result WorkerTurnResult) WorkerTurnResult {
+	result.Summary = truncateStringForPrompt(result.Summary, maxPromptResultSummaryBytes)
+	result.Error = truncateStringForPrompt(result.Error, maxPromptResultErrorBytes)
+	result.Changes.Status = truncateStringForPrompt(result.Changes.Status, maxPromptStatusBytes)
+	result.Changes.DiffStat = truncateStringForPrompt(result.Changes.DiffStat, maxPromptDiffStatBytes)
+	result.Changes.Diff = ""
+	result.Changes.Error = truncateStringForPrompt(result.Changes.Error, maxPromptResultErrorBytes)
+	if len(result.Changes.ChangedFiles) > maxPromptChangedFiles {
+		omitted := len(result.Changes.ChangedFiles) - maxPromptChangedFiles
+		result.Changes.ChangedFiles = append(result.Changes.ChangedFiles[:maxPromptChangedFiles], WorkspaceChangedFile{
+			Path:   fmt.Sprintf("... %d additional changed files omitted ...", omitted),
+			Status: "omitted",
+		})
+	}
+	if len(result.Changes.Artifacts) > maxPromptArtifacts {
+		result.Changes.Artifacts = result.Changes.Artifacts[:maxPromptArtifacts]
+	}
+	for index := range result.Changes.Artifacts {
+		result.Changes.Artifacts[index].Content = truncateStringForPrompt(result.Changes.Artifacts[index].Content, maxPromptArtifactBytes)
+	}
+	return result
+}
+
+func truncateStringForPrompt(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	const marker = "\n... truncated for replanning prompt ...\n"
+	if maxBytes <= len(marker) {
+		return value[:maxBytes]
+	}
+	head := (maxBytes - len(marker)) / 2
+	tail := maxBytes - len(marker) - head
+	return value[:head] + marker + value[len(value)-tail:]
 }
 
 func extractCodexAgentMessage(output []byte) (string, error) {
