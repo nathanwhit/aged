@@ -1462,6 +1462,18 @@ small {
   white-space: pre-wrap;
 }
 
+.worker-prompt-section summary {
+  cursor: pointer;
+}
+
+.worker-prompt-section summary::-webkit-details-marker {
+  color: #7a818d;
+}
+
+.worker-prompt-section[open] summary {
+  padding-bottom: 2px;
+}
+
 .tool-output {
   background: #202124;
   color: #eceff1;

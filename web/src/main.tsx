@@ -1979,18 +1979,20 @@ function WorkerPrompt({ worker, created }: { worker: Worker; created: EventRecor
   const prompt = payloadValue(worker.prompt) || payloadValue(payload.prompt);
   const promptPath = payloadValue(worker.promptPath) || payloadValue(payload.promptPath);
   const promptError = payloadValue(worker.promptError) || payloadValue(payload.promptError);
+  const promptSummary = prompt ? `${prompt.length.toLocaleString()} chars` : "Unavailable";
   return (
-    <section className="worker-section-card">
-      <div className="section-title-row">
+    <details className="worker-section-card worker-prompt-section">
+      <summary className="section-title-row">
         <strong>Prompt</strong>
+        <span className="tool-status neutral">{promptSummary}</span>
         {promptPath && <span className="tool-status neutral">{promptPath}</span>}
-      </div>
+      </summary>
       {prompt ? (
-        <CodeBlock label="prompt" value={prompt} className="worker-prompt-block" />
+        <TruncatedBlock label="prompt" value={prompt} className="worker-prompt-block" limit={4000} />
       ) : (
         <p className="empty">{promptError ? `Prompt unavailable: ${promptError}` : "Prompt unavailable for this worker."}</p>
       )}
-    </section>
+    </details>
   );
 }
 
