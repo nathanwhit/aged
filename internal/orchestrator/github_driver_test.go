@@ -93,7 +93,7 @@ func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *test
 	if !ok {
 		t.Fatal("missing github issue task")
 	}
-	waitForPullRequests(t, store, task.ID, 1)
+	_ = waitForPullRequests(t, store, task.ID, 1)
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	task, ok = findTask(snapshot, task.ID)
 	if !ok {
