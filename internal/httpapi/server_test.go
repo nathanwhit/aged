@@ -142,6 +142,102 @@ func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
 	}
 }
 
+func TestSnapshotCanOmitEventsAndExposeLastEventID(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"title": "Task A", "prompt": "Load quickly"})},
+		{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": strings.Repeat("x", 256)})},
+		{Type: core.EventTaskStatus, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/snapshot?events=none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var snapshot core.Snapshot
+	if err := json.NewDecoder(res.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Events) != 0 {
+		t.Fatalf("events = %d, want 0", len(snapshot.Events))
+	}
+	if snapshot.LastEventID != 3 {
+		t.Fatalf("last event id = %d, want 3", snapshot.LastEventID)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskSucceeded {
+		t.Fatalf("tasks = %+v", snapshot.Tasks)
+	}
+}
+
+func TestTaskEventsEndpointLimitsWorkerOutput(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-events"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Events", "prompt": "Lazy detail"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"text": "first"})},
+		{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"text": "second"})},
+		{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/tasks/" + taskID + "/events?limit=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var events []core.Event
+	if err := json.NewDecoder(res.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 {
+		t.Fatalf("events = %d, want 4", len(events))
+	}
+	var outputCount int
+	for _, event := range events {
+		if event.Type == core.EventWorkerOutput {
+			outputCount++
+		}
+	}
+	if outputCount != 1 {
+		t.Fatalf("worker.output events = %d, want 1; events = %+v", outputCount, events)
+	}
+}
+
 func TestMCPEndpointInitializesAndListsTools(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
