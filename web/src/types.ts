@@ -135,6 +135,9 @@ export type Worker = {
   kind: string;
   status: WorkerStatus;
   command?: string[];
+  prompt?: string;
+  promptPath?: string;
+  promptError?: string;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;

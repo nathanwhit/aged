@@ -2890,6 +2890,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		Payload: core.MustJSON(map[string]any{
 			"kind":     plan.WorkerKind,
 			"command":  command,
+			"prompt":   spec.Prompt,
 			"metadata": planMetadata(plan),
 		}),
 	}); err != nil {
@@ -3176,9 +3177,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		TaskID:   task.ID,
 		WorkerID: workerID,
 		Payload: core.MustJSON(map[string]any{
-			"kind":     plan.WorkerKind,
-			"command":  command,
-			"metadata": planMetadata(plan),
+			"kind":       plan.WorkerKind,
+			"command":    command,
+			"prompt":     spec.Prompt,
+			"promptPath": remotePromptPath(remoteRun),
+			"metadata":   planMetadata(plan),
 		}),
 	}); err != nil {
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)

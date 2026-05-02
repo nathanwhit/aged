@@ -119,14 +119,17 @@ type TaskArtifact struct {
 }
 
 type Worker struct {
-	ID        string          `json:"id"`
-	TaskID    string          `json:"taskId"`
-	Kind      string          `json:"kind"`
-	Status    WorkerStatus    `json:"status"`
-	Command   []string        `json:"command,omitempty"`
-	CreatedAt time.Time       `json:"createdAt"`
-	UpdatedAt time.Time       `json:"updatedAt"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	ID          string          `json:"id"`
+	TaskID      string          `json:"taskId"`
+	Kind        string          `json:"kind"`
+	Status      WorkerStatus    `json:"status"`
+	Command     []string        `json:"command,omitempty"`
+	Prompt      string          `json:"prompt,omitempty"`
+	PromptPath  string          `json:"promptPath,omitempty"`
+	PromptError string          `json:"promptError,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
 }
 
 type ExecutionNode struct {

@@ -110,6 +110,54 @@ func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 	}
 }
 
+func TestSnapshotProjectsWorkerPrompt(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Prompt task",
+			"prompt": "Original request",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind":       "codex",
+			"command":    []string{"codex", "exec", "-"},
+			"prompt":     "line one\n  line two",
+			"promptPath": "prompt.txt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(snapshot.Workers))
+	}
+	worker := snapshot.Workers[0]
+	if worker.Prompt != "line one\n  line two" {
+		t.Fatalf("worker prompt = %q", worker.Prompt)
+	}
+	if worker.PromptPath != "prompt.txt" {
+		t.Fatalf("worker prompt path = %q", worker.PromptPath)
+	}
+}
+
 func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

@@ -60,6 +60,15 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	if !hasWorkerCreated(snapshot.Events, task.ID, "chosen") {
 		t.Fatalf("missing worker.created with chosen kind")
 	}
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(snapshot.Workers))
+	}
+	if snapshot.Workers[0].Prompt != runner.prompt {
+		t.Fatalf("snapshot worker prompt = %q, want runner prompt %q", snapshot.Workers[0].Prompt, runner.prompt)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "prompt", runner.prompt) {
+		t.Fatalf("missing worker.created prompt")
+	}
 }
 
 func TestServicePassesReasoningEffortToWorker(t *testing.T) {

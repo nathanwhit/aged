@@ -1350,6 +1350,21 @@ small {
   color: #e8edf2;
 }
 
+.worker-prompt-block {
+  background: #f8fafc;
+  border: 1px solid #e3e7ee;
+  border-radius: 6px;
+  color: #343741;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .tool-output {
   background: #202124;
   color: #eceff1;
