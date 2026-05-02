@@ -589,6 +589,20 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	if err != nil {
 		return core.Snapshot{}, err
 	}
+	s.hydrateSnapshotRuntimeState(&snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
+	snapshot, err := s.store.SnapshotSummary(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	s.hydrateSnapshotRuntimeState(&snapshot)
+	return snapshot, nil
+}
+
+func (s *Service) hydrateSnapshotRuntimeState(snapshot *core.Snapshot) {
 	if s.targets != nil {
 		snapshot.Targets = s.targets.Snapshot()
 	}
@@ -598,7 +612,6 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	if s.plugins != nil {
 		snapshot.Plugins = s.plugins.Snapshot()
 	}
-	return snapshot, nil
 }
 
 func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
@@ -730,6 +743,10 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
 	return s.store.ListEvents(ctx, afterID, limit)
+}
+
+func (s *Service) TaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error) {
+	return s.store.ListTaskEvents(ctx, taskID, limit)
 }
 
 func (s *Service) Subscribe() (int, <-chan core.Event) {

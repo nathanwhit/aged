@@ -55,6 +55,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/assistant", s.assistant)
 	mux.HandleFunc("GET /api/tasks/lookup", s.lookupTask)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
@@ -84,7 +85,15 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := s.service.Snapshot(r.Context())
+	var (
+		snapshot core.Snapshot
+		err      error
+	)
+	if r.URL.Query().Get("events") == "none" {
+		snapshot, err = s.service.SnapshotSummary(r.Context())
+	} else {
+		snapshot, err = s.service.Snapshot(r.Context())
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -271,6 +280,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	afterID := parseInt64(r.URL.Query().Get("after"))
 	limit := int(parseInt64(r.URL.Query().Get("limit")))
 	events, err := s.service.Events(r.Context(), afterID, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	limit := int(parseInt64(r.URL.Query().Get("limit")))
+	events, err := s.service.TaskEvents(r.Context(), r.PathValue("id"), limit)
 	if err != nil {
 		writeError(w, err)
 		return

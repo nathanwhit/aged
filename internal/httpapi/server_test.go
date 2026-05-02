@@ -133,6 +133,153 @@ func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
 	}
 }
 
+func TestSnapshotCanOmitEventsAndExposeLastEventID(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-mobile",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Mobile task",
+				"prompt": "Load quickly.",
+			}),
+		},
+		{
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-mobile",
+			WorkerID: "worker-mobile",
+			Payload: core.MustJSON(map[string]any{
+				"stream": "stdout",
+				"text":   strings.Repeat("x", 1024),
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: "task-mobile",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskSucceeded,
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/snapshot?events=none")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var snapshot core.Snapshot
+	if err := json.NewDecoder(res.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Events) != 0 {
+		t.Fatalf("events = %d, want 0", len(snapshot.Events))
+	}
+	if snapshot.LastEventID != 3 {
+		t.Fatalf("last event id = %d, want 3", snapshot.LastEventID)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskSucceeded {
+		t.Fatalf("tasks = %+v", snapshot.Tasks)
+	}
+}
+
+func TestTaskEventsReturnsSelectedTaskHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-a",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task A",
+				"prompt": "A",
+			}),
+		},
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-b",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task B",
+				"prompt": "B",
+			}),
+		},
+		{
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-a",
+			WorkerID: "worker-a",
+			Payload: core.MustJSON(map[string]any{
+				"text": "progress",
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/tasks/task-a/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var events []core.Event
+	if err := json.NewDecoder(res.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2: %+v", len(events), events)
+	}
+	for _, event := range events {
+		if event.TaskID != "task-a" {
+			t.Fatalf("unexpected task event: %+v", event)
+		}
+	}
+	if events[1].Type != core.EventWorkerOutput {
+		t.Fatalf("second event = %q, want worker output", events[1].Type)
+	}
+
+	limitedRes, err := http.Get(server.URL + "/api/tasks/task-a/events?limit=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer limitedRes.Body.Close()
+	var limited []core.Event
+	if err := json.NewDecoder(limitedRes.Body).Decode(&limited); err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 2 || limited[0].Type != core.EventTaskCreated || limited[1].Type != core.EventWorkerOutput {
+		t.Fatalf("limited events = %+v, want lifecycle events plus latest worker output", limited)
+	}
+}
+
 func TestMCPEndpointInitializesAndListsTools(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {

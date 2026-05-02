@@ -3,7 +3,11 @@ package eventstore
 import (
 	"context"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"aged/internal/core"
 )
@@ -107,6 +111,126 @@ func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 	}
 	if snapshot.Tasks[0].Error != "publish completion pull request: patch does not apply" {
 		t.Fatalf("task error = %q", snapshot.Tasks[0].Error)
+	}
+}
+
+func TestSnapshotSummaryLastEventIDCoversCompactProjection(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aged.db")
+	reader, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	writer, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	taskID := "task-compact"
+	if _, err := writer.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Compact projection",
+			"prompt": "Keep the SSE handoff id consistent.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var phaseEventIDs sync.Map
+	appendPhase := func(ctx context.Context, seq int64) error {
+		phase := "phase-" + strconv.FormatInt(seq, 10)
+		event, err := writer.Append(ctx, core.Event{
+			Type:   core.EventTaskObjective,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.ObjectiveActive,
+				"phase":  phase,
+			}),
+		})
+		if err != nil {
+			return err
+		}
+		phaseEventIDs.Store(seq, event.ID)
+		return nil
+	}
+	for seq := int64(0); seq < 300; seq++ {
+		if err := appendPhase(ctx, seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	appendCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for seq := int64(300); seq < 900; seq++ {
+			if err := appendPhase(appendCtx, seq); err != nil {
+				if appendCtx.Err() != nil {
+					return
+				}
+				errCh <- err
+				return
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	observed := 0
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-errCh:
+			t.Fatal(err)
+		default:
+		}
+		snapshot, err := reader.SnapshotSummary(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Events) != 0 {
+			t.Fatalf("compact snapshot events = %d, want 0", len(snapshot.Events))
+		}
+		if len(snapshot.Tasks) != 1 {
+			t.Fatalf("tasks = %+v", snapshot.Tasks)
+		}
+		phase := snapshot.Tasks[0].ObjectivePhase
+		if !strings.HasPrefix(phase, "phase-") {
+			continue
+		}
+		seq, err := strconv.ParseInt(strings.TrimPrefix(phase, "phase-"), 10, 64)
+		if err != nil {
+			t.Fatalf("objective phase = %q", phase)
+		}
+		value, ok := phaseEventIDs.Load(seq)
+		if !ok {
+			continue
+		}
+		eventID := value.(int64)
+		if snapshot.LastEventID < eventID {
+			t.Fatalf("last event id = %d, compact phase %q came from event %d", snapshot.LastEventID, phase, eventID)
+		}
+		observed++
+		if observed >= 50 {
+			cancel()
+			<-done
+			return
+		}
+	}
+	cancel()
+	<-done
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
+	if observed == 0 {
+		t.Fatal("did not observe any compact projection updates")
 	}
 }
 
