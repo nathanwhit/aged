@@ -277,19 +277,49 @@ func TestServiceGeneratesMissingTaskTitle(t *testing.T) {
 }
 
 func TestNormalizeCreateTaskRequestDefaultsCompletionModeToGitHubAndPreservesExplicitLocal(t *testing.T) {
-	defaultReq, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
-		Title:  "Fix TODOs",
-		Prompt: "Take a look at TODOs in the code and fix them.",
-	})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name   string
+		prompt string
+		want   string
+	}{
+		{
+			name:   "default work prompt",
+			prompt: "Take a look at TODOs in the code and fix them.",
+			want:   "github",
+		},
+		{
+			name:   "no problem is not no pr",
+			prompt: "No problem, fix this.",
+			want:   "github",
+		},
+		{
+			name:   "explicit no pr",
+			prompt: "Fix this, no PR.",
+			want:   "local",
+		},
+		{
+			name:   "explicit local only",
+			prompt: "Fix this local-only.",
+			want:   "local",
+		},
 	}
-	var metadata map[string]any
-	if err := json.Unmarshal(defaultReq.Metadata, &metadata); err != nil {
-		t.Fatal(err)
-	}
-	if metadata["completionMode"] != "github" {
-		t.Fatalf("default metadata = %+v", metadata)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
+				Title:  "Fix TODOs",
+				Prompt: test.prompt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var metadata map[string]any
+			if err := json.Unmarshal(req.Metadata, &metadata); err != nil {
+				t.Fatal(err)
+			}
+			if metadata["completionMode"] != test.want {
+				t.Fatalf("metadata = %+v, want completionMode %q", metadata, test.want)
+			}
+		})
 	}
 
 	explicitLocalReq, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
@@ -302,7 +332,7 @@ func TestNormalizeCreateTaskRequestDefaultsCompletionModeToGitHubAndPreservesExp
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata = nil
+	var metadata map[string]any
 	if err := json.Unmarshal(explicitLocalReq.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,8 @@ type WorkerChangesReview struct {
 	Workspace PreparedWorkspace `json:"workspace"`
 	Changes   WorkspaceChanges  `json:"changes"`
 }
+
+var standaloneNoPRPattern = regexp.MustCompile(`\bno\s+pr\b`)
 
 type WorkerApplyResult struct {
 	WorkerID      string                 `json:"workerId"`
@@ -5056,7 +5059,7 @@ func promptRequestsLocalCompletion(prompt string) bool {
 		strings.Contains(lower, "do not open pr") ||
 		strings.Contains(lower, "don't open a pr") ||
 		strings.Contains(lower, "don't open pr") ||
-		strings.Contains(lower, "no pr")
+		standaloneNoPRPattern.MatchString(lower)
 }
 
 func promptRequestsGitHubCompletion(prompt string) bool {

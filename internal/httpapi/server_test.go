@@ -307,6 +307,13 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	if err := json.Unmarshal([]byte(content["text"].(string)), &task); err != nil {
 		t.Fatal(err)
 	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "github" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
 
 	resources := postMCP(t, server.URL, `{"jsonrpc":"2.0","id":2,"method":"resources/list"}`)
 	list := resources["result"].(map[string]any)["resources"].([]any)
