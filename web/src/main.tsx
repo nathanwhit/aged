@@ -93,7 +93,6 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "pull-requests", span: 6, minHeight: 0 },
   { id: "current-state", span: 6, minHeight: 0 },
   { id: "workers", span: 12, minHeight: 0 },
-  { id: "worker-detail", span: 8, minHeight: 0 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "plugins", span: 8, minHeight: 0 },
   { id: "timeline", span: 12, minHeight: 360 },
@@ -147,9 +146,6 @@ function App() {
   const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
   const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
-  const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
-  const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
-  const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
 
@@ -292,15 +288,6 @@ function App() {
             />
           ),
         },
-        ...(selectedWorker
-          ? [
-              {
-                id: "worker-detail" as const,
-                title: "Worker Detail",
-                element: <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />,
-              },
-            ]
-          : []),
         {
           id: "timeline",
           title: "Timeline",
@@ -1656,12 +1643,21 @@ function WorkerList({
       {workers.length === 0 && nodes.length === 0 ? (
         <p className="empty">No workers have been spawned.</p>
       ) : (
-        <div className="worker-grid">
+        <div className="worker-table" role="table" aria-label="Workers">
+          <div className="worker-table-head" role="row">
+            <span>Worker</span>
+            <span>Status</span>
+            <span>Latest</span>
+            <span>Target</span>
+            <span>Updated</span>
+            <span>Actions</span>
+          </div>
           {orchestrationRows(workers, nodes, graph).map(({ worker, node, graphNode }) => {
             const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
             const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
             const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
             const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
+            const title = node?.role || graphNode?.role || kind;
             const completion = workerId ? latestWorkerCompletion(events, workerId) : {};
             const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
             const applied = workerId ? workerChangesApplied(events, workerId) : false;
@@ -1675,63 +1671,82 @@ function WorkerList({
               return dependency && dependency.status !== "succeeded";
             });
             const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
+            const updatedAt = worker?.updatedAt ?? node?.updatedAt ?? graph?.updatedAt ?? "";
+            const isSelected = workerId === selectedWorkerId || (!selectedWorkerId && !workerId && rowId === selectedWorkerId);
             return (
-              <article key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
-                <div>
-                  <strong>{node?.role || graphNode?.role || kind}</strong>
-                  <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
-                </div>
-                <Status value={status} />
-                <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
-                  <Eye size={16} />
+              <article key={rowId} className={isSelected ? "worker-row selected" : "worker-row"} role="row">
+                <button className="worker-row-main" disabled={!workerId} onClick={() => onSelect(workerId)} title={workerId ? "Inspect worker" : undefined}>
+                  <span className="worker-row-title">
+                    <strong>{title}</strong>
+                    <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)} · {kind}</small>
+                  </span>
                 </button>
-                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
-                  <CircleStop size={16} />
-                </button>
-                <div className="worker-context">
-                  <WorkerContextItem label="Kind" value={kind} />
-                  <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
-                  <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
-                  <WorkerContextItem label="Updated" value={worker ? new Date(worker.updatedAt).toLocaleTimeString() : node ? new Date(node.updatedAt).toLocaleTimeString() : ""} />
-                  {duration && <WorkerContextItem label="Duration" value={duration} />}
-                  {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
-                </div>
-                {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
-                  <div className="worker-graph-context">
-                    {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
-                    {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
-                    {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
-                  </div>
-                )}
-                <div className="worker-current">
-                  <span>Latest</span>
-                  <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
-                </div>
-                <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
-                {changes.length > 0 && (
-                  <div className="worker-review">
-                    <details>
-                      <summary>{changes.length} changed files</summary>
-                      <ul>
-                        {changes.slice(0, 8).map((file) => (
-                          <li key={`${file.status}-${file.path}`}>
-                            <code>{file.status ?? "changed"}</code>
-                            <span>{file.path}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </details>
-                    <div className="worker-review-actions">
-                      <button className="secondary compact" disabled={!workerId || diff?.loading} onClick={() => toggleDiff(workerId)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
-                        <FileText size={16} />
-                        {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
-                      </button>
-                      <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
-                        <Check size={16} />
-                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
-                      </button>
+                <span className="worker-row-status">
+                  <Status value={status} />
+                </span>
+                <span className="worker-row-latest" title={latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}>
+                  {latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}
+                </span>
+                <span className="worker-row-target">{targetLabel(node, graphNode)}</span>
+                <span className="worker-row-updated">{updatedAt ? new Date(updatedAt).toLocaleTimeString() : ""}</span>
+                <span className="worker-row-actions">
+                  {changes.length > 0 && <span className="pill">{changes.length} files</span>}
+                  {isFinalCandidate && <span className="pill ok">Final</span>}
+                  <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
+                    <Eye size={16} />
+                  </button>
+                  <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
+                    <CircleStop size={16} />
+                  </button>
+                </span>
+                {isSelected && (
+                  <div className="worker-row-detail">
+                    <div className="worker-context">
+                      <WorkerContextItem label="Kind" value={kind} />
+                      <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
+                      <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
+                      <WorkerContextItem label="Updated" value={updatedAt ? new Date(updatedAt).toLocaleTimeString() : ""} />
+                      {duration && <WorkerContextItem label="Duration" value={duration} />}
+                      {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
                     </div>
-                    {diff?.open && <DiffViewer state={diff} />}
+                    {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
+                      <div className="worker-graph-context">
+                        {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                        {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
+                        {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
+                      </div>
+                    )}
+                    <div className="worker-current">
+                      <span>Latest</span>
+                      <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
+                    </div>
+                    <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
+                    {changes.length > 0 && (
+                      <div className="worker-review">
+                        <details>
+                          <summary>{changes.length} changed files</summary>
+                          <ul>
+                            {changes.slice(0, 8).map((file) => (
+                              <li key={`${file.status}-${file.path}`}>
+                                <code>{file.status ?? "changed"}</code>
+                                <span>{file.path}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                        <div className="worker-review-actions">
+                          <button className="secondary compact" disabled={!workerId || diff?.loading} onClick={() => toggleDiff(workerId)} title={diff?.open ? "Hide worker diff" : "Show worker diff"}>
+                            <FileText size={16} />
+                            {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
+                          </button>
+                          <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
+                            <Check size={16} />
+                            {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
+                          </button>
+                        </div>
+                        {diff?.open && <DiffViewer state={diff} />}
+                      </div>
+                    )}
                   </div>
                 )}
               </article>
@@ -1797,7 +1812,26 @@ function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: Orc
   for (const worker of workers) {
     rows.set(worker.id, { ...rows.get(worker.id), worker });
   }
-  return [...rows.values()];
+  return [...rows.values()].sort((left, right) => {
+    const priorityDelta = orchestrationRowPriority(left) - orchestrationRowPriority(right);
+    if (priorityDelta !== 0) return priorityDelta;
+    return orchestrationRowUpdatedAt(right, graph) - orchestrationRowUpdatedAt(left, graph);
+  });
+}
+
+function orchestrationRowPriority(row: OrchestrationRow): number {
+  const status = row.worker?.status ?? row.node?.status ?? row.graphNode?.status ?? "queued";
+  if (status === "failed") return 0;
+  if (status === "running") return 1;
+  if (status === "waiting" || status === "queued") return 2;
+  if (status === "canceled") return 3;
+  return 4;
+}
+
+function orchestrationRowUpdatedAt(row: OrchestrationRow, graph: OrchestrationGraph | undefined): number {
+  const updatedAt = row.worker?.updatedAt ?? row.node?.updatedAt ?? graph?.updatedAt ?? "";
+  const timestamp = Date.parse(updatedAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function WorkerContextItem({ label, value }: { label: string; value: string }) {
