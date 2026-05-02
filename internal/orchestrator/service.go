@@ -589,20 +589,6 @@ func (s *Service) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	if err != nil {
 		return core.Snapshot{}, err
 	}
-	s.hydrateSnapshotRuntimeState(&snapshot)
-	return snapshot, nil
-}
-
-func (s *Service) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
-	snapshot, err := s.store.SnapshotSummary(ctx)
-	if err != nil {
-		return core.Snapshot{}, err
-	}
-	s.hydrateSnapshotRuntimeState(&snapshot)
-	return snapshot, nil
-}
-
-func (s *Service) hydrateSnapshotRuntimeState(snapshot *core.Snapshot) {
 	if s.targets != nil {
 		snapshot.Targets = s.targets.Snapshot()
 	}
@@ -612,6 +598,7 @@ func (s *Service) hydrateSnapshotRuntimeState(snapshot *core.Snapshot) {
 	if s.plugins != nil {
 		snapshot.Plugins = s.plugins.Snapshot()
 	}
+	return snapshot, nil
 }
 
 func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
@@ -743,10 +730,6 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
 	return s.store.ListEvents(ctx, afterID, limit)
-}
-
-func (s *Service) TaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error) {
-	return s.store.ListTaskEvents(ctx, taskID, limit)
 }
 
 func (s *Service) Subscribe() (int, <-chan core.Event) {
@@ -991,7 +974,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
-		body = defaultTaskPullRequestBody(snapshot, task, workerID)
+		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
 		TaskID:        taskID,
@@ -1045,94 +1028,6 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
-}
-
-func defaultTaskPullRequestBody(snapshot core.Snapshot, task core.Task, workerID string) string {
-	summary, changes, ok := completedWorkerDetails(snapshot, task.ID, workerID)
-	if !ok || !hasPullRequestChangeDetails(summary, changes) {
-		return fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
-	}
-
-	var builder strings.Builder
-	builder.WriteString("## Summary\n\n")
-	if strings.TrimSpace(summary) != "" {
-		builder.WriteString(truncatePullRequestBodySection(summary, 4000))
-	} else {
-		builder.WriteString("Implemented task changes in worker `")
-		builder.WriteString(workerID)
-		builder.WriteString("`.")
-	}
-
-	changedFiles := changes.ChangedFiles
-	if len(changedFiles) > 0 {
-		builder.WriteString("\n\n## Changed Files\n\n")
-		maxFiles := 30
-		for index, file := range changedFiles {
-			if index >= maxFiles {
-				builder.WriteString(fmt.Sprintf("- ... %d additional file(s) omitted\n", len(changedFiles)-maxFiles))
-				break
-			}
-			builder.WriteString("- `")
-			builder.WriteString(file.Path)
-			builder.WriteString("`")
-			if strings.TrimSpace(file.Status) != "" {
-				builder.WriteString(" (")
-				builder.WriteString(file.Status)
-				builder.WriteString(")")
-			}
-			builder.WriteString("\n")
-		}
-	}
-
-	if diffStat := strings.TrimSpace(changes.DiffStat); diffStat != "" {
-		builder.WriteString("\n## Diff Stat\n\n```text\n")
-		builder.WriteString(truncatePullRequestBodySection(diffStat, 2000))
-		builder.WriteString("\n```")
-	}
-
-	return strings.TrimSpace(builder.String())
-}
-
-func completedWorkerDetails(snapshot core.Snapshot, taskID string, workerID string) (string, WorkspaceChanges, bool) {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return "", WorkspaceChanges{}, false
-	}
-	for i := len(snapshot.Events) - 1; i >= 0; i-- {
-		event := snapshot.Events[i]
-		if event.Type != core.EventWorkerCompleted || event.TaskID != taskID || event.WorkerID != workerID {
-			continue
-		}
-		var payload struct {
-			Summary          string                 `json:"summary,omitempty"`
-			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
-			WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges,omitempty"`
-		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			return "", WorkspaceChanges{}, false
-		}
-		changes := payload.WorkspaceChanges
-		if len(changes.ChangedFiles) == 0 {
-			changes.ChangedFiles = payload.ChangedFiles
-		}
-		return strings.TrimSpace(payload.Summary), changes, true
-	}
-	return "", WorkspaceChanges{}, false
-}
-
-func hasPullRequestChangeDetails(summary string, changes WorkspaceChanges) bool {
-	return strings.TrimSpace(summary) != "" ||
-		strings.TrimSpace(changes.DiffStat) != "" ||
-		len(changes.ChangedFiles) > 0 ||
-		strings.TrimSpace(changes.Diff) != ""
-}
-
-func truncatePullRequestBodySection(value string, maxBytes int) string {
-	value = strings.TrimSpace(value)
-	if maxBytes <= 0 || len(value) <= maxBytes {
-		return value
-	}
-	return value[:maxBytes] + "\n[truncated]"
 }
 
 func (s *Service) pullRequestSourceRootForWorker(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, error) {

@@ -20,9 +20,6 @@ import (
 const (
 	oauthStateCookie = "aged_oauth_state"
 	sessionCookie    = "aged_session"
-
-	oauthStateDuration     = 10 * time.Minute
-	defaultSessionDuration = 7 * 24 * time.Hour
 )
 
 type contextKey string
@@ -177,7 +174,7 @@ func (a *GoogleAuth) login(w http.ResponseWriter, r *http.Request) {
 		Name:     oauthStateCookie,
 		Value:    state,
 		Path:     "/auth",
-		MaxAge:   int(oauthStateDuration.Seconds()),
+		MaxAge:   int((10 * time.Minute).Seconds()),
 		HttpOnly: true,
 		Secure:   secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
@@ -230,7 +227,7 @@ func (a *GoogleAuth) callback(w http.ResponseWriter, r *http.Request) {
 		Name:     sessionCookie,
 		Value:    encoded,
 		Path:     "/",
-		MaxAge:   int(defaultSessionDuration.Seconds()),
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
 		HttpOnly: true,
 		Secure:   secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
@@ -341,7 +338,7 @@ func (a *GoogleAuth) verifyIDToken(ctx context.Context, idToken string) (AuthUse
 		Email:   email,
 		Name:    info.Name,
 		Picture: info.Picture,
-		Expires: a.now().Add(defaultSessionDuration).Unix(),
+		Expires: minInt64(expires, a.now().Add(7*24*time.Hour).Unix()),
 	}, nil
 }
 
@@ -431,6 +428,13 @@ func parseClaimUnix(value any) (int64, error) {
 	default:
 		return 0, errors.New("invalid unix claim")
 	}
+}
+
+func minInt64(a int64, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func nonEmpty(values ...string) string {

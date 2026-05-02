@@ -384,7 +384,6 @@ type Snapshot struct {
 	Projects            []Project            `json:"projects,omitempty"`
 	PullRequests        []PullRequest        `json:"pullRequests,omitempty"`
 	OrchestrationGraphs []OrchestrationGraph `json:"orchestrationGraphs,omitempty"`
-	LastEventID         int64                `json:"lastEventId,omitempty"`
 	Events              []Event              `json:"events"`
 }
 

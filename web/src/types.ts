@@ -306,6 +306,5 @@ export type Snapshot = {
   projects?: Project[] | null;
   pullRequests?: PullRequestState[] | null;
   orchestrationGraphs?: OrchestrationGraph[] | null;
-  lastEventId?: number;
   events: EventRecord[] | null;
 };
