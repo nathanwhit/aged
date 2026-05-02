@@ -93,7 +93,6 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "pull-requests", span: 6, minHeight: 0 },
   { id: "current-state", span: 6, minHeight: 0 },
   { id: "workers", span: 12, minHeight: 0 },
-  { id: "worker-detail", span: 8, minHeight: 0 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "plugins", span: 8, minHeight: 0 },
   { id: "timeline", span: 12, minHeight: 360 },
@@ -147,9 +146,6 @@ function App() {
   const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
   const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
   const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
-  const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
-  const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
-  const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
 
@@ -292,15 +288,6 @@ function App() {
             />
           ),
         },
-        ...(selectedWorker
-          ? [
-              {
-                id: "worker-detail" as const,
-                title: "Worker Detail",
-                element: <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />,
-              },
-            ]
-          : []),
         {
           id: "timeline",
           title: "Timeline",
@@ -1825,7 +1812,26 @@ function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: Orc
   for (const worker of workers) {
     rows.set(worker.id, { ...rows.get(worker.id), worker });
   }
-  return [...rows.values()];
+  return [...rows.values()].sort((left, right) => {
+    const priorityDelta = orchestrationRowPriority(left) - orchestrationRowPriority(right);
+    if (priorityDelta !== 0) return priorityDelta;
+    return orchestrationRowUpdatedAt(right, graph) - orchestrationRowUpdatedAt(left, graph);
+  });
+}
+
+function orchestrationRowPriority(row: OrchestrationRow): number {
+  const status = row.worker?.status ?? row.node?.status ?? row.graphNode?.status ?? "queued";
+  if (status === "failed") return 0;
+  if (status === "running") return 1;
+  if (status === "waiting" || status === "queued") return 2;
+  if (status === "canceled") return 3;
+  return 4;
+}
+
+function orchestrationRowUpdatedAt(row: OrchestrationRow, graph: OrchestrationGraph | undefined): number {
+  const updatedAt = row.worker?.updatedAt ?? row.node?.updatedAt ?? graph?.updatedAt ?? "";
+  const timestamp = Date.parse(updatedAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function WorkerContextItem({ label, value }: { label: string; value: string }) {
