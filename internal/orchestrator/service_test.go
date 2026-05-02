@@ -4912,7 +4912,18 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	if node.TargetID != "vm-1" || node.TargetKind != "ssh" || node.RemoteSession == "" {
 		t.Fatalf("node = %+v", node)
 	}
-	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, snapshot.Workers[0].ID) {
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	remoteWorker := snapshot.Workers[0]
+	wantPrompt := workerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo"})
+	if remoteWorker.Prompt != wantPrompt {
+		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
+	}
+	if remoteWorker.PromptPath != "/runs/"+remoteWorker.ID+"/prompt.txt" {
+		t.Fatalf("worker prompt path = %q", remoteWorker.PromptPath)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, remoteWorker.ID) {
 		t.Fatalf("missing remote worker output")
 	}
 }
