@@ -50,6 +50,31 @@ test("SSE duplicate after selected task history does not undo the projected upda
   assert.equal(afterDuplicateSSE.events.length, 1);
 });
 
+test("worker created events project prompt fields", () => {
+  const snapshot: AppSnapshot = {
+    ...emptySnapshot,
+    tasks: [task],
+  };
+
+  const next = reduceEvent(snapshot, {
+    id: 12,
+    at: "2026-05-02T00:00:12Z",
+    type: "worker.created",
+    taskId: task.id,
+    workerId: "worker-1",
+    payload: {
+      kind: "codex",
+      command: ["codex", "exec", "-"],
+      prompt: "Inspect the workspace.\nReturn a concise report.",
+      promptPath: "/tmp/prompt.txt",
+    },
+  });
+
+  assert.equal(next.workers.length, 1);
+  assert.equal(next.workers[0].prompt, "Inspect the workspace.\nReturn a concise report.");
+  assert.equal(next.workers[0].promptPath, "/tmp/prompt.txt");
+});
+
 function taskStatusEvent(id: number, status: Task["status"]): EventRecord {
   return {
     id,
