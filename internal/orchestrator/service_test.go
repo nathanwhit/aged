@@ -4511,6 +4511,110 @@ func TestServiceSelectsLatestLeafWhenReplannerErrorsWithAmbiguousCandidates(t *t
 	}
 }
 
+func TestServiceDoesNotExhaustTurnLimitWhileReplannerMakesProgress(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement initial slice",
+		},
+		continueTurns: maxDynamicReplanTurns + 1,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial"}}},
+		"follow": eventRunner{kind: "follow", events: []worker.Event{{Kind: worker.EventResult, Text: "follow-up patch"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Replan limit", Prompt: "Keep improving the candidate."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(brain.states) != maxDynamicReplanTurns+2 {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxDynamicReplanTurns+2)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxDynamicReplanTurns+2 {
+		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxDynamicReplanTurns+2)
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("unexpected fallback replanned event")
+	}
+	var finalKind string
+	for _, worker := range snapshot.Workers {
+		if worker.ID == snapshot.Tasks[0].FinalCandidateWorkerID {
+			finalKind = worker.Kind
+			break
+		}
+	}
+	if finalKind != "follow" {
+		t.Fatalf("final worker kind = %q, want latest dynamic follow worker", finalKind)
+	}
+}
+
+func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement initial candidate",
+		},
+		continueTurns: maxDynamicReplanTurns + 10,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial implementation"}}},
+		"follow": failingRunner{kind: "follow", err: errors.New("no useful follow-up progress")},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Stalled replan", Prompt: "Keep trying follow-ups."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(brain.states) != maxDynamicReplanTurns {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxDynamicReplanTurns)
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxDynamicReplanTurns+1 {
+		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxDynamicReplanTurns+1)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("missing fallback replanned event")
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing fallback final candidate: %+v", snapshot.Tasks[0])
+	}
+	var finalKind string
+	for _, worker := range snapshot.Workers {
+		if worker.ID == snapshot.Tasks[0].FinalCandidateWorkerID {
+			finalKind = worker.Kind
+			break
+		}
+	}
+	if finalKind != "codex" {
+		t.Fatalf("final worker kind = %q, want original candidate", finalKind)
+	}
+}
+
 func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -5494,6 +5598,35 @@ func (b *continueThenSelectLatestBrain) Replan(_ context.Context, _ core.Task, s
 		Action:                 "complete",
 		FinalCandidateWorkerID: latestCandidateWorkerID(state.Results),
 		Rationale:              "select latest dynamic candidate",
+	}, nil
+}
+
+type continueForTurnsBrain struct {
+	plan          Plan
+	continueTurns int
+	states        []OrchestrationState
+}
+
+func (b *continueForTurnsBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return b.plan, nil
+}
+
+func (b *continueForTurnsBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	if state.Turn > b.continueTurns {
+		return ReplanDecision{
+			Action:                 "complete",
+			FinalCandidateWorkerID: latestCandidateWorkerID(state.Results),
+			Rationale:              "select latest dynamic candidate after continued progress",
+		}, nil
+	}
+	return ReplanDecision{
+		Action: "continue",
+		Plan: &Plan{
+			WorkerKind: "follow",
+			Prompt:     "continue improving the candidate",
+		},
+		Rationale: "more work remains",
 	}, nil
 }
 
