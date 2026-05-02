@@ -826,7 +826,15 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 }
 
 func copyGitTrackedChanges(ctx context.Context, source string, destination string) (bool, error) {
-	nameStatus, err := runGit(ctx, source, "diff", "--name-status", "-z", "HEAD", "--")
+	baseRef, err := runGit(ctx, destination, "rev-parse", "HEAD")
+	if err != nil {
+		return false, fmt.Errorf("read git base workspace destination HEAD: %w", err)
+	}
+	baseRef = strings.TrimSpace(baseRef)
+	if baseRef == "" {
+		baseRef = "HEAD"
+	}
+	nameStatus, err := runGit(ctx, source, "diff", "--name-status", "-z", baseRef, "--")
 	if err != nil {
 		return false, fmt.Errorf("list git base workspace tracked changes: %w", err)
 	}

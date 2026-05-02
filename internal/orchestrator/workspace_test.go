@@ -294,6 +294,73 @@ func TestGitWorkspaceManagerCopiesStagedNewBaseCandidate(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerCopiesCommittedBaseCandidateWithDirtyFollowUp(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	base, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "base-worker",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(base.CWD, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, ".github", "workflows", "ci.yml"), []byte("name: CI\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	followUp, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:      "task",
+		WorkerID:    "followup-worker",
+		WorkDir:     repo,
+		BaseWorkDir: base.CWD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(followUp.CWD, "file.txt"), []byte("follow-up repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reviewer, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:      "task",
+		WorkerID:    "reviewer-worker",
+		WorkDir:     repo,
+		BaseWorkDir: followUp.CWD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workflow, err := os.ReadFile(filepath.Join(reviewer.CWD, ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(workflow) != "name: CI\n" {
+		t.Fatalf("workflow contents = %q", workflow)
+	}
+	contents, err := os.ReadFile(filepath.Join(reviewer.CWD, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "follow-up repair\n" {
+		t.Fatalf("file contents = %q", contents)
+	}
+	status := strings.TrimSpace(runTestGit(t, reviewer.CWD, "status", "--porcelain=v1"))
+	if status != "" {
+		t.Fatalf("reviewer workspace status = %q, want clean committed base candidate", status)
+	}
+	nameStatus := strings.TrimSpace(runTestGit(t, reviewer.CWD, "diff", "--name-status", "HEAD~1", "HEAD", "--"))
+	if !strings.Contains(nameStatus, "A\t.github/workflows/ci.yml") || !strings.Contains(nameStatus, "M\tfile.txt") {
+		t.Fatalf("reviewer base commit changes = %q", nameStatus)
+	}
+}
+
 func TestGitWorkspaceManagerApplyConflictAbortsSourceMerge(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
