@@ -276,29 +276,38 @@ func TestServiceGeneratesMissingTaskTitle(t *testing.T) {
 	}
 }
 
-func TestServiceInfersGitHubCompletionModeFromPrompt(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "mock",
-		Prompt:     "worker prompt",
-	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
-
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+func TestNormalizeCreateTaskRequestDefaultsCompletionModeToGitHubAndPreservesExplicitLocal(t *testing.T) {
+	defaultReq, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
 		Title:  "Fix TODOs",
-		Prompt: "Take a look at TODOs in the code, fix them, open PR and make sure it gets merged.",
+		Prompt: "Take a look at TODOs in the code and fix them.",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var metadata map[string]any
-	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+	if err := json.Unmarshal(defaultReq.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "github" || metadata["completionModeInferred"] != true {
-		t.Fatalf("metadata = %+v", metadata)
+	if metadata["completionMode"] != "github" {
+		t.Fatalf("default metadata = %+v", metadata)
+	}
+
+	explicitLocalReq, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
+		Title:  "Fix TODOs",
+		Prompt: "Take a look at TODOs in the code and fix them.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "local",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata = nil
+	if err := json.Unmarshal(explicitLocalReq.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "local" {
+		t.Fatalf("explicit local metadata = %+v", metadata)
 	}
 }
 

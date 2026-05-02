@@ -1164,6 +1164,17 @@ func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
 	if res.StatusCode != http.StatusAccepted {
 		t.Fatalf("create status = %d", res.StatusCode)
 	}
+	var created core.Task
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(created.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "github" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
 
 	lookup, err := http.Get(server.URL + "/api/tasks/lookup?source=github&externalId=owner%2Frepo%23123")
 	if err != nil {

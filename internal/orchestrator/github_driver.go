@@ -286,6 +286,8 @@ func githubIssueTaskRequest(issue GitHubIssue, projectID string, githubCompletio
 	}
 	if githubCompletion {
 		metadata["completionMode"] = "github"
+	} else {
+		metadata["completionMode"] = "local"
 	}
 	return core.CreateTaskRequest{
 		ProjectID:  projectID,

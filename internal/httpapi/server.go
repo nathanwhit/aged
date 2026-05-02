@@ -303,6 +303,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	req, err := orchestrator.NormalizeCreateTaskRequest(req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	task, err := s.service.CreateTask(r.Context(), req)
 	if err != nil {
 		writeError(w, err)
