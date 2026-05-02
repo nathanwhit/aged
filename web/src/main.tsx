@@ -1896,6 +1896,7 @@ function WorkerDetail({ worker, node, events }: { worker: Worker; node: Executio
         <WorkerMetaItem label="Updated" value={new Date(worker.updatedAt).toLocaleString()} />
       </div>
       {created && <FullCommand event={created} />}
+      <WorkerPrompt worker={worker} created={created} />
       {workspace && <WorkspaceSummary event={workspace} />}
       {completed && <CompletionSummary event={completed} />}
       <div className="worker-detail-events">
@@ -1938,6 +1939,26 @@ function WorkerActivity({ events, defaultOpen }: { events: EventRecord[]; defaul
         )}
       </div>
     </details>
+  );
+}
+
+function WorkerPrompt({ worker, created }: { worker: Worker; created: EventRecord | undefined }) {
+  const payload = asRecord(created?.payload);
+  const prompt = payloadValue(worker.prompt) || payloadValue(payload.prompt);
+  const promptPath = payloadValue(worker.promptPath) || payloadValue(payload.promptPath);
+  const promptError = payloadValue(worker.promptError) || payloadValue(payload.promptError);
+  return (
+    <section className="worker-section-card">
+      <div className="section-title-row">
+        <strong>Prompt</strong>
+        {promptPath && <span className="tool-status neutral">{promptPath}</span>}
+      </div>
+      {prompt ? (
+        <CodeBlock label="prompt" value={prompt} className="worker-prompt-block" />
+      ) : (
+        <p className="empty">{promptError ? `Prompt unavailable: ${promptError}` : "Prompt unavailable for this worker."}</p>
+      )}
+    </section>
   );
 }
 
@@ -3572,6 +3593,9 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         kind: String(payload.kind ?? "unknown"),
         status: "queued",
         command: Array.isArray(payload.command) ? payload.command.map(String) : undefined,
+        prompt: payloadValue(payload.prompt) || undefined,
+        promptPath: payloadValue(payload.promptPath) || undefined,
+        promptError: payloadValue(payload.promptError) || undefined,
         createdAt: event.at,
         updatedAt: event.at,
         metadata: isRecord(payload.metadata) ? payload.metadata : undefined,

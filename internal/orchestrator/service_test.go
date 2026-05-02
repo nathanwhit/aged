@@ -60,6 +60,15 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	if !hasWorkerCreated(snapshot.Events, task.ID, "chosen") {
 		t.Fatalf("missing worker.created with chosen kind")
 	}
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %d, want 1", len(snapshot.Workers))
+	}
+	if snapshot.Workers[0].Prompt != runner.prompt {
+		t.Fatalf("snapshot worker prompt = %q, want runner prompt %q", snapshot.Workers[0].Prompt, runner.prompt)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "prompt", runner.prompt) {
+		t.Fatalf("missing worker.created prompt")
+	}
 }
 
 func TestServicePassesReasoningEffortToWorker(t *testing.T) {
@@ -4903,7 +4912,18 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	if node.TargetID != "vm-1" || node.TargetKind != "ssh" || node.RemoteSession == "" {
 		t.Fatalf("node = %+v", node)
 	}
-	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, snapshot.Workers[0].ID) {
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	remoteWorker := snapshot.Workers[0]
+	wantPrompt := workerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo"})
+	if remoteWorker.Prompt != wantPrompt {
+		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
+	}
+	if remoteWorker.PromptPath != "/runs/"+remoteWorker.ID+"/prompt.txt" {
+		t.Fatalf("worker prompt path = %q", remoteWorker.PromptPath)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, remoteWorker.ID) {
 		t.Fatalf("missing remote worker output")
 	}
 }

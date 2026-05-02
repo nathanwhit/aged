@@ -799,23 +799,29 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 			}
 		case core.EventWorkerCreated:
 			var payload struct {
-				Kind     string          `json:"kind"`
-				Command  []string        `json:"command,omitempty"`
-				Metadata json.RawMessage `json:"metadata,omitempty"`
+				Kind        string          `json:"kind"`
+				Command     []string        `json:"command,omitempty"`
+				Prompt      string          `json:"prompt,omitempty"`
+				PromptPath  string          `json:"promptPath,omitempty"`
+				PromptError string          `json:"promptError,omitempty"`
+				Metadata    json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode worker.created: %w", err)
 			}
 			metadata := mergeMetadata(payload.Metadata, workspaceMetadata[event.WorkerID])
 			workers[event.WorkerID] = core.Worker{
-				ID:        event.WorkerID,
-				TaskID:    event.TaskID,
-				Kind:      payload.Kind,
-				Status:    core.WorkerQueued,
-				Command:   payload.Command,
-				CreatedAt: event.At,
-				UpdatedAt: event.At,
-				Metadata:  metadata,
+				ID:          event.WorkerID,
+				TaskID:      event.TaskID,
+				Kind:        payload.Kind,
+				Status:      core.WorkerQueued,
+				Command:     payload.Command,
+				Prompt:      payload.Prompt,
+				PromptPath:  payload.PromptPath,
+				PromptError: payload.PromptError,
+				CreatedAt:   event.At,
+				UpdatedAt:   event.At,
+				Metadata:    metadata,
 			}
 			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
 				node := nodes[nodeID]
