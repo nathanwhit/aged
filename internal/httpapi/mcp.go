@@ -10,6 +10,7 @@ import (
 
 	"aged/internal/core"
 	"aged/internal/eventstore"
+	"aged/internal/orchestrator"
 )
 
 const mcpProtocolVersion = "2025-11-25"
@@ -293,6 +294,9 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 	case "aged_create_task":
 		var req core.CreateTaskRequest
 		err = decodeMCPArgs(params.Arguments, &req)
+		if err == nil {
+			req, err = orchestrator.NormalizeCreateTaskRequest(req)
+		}
 		if err == nil {
 			result, err = s.service.CreateTask(r.Context(), req)
 		}
@@ -801,7 +805,7 @@ func mcpTools() []mcpTool {
 		{
 			Name:        "aged_create_task",
 			Title:       "Create aged task",
-			Description: "Create a durable orchestrated task from a concrete work prompt. Use this for 'do it' after synthesizing the actual task from conversation context.",
+			Description: "Create a durable orchestrated task from a concrete work prompt. Tasks default to GitHub PR completion; pass metadata.completionMode=\"local\" only for an explicit local-only request. Use this for 'do it' after synthesizing the actual task from conversation context.",
 			InputSchema: objectSchema(map[string]any{
 				"projectId":  stringSchema("Optional project id."),
 				"title":      stringSchema("Short task title. Optional; aged can generate one when omitted."),

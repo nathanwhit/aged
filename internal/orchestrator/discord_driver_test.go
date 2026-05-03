@@ -55,7 +55,13 @@ func TestDiscordDriverSkipsHistoryThenCreatesTaskFromPrefix(t *testing.T) {
 	if !ok {
 		t.Fatal("missing discord task")
 	}
-	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "github" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
 	if !strings.Contains(client.sent[len(client.sent)-1], "Created aged task") {
 		t.Fatalf("sent messages = %+v", client.sent)
 	}
@@ -123,7 +129,8 @@ func TestDiscordDriverStructuredProposalRoutesProject(t *testing.T) {
 			"proposedTask": {
 				"projectId": "node",
 				"title": "Improve Node Benchmarks",
-				"prompt": "Improve performance on the Node.js benchmarks."
+				"prompt": "Improve performance on the Node.js benchmarks.",
+				"completionMode": "local"
 			}
 		}`,
 	}
@@ -166,6 +173,13 @@ func TestDiscordDriverStructuredProposalRoutesProject(t *testing.T) {
 	}
 	if !ok || task.ProjectID != "node" || task.Title != "Improve Node Benchmarks" {
 		t.Fatalf("task = %+v ok=%v", task, ok)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "local" {
+		t.Fatalf("metadata = %+v", metadata)
 	}
 }
 

@@ -816,7 +816,7 @@ function TaskComposer({
   const [projectId, setProjectId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [completionMode, setCompletionMode] = useState<"local" | "github">("local");
+  const [completionMode, setCompletionMode] = useState<"local" | "github">("github");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
@@ -828,7 +828,7 @@ function TaskComposer({
       await onCreate(input);
       setTitle("");
       setPrompt("");
-      setCompletionMode("local");
+      setCompletionMode("github");
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -866,8 +866,8 @@ function TaskComposer({
       <label>
         Completion
         <select value={completionMode} onChange={(event) => setCompletionMode(event.target.value as "local" | "github")}>
-          <option value="local">Local: review diff here and apply result</option>
           <option value="github">GitHub: open PR when complete</option>
+          <option value="local">Local: review diff here and apply result</option>
         </select>
       </label>
       <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>

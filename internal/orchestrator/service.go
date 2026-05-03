@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,8 @@ type WorkerChangesReview struct {
 	Workspace PreparedWorkspace `json:"workspace"`
 	Changes   WorkspaceChanges  `json:"changes"`
 }
+
+var standaloneNoPRPattern = regexp.MustCompile(`\bno\s+pr\b`)
 
 type WorkerApplyResult struct {
 	WorkerID      string                 `json:"workerId"`
@@ -764,10 +767,6 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	metadata, err := createTaskMetadata(req)
 	if err != nil {
 		return core.Task{}, err
-	}
-	if stringMetadataValue(metadata["completionMode"]) == "" && promptRequestsGitHubCompletion(req.Prompt) {
-		metadata["completionMode"] = "github"
-		metadata["completionModeInferred"] = true
 	}
 	if title == "" {
 		title = s.generateTaskTitle(ctx, req.Prompt)
@@ -4995,14 +4994,9 @@ func looksLikeHexObjectID(ref string) bool {
 }
 
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
-	metadata := map[string]any{}
-	if len(req.Metadata) > 0 {
-		if err := json.Unmarshal(req.Metadata, &metadata); err != nil {
-			return nil, fmt.Errorf("metadata must be a JSON object: %w", err)
-		}
-		if metadata == nil {
-			metadata = map[string]any{}
-		}
+	metadata, err := createTaskMetadataMap(req.Metadata)
+	if err != nil {
+		return nil, err
 	}
 	if req.Source != "" {
 		metadata["source"] = strings.TrimSpace(req.Source)
@@ -5014,6 +5008,58 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 		metadata["projectId"] = strings.TrimSpace(req.ProjectID)
 	}
 	return metadata, nil
+}
+
+func NormalizeCreateTaskRequest(req core.CreateTaskRequest) (core.CreateTaskRequest, error) {
+	metadata, err := createTaskMetadataMap(req.Metadata)
+	if err != nil {
+		return core.CreateTaskRequest{}, err
+	}
+	ensureDefaultTaskCompletionMode(metadata, req.Prompt)
+	req.Metadata = core.MustJSON(metadata)
+	return req, nil
+}
+
+func createTaskMetadataMap(raw json.RawMessage) (map[string]any, error) {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &metadata); err != nil {
+			return nil, fmt.Errorf("metadata must be a JSON object: %w", err)
+		}
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+	}
+	return metadata, nil
+}
+
+func ensureDefaultTaskCompletionMode(metadata map[string]any, prompt string) {
+	if stringMetadataValue(metadata["completionMode"]) == "" {
+		if promptRequestsLocalCompletion(prompt) {
+			metadata["completionMode"] = "local"
+			metadata["completionModeInferred"] = true
+		} else {
+			metadata["completionMode"] = "github"
+			if promptRequestsGitHubCompletion(prompt) {
+				metadata["completionModeInferred"] = true
+			}
+		}
+	}
+}
+
+func promptRequestsLocalCompletion(prompt string) bool {
+	lower := strings.ToLower(prompt)
+	return strings.Contains(lower, "local-only") ||
+		strings.Contains(lower, "local only") ||
+		strings.Contains(lower, "local completion") ||
+		strings.Contains(lower, "complete locally") ||
+		strings.Contains(lower, "without a pr") ||
+		strings.Contains(lower, "without pr") ||
+		strings.Contains(lower, "do not open a pr") ||
+		strings.Contains(lower, "do not open pr") ||
+		strings.Contains(lower, "don't open a pr") ||
+		strings.Contains(lower, "don't open pr") ||
+		standaloneNoPRPattern.MatchString(lower)
 }
 
 func promptRequestsGitHubCompletion(prompt string) bool {

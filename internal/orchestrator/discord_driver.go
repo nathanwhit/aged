@@ -72,9 +72,10 @@ type DiscordDriver struct {
 }
 
 type DiscordTaskProposal struct {
-	ProjectID string `json:"projectId,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Prompt    string `json:"prompt"`
+	ProjectID      string `json:"projectId,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Prompt         string `json:"prompt"`
+	CompletionMode string `json:"completionMode,omitempty"`
 }
 
 type DiscordAssistantDecision struct {
@@ -859,21 +860,30 @@ func (d *DiscordDriver) createDiscordTask(ctx context.Context, channel DiscordCh
 	proposal.Prompt = strings.TrimSpace(proposal.Prompt)
 	proposal.ProjectID = strings.TrimSpace(proposal.ProjectID)
 	proposal.Title = strings.TrimSpace(proposal.Title)
+	proposal.CompletionMode = strings.ToLower(strings.TrimSpace(proposal.CompletionMode))
 	if proposal.Prompt == "" {
 		return d.client.SendMessage(ctx, channel.ID, "Task prompt is empty.")
 	}
-	task, err := d.service.CreateTask(ctx, core.CreateTaskRequest{
+	metadata := map[string]any{
+		"channelId": channel.ID,
+		"messageId": message.ID,
+		"userId":    message.Author.ID,
+	}
+	if proposal.CompletionMode == "local" || proposal.CompletionMode == "github" {
+		metadata["completionMode"] = proposal.CompletionMode
+	}
+	req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
 		ProjectID:  proposal.ProjectID,
 		Title:      proposal.Title,
 		Prompt:     proposal.Prompt,
 		Source:     "discord",
 		ExternalID: "discord:" + message.ID,
-		Metadata: core.MustJSON(map[string]any{
-			"channelId": channel.ID,
-			"messageId": message.ID,
-			"userId":    message.Author.ID,
-		}),
+		Metadata:   core.MustJSON(metadata),
 	})
+	if err != nil {
+		return d.client.SendMessage(ctx, channel.ID, "Task create error: "+err.Error())
+	}
+	task, err := d.service.CreateTask(ctx, req)
 	if err != nil {
 		return d.client.SendMessage(ctx, channel.ID, "Task create error: "+err.Error())
 	}
@@ -951,7 +961,8 @@ Return exactly one JSON object with this schema and no Markdown fence:
   "proposedTask": {
     "projectId": "one configured project id, or omit when the default project is correct",
     "title": "optional short task title",
-    "prompt": "specific prompt to create as an aged task if the user replies do it"
+    "prompt": "specific prompt to create as an aged task if the user replies do it",
+    "completionMode": "github | local"
   },
   "publishPr": {
     "workerId": "optional worker id",
@@ -973,7 +984,7 @@ Return exactly one JSON object with this schema and no Markdown fence:
   }
 }
 
-Use "answer" for questions and discussion. Use "list_projects", "list_targets", or "list_plugins" when the user asks what is configured. Use "project_health" when the user asks for health/status/readiness of a configured project; set projectId to an exact id from the project list, or omit it only when the selected project is clearly intended. Use "target_health" when the user asks for health/status/resources/readiness of a configured execution target; set targetId to an exact id from the target list. Use "update_project" when the user asks to edit a configured project; set projectId to the exact existing project id and include changed project fields in "project" while preserving unrelated fields by omission. Empty project name, vcs, defaultBase, and pullRequestPolicy.branchPrefix are normalized back to service defaults. Use "update_target" or "update_plugin" similarly for configured targets and plugins; set targetId/pluginId exactly and include only changed fields when possible. For update actions, omit unchanged fields inside the selected project/target/plugin object; include empty strings, empty arrays/maps, false booleans, or numeric zero only when the user explicitly wants to clear or set that value. For target capacity, maxWorkers and cpuWeight must be positive and zero normalizes to one; memoryGB zero clears optional memory capacity. Use "delete_project", "delete_target", or "delete_plugin" when the user asks to remove a configured item; set the exact id and set confirmed true only when the user explicitly confirms deletion. Use "show_task" when the user asks for status/details/logs/workers/PRs/actions for one identifiable task; set taskId to the exact id from the snapshot. Use "show_worker" or "review_worker_changes" when the user asks for one identifiable worker's details or diff; set workerId exactly. Use task control actions when the user asks to retry, steer, cancel, clear, publish a PR, watch PRs, refresh a PR, babysit a PR, or apply results. For "steer_task", set message to the exact feedback or answer that should be sent to the task. For PR actions, use the exact aged pullRequestId from the snapshot when one exists; for "watch_prs", set taskId and fill watchPrs from the user's repo/number/url filters. For "publish_pr", set taskId and optional publishPr fields. For "publish_pr", "apply_task_result", and "apply_worker_changes", set confirmed true only when the user explicitly confirms publishing or applying changes; otherwise leave confirmed false so the bot can ask for confirmation. Use "create_project" when the user clearly asks to add/register a project and provides at least an id or name plus a local checkout path; otherwise ask a follow-up for the missing fields. Use "create_target" when the user clearly asks to add/register a target and provides an id, plus a host for ssh targets. Use "create_plugin" when the user clearly asks to add/register a plugin and provides an id. Use "propose_task" when a task is plausible but the user has not clearly decided to run it. Use "create_task" when the conversation clearly asks aged to start doing work, even if the user does not literally say "create a task". Set unrelated top-level object fields to null or empty values. If the user asks for work in a repo/project and multiple projects could match, ask a concise follow-up in "reply", set "action" to "answer", and set "proposedTask" to null. Only use ids that appear in the provided project, target, and plugin lists for update/delete/health actions.
+Use "answer" for questions and discussion. Use "list_projects", "list_targets", or "list_plugins" when the user asks what is configured. Use "project_health" when the user asks for health/status/readiness of a configured project; set projectId to an exact id from the project list, or omit it only when the selected project is clearly intended. Use "target_health" when the user asks for health/status/resources/readiness of a configured execution target; set targetId to an exact id from the target list. Use "update_project" when the user asks to edit a configured project; set projectId to the exact existing project id and include changed project fields in "project" while preserving unrelated fields by omission. Empty project name, vcs, defaultBase, and pullRequestPolicy.branchPrefix are normalized back to service defaults. Use "update_target" or "update_plugin" similarly for configured targets and plugins; set targetId/pluginId exactly and include only changed fields when possible. For update actions, omit unchanged fields inside the selected project/target/plugin object; include empty strings, empty arrays/maps, false booleans, or numeric zero only when the user explicitly wants to clear or set that value. For target capacity, maxWorkers and cpuWeight must be positive and zero normalizes to one; memoryGB zero clears optional memory capacity. Use "delete_project", "delete_target", or "delete_plugin" when the user asks to remove a configured item; set the exact id and set confirmed true only when the user explicitly confirms deletion. Use "show_task" when the user asks for status/details/logs/workers/PRs/actions for one identifiable task; set taskId to the exact id from the snapshot. Use "show_worker" or "review_worker_changes" when the user asks for one identifiable worker's details or diff; set workerId exactly. Use task control actions when the user asks to retry, steer, cancel, clear, publish a PR, watch PRs, refresh a PR, babysit a PR, or apply results. For "steer_task", set message to the exact feedback or answer that should be sent to the task. For PR actions, use the exact aged pullRequestId from the snapshot when one exists; for "watch_prs", set taskId and fill watchPrs from the user's repo/number/url filters. For "publish_pr", set taskId and optional publishPr fields. For "publish_pr", "apply_task_result", and "apply_worker_changes", set confirmed true only when the user explicitly confirms publishing or applying changes; otherwise leave confirmed false so the bot can ask for confirmation. Use "create_project" when the user clearly asks to add/register a project and provides at least an id or name plus a local checkout path; otherwise ask a follow-up for the missing fields. Use "create_target" when the user clearly asks to add/register a target and provides an id, plus a host for ssh targets. Use "create_plugin" when the user clearly asks to add/register a plugin and provides an id. Use "propose_task" when a task is plausible but the user has not clearly decided to run it. Use "create_task" when the conversation clearly asks aged to start doing work, even if the user does not literally say "create a task". Omit proposedTask.completionMode to use the default GitHub PR completion; set it to "local" only when the user explicitly asks for local-only/no-PR completion. Set unrelated top-level object fields to null or empty values. If the user asks for work in a repo/project and multiple projects could match, ask a concise follow-up in "reply", set "action" to "answer", and set "proposedTask" to null. Only use ids that appear in the provided project, target, and plugin lists for update/delete/health actions.
 
 User message:
 %s`, content)
@@ -1046,6 +1057,7 @@ func parseDiscordAssistantJSON(message string) (DiscordAssistantDecision, bool) 
 		proposal.ProjectID = strings.TrimSpace(proposal.ProjectID)
 		proposal.Title = strings.TrimSpace(proposal.Title)
 		proposal.Prompt = strings.TrimSpace(proposal.Prompt)
+		proposal.CompletionMode = strings.ToLower(strings.TrimSpace(proposal.CompletionMode))
 		if action == "answer" && proposal.Prompt != "" {
 			action = "propose_task"
 		}

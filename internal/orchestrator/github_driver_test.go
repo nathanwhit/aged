@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"aged/internal/core"
@@ -40,6 +41,13 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("missing github issue task")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "local" {
+		t.Fatalf("metadata = %+v", metadata)
 	}
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if err := driver.RunOnce(ctx); err != nil {
