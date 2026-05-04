@@ -74,14 +74,19 @@ type Service struct {
 	prPublisher PullRequestPublisher
 	remoteApply func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
 
-	mu         sync.Mutex
-	cancels    map[string]context.CancelFunc
-	tasks      map[string]string
-	steering   map[string]chan string
-	remoteRuns map[string]remoteRun
+	mu          sync.Mutex
+	cancels     map[string]context.CancelFunc
+	taskCancels map[string]context.CancelFunc
+	taskRuns    map[string]string
+	tasks       map[string]string
+	steering    map[string]chan string
+	remoteRuns  map[string]remoteRun
 }
 
-const maxDynamicReplanTurns = 4
+const (
+	maxCompletionPublishRecoveryAttempts  = 4
+	maxConsecutiveUnproductiveReplanTurns = 4
+)
 
 func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	cwd := strings.TrimSpace(workspace.CWD)
@@ -176,6 +181,8 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		prPublisher: NewLocalPullRequestPublisher(),
 		remoteApply: applyRemotePatch,
 		cancels:     map[string]context.CancelFunc{},
+		taskCancels: map[string]context.CancelFunc{},
+		taskRuns:    map[string]string{},
 		tasks:       map[string]string{},
 		steering:    map[string]chan string{},
 		remoteRuns:  map[string]remoteRun{},
@@ -759,6 +766,31 @@ func (s *Service) Unsubscribe(id int) {
 	s.broker.Unsubscribe(id)
 }
 
+func (s *Service) startTaskRoutine(taskID string, fn func(context.Context)) {
+	taskCtx, cancel := context.WithCancel(context.Background())
+	runID := uuid.NewString()
+	s.mu.Lock()
+	if existing := s.taskCancels[taskID]; existing != nil {
+		existing()
+	}
+	s.taskCancels[taskID] = cancel
+	s.taskRuns[taskID] = runID
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			s.mu.Lock()
+			if s.taskRuns[taskID] == runID {
+				delete(s.taskCancels, taskID)
+				delete(s.taskRuns, taskID)
+			}
+			s.mu.Unlock()
+		}()
+		fn(taskCtx)
+	}()
+}
+
 func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (core.Task, error) {
 	if req.Prompt == "" {
 		return core.Task{}, errors.New("prompt is required")
@@ -814,7 +846,9 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Metadata:  core.MustJSON(metadata),
 	}
 
-	go s.runTask(context.Background(), task)
+	s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+		s.runTask(taskCtx, task)
+	})
 	return task, nil
 }
 
@@ -1616,7 +1650,9 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	s.mu.Unlock()
 	snapshot, snapshotErr := s.store.Snapshot(ctx)
 	if snapshotErr == nil && taskStatus(snapshot, taskID) == core.TaskWaiting {
-		go s.resumeWaitingTask(context.Background(), taskID, req.Message)
+		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			s.resumeWaitingTask(taskCtx, taskID, req.Message)
+		})
 	}
 	return err
 }
@@ -1642,7 +1678,9 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			go s.retryFinalCandidateTask(context.Background(), task, results)
+			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+				s.retryFinalCandidateTask(taskCtx, task, results)
+			})
 			return task, nil
 		}
 	}
@@ -1656,7 +1694,9 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			go s.retryGraphTask(context.Background(), task, initial, results)
+			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+				s.retryGraphTask(taskCtx, task, initial, results)
+			})
 			return task, nil
 		}
 	}
@@ -1672,7 +1712,9 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		task.Error = ""
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
-		go s.retryGraphTask(context.Background(), task, initial, results)
+		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			s.retryGraphTask(taskCtx, task, initial, results)
+		})
 		return task, nil
 	}
 	plan, err := retryPlanForTask(snapshot, taskID)
@@ -1686,7 +1728,9 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "retrying"
-	go s.retryTask(context.Background(), task, plan)
+	s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+		s.retryTask(taskCtx, task, plan)
+	})
 	return task, nil
 }
 
@@ -1819,6 +1863,9 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	canceledWorkers := map[string]bool{}
 	var workerIDs []string
 	s.mu.Lock()
+	if cancel := s.taskCancels[taskID]; cancel != nil {
+		cancel()
+	}
 	for workerID := range s.cancels {
 		if s.tasks[workerID] == taskID {
 			canceledWorkers[workerID] = true
@@ -2458,7 +2505,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		}
 		decision.Plan.Metadata["parentNodeID"] = waiting.NodeID
 		decision.Plan.Metadata["questionWorkerID"] = waiting.WorkerID
-		if stringMetadata(decision.Plan.Metadata, "baseWorkerID") == "" {
+		if shouldInheritLatestCandidate(decision.Plan.Metadata) {
 			if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 				decision.Plan.Metadata["baseWorkerID"] = baseWorkerID
 			}
@@ -2805,7 +2852,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["workspaceBaseRevision"] = workspaceSpec.BaseRevision
 	}
 	if !reusedWorkspace {
-		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" {
+		if baseWorkerID := candidateBaseWorkerID(plan.Metadata); baseWorkerID != "" {
 			baseSpec, err := s.baseWorkspaceSpec(ctx, workspaceSpec, baseWorkerID)
 			if err != nil {
 				_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -2851,7 +2898,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 			return WorkerTurnResult{}, err
 		}
-		if baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID"); baseWorkerID != "" && workspaceSpec.BaseWorkDir == "" && workspaceSpec.BaseRevision == "" {
+		if baseWorkerID := candidateBaseWorkerID(plan.Metadata); baseWorkerID != "" && workspaceSpec.BaseWorkDir == "" && workspaceSpec.BaseRevision == "" {
 			patch, baseChanges, err := s.workerHandoffPatch(ctx, baseWorkerID)
 			if err != nil {
 				_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -3082,7 +3129,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			plan.Metadata["retryWorkspaceCWD"] = remoteWorkDir
 		}
 	}
-	baseWorkerID := stringMetadata(plan.Metadata, "baseWorkerID")
+	baseWorkerID := candidateBaseWorkerID(plan.Metadata)
 	if !reusedWorkspace && baseWorkerID != "" && !requireFreshWorkspace {
 		if sameTarget, _ := s.workerRanOnTarget(ctx, baseWorkerID, target.ID); sameTarget {
 			if baseWorkDir, err := s.remoteRetryWorkDir(ctx, target, baseWorkerID); err == nil {
@@ -3296,8 +3343,6 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
 	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, publishRecoveryState{})
 }
-
-const maxCompletionPublishRecoveryAttempts = maxDynamicReplanTurns
 
 type publishRecoveryState struct {
 	Attempts               int
@@ -3687,6 +3732,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"kind":     action.Kind,
 			"when":     nonEmpty(action.When, "after_success"),
 			"reason":   action.Reason,
+			"inputs":   action.Inputs,
 			"workerId": workerID,
 			"status":   "started",
 		}); err != nil {
@@ -3700,11 +3746,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"kind":          action.Kind,
 			"when":          nonEmpty(action.When, "after_success"),
 			"reason":        action.Reason,
+			"inputs":        action.Inputs,
 			"workerId":      workerID,
 			"pullRequestId": pr.ID,
 			"url":           pr.URL,
 		}); err != nil {
 			return false, err
+		}
+		if boolMetadata(action.Inputs, "continueAfterPublish") {
+			if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "continuing_after_pr", "Pull request opened; objective continues looking for more results."); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
 		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "watch_pull_requests":
@@ -4223,7 +4276,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	recoveryHint := options.RecoveryHint
 	stalledTurns := 0
 	for turn := 1; ; turn++ {
-		if stalledTurns >= maxDynamicReplanTurns {
+		if stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
 			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
@@ -4238,6 +4291,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			RecoveryHint:             recoveryHint,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				return false, "", "", results
+			}
 			recoveryOptions := options
 			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
@@ -4317,13 +4373,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if strings.TrimSpace(options.RequiredRepairWorkerID) != "" {
 				next = forceConflictRepairPlan(task, next, options.RequiredRepairWorkerID, nonEmpty(options.RequiredRepairReason, recoveryHint), blockedFinalCandidates)
 			}
-			if stringMetadata(next.Metadata, "baseWorkerID") == "" {
+			if shouldInheritLatestCandidate(next.Metadata) {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
 				}
 			}
 			if options.AllowBlockedBasePatchConflicts {
-				baseWorkerID := stringMetadata(next.Metadata, "baseWorkerID")
+				baseWorkerID := candidateBaseWorkerID(next.Metadata)
 				if _, blocked := blockedFinalCandidates[baseWorkerID]; blocked {
 					next.Metadata["allowBasePatchConflicts"] = true
 					next.Metadata["recoveryBaseWorkerID"] = baseWorkerID
@@ -4341,6 +4397,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			result, err := s.runPlannedWorker(ctx, task, next)
 			if err != nil {
+				if ctx.Err() != nil {
+					return false, "", "", results
+				}
 				if s.waitForRecoverableError(ctx, task.ID, "", err) {
 					return false, "", "", results
 				}
@@ -4378,6 +4437,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			var ok bool
 			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
 			if err != nil {
+				if ctx.Err() != nil {
+					return false, "", "", results
+				}
 				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
 					return false, "", "", results
 				}
@@ -4388,6 +4450,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				return false, "", "", results
 			}
 			if ok, err := s.runPlanActions(ctx, task, next, results); err != nil {
+				if ctx.Err() != nil {
+					return false, "", "", results
+				}
 				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
 					return false, "", "", results
 				}
@@ -4417,7 +4482,7 @@ func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn i
 }
 
 func (s *Service) recoverReplanLimit(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
-	replanErr := fmt.Errorf("dynamic replanning reached %d consecutive turns without productive progress", maxDynamicReplanTurns)
+	replanErr := fmt.Errorf("dynamic replanning reached %d consecutive turns without productive progress", maxConsecutiveUnproductiveReplanTurns)
 	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
 		CompleteReasonPrefix: "fallback completion after dynamic replanning stalled",
 		CompleteMessage:      "Dynamic replanning stopped making productive progress, so aged used the deterministic final-candidate fallback instead of failing the task.",
@@ -6143,6 +6208,18 @@ func boolMetadata(metadata map[string]any, key string) bool {
 	}
 	value, _ := metadata[key].(bool)
 	return value
+}
+
+func candidateBaseWorkerID(metadata map[string]any) string {
+	baseWorkerID := stringMetadata(metadata, "baseWorkerID")
+	if strings.EqualFold(baseWorkerID, "source") {
+		return ""
+	}
+	return baseWorkerID
+}
+
+func shouldInheritLatestCandidate(metadata map[string]any) bool {
+	return candidateBaseWorkerID(metadata) == "" && !strings.EqualFold(stringMetadata(metadata, "baseWorkerID"), "source")
 }
 
 func intMetadata(metadata map[string]any, key string) int {
