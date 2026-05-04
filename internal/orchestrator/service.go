@@ -4988,10 +4988,17 @@ func syncGitProjectBaseBranch(ctx context.Context, dir string, base string) (str
 	} else if gitCommitRefExists(ctx, dir, "refs/heads/"+base) {
 		upstreamRemote, upstreamBranch, err := gitBranchUpstream(ctx, dir, base)
 		if err != nil {
-			return "", fmt.Errorf("sync git base branch %q: %w", base, err)
+			if !errors.Is(err, errGitBranchUpstreamNotConfigured) {
+				return "", fmt.Errorf("sync git base branch %q: %w", base, err)
+			}
+			if !gitCommitRefExists(ctx, dir, "refs/remotes/origin/"+base) {
+				return "", fmt.Errorf("sync git base branch %q: %w", base, err)
+			}
+			remote = "origin"
+		} else {
+			remote = upstreamRemote
+			branch = upstreamBranch
 		}
-		remote = upstreamRemote
-		branch = upstreamBranch
 	} else if gitRemoteExists(ctx, dir, "origin") {
 		remote = "origin"
 	}
@@ -5017,19 +5024,21 @@ func gitRemoteExists(ctx context.Context, dir string, remote string) bool {
 	return err == nil
 }
 
+var errGitBranchUpstreamNotConfigured = errors.New("upstream tracking branch is not configured")
+
 func gitBranchUpstream(ctx context.Context, dir string, branch string) (string, string, error) {
 	remote, err := runCommand(ctx, dir, "git", "config", "--get", "branch."+branch+".remote")
 	if err != nil {
-		return "", "", errors.New("upstream tracking branch is not configured")
+		return "", "", errGitBranchUpstreamNotConfigured
 	}
 	merge, err := runCommand(ctx, dir, "git", "config", "--get", "branch."+branch+".merge")
 	if err != nil {
-		return "", "", errors.New("upstream tracking branch is not configured")
+		return "", "", errGitBranchUpstreamNotConfigured
 	}
 	remote = strings.TrimSpace(remote)
 	merge = strings.TrimSpace(merge)
 	if remote == "" || remote == "." || merge == "" {
-		return "", "", errors.New("upstream tracking branch is not configured")
+		return "", "", errGitBranchUpstreamNotConfigured
 	}
 	upstreamBranch := strings.TrimPrefix(merge, "refs/heads/")
 	if upstreamBranch == "" || upstreamBranch == merge {
