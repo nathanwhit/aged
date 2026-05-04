@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -967,6 +968,81 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 	if publisher.published.WorkerID == "" || publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
 		t.Fatalf("published from wrong worker workspace: %+v", publisher.published)
+	}
+}
+
+func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "find the first optimization",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "ship the first optimization and keep researching",
+				Inputs: map[string]any{"repo": "owner/repo", "continueAfterPublish": true},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "continue looking for the next optimization",
+			Plan: &Plan{
+				WorkerKind: "change",
+				Prompt:     "find the second optimization",
+				Metadata:   map[string]any{"baseWorkerID": "source"},
+				Actions: []PlanAction{{
+					Kind:   "publish_pull_request",
+					When:   "after_success",
+					Reason: "ship the second optimization and keep the task owning both PRs",
+					Inputs: map[string]any{"repo": "owner/repo"},
+				}},
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "optimized"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Perf research",
+		Prompt: "Keep producing optimization PRs.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 2)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.ObjectiveStatus != core.ObjectiveWaitingExternal || task.ObjectivePhase != "pr_opened" {
+		t.Fatalf("objective = %q phase %q", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if len(publisher.publishedSpecs) != 2 {
+		t.Fatalf("published specs = %d, want 2", len(publisher.publishedSpecs))
+	}
+	if countEvents(snapshot.Events, core.EventTaskAction, task.ID) != 4 {
+		t.Fatalf("task action events = %d, want 4", countEvents(snapshot.Events, core.EventTaskAction, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 1 {
+		t.Fatalf("task.replanned events = %d, want 1", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "baseWorkerID", "source") {
+		t.Fatalf("missing source-base worker metadata")
 	}
 }
 
@@ -4764,7 +4840,7 @@ func TestServiceDoesNotExhaustTurnLimitWhileReplannerMakesProgress(t *testing.T)
 			WorkerKind: "codex",
 			Prompt:     "implement initial slice",
 		},
-		continueTurns: maxDynamicReplanTurns + 1,
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 1,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial"}}},
@@ -4782,14 +4858,14 @@ func TestServiceDoesNotExhaustTurnLimitWhileReplannerMakesProgress(t *testing.T)
 		t.Fatal(err)
 	}
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
-	if len(brain.states) != maxDynamicReplanTurns+2 {
-		t.Fatalf("replan states = %d, want %d", len(brain.states), maxDynamicReplanTurns+2)
+	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns+2 {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns+2)
 	}
 	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
 		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
 	}
-	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxDynamicReplanTurns+2 {
-		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxDynamicReplanTurns+2)
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxConsecutiveUnproductiveReplanTurns+2 {
+		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxConsecutiveUnproductiveReplanTurns+2)
 	}
 	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
 		t.Fatalf("unexpected fallback replanned event")
@@ -4816,7 +4892,7 @@ func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *tes
 			WorkerKind: "codex",
 			Prompt:     "implement initial candidate",
 		},
-		continueTurns: maxDynamicReplanTurns + 10,
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 10,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial implementation"}}},
@@ -4834,11 +4910,11 @@ func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *tes
 		t.Fatal(err)
 	}
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
-	if len(brain.states) != maxDynamicReplanTurns {
-		t.Fatalf("replan states = %d, want %d", len(brain.states), maxDynamicReplanTurns)
+	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns)
 	}
-	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxDynamicReplanTurns+1 {
-		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxDynamicReplanTurns+1)
+	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != maxConsecutiveUnproductiveReplanTurns+1 {
+		t.Fatalf("task.replanned count = %d, want %d", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID), maxConsecutiveUnproductiveReplanTurns+1)
 	}
 	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
 		t.Fatalf("missing fallback replanned event")
@@ -5650,6 +5726,7 @@ func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (
 
 type fakePullRequestPublisher struct {
 	published        PullRequestPublishSpec
+	publishedSpecs   []PullRequestPublishSpec
 	publishedWorkers []string
 	publishCalls     int
 	errOnce          error
@@ -5671,6 +5748,7 @@ func (g fakeTitleGenerator) GenerateTitle(context.Context, string) (string, erro
 func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPublishSpec) (core.PullRequest, error) {
 	p.published = spec
 	p.publishCalls++
+	p.publishedSpecs = append(p.publishedSpecs, spec)
 	p.publishedWorkers = append(p.publishedWorkers, spec.WorkerID)
 	if p.errCount > 0 && p.publishCalls <= p.errCount {
 		return core.PullRequest{}, errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply")
@@ -5683,11 +5761,11 @@ func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPu
 		branch = defaultPRBranch(spec)
 	}
 	return core.PullRequest{
-		ID:           "pr-1",
+		ID:           fmt.Sprintf("pr-%d", p.publishCalls),
 		TaskID:       spec.TaskID,
 		Repo:         spec.Repo,
-		Number:       12,
-		URL:          "https://github.com/" + spec.Repo + "/pull/12",
+		Number:       11 + p.publishCalls,
+		URL:          fmt.Sprintf("https://github.com/%s/pull/%d", spec.Repo, 11+p.publishCalls),
 		Branch:       branch,
 		Base:         nonEmpty(spec.Base, "main"),
 		Title:        spec.Title,
