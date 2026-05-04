@@ -1414,7 +1414,10 @@ func TestServiceStartsNewTaskWorkspaceFromProjectDefaultBase(t *testing.T) {
 	repo := initGitTestRepo(t)
 	runTestGit(t, repo, "branch", "-M", "main")
 	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
-	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	upstream := t.TempDir()
+	runTestGit(t, upstream, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "upstream", upstream)
+	runTestGit(t, repo, "push", "-u", "upstream", "main")
 	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("feature\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1451,6 +1454,71 @@ func TestServiceStartsNewTaskWorkspaceFromProjectDefaultBase(t *testing.T) {
 	if workspace.baseRevision != "refs/remotes/upstream/main" {
 		t.Fatalf("workspace base revision = %q, want upstream default base", workspace.baseRevision)
 	}
+	gotCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", workspace.baseRevision))
+	if gotCommit != mainCommit {
+		t.Fatalf("workspace base revision commit = %q, want %q", gotCommit, mainCommit)
+	}
+}
+
+func TestSyncedProjectWorkspaceBaseRevisionFetchesStaleBase(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "origin", remote)
+	runTestGit(t, repo, "push", "-u", "origin", "main")
+	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	updaterParent := t.TempDir()
+	updater := filepath.Join(updaterParent, "updater")
+	runTestGit(t, updaterParent, "clone", remote, updater)
+	runTestGit(t, updater, "config", "user.name", "aged-test")
+	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, updater, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(updater, "file.txt"), []byte("remote update\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, updater, "add", "file.txt")
+	runTestGit(t, updater, "commit", "-m", "remote update")
+	runTestGit(t, updater, "push", "origin", "main")
+	remoteCommit := strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD"))
+
+	staleCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "refs/remotes/origin/main"))
+	if staleCommit == remoteCommit {
+		t.Fatalf("test setup failed: local origin/main is already current")
+	}
+	ref, err := syncedProjectWorkspaceBaseRevision(ctx, core.Project{
+		LocalPath:   repo,
+		DefaultBase: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "refs/remotes/origin/main" {
+		t.Fatalf("synced base ref = %q, want refs/remotes/origin/main", ref)
+	}
+	gotCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", ref))
+	if gotCommit != remoteCommit {
+		t.Fatalf("synced base commit = %q, want %q", gotCommit, remoteCommit)
+	}
+}
+
+func TestSyncedProjectWorkspaceBaseRevisionFailsWithoutUpstream(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+
+	_, err := syncedProjectWorkspaceBaseRevision(ctx, core.Project{
+		LocalPath:   repo,
+		DefaultBase: "main",
+	})
+	if err == nil {
+		t.Fatal("syncedProjectWorkspaceBaseRevision succeeded; want missing upstream error")
+	}
+	if !strings.Contains(err.Error(), "upstream tracking branch is not configured") {
+		t.Fatalf("error = %v, want upstream tracking blocker", err)
+	}
 }
 
 func TestServicePublishedPRContainsWorkerChangesNotDaemonBranch(t *testing.T) {
@@ -1461,7 +1529,10 @@ func TestServicePublishedPRContainsWorkerChangesNotDaemonBranch(t *testing.T) {
 	repo := initGitTestRepo(t)
 	runTestGit(t, repo, "branch", "-M", "main")
 	mainCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
-	runTestGit(t, repo, "update-ref", "refs/remotes/upstream/main", mainCommit)
+	upstream := t.TempDir()
+	runTestGit(t, upstream, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "upstream", upstream)
+	runTestGit(t, repo, "push", "-u", "upstream", "main")
 	runTestGit(t, repo, "checkout", "-b", "daemon-feature")
 	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("do not publish\n"), 0o644); err != nil {
 		t.Fatal(err)

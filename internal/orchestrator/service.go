@@ -2788,11 +2788,18 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["retryWorkspaceReused"] = false
 	}
 	workspaceSpec := WorkspaceSpec{
-		TaskID:       task.ID,
-		WorkerID:     workerID,
-		WorkDir:      project.LocalPath,
-		BaseRevision: projectWorkspaceBaseRevision(ctx, project),
-		TaskTitle:    task.Title,
+		TaskID:    task.ID,
+		WorkerID:  workerID,
+		WorkDir:   project.LocalPath,
+		TaskTitle: task.Title,
+	}
+	if !reusedWorkspace {
+		baseRevision, err := syncedProjectWorkspaceBaseRevision(ctx, project)
+		if err != nil {
+			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+			return WorkerTurnResult{}, err
+		}
+		workspaceSpec.BaseRevision = baseRevision
 	}
 	if strings.TrimSpace(workspaceSpec.BaseRevision) != "" {
 		plan.Metadata["workspaceBaseRevision"] = workspaceSpec.BaseRevision
@@ -4953,6 +4960,82 @@ func projectWorkspaceBaseRevision(ctx context.Context, project core.Project) str
 		}
 	}
 	return ""
+}
+
+func syncedProjectWorkspaceBaseRevision(ctx context.Context, project core.Project) (string, error) {
+	base := strings.TrimSpace(project.DefaultBase)
+	if base == "" || strings.TrimSpace(project.LocalPath) == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(base, "refs/") || gitCommitRefExists(ctx, project.LocalPath, base) && !looksLikeBranchName(base) {
+		return base, nil
+	}
+	if _, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--show-toplevel"); err != nil {
+		return projectWorkspaceBaseRevision(ctx, project), nil
+	}
+	ref, err := syncGitProjectBaseBranch(ctx, project.LocalPath, base)
+	if err != nil {
+		return "", err
+	}
+	return ref, nil
+}
+
+func syncGitProjectBaseBranch(ctx context.Context, dir string, base string) (string, error) {
+	remote := ""
+	branch := base
+	if gitRemoteExists(ctx, dir, "upstream") {
+		remote = "upstream"
+	} else if gitCommitRefExists(ctx, dir, "refs/heads/"+base) {
+		upstreamRemote, upstreamBranch, err := gitBranchUpstream(ctx, dir, base)
+		if err != nil {
+			return "", fmt.Errorf("sync git base branch %q: %w", base, err)
+		}
+		remote = upstreamRemote
+		branch = upstreamBranch
+	} else if gitRemoteExists(ctx, dir, "origin") {
+		remote = "origin"
+	}
+	if strings.TrimSpace(remote) == "" || strings.TrimSpace(branch) == "" {
+		return "", fmt.Errorf("sync git base branch %q: upstream tracking branch is not configured", base)
+	}
+	remoteRef := "refs/remotes/" + remote + "/" + branch
+	refspec := "+refs/heads/" + branch + ":" + remoteRef
+	if _, err := runCommand(ctx, dir, "git", "fetch", "--prune", remote, refspec); err != nil {
+		return "", fmt.Errorf("fetch git base branch %q from %s: %w", base, remote, err)
+	}
+	if !gitCommitRefExists(ctx, dir, remoteRef) {
+		return "", fmt.Errorf("sync git base branch %q: fetched ref %s is not a commit", base, remoteRef)
+	}
+	return remoteRef, nil
+}
+
+func gitRemoteExists(ctx context.Context, dir string, remote string) bool {
+	if strings.TrimSpace(remote) == "" {
+		return false
+	}
+	_, err := runCommand(ctx, dir, "git", "remote", "get-url", remote)
+	return err == nil
+}
+
+func gitBranchUpstream(ctx context.Context, dir string, branch string) (string, string, error) {
+	remote, err := runCommand(ctx, dir, "git", "config", "--get", "branch."+branch+".remote")
+	if err != nil {
+		return "", "", errors.New("upstream tracking branch is not configured")
+	}
+	merge, err := runCommand(ctx, dir, "git", "config", "--get", "branch."+branch+".merge")
+	if err != nil {
+		return "", "", errors.New("upstream tracking branch is not configured")
+	}
+	remote = strings.TrimSpace(remote)
+	merge = strings.TrimSpace(merge)
+	if remote == "" || remote == "." || merge == "" {
+		return "", "", errors.New("upstream tracking branch is not configured")
+	}
+	upstreamBranch := strings.TrimPrefix(merge, "refs/heads/")
+	if upstreamBranch == "" || upstreamBranch == merge {
+		return "", "", fmt.Errorf("unsupported upstream merge ref %q", merge)
+	}
+	return remote, upstreamBranch, nil
 }
 
 func projectWorkspaceBaseCommit(ctx context.Context, project core.Project) string {

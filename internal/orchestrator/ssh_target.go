@@ -414,15 +414,17 @@ else
   cd "$work_dir"
   git fetch origin --prune
 fi
-if [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
-  git checkout --detach "$base_ref"
-elif [ -n "$base" ]; then
+if [ -n "$base" ]; then
   if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
     git checkout --detach "origin/$base"
+  elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
+    git checkout --detach "$base_ref"
   else
     git checkout "$base"
     git pull --ff-only
   fi
+elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
+  git checkout --detach "$base_ref"
 fi
 echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase), shellQuote(spec.BaseRef))
 }
