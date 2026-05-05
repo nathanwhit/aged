@@ -3476,6 +3476,34 @@ function payloadStringArray(value: unknown): string[] {
   return value.map(payloadValue).filter(Boolean);
 }
 
+function latestTimestamp(left: string | undefined, right: string): string {
+  if (!left) return right;
+  const leftMs = Date.parse(left);
+  const rightMs = Date.parse(right);
+  if (!Number.isFinite(leftMs) || !Number.isFinite(rightMs)) return left;
+  return rightMs > leftMs ? right : left;
+}
+
+function workerFromCreatedEvent(existing: Worker | undefined, event: EventRecord, payload: Record<string, unknown>): Worker {
+  const prompt = payloadValue(payload.prompt);
+  const promptPath = payloadValue(payload.promptPath);
+  const promptError = payloadValue(payload.promptError);
+  const metadata = isRecord(payload.metadata) ? { ...(existing?.metadata ?? {}), ...payload.metadata } : existing?.metadata;
+  return {
+    id: event.workerId ?? existing?.id ?? "",
+    taskId: event.taskId ?? existing?.taskId ?? "",
+    kind: payloadValue(payload.kind) || existing?.kind || "unknown",
+    status: existing?.status ?? "queued",
+    command: Array.isArray(payload.command) ? payload.command.map(String) : existing?.command,
+    prompt: prompt || existing?.prompt,
+    promptPath: promptPath || existing?.promptPath,
+    promptError: promptError || existing?.promptError,
+    createdAt: existing?.createdAt || event.at,
+    updatedAt: latestTimestamp(existing?.updatedAt, event.at),
+    metadata,
+  };
+}
+
 function prettyPayload(value: unknown): string {
   if (typeof value === "string") {
     try {
@@ -3691,21 +3719,10 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     return { ...snapshot, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
   }
   if (event.type === "worker.created" && event.workerId && event.taskId) {
+    const existing = snapshot.workers.find((worker) => worker.id === event.workerId);
     return {
       ...snapshot,
-      workers: upsertById(snapshot.workers, {
-        id: event.workerId,
-        taskId: event.taskId,
-        kind: String(payload.kind ?? "unknown"),
-        status: "queued",
-        command: Array.isArray(payload.command) ? payload.command.map(String) : undefined,
-        prompt: payloadValue(payload.prompt) || undefined,
-        promptPath: payloadValue(payload.promptPath) || undefined,
-        promptError: payloadValue(payload.promptError) || undefined,
-        createdAt: event.at,
-        updatedAt: event.at,
-        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
-      }),
+      workers: upsertById(snapshot.workers, workerFromCreatedEvent(existing, event, payload)),
     };
   }
   if (event.type === "worker.workspace_prepared" && event.workerId) {
@@ -3883,19 +3900,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       }
     }
     if (event.type === "worker.created" && event.workerId && event.taskId) {
-      workers.set(event.workerId, {
-        id: event.workerId,
-        taskId: event.taskId,
-        kind: String(payload.kind ?? "unknown"),
-        status: "queued",
-        command: Array.isArray(payload.command) ? payload.command.map(String) : undefined,
-        prompt: payloadValue(payload.prompt) || undefined,
-        promptPath: payloadValue(payload.promptPath) || undefined,
-        promptError: payloadValue(payload.promptError) || undefined,
-        createdAt: event.at,
-        updatedAt: event.at,
-        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
-      });
+      workers.set(event.workerId, workerFromCreatedEvent(workers.get(event.workerId), event, payload));
     }
     if (event.type === "worker.started" && event.workerId) {
       const worker = workers.get(event.workerId);
