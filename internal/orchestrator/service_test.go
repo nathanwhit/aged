@@ -6310,6 +6310,10 @@ func (r *restartOnSteeringRunner) Kind() string {
 	return "codex"
 }
 
+func (r *restartOnSteeringRunner) Capabilities() worker.Capabilities {
+	return worker.Capabilities{ResumeSession: true}
+}
+
 func (r *restartOnSteeringRunner) BuildCommand(worker.Spec) []string {
 	return nil
 }
@@ -6394,6 +6398,10 @@ func (r *recordingBuildRunner) Kind() string {
 	return r.kind
 }
 
+func (r *recordingBuildRunner) Capabilities() worker.Capabilities {
+	return worker.Capabilities{ResumeSession: true}
+}
+
 func (r *recordingBuildRunner) BuildCommand(spec worker.Spec) []string {
 	r.spec = spec
 	return []string{"worker", spec.WorkDir, spec.ResumeSessionID}
@@ -6421,6 +6429,10 @@ func (r fileWritingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sin
 
 func (r *recordingRunner) Kind() string {
 	return r.kind
+}
+
+func (r *recordingRunner) Capabilities() worker.Capabilities {
+	return worker.Capabilities{ResumeSession: true}
 }
 
 func (r *recordingRunner) BuildCommand(worker.Spec) []string {

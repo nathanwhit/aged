@@ -81,6 +81,7 @@ type Service struct {
 	tasks       map[string]string
 	steering    map[string]chan string
 	remoteRuns  map[string]remoteRun
+	workerCaps  map[string]worker.Capabilities
 }
 
 const (
@@ -156,6 +157,12 @@ type WorkerTurnResult struct {
 	Changes      WorkspaceChanges  `json:"changes"`
 }
 
+type activeWorkerControl struct {
+	ID           string
+	Cancel       context.CancelFunc
+	Capabilities worker.Capabilities
+}
+
 func NewService(store eventstore.Store, brain BrainProvider, runners map[string]worker.Runner, workDir string) *Service {
 	return NewServiceWithWorkspaceManager(store, brain, runners, workDir, NewWorkspaceManager(WorkspaceVCSAuto, WorkspaceModeIsolated, "", WorkspaceCleanupRetain))
 }
@@ -200,6 +207,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		tasks:       map[string]string{},
 		steering:    map[string]chan string{},
 		remoteRuns:  map[string]remoteRun{},
+		workerCaps:  map[string]worker.Capabilities{},
 	}
 }
 
@@ -1825,45 +1833,57 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		return err
 	}
 	s.mu.Lock()
-	activeWorkerIDs := make([]string, 0)
-	activeCancels := map[string]context.CancelFunc{}
+	activeWorkers := make([]activeWorkerControl, 0)
 	for workerID, workerTaskID := range s.tasks {
 		if workerTaskID == taskID {
-			activeWorkerIDs = append(activeWorkerIDs, workerID)
-			if cancel := s.cancels[workerID]; cancel != nil {
-				activeCancels[workerID] = cancel
-			}
+			activeWorkers = append(activeWorkers, activeWorkerControl{
+				ID:           workerID,
+				Cancel:       s.cancels[workerID],
+				Capabilities: s.workerCaps[workerID],
+			})
 		}
 	}
-	sort.Strings(activeWorkerIDs)
-	delivered := false
-	for workerID, ch := range s.steering {
-		if s.tasks[workerID] != taskID {
+	sort.Slice(activeWorkers, func(i, j int) bool {
+		return activeWorkers[i].ID < activeWorkers[j].ID
+	})
+	deliveredWorkerIDs := map[string]bool{}
+	for _, active := range activeWorkers {
+		if !active.Capabilities.LiveSteering {
 			continue
 		}
-		if remote := s.remoteRuns[workerID]; remote.Session != "" {
+		ch := s.steering[active.ID]
+		if ch == nil {
 			continue
 		}
 		select {
 		case ch <- req.Message:
-			delivered = true
+			deliveredWorkerIDs[active.ID] = true
 		default:
 		}
 	}
 	s.mu.Unlock()
+	restartWorkers := make([]activeWorkerControl, 0)
+	restartWorkerIDs := make([]string, 0)
+	for _, active := range activeWorkers {
+		if deliveredWorkerIDs[active.ID] {
+			continue
+		}
+		restartWorkers = append(restartWorkers, active)
+		restartWorkerIDs = append(restartWorkerIDs, active.ID)
+	}
 	snapshot, snapshotErr := s.store.Snapshot(ctx)
 	if snapshotErr == nil && taskStatus(snapshot, taskID) == core.TaskWaiting {
 		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
 		})
-	} else if snapshotErr == nil && !delivered && len(activeWorkerIDs) > 0 {
-		for _, workerID := range activeWorkerIDs {
-			if cancel := activeCancels[workerID]; cancel != nil {
-				cancel()
+	} else if snapshotErr == nil && len(restartWorkerIDs) > 0 {
+		for _, active := range restartWorkers {
+			if active.Cancel != nil {
+				active.Cancel()
 			}
-			_ = s.CancelWorker(ctx, workerID)
+			_ = s.CancelWorker(ctx, active.ID)
 		}
-		go s.restartRunningTaskWithSteering(context.Background(), taskID, req.Message, activeWorkerIDs)
+		go s.restartRunningTaskWithSteering(context.Background(), taskID, req.Message, restartWorkerIDs)
 	}
 	return err
 }
@@ -3250,13 +3270,18 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
+	capabilities := worker.RunnerCapabilities(runner)
 	var steering chan string
-	if runnerSupportsSteering(runner) {
+	if capabilities.LiveSteering {
 		steering = make(chan string, 16)
 	}
 	retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
 	prompt := workerExecutionPrompt(plan.Prompt, workspace)
 	if reusedWorkspace {
+		if !capabilities.ResumeSession {
+			resumeSessionID = ""
+			delete(plan.Metadata, "retryResumeSessionID")
+		}
 		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering)
 	} else {
 		resumeSessionID = ""
@@ -3292,6 +3317,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	s.mu.Lock()
 	s.cancels[workerID] = cancel
 	s.tasks[workerID] = task.ID
+	s.workerCaps[workerID] = capabilities
 	if steering != nil {
 		s.steering[workerID] = steering
 	}
@@ -3305,6 +3331,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		delete(s.cancels, workerID)
 		delete(s.tasks, workerID)
 		delete(s.steering, workerID)
+		delete(s.workerCaps, workerID)
 		s.mu.Unlock()
 	}()
 
@@ -3506,7 +3533,8 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		WorkerID:   workerID,
 		TaskID:     task.ID,
 	}
-	steering := make(chan string, 16)
+	capabilities := worker.RunnerCapabilities(runner)
+	capabilities.LiveSteering = false
 	spec := worker.Spec{
 		ID:              workerID,
 		TaskID:          task.ID,
@@ -3515,9 +3543,13 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		WorkDir:         remoteWorkDir,
 		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
-		Steering:        steering,
 	}
 	if reusedWorkspace {
+		if !capabilities.ResumeSession {
+			resumeSessionID = ""
+			delete(plan.Metadata, "retryResumeSessionID")
+			spec.ResumeSessionID = ""
+		}
 		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"))
 	}
 	command := runner.BuildCommand(spec)
@@ -3582,17 +3614,17 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	s.mu.Lock()
 	s.cancels[workerID] = cancel
 	s.tasks[workerID] = task.ID
-	s.steering[workerID] = steering
 	s.remoteRuns[workerID] = remoteRun
+	s.workerCaps[workerID] = capabilities
 	s.mu.Unlock()
 	defer func() {
 		cancel()
 		s.mu.Lock()
-		close(s.steering[workerID])
 		delete(s.cancels, workerID)
 		delete(s.tasks, workerID)
 		delete(s.steering, workerID)
 		delete(s.remoteRuns, workerID)
+		delete(s.workerCaps, workerID)
 		s.mu.Unlock()
 	}()
 
@@ -6586,11 +6618,6 @@ func stringSliceMetadata(metadata map[string]any, key string) []string {
 	default:
 		return nil
 	}
-}
-
-func runnerSupportsSteering(runner worker.Runner) bool {
-	support, ok := runner.(worker.SteeringSupport)
-	return ok && support.SupportsSteering()
 }
 
 func (s *Service) append(ctx context.Context, event core.Event) (core.Event, error) {
