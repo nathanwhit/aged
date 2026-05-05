@@ -4,6 +4,7 @@ aged.db-*
 .gomodcache/
 node_modules/
 web/dist/
+eval-results/
 *.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js
