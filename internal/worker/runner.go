@@ -60,8 +60,31 @@ type Runner interface {
 	Run(ctx context.Context, spec Spec, sink Sink) error
 }
 
+type Capabilities struct {
+	LiveSteering  bool
+	ResumeSession bool
+}
+
+type CapabilityProvider interface {
+	Capabilities() Capabilities
+}
+
 type SteeringSupport interface {
 	SupportsSteering() bool
+}
+
+func RunnerCapabilities(runner Runner) Capabilities {
+	if runner == nil {
+		return Capabilities{}
+	}
+	if provider, ok := runner.(CapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	capabilities := Capabilities{}
+	if support, ok := runner.(SteeringSupport); ok {
+		capabilities.LiveSteering = support.SupportsSteering()
+	}
+	return capabilities
 }
 
 type MockRunner struct{}
@@ -88,17 +111,22 @@ type CommandRunner struct {
 	kind              string
 	command           func(Spec) []string
 	steeringFormatter func(string) string
+	capabilities      Capabilities
 }
 
 func NewCommandRunner(kind string, command func(Spec) []string) CommandRunner {
 	return CommandRunner{kind: kind, command: command}
 }
 
+func NewCommandRunnerWithCapabilities(kind string, capabilities Capabilities, command func(Spec) []string) CommandRunner {
+	return CommandRunner{kind: kind, command: command, capabilities: capabilities}
+}
+
 func NewSteerableCommandRunner(kind string, command func(Spec) []string, steeringFormatter func(string) string) CommandRunner {
 	if steeringFormatter == nil {
 		steeringFormatter = defaultSteeringFormatter
 	}
-	return CommandRunner{kind: kind, command: command, steeringFormatter: steeringFormatter}
+	return CommandRunner{kind: kind, command: command, steeringFormatter: steeringFormatter, capabilities: Capabilities{LiveSteering: true}}
 }
 
 func (r CommandRunner) Kind() string {
@@ -106,7 +134,15 @@ func (r CommandRunner) Kind() string {
 }
 
 func (r CommandRunner) SupportsSteering() bool {
-	return r.steeringFormatter != nil
+	return r.Capabilities().LiveSteering
+}
+
+func (r CommandRunner) Capabilities() Capabilities {
+	capabilities := r.capabilities
+	if r.steeringFormatter != nil {
+		capabilities.LiveSteering = true
+	}
+	return capabilities
 }
 
 func (r CommandRunner) BuildCommand(spec Spec) []string {
@@ -315,7 +351,7 @@ func DefaultRunners() map[string]Runner {
 	runners := []Runner{
 		MockRunner{},
 		BenchmarkCompareRunner{},
-		NewCommandRunner("codex", func(spec Spec) []string {
+		NewCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args := []string{"codex", "exec", "resume", codexYoloFlag, "--json"}
 				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
@@ -329,7 +365,7 @@ func DefaultRunners() map[string]Runner {
 			}
 			return append(args, "-")
 		}),
-		NewCommandRunner("claude", func(spec Spec) []string {
+		NewCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			args := []string{"claude", "--print", "--output-format", "stream-json", "--verbose"}
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args = append(args, "--resume", strings.TrimSpace(spec.ResumeSessionID))
