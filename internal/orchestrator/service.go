@@ -114,7 +114,7 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	return b.String()
 }
 
-func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string) string {
+func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string, steering []string) string {
 	var b strings.Builder
 	b.WriteString("# Retry Context\n\n")
 	b.WriteString("This is a retry of a previously failed or canceled worker turn.\n")
@@ -125,6 +125,20 @@ func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSe
 		b.WriteString("The worker provider session is being resumed when supported.\n")
 	}
 	b.WriteString("The execution workspace may already contain partial changes from that worker. Inspect the current workspace state first, preserve useful existing work, and continue from there instead of starting over.\n\n")
+	if len(steering) > 0 {
+		b.WriteString("# User Steering\n\n")
+		b.WriteString("Apply this user steering on the resumed turn:\n")
+		for _, message := range steering {
+			message = strings.TrimSpace(message)
+			if message == "" {
+				continue
+			}
+			b.WriteString("- ")
+			b.WriteString(message)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString(prompt)
 	return b.String()
 }
@@ -1012,6 +1026,9 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		if !workerBelongsToTask(snapshot, workerID, taskID) {
 			return core.PullRequest{}, errors.New("worker does not belong to task")
 		}
+		if !workerIsPublishableCandidate(snapshot, workerID) {
+			return core.PullRequest{}, errors.New("pull request publishing requires a successful worker with candidate changes")
+		}
 		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
 		if err != nil {
 			return core.PullRequest{}, err
@@ -1023,7 +1040,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
-		body = fmt.Sprintf("Task: `%s`\n\n%s", task.ID, task.Prompt)
+		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
 		TaskID:        taskID,
@@ -1071,6 +1088,9 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
+	if err := s.recordPullRequestBabysitter(ctx, pr); err != nil {
+		return core.PullRequest{}, err
+	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
 		return core.PullRequest{}, err
 	}
@@ -1078,6 +1098,151 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
+}
+
+func workerIsPublishableCandidate(snapshot core.Snapshot, workerID string) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.WorkerID != workerID || event.Type != core.EventWorkerCompleted {
+			continue
+		}
+		var payload struct {
+			Status           core.WorkerStatus `json:"status"`
+			WorkspaceChanges WorkspaceChanges  `json:"workspaceChanges"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false
+		}
+		return payload.Status == core.WorkerSucceeded && resultHasCandidateChanges(WorkerTurnResult{Changes: payload.WorkspaceChanges})
+	}
+	return false
+}
+
+func (s *Service) defaultPullRequestBody(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, sourceRoot string) string {
+	changes := WorkspaceChanges{}
+	if strings.TrimSpace(workerID) != "" {
+		if completed, err := s.completedWorkspaceChanges(ctx, workerID); err == nil {
+			changes = completed
+		}
+	}
+	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
+	generated := generatedPullRequestBody(task, workerID, summary, changes)
+	template, templatePath := pullRequestTemplate(sourceRoot)
+	if strings.TrimSpace(template) == "" {
+		return generated
+	}
+	var builder strings.Builder
+	builder.WriteString(strings.TrimSpace(template))
+	builder.WriteString("\n\n---\n\n")
+	builder.WriteString("## Aged context\n\n")
+	builder.WriteString("Repository PR template detected at `")
+	builder.WriteString(templatePath)
+	builder.WriteString("`.\n\n")
+	builder.WriteString(generated)
+	return builder.String()
+}
+
+func generatedPullRequestBody(task core.Task, workerID string, summary string, changes WorkspaceChanges) string {
+	var builder strings.Builder
+	builder.WriteString("## Summary\n")
+	builder.WriteString("- ")
+	builder.WriteString(nonEmpty(strings.TrimSpace(summary), strings.TrimSpace(task.Title), "Aged task result"))
+	builder.WriteString("\n\n")
+	if len(changes.ChangedFiles) > 0 {
+		builder.WriteString("## Changed files\n")
+		for _, file := range changes.ChangedFiles {
+			path := strings.TrimSpace(file.Path)
+			if path == "" {
+				continue
+			}
+			status := strings.TrimSpace(file.Status)
+			if status != "" {
+				builder.WriteString("- `")
+				builder.WriteString(path)
+				builder.WriteString("` (")
+				builder.WriteString(status)
+				builder.WriteString(")\n")
+			} else {
+				builder.WriteString("- `")
+				builder.WriteString(path)
+				builder.WriteString("`\n")
+			}
+		}
+		builder.WriteString("\n")
+	}
+	if strings.TrimSpace(changes.DiffStat) != "" {
+		builder.WriteString("## Diffstat\n")
+		builder.WriteString("```text\n")
+		builder.WriteString(strings.TrimSpace(changes.DiffStat))
+		builder.WriteString("\n```\n\n")
+	}
+	builder.WriteString("## Validation\n")
+	builder.WriteString("- Worker completed successfully before PR publication.\n\n")
+	builder.WriteString("## Aged task\n")
+	builder.WriteString("- Task: `")
+	builder.WriteString(task.ID)
+	builder.WriteString("`\n")
+	if strings.TrimSpace(workerID) != "" {
+		builder.WriteString("- Worker: `")
+		builder.WriteString(workerID)
+		builder.WriteString("`\n")
+	}
+	return builder.String()
+}
+
+func workerCompletionSummaryFromSnapshot(snapshot core.Snapshot, workerID string) string {
+	if strings.TrimSpace(workerID) == "" {
+		return ""
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.WorkerID != workerID || event.Type != core.EventWorkerCompleted {
+			continue
+		}
+		var payload struct {
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			return strings.TrimSpace(payload.Summary)
+		}
+	}
+	return ""
+}
+
+func pullRequestTemplate(root string) (string, string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", ""
+	}
+	candidates := []string{
+		filepath.Join(root, ".github", "pull_request_template.md"),
+		filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE.md"),
+		filepath.Join(root, "PULL_REQUEST_TEMPLATE.md"),
+		filepath.Join(root, "pull_request_template.md"),
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE")); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasSuffix(strings.ToLower(name), ".md") {
+				candidates = append(candidates, filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE", name))
+			}
+		}
+	}
+	for _, candidate := range candidates {
+		body, err := os.ReadFile(candidate)
+		if err != nil || strings.TrimSpace(string(body)) == "" {
+			continue
+		}
+		rel, relErr := filepath.Rel(root, candidate)
+		if relErr != nil {
+			rel = candidate
+		}
+		return string(body), filepath.ToSlash(rel)
+	}
+	return "", ""
 }
 
 func (s *Service) pullRequestSourceRootForWorker(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, error) {
@@ -1390,15 +1555,10 @@ func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (
 	if isTerminalTaskStatus(task.Status) && !strings.EqualFold(pr.State, "OPEN") {
 		return task, nil
 	}
-	if _, err := s.append(ctx, core.Event{
-		Type:   core.EventPRBabysitter,
-		TaskID: pr.TaskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":               pr.ID,
-			"babysitterTaskId": pr.TaskID,
-		}),
-	}); err != nil {
-		return core.Task{}, err
+	if !pullRequestHasBabysitter(snapshot, pr.ID) {
+		if err := s.recordPullRequestBabysitter(ctx, pr); err != nil {
+			return core.Task{}, err
+		}
 	}
 	if !isTerminalTaskStatus(task.Status) {
 		if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, "pr_open", "Pull request is open; waiting on external GitHub state."); err != nil {
@@ -1411,6 +1571,33 @@ func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (
 		}
 	}
 	return task, nil
+}
+
+func (s *Service) recordPullRequestBabysitter(ctx context.Context, pr core.PullRequest) error {
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventPRBabysitter,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":               pr.ID,
+			"babysitterTaskId": pr.TaskID,
+		}),
+	})
+	return err
+}
+
+func pullRequestHasBabysitter(snapshot core.Snapshot, prID string) bool {
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventPRBabysitter {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.ID == prID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) error {
@@ -1638,12 +1825,28 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		return err
 	}
 	s.mu.Lock()
+	activeWorkerIDs := make([]string, 0)
+	activeCancels := map[string]context.CancelFunc{}
+	for workerID, workerTaskID := range s.tasks {
+		if workerTaskID == taskID {
+			activeWorkerIDs = append(activeWorkerIDs, workerID)
+			if cancel := s.cancels[workerID]; cancel != nil {
+				activeCancels[workerID] = cancel
+			}
+		}
+	}
+	sort.Strings(activeWorkerIDs)
+	delivered := false
 	for workerID, ch := range s.steering {
 		if s.tasks[workerID] != taskID {
 			continue
 		}
+		if remote := s.remoteRuns[workerID]; remote.Session != "" {
+			continue
+		}
 		select {
 		case ch <- req.Message:
+			delivered = true
 		default:
 		}
 	}
@@ -1653,8 +1856,121 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
 		})
+	} else if snapshotErr == nil && !delivered && len(activeWorkerIDs) > 0 {
+		for _, workerID := range activeWorkerIDs {
+			if cancel := activeCancels[workerID]; cancel != nil {
+				cancel()
+			}
+			_ = s.CancelWorker(ctx, workerID)
+		}
+		go s.restartRunningTaskWithSteering(context.Background(), taskID, req.Message, activeWorkerIDs)
 	}
 	return err
+}
+
+func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID string, message string, workerIDs []string) {
+	_ = s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":      "steering_restart",
+		"status":    "started",
+		"reason":    "runner does not support live steering; canceling and resuming with user input",
+		"message":   message,
+		"workerIds": workerIDs,
+	})
+	for _, workerID := range workerIDs {
+		if err := s.CancelWorker(ctx, workerID); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+			_ = s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":     "steering_restart",
+				"status":   "warning",
+				"reason":   "worker cancellation failed",
+				"workerId": workerID,
+				"error":    err.Error(),
+			})
+		}
+	}
+	snapshot, err := s.waitForTaskWorkersStopped(ctx, taskID, 15*time.Second)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "steering_restart",
+			"status": "failed",
+			"reason": "timed out waiting for workers to stop",
+			"error":  err.Error(),
+		})
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "steering_restart",
+			"status": "failed",
+			"reason": "task was not found after steering restart",
+		})
+		return
+	}
+	if task.Status == core.TaskSucceeded {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "steering_restart",
+			"status": "skipped",
+			"reason": "task completed before steering restart could resume it",
+		})
+		return
+	}
+	plan, err := retryPlanForTask(snapshot, taskID)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "steering_restart",
+			"status": "failed",
+			"reason": "retry plan could not be reconstructed",
+			"error":  err.Error(),
+		})
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "steering_restart",
+			"status": "failed",
+			"reason": "task could not be marked retrying",
+			"error":  err.Error(),
+		})
+		return
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "retrying"
+	_ = s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":      "steering_restart",
+		"status":    "resumed",
+		"reason":    "retrying canceled worker with retained workspace and steering",
+		"workerIds": workerIDs,
+	})
+	s.retryTask(ctx, task, plan)
+}
+
+func (s *Service) waitForTaskWorkersStopped(ctx context.Context, taskID string, timeout time.Duration) (core.Snapshot, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	var latest core.Snapshot
+	for {
+		snapshot, err := s.store.Snapshot(ctx)
+		if err == nil {
+			latest = snapshot
+			status := taskStatus(snapshot, taskID)
+			if !taskHasActiveWorkers(snapshot, taskID) && status != core.TaskQueued && status != core.TaskPlanning && status != core.TaskRunning {
+				return snapshot, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return latest, ctx.Err()
+		case <-deadline.C:
+			return latest, fmt.Errorf("task %s still has active workers after %s", taskID, timeout)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, error) {
@@ -2938,9 +3254,10 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if runnerSupportsSteering(runner) {
 		steering = make(chan string, 16)
 	}
+	retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
 	prompt := workerExecutionPrompt(plan.Prompt, workspace)
 	if reusedWorkspace {
-		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID)
+		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering)
 	} else {
 		resumeSessionID = ""
 		delete(plan.Metadata, "retryResumeSessionID")
@@ -3201,7 +3518,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		Steering:        steering,
 	}
 	if reusedWorkspace {
-		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID)
+		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"))
 	}
 	command := runner.BuildCommand(spec)
 	workspace.Root = remoteRun.RunDir
@@ -4800,6 +5117,12 @@ func (s *Service) runFollowUpWave(ctx context.Context, task core.Task, initial P
 		}
 		ordered[outcome.index] = outcome.result
 	}
+	for _, result := range ordered {
+		if result.Status == core.WorkerCanceled {
+			_ = s.setTaskStatus(ctx, task.ID, core.TaskCanceled)
+			return ordered, false, nil
+		}
+	}
 	return ordered, true, nil
 }
 
@@ -5332,11 +5655,11 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 	if terminalWorkerID != "" {
 		for i := len(workerIDs) - 1; i >= 0; i-- {
 			if workerIDs[i] == terminalWorkerID && i < len(plans) {
-				return retryPlanWithResume(snapshot, plans[i], terminalWorkerID), nil
+				return retryPlanWithResume(snapshot, plans[i], taskID, terminalWorkerID), nil
 			}
 		}
 	}
-	return retryPlanWithResume(snapshot, plans[len(plans)-1], terminalWorkerID), nil
+	return retryPlanWithResume(snapshot, plans[len(plans)-1], taskID, terminalWorkerID), nil
 }
 
 func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
@@ -5458,7 +5781,7 @@ func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []Work
 	return initial, results, nil
 }
 
-func retryPlanWithResume(snapshot core.Snapshot, plan Plan, workerID string) Plan {
+func retryPlanWithResume(snapshot core.Snapshot, plan Plan, taskID string, workerID string) Plan {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
 		return plan
@@ -5467,6 +5790,9 @@ func retryPlanWithResume(snapshot core.Snapshot, plan Plan, workerID string) Pla
 		plan.Metadata = map[string]any{}
 	}
 	plan.Metadata["retryFromWorkerID"] = workerID
+	if steering := taskSteering(snapshot, taskID); len(steering) > 0 {
+		plan.Metadata["retrySteering"] = steering
+	}
 	if execution := workerExecutionInfo(snapshot, workerID); len(execution) > 0 {
 		if targetID := stringMetadataValue(execution["targetId"]); targetID != "" {
 			plan.Metadata["retryTargetID"] = targetID
@@ -6143,6 +6469,7 @@ func planMetadata(plan Plan) map[string]any {
 		"retryRemoteRunDir",
 		"retryRemoteWorkDir",
 		"retryResumeSessionID",
+		"retrySteering",
 		"retryWorkspaceReused",
 		"retryWorkspaceCWD",
 		"retryWorkspaceError",
