@@ -3724,6 +3724,11 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const executionNodes = snapshot.executionNodes.map((node) => node.workerId === event.workerId ? { ...node, status, updatedAt: event.at } : node);
     return { ...snapshot, workers, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
   }
+  if (event.type === "worker.output" && event.workerId) {
+    const workers = snapshot.workers.map((worker) => worker.id === event.workerId && !isTerminalWorkerStatus(worker.status) ? { ...worker, updatedAt: event.at } : worker);
+    const executionNodes = snapshot.executionNodes.map((node) => node.workerId === event.workerId && !isTerminalWorkerStatus(node.status) ? { ...node, updatedAt: event.at } : node);
+    return { ...snapshot, workers, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
+  }
   if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
     return task ? { ...snapshot, tasks: upsertById(snapshot.tasks, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at }) } : snapshot;
@@ -3903,6 +3908,12 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       if (worker) workers.set(event.workerId, { ...worker, status: String(payload.status) as Worker["status"], updatedAt: event.at });
       const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
       if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
+    }
+    if (event.type === "worker.output" && event.workerId) {
+      const worker = workers.get(event.workerId);
+      if (worker && !isTerminalWorkerStatus(worker.status)) workers.set(event.workerId, { ...worker, updatedAt: event.at });
+      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
+      if (node && !isTerminalWorkerStatus(node.status)) executionNodes.set(node.id, { ...node, updatedAt: event.at });
     }
     if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
       const task = tasks.get(event.taskId);

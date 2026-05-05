@@ -432,14 +432,21 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 
 	applyCalls := 0
 	publisher := &fakePullRequestPublisher{}
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".github", "pull_request_template.md"), []byte("## Repo checklist\n- [ ] Tests pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "change",
 		Prompt:     "make change",
 	}}, map[string]worker.Runner{
 		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	}, workspace, fakeWorkspaceManager{
+		cwd:        workspace,
+		sourceRoot: workspace,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
@@ -461,6 +468,9 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if len(snapshot.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
+	if snapshot.PullRequests[0].BabysitterTaskID != task.ID {
+		t.Fatalf("babysitter task id = %q, want %q", snapshot.PullRequests[0].BabysitterTaskID, task.ID)
+	}
 	task = snapshot.Tasks[0]
 	if task.Status != core.TaskWaiting {
 		t.Fatalf("task status = %q, want waiting while PR is open", task.Status)
@@ -477,8 +487,74 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if !hasMilestone(task.Milestones, "candidate_ready") || !hasMilestone(task.Milestones, "pr_opened") {
 		t.Fatalf("milestones = %+v", task.Milestones)
 	}
+	if !strings.Contains(publisher.published.Body, "## Repo checklist") || !strings.Contains(publisher.published.Body, "`README.md` (modified)") || !strings.Contains(publisher.published.Body, "implemented") {
+		t.Fatalf("published body did not include template, changed files, and summary:\n%s", publisher.published.Body)
+	}
 	if applyCalls != 0 {
 		t.Fatalf("apply calls = %d, want 0", applyCalls)
+	}
+}
+
+func TestServiceCanceledFollowUpDoesNotPublishPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 1)
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+		Spawns: []SpawnRequest{{
+			ID:         "review",
+			Role:       "reviewer",
+			Reason:     "Review before publishing.",
+			WorkerKind: "review",
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"review": &blockingEventRunner{kind: "review", started: started},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Implement feature",
+		Prompt:   "Do it.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewWorkerID := ""
+	for _, candidate := range snapshot.Workers {
+		if candidate.TaskID == task.ID && candidate.Kind == "review" && candidate.Status == core.WorkerRunning {
+			reviewWorkerID = candidate.ID
+			break
+		}
+	}
+	if reviewWorkerID == "" {
+		t.Fatalf("missing running review worker: %+v", snapshot.Workers)
+	}
+	if err := service.CancelWorker(ctx, reviewWorkerID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskCanceled)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
+	}
+	if len(snapshot.PullRequests) != 0 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
 }
 
@@ -1025,6 +1101,7 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 2)
 	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	snapshot = waitForEventCount(t, store, core.EventTaskAction, task.ID, 4)
 	task, ok := findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")
@@ -5133,6 +5210,47 @@ func TestServiceDeliversSteeringToRunningWorker(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 }
 
+func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	runner := &restartOnSteeringRunner{started: started}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "continue the investigation",
+	}}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Steer restart", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "adjust course"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if calls := runner.callsValue(); calls < 2 {
+		t.Fatalf("runner calls = %d, want at least 2", calls)
+	}
+	if runner.resumeSessionIDValue() != "thread-1" {
+		t.Fatalf("resume session id = %q", runner.resumeSessionIDValue())
+	}
+	prompt := runner.promptValue()
+	if !strings.Contains(prompt, "Apply this user steering on the resumed turn") || !strings.Contains(prompt, "adjust course") {
+		t.Fatalf("retry prompt did not include steering: %q", prompt)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "steering_restart", "started") {
+		t.Fatalf("missing started steering restart action")
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "steering_restart", "resumed") {
+		t.Fatalf("missing resumed steering restart action")
+	}
+}
+
 func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -6054,6 +6172,14 @@ type blockingEventRunner struct {
 	prompt  string
 }
 
+type restartOnSteeringRunner struct {
+	mu              sync.Mutex
+	started         chan<- struct{}
+	calls           int
+	prompt          string
+	resumeSessionID string
+}
+
 type steeringRunner struct {
 	started chan<- struct{}
 	got     chan<- string
@@ -6178,6 +6304,55 @@ func (r *blockingEventRunner) promptValue() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.prompt
+}
+
+func (r *restartOnSteeringRunner) Kind() string {
+	return "codex"
+}
+
+func (r *restartOnSteeringRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *restartOnSteeringRunner) Run(ctx context.Context, spec worker.Spec, sink worker.Sink) error {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	if call > 1 {
+		r.prompt = spec.Prompt
+		r.resumeSessionID = spec.ResumeSessionID
+	}
+	r.mu.Unlock()
+	if call == 1 {
+		if err := sink.Event(ctx, worker.Event{
+			Kind: worker.EventLog,
+			Raw:  json.RawMessage(`{"type":"thread.started","thread_id":"thread-1"}`),
+		}); err != nil {
+			return err
+		}
+		close(r.started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: "resumed with steering"})
+}
+
+func (r *restartOnSteeringRunner) callsValue() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *restartOnSteeringRunner) promptValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prompt
+}
+
+func (r *restartOnSteeringRunner) resumeSessionIDValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resumeSessionID
 }
 
 func (r steeringRunner) Kind() string {
@@ -6539,6 +6714,24 @@ func waitForEvent(t *testing.T, store eventstore.Store, eventType core.EventType
 	}
 	snapshot, _ := store.Snapshot(context.Background())
 	t.Fatalf("task %s did not record event %s; events = %+v", taskID, eventType, snapshot.Events)
+	return core.Snapshot{}
+}
+
+func waitForEventCount(t *testing.T, store eventstore.Store, eventType core.EventType, taskID string, count int) core.Snapshot {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := store.Snapshot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if countEvents(snapshot.Events, eventType, taskID) >= count {
+			return snapshot
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snapshot, _ := store.Snapshot(context.Background())
+	t.Fatalf("task %s did not record %d events of type %s; events = %+v", taskID, count, eventType, snapshot.Events)
 	return core.Snapshot{}
 }
 

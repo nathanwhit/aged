@@ -19,6 +19,10 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+func isTerminalWorkerStatus(status core.WorkerStatus) bool {
+	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
+}
+
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -918,6 +922,19 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				node.Status = core.WorkerRunning
 				node.UpdatedAt = event.At
 				nodes[nodeID] = node
+			}
+		case core.EventWorkerOutput:
+			worker := workers[event.WorkerID]
+			if worker.ID != "" && !isTerminalWorkerStatus(worker.Status) {
+				worker.UpdatedAt = event.At
+				workers[event.WorkerID] = worker
+			}
+			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
+				node := nodes[nodeID]
+				if node.ID != "" && !isTerminalWorkerStatus(node.Status) {
+					node.UpdatedAt = event.At
+					nodes[nodeID] = node
+				}
 			}
 		case core.EventWorkerCompleted:
 			var payload struct {

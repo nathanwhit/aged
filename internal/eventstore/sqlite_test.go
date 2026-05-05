@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"aged/internal/core"
 )
@@ -67,6 +68,85 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	}
 	if snapshot.Tasks[0].Status != core.TaskSucceeded {
 		t.Fatalf("task status = %q, want %q", snapshot.Tasks[0].Status, core.TaskSucceeded)
+	}
+}
+
+func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	startedAt := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	outputAt := startedAt.Add(10 * time.Minute)
+	if _, err := store.Append(ctx, core.Event{
+		At:     startedAt,
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		At:       startedAt,
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   "worker-1",
+			"workerKind": "codex",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		At:       startedAt,
+		Type:     core.EventWorkerCreated,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		At:       startedAt,
+		Type:     core.EventWorkerStarted,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload:  core.MustJSON(map[string]any{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		At:       outputAt,
+		Type:     core.EventWorkerOutput,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind": "log",
+			"text": "still working",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 || !snapshot.Workers[0].UpdatedAt.Equal(outputAt) {
+		t.Fatalf("worker updatedAt = %+v, want %s", snapshot.Workers, outputAt)
+	}
+	if len(snapshot.ExecutionNodes) != 1 || !snapshot.ExecutionNodes[0].UpdatedAt.Equal(outputAt) {
+		t.Fatalf("node updatedAt = %+v, want %s", snapshot.ExecutionNodes, outputAt)
 	}
 }
 
