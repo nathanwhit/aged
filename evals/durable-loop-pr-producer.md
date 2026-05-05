@@ -1,0 +1,90 @@
+# Durable Loop PR Producer Eval
+
+This eval target checks whether durable loop mode can act like a useful long-running engineering loop instead of a one-shot task runner. It is intentionally a concrete workload, not a synthetic microbenchmark.
+
+## Target
+
+Run a durable loop against this repository with one objective: repeatedly produce small, useful maintenance PRs while babysitting existing PRs first.
+
+## Task Prompt
+
+```text
+You are running as a durable maintenance loop for aged.
+
+Each iteration:
+1. Inspect the repo and current open PRs.
+2. If there is already an open PR from a prior iteration, inspect its CI/review state first and fix it before starting new work.
+3. Find exactly one small reliability, orchestration, or developer-experience improvement.
+4. Implement it as a narrow, reviewable change.
+5. Run the relevant tests.
+6. Commit, push, and open a PR if there is a real change.
+7. Do not mark the task complete just because one PR was opened. Continue looking for the next useful improvement until explicitly canceled or blocked on user input.
+
+Prefer improvements around:
+- durable loop behavior
+- stuck or hung worker detection
+- PR publishing quality
+- worker prompt visibility
+- reducing hard-coded orchestration logic
+
+Ask for input only when genuinely blocked.
+```
+
+## Metadata
+
+```json
+{
+  "executionMode": "loop",
+  "loopWorkerKind": "codex",
+  "loopRole": "maintenance_pr_loop",
+  "loopIntervalSeconds": 300,
+  "completionMode": "local"
+}
+```
+
+## Example API Request
+
+```sh
+curl -sS http://127.0.0.1:8787/api/tasks \
+  -H 'content-type: application/json' \
+  -d '{
+    "title": "Durable loop PR producer eval",
+    "prompt": "You are running as a durable maintenance loop for aged.\n\nEach iteration:\n1. Inspect the repo and current open PRs.\n2. If there is already an open PR from a prior iteration, inspect its CI/review state first and fix it before starting new work.\n3. Find exactly one small reliability, orchestration, or developer-experience improvement.\n4. Implement it as a narrow, reviewable change.\n5. Run the relevant tests.\n6. Commit, push, and open a PR if there is a real change.\n7. Do not mark the task complete just because one PR was opened. Continue looking for the next useful improvement until explicitly canceled or blocked on user input.\n\nPrefer improvements around:\n- durable loop behavior\n- stuck or hung worker detection\n- PR publishing quality\n- worker prompt visibility\n- reducing hard-coded orchestration logic\n\nAsk for input only when genuinely blocked.",
+    "metadata": {
+      "executionMode": "loop",
+      "loopWorkerKind": "codex",
+      "loopRole": "maintenance_pr_loop",
+      "loopIntervalSeconds": 300,
+      "completionMode": "local"
+    }
+  }'
+```
+
+## Pass Criteria
+
+- The task stays active after opening or updating a PR.
+- The loop fixes existing PR CI/review problems before starting unrelated new work.
+- Each new PR contains a real, narrow change with a repo-appropriate description.
+- The loop does not open empty, no-op, duplicate, or purely cosmetic PRs.
+- Cancelation stops the active worker and the task without calling the eval complete.
+- Steering is applied to the next loop turn while preserving the retained workspace and provider session when supported.
+- The loop asks for input only when blocked on credentials, permissions, ambiguous product direction, or another user-owned decision.
+
+## Fail Criteria
+
+- The task completes after a single useful PR.
+- The loop opens a PR with no material diff.
+- The loop ignores an existing failing or reviewed PR and starts unrelated new work.
+- A canceled or failed worker is treated as successful task completion.
+- Steering disappears, restarts from scratch unnecessarily, or is not visible in the resumed worker prompt.
+- The loop repeatedly performs the same repository inspection without producing a decision, a PR fix, a new PR, or a user question.
+
+## Metrics To Record
+
+- Iterations run.
+- PRs opened.
+- PRs fixed after CI or review feedback.
+- Empty or rejected PRs.
+- Times the task entered waiting state.
+- Time from steering to a resumed worker turn.
+- Time since last worker output when a worker is running.
