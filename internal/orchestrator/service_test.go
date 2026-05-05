@@ -2375,6 +2375,54 @@ func TestServiceFailsCleanlyForUnknownBrainWorker(t *testing.T) {
 	}
 }
 
+func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventResult, Text: "loop iteration done"}},
+			{{Kind: worker.EventNeedsInput, Text: "need user input"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Keep making bounded progress.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 0,
+			"completionMode":      "local",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if calls := runner.callsValue(); calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+	if count := countEvents(snapshot.Events, core.EventTaskPlanned, task.ID); count != 2 {
+		t.Fatalf("task.planned count = %d, want 2", count)
+	}
+	if !strings.Contains(runner.promptValue(), "# Durable Agent Loop") {
+		t.Fatalf("runner prompt missing loop context:\n%s", runner.promptValue())
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "durable_loop", "waiting_for_input") {
+		t.Fatalf("missing durable loop waiting action")
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "durable_loop", "paused") {
+		t.Fatalf("loop should only stop on worker input or cancelation")
+	}
+}
+
 func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -6155,6 +6203,16 @@ type recordingEventRunner struct {
 	events  []worker.Event
 	prompt  string
 	workDir string
+	calls   int
+}
+
+type sequenceEventRunner struct {
+	mu      sync.Mutex
+	kind    string
+	events  [][]worker.Event
+	prompt  string
+	workDir string
+	calls   int
 }
 
 type flakyRunner struct {
@@ -6236,6 +6294,7 @@ func (r *recordingEventRunner) Run(ctx context.Context, spec worker.Spec, sink w
 	r.mu.Lock()
 	r.prompt = spec.Prompt
 	r.workDir = spec.WorkDir
+	r.calls++
 	r.mu.Unlock()
 	for _, event := range r.events {
 		if err := sink.Event(ctx, event); err != nil {
@@ -6249,6 +6308,53 @@ func (r *recordingEventRunner) promptValue() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.prompt
+}
+
+func (r *recordingEventRunner) callsValue() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *sequenceEventRunner) Kind() string {
+	return r.kind
+}
+
+func (r *sequenceEventRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *sequenceEventRunner) Run(ctx context.Context, spec worker.Spec, sink worker.Sink) error {
+	r.mu.Lock()
+	r.prompt = spec.Prompt
+	r.workDir = spec.WorkDir
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+	events := []worker.Event{{Kind: worker.EventResult, Text: "ok"}}
+	if call > 0 && call <= len(r.events) {
+		events = r.events[call-1]
+	} else if len(r.events) > 0 {
+		events = r.events[len(r.events)-1]
+	}
+	for _, event := range events {
+		if err := sink.Event(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *sequenceEventRunner) promptValue() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prompt
+}
+
+func (r *sequenceEventRunner) callsValue() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func (r *flakyRunner) Kind() string {
