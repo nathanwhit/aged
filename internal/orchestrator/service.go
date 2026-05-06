@@ -2320,6 +2320,10 @@ func (s *Service) findPullRequest(ctx context.Context, prID string) (core.PullRe
 }
 
 func (s *Service) runTask(ctx context.Context, task core.Task) {
+	if taskExecutionMode(task) == executionModeLoop {
+		s.runDurableLoopTask(ctx, task)
+		return
+	}
 	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
 		return
 	}
