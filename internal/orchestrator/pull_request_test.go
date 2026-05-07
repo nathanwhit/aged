@@ -99,6 +99,7 @@ func TestFindExistingPullRequestKeepsHeadForLocalBranch(t *testing.T) {
 
 func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *testing.T) {
 	var calls [][]string
+	var createdBody string
 	publisher := LocalPullRequestPublisher{
 		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
 			call := append([]string{name}, args...)
@@ -111,6 +112,15 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 			case name == "jj" && len(args) >= 2 && args[0] == "git":
 				return "", nil
 			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				bodyFile := argAfter(args, "--body-file")
+				if bodyFile == "" {
+					t.Fatalf("missing --body-file in gh pr create args: %v", args)
+				}
+				body, err := os.ReadFile(bodyFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				createdBody = string(body)
 				return "https://github.com/upstream/repo/pull/9", nil
 			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 				return `{"number":9,"url":"https://github.com/upstream/repo/pull/9","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"trunk","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"REVIEW_REQUIRED"}`, nil
@@ -140,6 +150,14 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 	}
 	assertCommandContains(t, calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
 	assertCommandContains(t, calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
+	if createdBody != "Body" {
+		t.Fatalf("body file contents = %q", createdBody)
+	}
+	for _, call := range calls {
+		if containsSubsequence(call, []string{"gh", "pr", "create", "--body", "Body"}) {
+			t.Fatalf("gh pr create used --body instead of --body-file: %v", call)
+		}
+	}
 }
 
 func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
@@ -324,6 +342,15 @@ func assertCommandContains(t *testing.T, calls [][]string, want []string) {
 		}
 	}
 	t.Fatalf("missing command containing %v in calls %v", want, calls)
+}
+
+func argAfter(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func containsSubsequence(values []string, want []string) bool {
