@@ -781,11 +781,15 @@ function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nod
       </div>
       <div className="active-work">
         <strong>{activeCount} active</strong>
-        {(activeNodes.length > 0 ? activeNodes : activeWorkers).slice(0, 4).map((item) => (
-          <span key={item.id}>
-            {"workerKind" in item ? (item.role || item.workerKind) : item.kind} <Status value={item.status} />
-          </span>
-        ))}
+        {(activeNodes.length > 0 ? activeNodes : activeWorkers).slice(0, 4).map((item) => {
+          const idle = formatWorkerIdle(item.status, item.updatedAt);
+          return (
+            <span key={item.id}>
+              {"workerKind" in item ? (item.role || item.workerKind) : item.kind} <Status value={item.status} />
+              {idle ? ` idle ${idle}` : ""}
+            </span>
+          );
+        })}
       </div>
     </section>
   );
@@ -1697,6 +1701,7 @@ function WorkerList({
               return dependency && dependency.status !== "succeeded";
             });
             const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
+            const idle = formatWorkerIdle(status, worker?.updatedAt ?? node?.updatedAt ?? "");
             return (
               <article key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
@@ -1716,6 +1721,7 @@ function WorkerList({
                   <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
                   <WorkerContextItem label="Updated" value={worker ? new Date(worker.updatedAt).toLocaleTimeString() : node ? new Date(node.updatedAt).toLocaleTimeString() : ""} />
                   {duration && <WorkerContextItem label="Duration" value={duration} />}
+                  {idle && <WorkerContextItem label="Idle" value={idle} />}
                   {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
                 </div>
                 {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
@@ -1856,6 +1862,26 @@ function formatDuration(start: string, end: string): string {
   return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
 }
 
+function formatWorkerIdle(status: WorkerStatus, updatedAt: string): string {
+  if (isTerminalWorkerStatus(status)) return "";
+  const updatedMs = Date.parse(updatedAt);
+  if (!Number.isFinite(updatedMs)) return "";
+  const elapsed = Date.now() - updatedMs;
+  if (elapsed < 30_000) return "";
+  return formatElapsed(elapsed);
+}
+
+function formatElapsed(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "";
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRemainder = minutes % 60;
+  return minuteRemainder ? `${hours}h ${minuteRemainder}m` : `${hours}h`;
+}
+
 type DiffReviewState = {
   open: boolean;
   loading: boolean;
@@ -1916,6 +1942,7 @@ function WorkerDetail({ worker, node, events }: { worker: Worker; node: Executio
         <WorkerMetaItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
         <WorkerMetaItem label="Target" value={target} />
         <WorkerMetaItem label="Updated" value={new Date(worker.updatedAt).toLocaleString()} />
+        <WorkerMetaItem label="Idle" value={formatWorkerIdle(worker.status, worker.updatedAt)} />
       </div>
       {created && <FullCommand event={created} />}
       <WorkerPrompt worker={worker} created={created} />
