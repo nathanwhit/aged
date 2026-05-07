@@ -35,6 +35,7 @@ type config struct {
 	loopInterval  int
 	repeat        time.Duration
 	maxRuns       int
+	staleAfter    time.Duration
 	feedback      bool
 	feedbackTitle string
 }
@@ -50,6 +51,7 @@ type evalResult struct {
 	StartedAt            time.Time          `json:"startedAt"`
 	EndedAt              time.Time          `json:"endedAt"`
 	HorizonSeconds       float64            `json:"horizonSeconds"`
+	StaleWorkerAfterSec  float64            `json:"staleWorkerAfterSeconds,omitempty"`
 	BaseURL              string             `json:"baseUrl"`
 	EvalPath             string             `json:"evalPath"`
 	OutputPath           string             `json:"outputPath"`
@@ -85,6 +87,8 @@ type evalMetrics struct {
 	SecondsFromSteeringToNextWorker  *float64   `json:"secondsFromSteeringToNextWorker,omitempty"`
 	LatestWorkerOutputAt             *time.Time `json:"latestWorkerOutputAt,omitempty"`
 	SecondsSinceLatestWorkerOutput   *float64   `json:"secondsSinceLatestWorkerOutput,omitempty"`
+	StaleRunningWorkers              int        `json:"staleRunningWorkers"`
+	MaxRunningWorkerSilenceSeconds   *float64   `json:"maxRunningWorkerSilenceSeconds,omitempty"`
 	RepositoryInspectionEventCount   int        `json:"repositoryInspectionEventCount"`
 	TestCommandEventCount            int        `json:"testCommandEventCount"`
 	MaterialPullRequestEvidenceCount int        `json:"materialPullRequestEvidenceCount"`
@@ -141,6 +145,7 @@ func parseFlags() config {
 	flag.IntVar(&cfg.loopInterval, "loop-interval-seconds", envInt("AGED_LOOP_EVAL_LOOP_INTERVAL_SECONDS", -1), "override metadata.loopIntervalSeconds; -1 keeps eval metadata")
 	flag.DurationVar(&cfg.repeat, "repeat", envDuration("AGED_LOOP_EVAL_REPEAT", 0), "delay between eval runs; 0 runs once")
 	flag.IntVar(&cfg.maxRuns, "max-runs", envInt("AGED_LOOP_EVAL_MAX_RUNS", 1), "maximum eval runs; 0 means forever when -repeat is set")
+	flag.DurationVar(&cfg.staleAfter, "stale-worker-after", envDuration("AGED_LOOP_EVAL_STALE_WORKER_AFTER", 15*time.Minute), "fail the scorecard when a nonterminal worker has no activity for this long; 0 disables")
 	flag.BoolVar(&cfg.feedback, "feedback-on-fail", envBool("AGED_LOOP_EVAL_FEEDBACK_ON_FAIL", false), "create a follow-up aged improvement task when any scorecard check fails")
 	flag.StringVar(&cfg.feedbackTitle, "feedback-title", envOr("AGED_LOOP_EVAL_FEEDBACK_TITLE", "Improve durable loop eval result"), "title for feedback tasks created by -feedback-on-fail")
 	flag.Parse()
@@ -458,7 +463,7 @@ func shouldSteer(started time.Time, cfg config, steered bool) bool {
 
 func buildResult(cfg config, taskID string, started time.Time, preStop core.Snapshot, finalSnapshot core.Snapshot, events []core.Event, canceled bool, steered bool, steeringAt *time.Time) evalResult {
 	ended := time.Now().UTC()
-	metrics := collectMetrics(taskID, preStop, events, ended, steeringAt)
+	metrics := collectMetrics(taskID, preStop, events, ended, steeringAt, cfg.staleAfter)
 	prs := scorePullRequests(taskID, preStop.PullRequests)
 	for _, pr := range prs {
 		if pr.ChangedFiles > 0 {
@@ -474,6 +479,7 @@ func buildResult(cfg config, taskID string, started time.Time, preStop core.Snap
 		StartedAt:            started,
 		EndedAt:              ended,
 		HorizonSeconds:       cfg.horizon.Seconds(),
+		StaleWorkerAfterSec:  staleWorkerAfterSeconds(cfg.staleAfter),
 		BaseURL:              cfg.baseURL,
 		EvalPath:             cfg.evalPath,
 		OutputPath:           cfg.outputPath,
@@ -490,7 +496,7 @@ func buildResult(cfg config, taskID string, started time.Time, preStop core.Snap
 	return result
 }
 
-func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, ended time.Time, steeringAt *time.Time) evalMetrics {
+func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, ended time.Time, steeringAt *time.Time, staleAfter time.Duration) evalMetrics {
 	var metrics evalMetrics
 	firstPRAt := (*time.Time)(nil)
 	nextWorkerAfterSteering := (*time.Time)(nil)
@@ -557,6 +563,7 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 			metrics.PullRequestsTracked++
 		}
 	}
+	collectRunningWorkerSilence(taskID, snapshot.Workers, ended, staleAfter, &metrics)
 	if firstPRAt != nil {
 		value := firstPRAt.Sub(firstEventTime(events)).Minutes()
 		metrics.MinutesToFirstPullRequest = &value
@@ -570,6 +577,36 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 		metrics.SecondsSinceLatestWorkerOutput = &value
 	}
 	return metrics
+}
+
+func collectRunningWorkerSilence(taskID string, workers []core.Worker, ended time.Time, staleAfter time.Duration, metrics *evalMetrics) {
+	if staleAfter <= 0 {
+		return
+	}
+	for _, worker := range workers {
+		if worker.TaskID != taskID || isTerminalEvalWorkerStatus(worker.Status) {
+			continue
+		}
+		activityAt := worker.UpdatedAt
+		if activityAt.IsZero() {
+			activityAt = worker.CreatedAt
+		}
+		if activityAt.IsZero() || activityAt.After(ended) {
+			continue
+		}
+		silence := ended.Sub(activityAt)
+		value := silence.Seconds()
+		if metrics.MaxRunningWorkerSilenceSeconds == nil || value > *metrics.MaxRunningWorkerSilenceSeconds {
+			metrics.MaxRunningWorkerSilenceSeconds = &value
+		}
+		if silence >= staleAfter {
+			metrics.StaleRunningWorkers++
+		}
+	}
+}
+
+func isTerminalEvalWorkerStatus(status core.WorkerStatus) bool {
+	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
 }
 
 func scorePullRequests(taskID string, prs []core.PullRequest) []pullRequestScore {
@@ -634,9 +671,34 @@ func scoreChecks(result evalResult) []evalCheck {
 		check("ran_or_reported_tests", result.Metrics.TestCommandEventCount > 0, fmt.Sprintf("test command events: %d", result.Metrics.TestCommandEventCount)),
 		check("cancel_did_not_complete_task", !(result.CanceledByRunner && result.FinalTaskStatus == core.TaskSucceeded), fmt.Sprintf("final status: %q", result.FinalTaskStatus)),
 		check("steering_reached_next_worker", !result.SteeringSent || result.Metrics.SecondsFromSteeringToNextWorker != nil, steeringCheckReason(result)),
+		check("no_stale_running_workers", result.StaleWorkerAfterSec <= 0 || result.Metrics.StaleRunningWorkers == 0, staleWorkerCheckReason(result)),
 		check("no_iteration_failures", result.Metrics.IterationsFailed == 0, fmt.Sprintf("failed iterations: %d", result.Metrics.IterationsFailed)),
 		check("loop_made_progress", result.Metrics.IterationsCompleted > 0 || result.Metrics.PullRequestsTracked > 0 || result.Metrics.WorkerNeedsInput > 0, fmt.Sprintf("completedIterations=%d prs=%d waitingWorkers=%d", result.Metrics.IterationsCompleted, result.Metrics.PullRequestsTracked, result.Metrics.WorkerNeedsInput)),
 	}
+}
+
+func staleWorkerCheckReason(result evalResult) string {
+	if result.StaleWorkerAfterSec <= 0 {
+		return "stale worker detection disabled"
+	}
+	if result.Metrics.StaleRunningWorkers == 0 {
+		return fmt.Sprintf("no nonterminal workers silent for %.0fs", result.StaleWorkerAfterSec)
+	}
+	return fmt.Sprintf("stale workers: %d, max silence %.0fs, threshold %.0fs", result.Metrics.StaleRunningWorkers, optionalSeconds(result.Metrics.MaxRunningWorkerSilenceSeconds), result.StaleWorkerAfterSec)
+}
+
+func optionalSeconds(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func staleWorkerAfterSeconds(value time.Duration) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return value.Seconds()
 }
 
 func resultHasFailingChecks(result evalResult) bool {
