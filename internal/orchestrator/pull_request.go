@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -98,12 +99,17 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if body == "" {
 		body = defaultPRBody(spec)
 	}
+	bodyFile, cleanupBodyFile, err := writePullRequestBodyFile(body)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	defer cleanupBodyFile()
 	if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
 		return core.PullRequest{}, err
 	}
 
 	head := prHeadRef(spec.HeadRepoOwner, branch)
-	args := []string{"pr", "create", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body", body}
+	args := []string{"pr", "create", "--repo", repo, "--base", base, "--head", head, "--title", title, "--body-file", bodyFile}
 	if spec.Draft {
 		args = append(args, "--draft")
 	}
@@ -154,6 +160,27 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 		inspected.Metadata = pr.Metadata
 	}
 	return inspected, nil
+}
+
+func writePullRequestBodyFile(body string) (string, func(), error) {
+	file, err := os.CreateTemp("", "aged-pr-body-*.md")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create pull request body file: %w", err)
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = os.Remove(path)
+	}
+	if _, err := file.WriteString(body); err != nil {
+		_ = file.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("write pull request body file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close pull request body file: %w", err)
+	}
+	return path, cleanup, nil
 }
 
 func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, exec commandExecutor, dir string, repo string, branch string) (core.PullRequest, error) {
