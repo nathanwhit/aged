@@ -60,6 +60,40 @@ curl -sS http://127.0.0.1:8787/api/tasks \
   }'
 ```
 
+## Eval Runner
+
+Use `cmd/aged-loop-eval` to run the target for a finite external observation window. The product loop remains unbounded; the eval runner owns the horizon, cancels the task at the end, and writes a JSON scorecard.
+
+```sh
+go run ./cmd/aged-loop-eval \
+  -addr http://127.0.0.1:8787 \
+  -horizon 90m \
+  -poll 10s \
+  -steer-after 30m
+```
+
+For a local smoke test that exercises the durable-loop plumbing without creating real PRs, run aged with a mock worker and override the eval metadata:
+
+```sh
+go run ./cmd/aged \
+  -addr 127.0.0.1:8787 \
+  -db /tmp/aged-loop-eval-smoke.db \
+  -worker mock \
+  -brain static \
+  -workdir /path/to/a/jj-or-git-checkout \
+  -workspace-mode shared
+
+go run ./cmd/aged-loop-eval \
+  -addr http://127.0.0.1:8787 \
+  -horizon 10s \
+  -poll 1s \
+  -worker-kind mock \
+  -loop-interval-seconds 1 \
+  -out /tmp/aged-loop-eval-smoke.json
+```
+
+The smoke run should pass loop mechanics checks such as no self-completion, no iteration failures, cancelation behavior, and loop progress. PR-quality checks are expected to fail under the mock worker because it does not inspect GitHub or open PRs.
+
 ## Pass Criteria
 
 - The task stays active after opening or updating a PR.
