@@ -94,6 +94,21 @@ go run ./cmd/aged-loop-eval \
 
 The smoke run should pass loop mechanics checks such as no self-completion, no iteration failures, cancelation behavior, and loop progress. PR-quality checks are expected to fail under the mock worker because it does not inspect GitHub or open PRs.
 
+To turn the eval into an automated feedback loop, run it repeatedly with feedback enabled:
+
+```sh
+go run ./cmd/aged-loop-eval \
+  -addr http://127.0.0.1:8787 \
+  -horizon 90m \
+  -poll 10s \
+  -steer-after 30m \
+  -repeat 24h \
+  -max-runs 0 \
+  -feedback-on-fail
+```
+
+Each run still has a finite external horizon. When a scorecard contains failing checks, the runner creates a follow-up aged task with the failed checks, scorecard path, and metrics so aged can make one narrow improvement PR. Keep this behind a local scheduler, launchd job, cron job, or dedicated always-on machine; it is intentionally not a GitHub Actions workflow because real runs need local Codex/Claude credentials and can create PRs.
+
 ## Pass Criteria
 
 - The task stays active after opening or updating a PR.
