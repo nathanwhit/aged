@@ -48,6 +48,8 @@ type TaskStartInput = {
   metadata?: Record<string, unknown>;
 };
 
+type RunMode = "one-shot" | "loop";
+
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
 const emptySnapshot: AppSnapshot = {
@@ -426,6 +428,7 @@ function App() {
                       {task.error && <small className="task-row-error">{task.error}</small>}
                     </span>
                     <span className="task-row-status">
+                      {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
                       <Status value={task.status} />
                       {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
                     </span>
@@ -755,6 +758,11 @@ function isRetryableTask(task: Task): boolean {
   return task.status === "failed" || task.status === "canceled";
 }
 
+function isDurableLoopMetadata(metadata: Record<string, unknown> | undefined): boolean {
+  const mode = String(metadata?.executionMode ?? "").trim().toLowerCase();
+  return mode === "loop" || mode === "durable_loop" || mode === "agent_loop";
+}
+
 function canPublishPullRequest(task: Task): boolean {
   return isTerminalTask(task) || Boolean(task.finalCandidateWorkerId);
 }
@@ -820,19 +828,36 @@ function TaskComposer({
   const [projectId, setProjectId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [runMode, setRunMode] = useState<RunMode>("one-shot");
   const [completionMode, setCompletionMode] = useState<"local" | "github">("github");
+  const [loopWorkerKind, setLoopWorkerKind] = useState("codex");
+  const [loopRole, setLoopRole] = useState("maintenance_pr_loop");
+  const [loopIntervalSeconds, setLoopIntervalSeconds] = useState("300");
   const [busy, setBusy] = useState(false);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const input = { projectId: projectId || undefined, title, prompt, metadata: { completionMode } };
+    const interval = Math.max(0, Number.parseInt(loopIntervalSeconds, 10) || 0);
+    const metadata: Record<string, unknown> = runMode === "loop"
+      ? {
+          executionMode: "loop",
+          loopWorkerKind: loopWorkerKind.trim() || "codex",
+          loopRole: loopRole.trim() || "maintenance_pr_loop",
+          loopIntervalSeconds: interval,
+        }
+      : { completionMode };
+    const input = { projectId: projectId || undefined, title, prompt, metadata };
     setBusy(true);
     onStartPending(input);
     try {
       await onCreate(input);
       setTitle("");
       setPrompt("");
+      setRunMode("one-shot");
       setCompletionMode("github");
+      setLoopWorkerKind("codex");
+      setLoopRole("maintenance_pr_loop");
+      setLoopIntervalSeconds("300");
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -867,13 +892,48 @@ function TaskComposer({
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
       </label>
-      <label>
-        Completion
-        <select value={completionMode} onChange={(event) => setCompletionMode(event.target.value as "local" | "github")}>
-          <option value="github">GitHub: open PR when complete</option>
-          <option value="local">Local: review diff here and apply result</option>
-        </select>
-      </label>
+      <fieldset className="run-mode-control">
+        <legend>Run mode</legend>
+        <label className={runMode === "one-shot" ? "run-mode-option selected" : "run-mode-option"}>
+          <input type="radio" name="run-mode" value="one-shot" checked={runMode === "one-shot"} onChange={() => setRunMode("one-shot")} />
+          <Play size={16} />
+          <span>One-shot</span>
+        </label>
+        <label className={runMode === "loop" ? "run-mode-option selected" : "run-mode-option"}>
+          <input type="radio" name="run-mode" value="loop" checked={runMode === "loop"} onChange={() => setRunMode("loop")} />
+          <RefreshCw size={16} />
+          <span>Durable loop</span>
+        </label>
+      </fieldset>
+      {runMode === "one-shot" ? (
+        <label>
+          Completion
+          <select value={completionMode} onChange={(event) => setCompletionMode(event.target.value as "local" | "github")}>
+            <option value="github">GitHub: open PR when complete</option>
+            <option value="local">Local: review diff here and apply result</option>
+          </select>
+        </label>
+      ) : (
+        <div className="loop-config">
+          <label>
+            Worker kind
+            <input list="loop-worker-kinds" value={loopWorkerKind} onChange={(event) => setLoopWorkerKind(event.target.value)} />
+            <datalist id="loop-worker-kinds">
+              <option value="codex" />
+              <option value="claude" />
+              <option value="mock" />
+            </datalist>
+          </label>
+          <label>
+            Interval seconds
+            <input type="number" min="0" step="30" value={loopIntervalSeconds} onChange={(event) => setLoopIntervalSeconds(event.target.value)} />
+          </label>
+          <label className="loop-role-field">
+            Role
+            <input value={loopRole} onChange={(event) => setLoopRole(event.target.value)} />
+          </label>
+        </div>
+      )}
       <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>
         {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
         {busy ? "Starting task" : "Start"}
@@ -901,6 +961,7 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
           <LoaderCircle className="spin" size={12} />
           Starting
         </span>
+        {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
       </div>
     </div>
   );
@@ -1232,9 +1293,10 @@ function TaskDetail({
   const [applying, setApplying] = useState(false);
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
+  const durableLoop = isDurableLoopMetadata(task.metadata);
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
-  const canApplyResult = completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
+  const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
@@ -1306,7 +1368,8 @@ function TaskDetail({
           <Status value={task.status} />
           {task.objectiveStatus && <Status value={task.objectiveStatus} />}
           {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
-          {completionMode === "github" && <span className="pill">GitHub mode</span>}
+          {durableLoop && <span className="pill">Loop mode</span>}
+          {!durableLoop && completionMode === "github" && <span className="pill">GitHub mode</span>}
           {canApplyResult && (
             <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
               <Check size={16} />
