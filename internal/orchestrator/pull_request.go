@@ -281,6 +281,9 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 	if err != nil {
 		return fmt.Errorf("list staged git changes before publish: %w", err)
 	}
+	if len(changedFiles) == 0 {
+		return nil
+	}
 	fallback := "Publish aged worker changes"
 	if strings.TrimSpace(branch) != "" {
 		fallback = "Publish " + strings.TrimSpace(branch)
