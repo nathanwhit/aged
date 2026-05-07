@@ -35,6 +35,7 @@ type config struct {
 	loopInterval  int
 	repeat        time.Duration
 	maxRuns       int
+	staleWorker   time.Duration
 	feedback      bool
 	feedbackTitle string
 }
@@ -77,6 +78,8 @@ type evalMetrics struct {
 	WorkersFailed                    int        `json:"workersFailed"`
 	WorkersCanceled                  int        `json:"workersCanceled"`
 	WorkerNeedsInput                 int        `json:"workerNeedsInput"`
+	RunningWorkers                   int        `json:"runningWorkers"`
+	StaleRunningWorkers              int        `json:"staleRunningWorkers"`
 	PullRequestsTracked              int        `json:"pullRequestsTracked"`
 	PullRequestFollowUps             int        `json:"pullRequestFollowUps"`
 	EmptyOrNoDiffPullRequests        int        `json:"emptyOrNoDiffPullRequests"`
@@ -85,6 +88,7 @@ type evalMetrics struct {
 	SecondsFromSteeringToNextWorker  *float64   `json:"secondsFromSteeringToNextWorker,omitempty"`
 	LatestWorkerOutputAt             *time.Time `json:"latestWorkerOutputAt,omitempty"`
 	SecondsSinceLatestWorkerOutput   *float64   `json:"secondsSinceLatestWorkerOutput,omitempty"`
+	SecondsSinceOldestRunningWorker  *float64   `json:"secondsSinceOldestRunningWorker,omitempty"`
 	RepositoryInspectionEventCount   int        `json:"repositoryInspectionEventCount"`
 	TestCommandEventCount            int        `json:"testCommandEventCount"`
 	MaterialPullRequestEvidenceCount int        `json:"materialPullRequestEvidenceCount"`
@@ -141,6 +145,7 @@ func parseFlags() config {
 	flag.IntVar(&cfg.loopInterval, "loop-interval-seconds", envInt("AGED_LOOP_EVAL_LOOP_INTERVAL_SECONDS", -1), "override metadata.loopIntervalSeconds; -1 keeps eval metadata")
 	flag.DurationVar(&cfg.repeat, "repeat", envDuration("AGED_LOOP_EVAL_REPEAT", 0), "delay between eval runs; 0 runs once")
 	flag.IntVar(&cfg.maxRuns, "max-runs", envInt("AGED_LOOP_EVAL_MAX_RUNS", 1), "maximum eval runs; 0 means forever when -repeat is set")
+	flag.DurationVar(&cfg.staleWorker, "stale-worker-after", envDuration("AGED_LOOP_EVAL_STALE_WORKER_AFTER", 15*time.Minute), "fail scorecard when a running worker has no updates for this duration; 0 disables")
 	flag.BoolVar(&cfg.feedback, "feedback-on-fail", envBool("AGED_LOOP_EVAL_FEEDBACK_ON_FAIL", false), "create a follow-up aged improvement task when any scorecard check fails")
 	flag.StringVar(&cfg.feedbackTitle, "feedback-title", envOr("AGED_LOOP_EVAL_FEEDBACK_TITLE", "Improve durable loop eval result"), "title for feedback tasks created by -feedback-on-fail")
 	flag.Parse()
@@ -458,7 +463,7 @@ func shouldSteer(started time.Time, cfg config, steered bool) bool {
 
 func buildResult(cfg config, taskID string, started time.Time, preStop core.Snapshot, finalSnapshot core.Snapshot, events []core.Event, canceled bool, steered bool, steeringAt *time.Time) evalResult {
 	ended := time.Now().UTC()
-	metrics := collectMetrics(taskID, preStop, events, ended, steeringAt)
+	metrics := collectMetrics(taskID, preStop, events, ended, steeringAt, cfg.staleWorker)
 	prs := scorePullRequests(taskID, preStop.PullRequests)
 	for _, pr := range prs {
 		if pr.ChangedFiles > 0 {
@@ -490,7 +495,7 @@ func buildResult(cfg config, taskID string, started time.Time, preStop core.Snap
 	return result
 }
 
-func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, ended time.Time, steeringAt *time.Time) evalMetrics {
+func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, ended time.Time, steeringAt *time.Time, staleWorkerAfter time.Duration) evalMetrics {
 	var metrics evalMetrics
 	firstPRAt := (*time.Time)(nil)
 	nextWorkerAfterSteering := (*time.Time)(nil)
@@ -569,7 +574,37 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 		value := ended.Sub(*metrics.LatestWorkerOutputAt).Seconds()
 		metrics.SecondsSinceLatestWorkerOutput = &value
 	}
+	collectRunningWorkerMetrics(taskID, snapshot, ended, staleWorkerAfter, &metrics)
 	return metrics
+}
+
+func collectRunningWorkerMetrics(taskID string, snapshot core.Snapshot, ended time.Time, staleWorkerAfter time.Duration, metrics *evalMetrics) {
+	var oldestAge *float64
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID != taskID || worker.Status != core.WorkerRunning {
+			continue
+		}
+		metrics.RunningWorkers++
+		updatedAt := worker.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = worker.CreatedAt
+		}
+		if updatedAt.IsZero() {
+			continue
+		}
+		age := ended.Sub(updatedAt).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		if oldestAge == nil || age > *oldestAge {
+			value := age
+			oldestAge = &value
+		}
+		if staleWorkerAfter > 0 && time.Duration(age*float64(time.Second)) > staleWorkerAfter {
+			metrics.StaleRunningWorkers++
+		}
+	}
+	metrics.SecondsSinceOldestRunningWorker = oldestAge
 }
 
 func scorePullRequests(taskID string, prs []core.PullRequest) []pullRequestScore {
@@ -634,6 +669,7 @@ func scoreChecks(result evalResult) []evalCheck {
 		check("ran_or_reported_tests", result.Metrics.TestCommandEventCount > 0, fmt.Sprintf("test command events: %d", result.Metrics.TestCommandEventCount)),
 		check("cancel_did_not_complete_task", !(result.CanceledByRunner && result.FinalTaskStatus == core.TaskSucceeded), fmt.Sprintf("final status: %q", result.FinalTaskStatus)),
 		check("steering_reached_next_worker", !result.SteeringSent || result.Metrics.SecondsFromSteeringToNextWorker != nil, steeringCheckReason(result)),
+		check("no_stale_running_workers", result.Metrics.StaleRunningWorkers == 0, staleRunningWorkerReason(result)),
 		check("no_iteration_failures", result.Metrics.IterationsFailed == 0, fmt.Sprintf("failed iterations: %d", result.Metrics.IterationsFailed)),
 		check("loop_made_progress", result.Metrics.IterationsCompleted > 0 || result.Metrics.PullRequestsTracked > 0 || result.Metrics.WorkerNeedsInput > 0, fmt.Sprintf("completedIterations=%d prs=%d waitingWorkers=%d", result.Metrics.IterationsCompleted, result.Metrics.PullRequestsTracked, result.Metrics.WorkerNeedsInput)),
 	}
@@ -674,6 +710,13 @@ func steeringCheckReason(result evalResult) string {
 		return "no worker was created after steering"
 	}
 	return fmt.Sprintf("next worker after %.2fs", *result.Metrics.SecondsFromSteeringToNextWorker)
+}
+
+func staleRunningWorkerReason(result evalResult) string {
+	if result.Metrics.SecondsSinceOldestRunningWorker == nil {
+		return fmt.Sprintf("runningWorkers=%d stale=%d", result.Metrics.RunningWorkers, result.Metrics.StaleRunningWorkers)
+	}
+	return fmt.Sprintf("runningWorkers=%d stale=%d oldestUpdateAge=%.2fs", result.Metrics.RunningWorkers, result.Metrics.StaleRunningWorkers, *result.Metrics.SecondsSinceOldestRunningWorker)
 }
 
 func writeResult(result evalResult) error {
