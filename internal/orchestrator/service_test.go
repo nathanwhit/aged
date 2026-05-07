@@ -453,6 +453,9 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 		},
 		applyCalls: &applyCalls,
 	})
+	service.SetAssistant(fixedAssistantBrain{
+		answer: `{"title":"Update README behavior","commitMessage":"Update README behavior","summary":"Implemented README update.","validation":["go test ./internal/orchestrator"]}`,
+	})
 	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -487,8 +490,14 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if !hasMilestone(task.Milestones, "candidate_ready") || !hasMilestone(task.Milestones, "pr_opened") {
 		t.Fatalf("milestones = %+v", task.Milestones)
 	}
-	if !strings.Contains(publisher.published.Body, "## Repo checklist") || !strings.Contains(publisher.published.Body, "`README.md` (modified)") || !strings.Contains(publisher.published.Body, "implemented") {
+	if publisher.published.Title != "Update README behavior" || publisher.published.CommitMessage != "Update README behavior" {
+		t.Fatalf("published text = title %q commit %q", publisher.published.Title, publisher.published.CommitMessage)
+	}
+	if !strings.Contains(publisher.published.Body, "## Repo checklist") || !strings.Contains(publisher.published.Body, "`README.md` (modified)") || !strings.Contains(publisher.published.Body, "Implemented README update.") || !strings.Contains(publisher.published.Body, "go test ./internal/orchestrator") {
 		t.Fatalf("published body did not include template, changed files, and summary:\n%s", publisher.published.Body)
+	}
+	if strings.Contains(publisher.published.Body, "Aged context") || strings.Contains(publisher.published.Body, task.ID) || strings.Contains(publisher.published.Body, publisher.published.WorkerID) {
+		t.Fatalf("published body leaked internal orchestration details:\n%s", publisher.published.Body)
 	}
 	if applyCalls != 0 {
 		t.Fatalf("apply calls = %d, want 0", applyCalls)

@@ -13,8 +13,8 @@ import (
 	"aged/internal/core"
 )
 
-func TestSanitizeGitHubCLIEnvDropsCertificateOverrides(t *testing.T) {
-	got := sanitizeGitHubCLIEnv([]string{
+func TestSanitizeGitNetworkEnvDropsCertificateOverrides(t *testing.T) {
+	got := sanitizeGitNetworkEnv([]string{
 		"PATH=/opt/homebrew/bin:/usr/bin",
 		"HOME=/Users/test",
 		"SSL_CERT_FILE=/bad.pem",
@@ -35,12 +35,14 @@ func TestSanitizeGitHubCLIEnvDropsCertificateOverrides(t *testing.T) {
 	}
 }
 
-func TestCommandEnvOnlyCustomizesGitHubCLI(t *testing.T) {
-	if env := commandEnv("jj"); env != nil {
-		t.Fatalf("jj env = %v, want nil", env)
+func TestCommandEnvSanitizesGitHubNetworkCommands(t *testing.T) {
+	for _, name := range []string{"gh", "/usr/bin/git", "/opt/homebrew/bin/jj"} {
+		if env := commandEnv(name); env == nil {
+			t.Fatalf("%s env = nil, want sanitized environment", name)
+		}
 	}
-	if env := commandEnv("/opt/homebrew/bin/gh"); env == nil {
-		t.Fatalf("gh env = nil, want sanitized environment")
+	if env := commandEnv("go"); env != nil {
+		t.Fatalf("go env = %v, want nil", env)
 	}
 }
 
@@ -163,6 +165,8 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "config", "user.name", "Nathan Whitaker")
+	runTestGit(t, repo, "config", "user.email", "nathan@deno.com")
 	runTestGit(t, repo, "branch", "-M", "main")
 	runTestGit(t, repo, "checkout", "--detach", "main")
 	if err := os.MkdirAll(filepath.Join(repo, ".github", "workflows"), 0o755); err != nil {
@@ -209,8 +213,36 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 		t.Fatalf("published branch missing workflow: %q", contents)
 	}
 	assertCommandContains(t, calls, []string{"git", "add", "-A"})
-	assertCommandContains(t, calls, []string{"git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
+	assertCommandContains(t, calls, []string{"git", "-c", "user.name=Nathan Whitaker", "-c", "user.email=nathan@deno.com", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+}
+
+func TestMaterializeGitPullRequestChangesIgnoresDirtySubmoduleOnlyStatus(t *testing.T) {
+	ctx := context.Background()
+	var calls [][]string
+	exec := func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		switch {
+		case name == "git" && containsSubsequence(args, []string{"status", "--porcelain=v1"}):
+			return " m tests/bench/testdata/lsp_benchdata\n", nil
+		case name == "git" && containsSubsequence(args, []string{"add", "-A"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"commit"}):
+			t.Fatalf("commit should not run when add -A staged no files")
+		default:
+			t.Fatalf("unexpected command %s %v", name, args)
+		}
+		return "", nil
+	}
+
+	err := materializeGitPullRequestChanges(ctx, exec, "/repo", "feature", PullRequestPublishSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommandContains(t, calls, []string{"git", "add", "-A"})
 }
 
 func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
@@ -248,15 +280,34 @@ func TestGeneratedPullRequestBodyNormalizesWorkerReportSummary(t *testing.T) {
 	body := generatedPullRequestBody(core.Task{
 		ID:    "task-1",
 		Title: "Publish aged worker changes",
-	}, "worker-1", "**Summary**\n- Improve generated PR body summaries.\n\n**Validation**\n- go test ./internal/orchestrator", WorkspaceChanges{
+	}, pullRequestText{
+		Title:      "Improve PR summaries",
+		Summary:    "Improve generated PR body summaries.",
+		Validation: []string{"go test ./internal/orchestrator"},
+	}, WorkspaceChanges{
 		ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/pull_request_workflow.go"}},
 	})
 
-	if !strings.Contains(body, "- Improve generated PR body summaries") {
+	if !strings.Contains(body, "- Improve generated PR body summaries.") {
 		t.Fatalf("body summary was not normalized:\n%s", body)
 	}
 	if strings.Contains(body, "**Summary**") || strings.Contains(body, "**Validation**") {
 		t.Fatalf("body leaked report headings into summary:\n%s", body)
+	}
+	if strings.Contains(body, "Aged") || strings.Contains(body, "task-1") || strings.Contains(body, "worker-") {
+		t.Fatalf("body leaked internal orchestration details:\n%s", body)
+	}
+}
+
+func TestDefaultPRBodyOmitsInternalAgedMetadata(t *testing.T) {
+	body := defaultPRBody(PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkerID:      "worker-1",
+		Title:         "Implement feature",
+		WorkerSummary: "Improve REPL context handling.",
+	})
+	if strings.Contains(body, "aged") || strings.Contains(body, "task-1") || strings.Contains(body, "worker-1") {
+		t.Fatalf("body leaked internal metadata:\n%s", body)
 	}
 }
 

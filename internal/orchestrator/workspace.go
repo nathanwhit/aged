@@ -888,7 +888,12 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 		WorkerSummary: spec.WorkerSummary,
 		ChangedFiles:  changedFiles,
 	})
-	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
+	identityArgs, err := gitCommitIdentityArgs(ctx, runCommand, destination)
+	if err != nil {
+		return err
+	}
+	args := append(identityArgs, "commit", "-m", message)
+	if _, err := runCommand(ctx, destination, "git", args...); err != nil {
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil
@@ -1384,13 +1389,15 @@ func runCommand(ctx context.Context, dir string, name string, args ...string) (s
 }
 
 func commandEnv(name string) []string {
-	if filepath.Base(name) != "gh" {
+	switch filepath.Base(name) {
+	case "gh", "git", "jj":
+	default:
 		return nil
 	}
-	return sanitizeGitHubCLIEnv(os.Environ())
+	return sanitizeGitNetworkEnv(os.Environ())
 }
 
-func sanitizeGitHubCLIEnv(env []string) []string {
+func sanitizeGitNetworkEnv(env []string) []string {
 	drop := map[string]bool{
 		"SSL_CERT_FILE":       true,
 		"SSL_CERT_DIR":        true,

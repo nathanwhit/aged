@@ -30,6 +30,8 @@ type PullRequestPublishSpec struct {
 	Title         string
 	Body          string
 	Draft         bool
+	WorkerSummary string
+	CommitMessage string
 	Metadata      map[string]any
 }
 
@@ -281,20 +283,56 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 	if err != nil {
 		return fmt.Errorf("list staged git changes before publish: %w", err)
 	}
-	fallback := "Publish aged worker changes"
+	if len(changedFiles) == 0 {
+		return nil
+	}
+	fallback := "Update project files"
 	if strings.TrimSpace(branch) != "" {
-		fallback = "Publish " + strings.TrimSpace(branch)
+		fallback = "Update " + strings.TrimSpace(branch)
 	}
 	message := changeCommitMessage(changeCommitMessageContext{
-		Fallback:     fallback,
-		PullTitle:    spec.Title,
-		Metadata:     spec.Metadata,
-		ChangedFiles: changedFiles,
+		Fallback:      fallback,
+		WorkerSummary: nonEmpty(spec.CommitMessage, spec.WorkerSummary),
+		ChangedFiles:  changedFiles,
 	})
-	if _, err := exec(ctx, dir, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
+	identityArgs, err := gitCommitIdentityArgs(ctx, exec, dir)
+	if err != nil {
+		return err
+	}
+	args := append(identityArgs, "commit", "-m", message)
+	if _, err := exec(ctx, dir, "git", args...); err != nil {
 		return fmt.Errorf("commit git changes before publish: %w", err)
 	}
 	return nil
+}
+
+func gitCommitIdentityArgs(ctx context.Context, exec commandExecutor, dir string) ([]string, error) {
+	name := gitConfigValue(ctx, exec, dir, "user.name")
+	email := gitConfigValue(ctx, exec, dir, "user.email")
+	if name == "" || email == "" {
+		out, err := exec(ctx, dir, "git", "log", "-1", "--format=%an%x00%ae")
+		if err == nil {
+			parts := strings.SplitN(strings.TrimSpace(out), "\x00", 2)
+			if name == "" && len(parts) > 0 {
+				name = strings.TrimSpace(parts[0])
+			}
+			if email == "" && len(parts) > 1 {
+				email = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	if name == "" || email == "" {
+		return nil, errors.New("commit git changes before publish: git user.name and user.email are required")
+	}
+	return []string{"-c", "user.name=" + name, "-c", "user.email=" + email, "-c", "commit.gpgsign=false"}, nil
+}
+
+func gitConfigValue(ctx context.Context, exec commandExecutor, dir string, key string) string {
+	out, err := exec(ctx, dir, "git", "config", "--get", key)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func gitIndexChangedFilesWithExec(ctx context.Context, exec commandExecutor, dir string) ([]string, error) {
@@ -611,13 +649,16 @@ func prHeadRef(owner string, branch string) string {
 
 func defaultPRBody(spec PullRequestPublishSpec) string {
 	var builder strings.Builder
-	builder.WriteString("Created by aged.\n\n")
-	if spec.TaskID != "" {
-		builder.WriteString("- Task: `" + spec.TaskID + "`\n")
-	}
-	if spec.WorkerID != "" {
-		builder.WriteString("- Worker: `" + spec.WorkerID + "`\n")
-	}
+	builder.WriteString("## Summary\n")
+	builder.WriteString("- ")
+	builder.WriteString(changeCommitMessage(changeCommitMessageContext{
+		Fallback:      "Update project files",
+		WorkerSummary: spec.WorkerSummary,
+		ChangedFiles:  []string{},
+	}))
+	builder.WriteString("\n\n")
+	builder.WriteString("## Validation\n")
+	builder.WriteString("- Not reported.\n")
 	return builder.String()
 }
 

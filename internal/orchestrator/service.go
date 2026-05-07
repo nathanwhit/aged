@@ -1027,13 +1027,28 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 			return core.PullRequest{}, err
 		}
 	}
+	workerChanges := WorkspaceChanges{}
+	if workerID != "" {
+		if completed, err := s.completedWorkspaceChanges(ctx, workerID); err == nil {
+			workerChanges = completed
+		}
+	}
+	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
+	publishChanges := workerChanges
+	if actual, err := describePullRequestPublishChanges(ctx, sourceRoot, nonEmpty(req.Base, project.DefaultBase)); err == nil && (actual.Dirty || len(actual.ChangedFiles) > 0 || strings.TrimSpace(actual.Diff) != "") {
+		publishChanges = actual
+	}
+	if err := s.reviewDirectPublicationReadiness(ctx, task, workerID, summary, publishChanges, req); err != nil {
+		return core.PullRequest{}, err
+	}
+	pullText := s.generatePullRequestText(ctx, task, summary, publishChanges, sourceRoot)
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
-		title = task.Title
+		title = pullText.Title
 	}
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
-		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)
+		body = defaultPullRequestBody(task, pullText, publishChanges, sourceRoot)
 	}
 	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
 		TaskID:        taskID,
@@ -1048,6 +1063,8 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		Title:         title,
 		Body:          body,
 		Draft:         req.Draft || project.PullRequestPolicy.Draft,
+		WorkerSummary: summary,
+		CommitMessage: pullText.CommitMessage,
 		Metadata: map[string]any{
 			"workerId":          workerID,
 			"taskTitle":         task.Title,
@@ -3884,6 +3901,55 @@ func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.
 		"status":          "rejected",
 		"candidateStatus": candidate.Status,
 	})
+}
+
+func (s *Service) reviewDirectPublicationReadiness(ctx context.Context, task core.Task, workerID string, summary string, changes WorkspaceChanges, req core.PublishPullRequestRequest) error {
+	reviewer, ok := s.brain.(PublicationReviewProvider)
+	if !ok {
+		return nil
+	}
+	candidate := WorkerTurnResult{
+		WorkerID: workerID,
+		Status:   core.WorkerSucceeded,
+		Summary:  summary,
+		Changes:  changes,
+	}
+	action := PlanAction{
+		Kind: "publish_pull_request",
+		When: "before_publish",
+		Inputs: map[string]any{
+			"repo":   req.Repo,
+			"base":   req.Base,
+			"branch": req.Branch,
+		},
+	}
+	review, err := reviewer.ReviewPublication(ctx, task, candidate, action)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "publish_pull_request_readiness_review",
+			"when":     "before_publish",
+			"reason":   "Publication readiness review failed; continuing with the publish request.",
+			"workerId": workerID,
+			"status":   "ignored",
+			"error":    err.Error(),
+		})
+		return nil
+	}
+	if review.Ready {
+		return nil
+	}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "candidate is not ready to publish as a pull request"
+	}
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "publish_pull_request_readiness_rejected",
+		"when":     "before_publish",
+		"reason":   reason,
+		"workerId": workerID,
+		"status":   "rejected",
+	})
+	return fmt.Errorf("publication readiness rejected: %s", reason)
 }
 
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {

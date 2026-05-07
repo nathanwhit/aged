@@ -125,7 +125,7 @@ func isGenericCommitMessageTitle(value string) bool {
 	normalized := strings.ToLower(strings.Join(strings.Fields(value), " "))
 	normalized = strings.Trim(normalized, " .:-_")
 	switch normalized {
-	case "", "ci", "fix", "published", "publish", "changes", "change", "updates", "update", "work", "base worker candidate", "publish aged worker changes":
+	case "", "ci", "fix", "changes", "change", "updates", "update", "work":
 		return true
 	default:
 		return false

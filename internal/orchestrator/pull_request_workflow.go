@@ -11,35 +11,105 @@ import (
 	"aged/internal/core"
 )
 
-func (s *Service) defaultPullRequestBody(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, sourceRoot string) string {
-	changes := WorkspaceChanges{}
-	if strings.TrimSpace(workerID) != "" {
-		if completed, err := s.completedWorkspaceChanges(ctx, workerID); err == nil {
-			changes = completed
-		}
-	}
-	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
-	generated := generatedPullRequestBody(task, workerID, summary, changes)
-	template, templatePath := pullRequestTemplate(sourceRoot)
+type pullRequestText struct {
+	Title         string
+	CommitMessage string
+	Summary       string
+	Validation    []string
+}
+
+func defaultPullRequestBody(task core.Task, text pullRequestText, changes WorkspaceChanges, sourceRoot string) string {
+	generated := generatedPullRequestBody(task, text, changes)
+	template, _ := pullRequestTemplate(sourceRoot)
 	if strings.TrimSpace(template) == "" {
 		return generated
 	}
 	var builder strings.Builder
 	builder.WriteString(strings.TrimSpace(template))
 	builder.WriteString("\n\n---\n\n")
-	builder.WriteString("## Aged context\n\n")
-	builder.WriteString("Repository PR template detected at `")
-	builder.WriteString(templatePath)
-	builder.WriteString("`.\n\n")
 	builder.WriteString(generated)
 	return builder.String()
 }
 
-func generatedPullRequestBody(task core.Task, workerID string, summary string, changes WorkspaceChanges) string {
+func describePullRequestPublishChanges(ctx context.Context, workDir string, base string) (WorkspaceChanges, error) {
+	changes := WorkspaceChanges{Root: workDir, CWD: workDir, VCSType: "git"}
+	if strings.TrimSpace(workDir) == "" {
+		return changes, nil
+	}
+	if _, err := runCommand(ctx, workDir, "git", "rev-parse", "--show-toplevel"); err != nil {
+		return changes, nil
+	}
+	baseRef := gitPublishBaseRef(ctx, runCommand, workDir, base)
+	if baseRef == "" {
+		return changes, fmt.Errorf("inspect pull request changes: base ref %q was not found", nonEmpty(strings.TrimSpace(base), "main"))
+	}
+	diffStat, err := runCommand(ctx, workDir, "git", "diff", "--stat", baseRef+"...HEAD", "--")
+	if err != nil {
+		return changes, fmt.Errorf("inspect pull request diffstat: %w", err)
+	}
+	nameStatus, err := runCommand(ctx, workDir, "git", "diff", "--name-status", "-z", baseRef+"...HEAD", "--")
+	if err != nil {
+		return changes, fmt.Errorf("inspect pull request changed files: %w", err)
+	}
+	diff, err := runCommand(ctx, workDir, "git", "diff", "--binary", baseRef+"...HEAD", "--")
+	if err != nil {
+		return changes, fmt.Errorf("inspect pull request diff: %w", err)
+	}
+	changes.DiffStat = strings.TrimSpace(diffStat)
+	changes.ChangedFiles = parseGitNameStatus(nameStatus)
+	changes.Diff = strings.TrimSpace(diff)
+	changes.Dirty = changes.DiffStat != "" || len(changes.ChangedFiles) > 0
+	return changes, nil
+}
+
+func (s *Service) generatePullRequestText(ctx context.Context, task core.Task, summary string, changes WorkspaceChanges, sourceRoot string) pullRequestText {
+	fallback := fallbackPullRequestText(summary, changes)
+	assistant := s.assistant
+	if assistant == nil {
+		var ok bool
+		assistant, ok = s.brain.(AssistantProvider)
+		if !ok {
+			return fallback
+		}
+	}
+	response, err := assistant.Ask(ctx, core.AssistantRequest{
+		WorkDir: sourceRoot,
+		Message: pullRequestTextPrompt(task, summary, changes),
+	})
+	if err != nil {
+		return fallback
+	}
+	text := parsePullRequestText(response.Message)
+	if text.Title == "" {
+		text.Title = fallback.Title
+	}
+	if text.CommitMessage == "" {
+		text.CommitMessage = fallback.CommitMessage
+	}
+	if text.Summary == "" {
+		text.Summary = fallback.Summary
+	}
+	if len(text.Validation) == 0 {
+		text.Validation = fallback.Validation
+	}
+	return text
+}
+
+func fallbackPullRequestText(summary string, changes WorkspaceChanges) pullRequestText {
+	title := pullRequestTitle(summary, changes)
+	return pullRequestText{
+		Title:         title,
+		CommitMessage: title,
+		Summary:       title,
+		Validation:    []string{"Not reported."},
+	}
+}
+
+func generatedPullRequestBody(_ core.Task, text pullRequestText, changes WorkspaceChanges) string {
 	var builder strings.Builder
 	builder.WriteString("## Summary\n")
 	builder.WriteString("- ")
-	builder.WriteString(pullRequestSummaryLine(task, summary, changes))
+	builder.WriteString(nonEmpty(strings.TrimSpace(text.Summary), text.Title, "Update project files"))
 	builder.WriteString("\n\n")
 	if len(changes.ChangedFiles) > 0 {
 		builder.WriteString("## Changed files\n")
@@ -70,20 +140,111 @@ func generatedPullRequestBody(task core.Task, workerID string, summary string, c
 		builder.WriteString("\n```\n\n")
 	}
 	builder.WriteString("## Validation\n")
-	builder.WriteString("- Worker completed successfully before PR publication.\n\n")
-	builder.WriteString("## Aged task\n")
-	builder.WriteString("- Task: `")
-	builder.WriteString(task.ID)
-	builder.WriteString("`\n")
-	if strings.TrimSpace(workerID) != "" {
-		builder.WriteString("- Worker: `")
-		builder.WriteString(workerID)
-		builder.WriteString("`\n")
+	validation := text.Validation
+	if len(validation) == 0 {
+		validation = []string{"Not reported."}
+	}
+	for _, item := range validation {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		builder.WriteString("- ")
+		builder.WriteString(item)
+		builder.WriteString("\n")
 	}
 	return builder.String()
 }
 
-func pullRequestSummaryLine(task core.Task, summary string, changes WorkspaceChanges) string {
+func pullRequestTextPrompt(task core.Task, summary string, changes WorkspaceChanges) string {
+	var builder strings.Builder
+	builder.WriteString("Generate reviewer-facing pull request metadata for a code change.\n")
+	builder.WriteString("Return only compact JSON with keys: title, commitMessage, summary, validation.\n")
+	builder.WriteString("Rules:\n")
+	builder.WriteString("- Use only the worker summary, changed files, and diffstat/diff excerpt below.\n")
+	builder.WriteString("- Do not mention aged, worker IDs, task IDs, automation, or publication mechanics.\n")
+	builder.WriteString("- Do not use the task prompt as the title unless the actual changes support it.\n")
+	builder.WriteString("- validation must be an array of commands or checks explicitly present in the worker summary; if none are present, use [\"Not reported.\"].\n\n")
+	builder.WriteString("Task title, for weak context only:\n")
+	builder.WriteString(strings.TrimSpace(task.Title))
+	builder.WriteString("\n\nWorker summary:\n")
+	builder.WriteString(strings.TrimSpace(summary))
+	builder.WriteString("\n\nChanged files:\n")
+	for _, file := range changes.ChangedFiles {
+		if path := strings.TrimSpace(file.Path); path != "" {
+			builder.WriteString("- ")
+			builder.WriteString(path)
+			if status := strings.TrimSpace(file.Status); status != "" {
+				builder.WriteString(" (")
+				builder.WriteString(status)
+				builder.WriteString(")")
+			}
+			builder.WriteString("\n")
+		}
+	}
+	if stat := strings.TrimSpace(changes.DiffStat); stat != "" {
+		builder.WriteString("\nDiffstat:\n")
+		builder.WriteString(stat)
+		builder.WriteString("\n")
+	}
+	if diff := strings.TrimSpace(changes.Diff); diff != "" {
+		const limit = 6000
+		if len(diff) > limit {
+			diff = diff[:limit] + "\n[truncated]"
+		}
+		builder.WriteString("\nDiff excerpt:\n")
+		builder.WriteString(diff)
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+func parsePullRequestText(value string) pullRequestText {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "```json")
+	value = strings.TrimPrefix(value, "```")
+	value = strings.TrimSuffix(value, "```")
+	value = strings.TrimSpace(value)
+	var payload struct {
+		Title         string   `json:"title"`
+		CommitMessage string   `json:"commitMessage"`
+		Summary       string   `json:"summary"`
+		Validation    []string `json:"validation"`
+	}
+	if err := json.Unmarshal([]byte(value), &payload); err != nil {
+		return pullRequestText{}
+	}
+	return pullRequestText{
+		Title:         normalizeGeneratedTitle(payload.Title),
+		CommitMessage: normalizeCommitMessageTitle(payload.CommitMessage),
+		Summary:       normalizePullRequestSummary(payload.Summary),
+		Validation:    normalizePullRequestValidation(payload.Validation),
+	}
+}
+
+func normalizePullRequestSummary(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimLeft(value, "-* \t")
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.TrimSpace(value)
+}
+
+func normalizePullRequestValidation(values []string) []string {
+	var out []string
+	for _, value := range values {
+		value = normalizePullRequestSummary(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func pullRequestSummaryLine(_ core.Task, summary string, changes WorkspaceChanges) string {
+	return pullRequestTitle(summary, changes)
+}
+
+func pullRequestTitle(summary string, changes WorkspaceChanges) string {
 	changedFiles := make([]string, 0, len(changes.ChangedFiles))
 	for _, file := range changes.ChangedFiles {
 		if path := strings.TrimSpace(file.Path); path != "" {
@@ -91,8 +252,7 @@ func pullRequestSummaryLine(task core.Task, summary string, changes WorkspaceCha
 		}
 	}
 	return changeCommitMessage(changeCommitMessageContext{
-		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Aged task result"),
-		TaskTitle:     task.Title,
+		Fallback:      "Update project files",
 		WorkerSummary: summary,
 		ChangedFiles:  changedFiles,
 	})
