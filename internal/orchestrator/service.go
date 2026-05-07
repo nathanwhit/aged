@@ -115,17 +115,26 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	return b.String()
 }
 
-func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string, steering []string) string {
+func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string, steering []string, contextKind string) string {
 	var b strings.Builder
-	b.WriteString("# Retry Context\n\n")
-	b.WriteString("This is a retry of a previously failed or canceled worker turn.\n")
+	if contextKind == "durable_loop" {
+		b.WriteString("# Continuation Context\n\n")
+		b.WriteString("This durable loop iteration is continuing from a previous worker turn.\n")
+	} else {
+		b.WriteString("# Retry Context\n\n")
+		b.WriteString("This is a retry of a previously failed or canceled worker turn.\n")
+	}
 	b.WriteString("Previous worker ID: ")
 	b.WriteString(previousWorkerID)
 	b.WriteString("\n")
 	if strings.TrimSpace(resumeSessionID) != "" {
 		b.WriteString("The worker provider session is being resumed when supported.\n")
 	}
-	b.WriteString("The execution workspace may already contain partial changes from that worker. Inspect the current workspace state first, preserve useful existing work, and continue from there instead of starting over.\n\n")
+	if contextKind == "durable_loop" {
+		b.WriteString("The execution workspace may already contain changes from that worker. Inspect the current workspace state first, preserve useful existing work, and continue from there instead of starting over.\n\n")
+	} else {
+		b.WriteString("The execution workspace may already contain partial changes from that worker. Inspect the current workspace state first, preserve useful existing work, and continue from there instead of starting over.\n\n")
+	}
 	if len(steering) > 0 {
 		b.WriteString("# User Steering\n\n")
 		b.WriteString("Apply this user steering on the resumed turn:\n")
@@ -2935,7 +2944,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			resumeSessionID = ""
 			delete(plan.Metadata, "retryResumeSessionID")
 		}
-		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering)
+		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
 	} else {
 		resumeSessionID = ""
 		delete(plan.Metadata, "retryResumeSessionID")
@@ -3203,7 +3212,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			delete(plan.Metadata, "retryResumeSessionID")
 			spec.ResumeSessionID = ""
 		}
-		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"))
+		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"), stringMetadata(plan.Metadata, "retryContextKind"))
 	}
 	command := runner.BuildCommand(spec)
 	workspace.Root = remoteRun.RunDir
