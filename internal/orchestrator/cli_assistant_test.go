@@ -51,8 +51,10 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 
 func TestCLIAssistantUsesClaudeStreamResult(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
+	stdinPath := filepath.Join(t.TempDir(), "stdin.txt")
 	script := writeExecutable(t, `#!/bin/sh
 printf '%s\n' "$*" > `+shellQuoteTest(argsPath)+`
+cat > `+shellQuoteTest(stdinPath)+`
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}' '{"type":"assistant","message":{"content":[{"type":"text","text":"draft answer"}]}}' '{"type":"result","subtype":"success","result":"claude answer"}'
 `)
 	assistant, err := NewCLIAssistant(CLIAssistantConfig{
@@ -82,6 +84,16 @@ printf '%s\n' '{"type":"system","subtype":"init","session_id":"session-1"}' '{"t
 	}
 	if !strings.Contains(string(args), "--effort medium") {
 		t.Fatalf("args missing medium effort: %s", args)
+	}
+	if strings.Contains(string(args), "hello") {
+		t.Fatalf("prompt leaked into args: %s", args)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stdin), "User message:\nhello") {
+		t.Fatalf("stdin missing prompt: %s", stdin)
 	}
 }
 
@@ -120,8 +132,10 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 
 func TestCLIAssistantResumesClaudeSession(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
+	stdinPath := filepath.Join(t.TempDir(), "stdin.txt")
 	script := writeExecutable(t, `#!/bin/sh
 printf '%s\n' "$*" > `+shellQuoteTest(argsPath)+`
+cat > `+shellQuoteTest(stdinPath)+`
 printf '%s\n' '{"type":"result","subtype":"success","result":"resumed claude"}'
 `)
 	assistant, err := NewCLIAssistant(CLIAssistantConfig{
@@ -148,6 +162,16 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"resumed claude"}'
 	}
 	if !strings.Contains(string(args), "--effort medium") {
 		t.Fatalf("args missing medium effort: %s", args)
+	}
+	if strings.Contains(string(args), "again") {
+		t.Fatalf("prompt leaked into args: %s", args)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stdin), "User message:\nagain") {
+		t.Fatalf("stdin missing prompt: %s", stdin)
 	}
 }
 

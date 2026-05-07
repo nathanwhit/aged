@@ -126,18 +126,19 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 
 func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), a.workDir)
-	args := []string{"--print", "--output-format", "stream-json", "--verbose", prompt}
+	args := []string{"--print", "--output-format", "stream-json", "--verbose"}
 	if effort := worker.ReasoningEffort(a.reasoningEffort); effort != "" {
-		args = []string{"--print", "--output-format", "stream-json", "--verbose", "--effort", effort, prompt}
+		args = []string{"--print", "--output-format", "stream-json", "--verbose", "--effort", effort}
 	}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
-		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", prompt}
+		args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose"}
 		if effort := worker.ReasoningEffort(a.reasoningEffort); effort != "" {
-			args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", "--effort", effort, prompt}
+			args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", "--effort", effort}
 		}
 	}
 	cmd := exec.CommandContext(ctx, a.claudePath, args...)
 	cmd.Dir = workDir
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

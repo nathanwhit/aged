@@ -234,6 +234,25 @@ func TestCommandRunnerWritesPromptToStdinForDashArgument(t *testing.T) {
 	}
 }
 
+func TestPromptStdinCommandRunnerWritesPromptWithoutDashArgument(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "stdin.txt")
+	runner := NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(Spec) []string {
+		return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath)}
+	})
+	err := runner.Run(context.Background(), Spec{Prompt: "large prompt body"}, &recordingSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "large prompt body" {
+		t.Fatalf("stdin = %q", out)
+	}
+}
+
 func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "max"})
@@ -254,7 +273,7 @@ func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "review this", ReasoningEffort: "xhigh"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--effort", "xhigh", "review this"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--effort", "xhigh"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
@@ -263,7 +282,7 @@ func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 func TestDefaultClaudeRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "continue", ResumeSessionID: "session-1"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--resume", "session-1", "continue"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--resume", "session-1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
