@@ -39,7 +39,7 @@ func generatedPullRequestBody(task core.Task, workerID string, summary string, c
 	var builder strings.Builder
 	builder.WriteString("## Summary\n")
 	builder.WriteString("- ")
-	builder.WriteString(nonEmpty(strings.TrimSpace(summary), strings.TrimSpace(task.Title), "Aged task result"))
+	builder.WriteString(pullRequestSummaryLine(task, summary, changes))
 	builder.WriteString("\n\n")
 	if len(changes.ChangedFiles) > 0 {
 		builder.WriteString("## Changed files\n")
@@ -81,6 +81,21 @@ func generatedPullRequestBody(task core.Task, workerID string, summary string, c
 		builder.WriteString("`\n")
 	}
 	return builder.String()
+}
+
+func pullRequestSummaryLine(task core.Task, summary string, changes WorkspaceChanges) string {
+	changedFiles := make([]string, 0, len(changes.ChangedFiles))
+	for _, file := range changes.ChangedFiles {
+		if path := strings.TrimSpace(file.Path); path != "" {
+			changedFiles = append(changedFiles, path)
+		}
+	}
+	return changeCommitMessage(changeCommitMessageContext{
+		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Aged task result"),
+		TaskTitle:     task.Title,
+		WorkerSummary: summary,
+		ChangedFiles:  changedFiles,
+	})
 }
 
 func workerCompletionSummaryFromSnapshot(snapshot core.Snapshot, workerID string) string {

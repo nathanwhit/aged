@@ -244,6 +244,22 @@ func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
 	}
 }
 
+func TestGeneratedPullRequestBodyNormalizesWorkerReportSummary(t *testing.T) {
+	body := generatedPullRequestBody(core.Task{
+		ID:    "task-1",
+		Title: "Publish aged worker changes",
+	}, "worker-1", "**Summary**\n- Improve generated PR body summaries.\n\n**Validation**\n- go test ./internal/orchestrator", WorkspaceChanges{
+		ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/pull_request_workflow.go"}},
+	})
+
+	if !strings.Contains(body, "- Improve generated PR body summaries") {
+		t.Fatalf("body summary was not normalized:\n%s", body)
+	}
+	if strings.Contains(body, "**Summary**") || strings.Contains(body, "**Validation**") {
+		t.Fatalf("body leaked report headings into summary:\n%s", body)
+	}
+}
+
 func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	publisher := LocalPullRequestPublisher{
 		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
