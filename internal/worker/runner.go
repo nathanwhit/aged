@@ -112,6 +112,7 @@ type CommandRunner struct {
 	command           func(Spec) []string
 	steeringFormatter func(string) string
 	capabilities      Capabilities
+	promptOnStdin     bool
 }
 
 func NewCommandRunner(kind string, command func(Spec) []string) CommandRunner {
@@ -120,6 +121,10 @@ func NewCommandRunner(kind string, command func(Spec) []string) CommandRunner {
 
 func NewCommandRunnerWithCapabilities(kind string, capabilities Capabilities, command func(Spec) []string) CommandRunner {
 	return CommandRunner{kind: kind, command: command, capabilities: capabilities}
+}
+
+func NewPromptStdinCommandRunnerWithCapabilities(kind string, capabilities Capabilities, command func(Spec) []string) CommandRunner {
+	return CommandRunner{kind: kind, command: command, capabilities: capabilities, promptOnStdin: true}
 }
 
 func NewSteerableCommandRunner(kind string, command func(Spec) []string, steeringFormatter func(string) string) CommandRunner {
@@ -170,7 +175,7 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return err
 	}
 	var stdin io.WriteCloser
-	promptOnStdin := CommandUsesPromptStdin(argv)
+	promptOnStdin := r.promptOnStdin || CommandUsesPromptStdin(argv)
 	if promptOnStdin || (r.SupportsSteering() && spec.Steering != nil) {
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
@@ -351,7 +356,7 @@ func DefaultRunners() map[string]Runner {
 	runners := []Runner{
 		MockRunner{},
 		BenchmarkCompareRunner{},
-		NewCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
+		NewPromptStdinCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args := []string{"codex", "exec", "resume", codexYoloFlag, "--json"}
 				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
@@ -365,7 +370,7 @@ func DefaultRunners() map[string]Runner {
 			}
 			return append(args, "-")
 		}),
-		NewCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
+		NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			args := []string{"claude", "--print", "--output-format", "stream-json", "--verbose"}
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args = append(args, "--resume", strings.TrimSpace(spec.ResumeSessionID))
@@ -373,7 +378,7 @@ func DefaultRunners() map[string]Runner {
 			if effort := ReasoningEffort(spec.ReasoningEffort); effort != "" {
 				args = append(args, "--effort", effort)
 			}
-			return append(args, spec.Prompt)
+			return args
 		}),
 		NewCommandRunner("shell", func(spec Spec) []string {
 			return spec.Command
