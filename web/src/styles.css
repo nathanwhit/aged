@@ -278,6 +278,66 @@ button {
   gap: 14px;
 }
 
+.run-mode-control {
+  border: 0;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.run-mode-control legend {
+  color: #4b4f58;
+  font-size: 13px;
+  grid-column: 1 / -1;
+  padding: 0;
+}
+
+.run-mode-option {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #c9c5ba;
+  border-radius: 6px;
+  color: #343741;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  min-height: 38px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.run-mode-option input {
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 1px;
+}
+
+.run-mode-option.selected {
+  background: #eef5ff;
+  border-color: #789fd6;
+  color: #243b53;
+}
+
+.run-mode-option:focus-within {
+  outline: 2px solid #6d3fc7;
+  outline-offset: 2px;
+}
+
+.loop-config {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.loop-role-field {
+  grid-column: 1 / -1;
+}
+
 .checkbox-label {
   align-items: center;
   display: flex;
@@ -2157,6 +2217,11 @@ small {
 
   .composer textarea {
     min-height: 120px;
+  }
+
+  .loop-config,
+  .run-mode-control {
+    grid-template-columns: 1fr;
   }
 
   .summary-grid {

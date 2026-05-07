@@ -5080,6 +5080,9 @@ func createTaskMetadataMap(raw json.RawMessage) (map[string]any, error) {
 }
 
 func ensureDefaultTaskCompletionMode(metadata map[string]any, prompt string) {
+	if taskMetadataExecutionMode(metadata) == executionModeLoop {
+		return
+	}
 	if stringMetadataValue(metadata["completionMode"]) == "" {
 		if promptRequestsLocalCompletion(prompt) {
 			metadata["completionMode"] = "local"
@@ -5090,6 +5093,15 @@ func ensureDefaultTaskCompletionMode(metadata map[string]any, prompt string) {
 				metadata["completionModeInferred"] = true
 			}
 		}
+	}
+}
+
+func taskMetadataExecutionMode(metadata map[string]any) string {
+	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["executionMode"]))) {
+	case "loop", "durable_loop", "agent_loop":
+		return executionModeLoop
+	default:
+		return "orchestrated"
 	}
 }
 

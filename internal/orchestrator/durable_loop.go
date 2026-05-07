@@ -28,13 +28,7 @@ type durableLoopConfig struct {
 }
 
 func taskExecutionMode(task core.Task) string {
-	metadata := taskMetadataMap(task)
-	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["executionMode"]))) {
-	case "loop", "durable_loop", "agent_loop":
-		return executionModeLoop
-	default:
-		return "orchestrated"
-	}
+	return taskMetadataExecutionMode(taskMetadataMap(task))
 }
 
 func taskMetadataMap(task core.Task) map[string]any {

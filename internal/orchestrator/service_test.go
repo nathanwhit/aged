@@ -340,6 +340,24 @@ func TestNormalizeCreateTaskRequestDefaultsCompletionModeToGitHubAndPreservesExp
 	if metadata["completionMode"] != "local" {
 		t.Fatalf("explicit local metadata = %+v", metadata)
 	}
+
+	loopReq, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Keep making bounded progress.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode": "loop",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var loopMetadata map[string]any
+	if err := json.Unmarshal(loopReq.Metadata, &loopMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loopMetadata["completionMode"]; ok {
+		t.Fatalf("loop metadata should not default completionMode: %+v", loopMetadata)
+	}
 }
 
 func TestServiceFallsBackWhenTitleGeneratorFails(t *testing.T) {
@@ -2398,7 +2416,6 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 			"executionMode":       "loop",
 			"loopWorkerKind":      "loop",
 			"loopIntervalSeconds": 0,
-			"completionMode":      "local",
 		}),
 	})
 	if err != nil {
