@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,19 +44,15 @@ func taskMetadataMap(task core.Task) map[string]any {
 
 func durableLoopConfigFromTask(task core.Task, runners map[string]worker.Runner) durableLoopConfig {
 	metadata := taskMetadataMap(task)
-	workerKind := nonEmpty(
+	explicitWorkerKind := nonEmpty(
 		stringMetadataValue(metadata["loopWorkerKind"]),
 		stringMetadataValue(metadata["workerKind"]),
 		stringMetadataValue(metadata["assistant"]),
-		defaultLoopWorkerKind,
 	)
+	workerKind := nonEmpty(explicitWorkerKind, defaultLoopWorkerKind)
 	if runner := runners[workerKind]; runner == nil {
-		for candidate, runner := range runners {
-			if runner == nil {
-				continue
-			}
-			workerKind = candidate
-			break
+		if explicitWorkerKind == "" {
+			workerKind = firstConfiguredRunnerKind(runners)
 		}
 	}
 	interval := defaultLoopInterval
@@ -77,6 +74,20 @@ func durableLoopConfigFromTask(task core.Task, runners map[string]worker.Runner)
 		Interval:       interval,
 		FreshWorkspace: boolMetadata(metadata, "loopFreshWorkspace"),
 	}
+}
+
+func firstConfiguredRunnerKind(runners map[string]worker.Runner) string {
+	candidates := make([]string, 0, len(runners))
+	for candidate, runner := range runners {
+		if runner != nil {
+			candidates = append(candidates, candidate)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
 }
 
 func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
