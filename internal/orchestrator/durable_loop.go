@@ -187,6 +187,7 @@ func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, c
 		snapshot, err := s.store.Snapshot(ctx)
 		if err == nil {
 			plan = retryPlanWithResume(snapshot, plan, task.ID, previousWorkerID)
+			plan.Metadata["retryContextKind"] = "durable_loop"
 		}
 	}
 	if err := plan.Validate(); err != nil {

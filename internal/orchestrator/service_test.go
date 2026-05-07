@@ -2415,6 +2415,12 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	if !strings.Contains(runner.promptValue(), "# Durable Agent Loop") {
 		t.Fatalf("runner prompt missing loop context:\n%s", runner.promptValue())
 	}
+	if !strings.Contains(runner.promptValue(), "# Continuation Context") {
+		t.Fatalf("runner prompt missing loop continuation context:\n%s", runner.promptValue())
+	}
+	if strings.Contains(runner.promptValue(), "previously failed or canceled") {
+		t.Fatalf("runner prompt used retry wording for loop continuation:\n%s", runner.promptValue())
+	}
 	if !hasTaskAction(snapshot.Events, task.ID, "durable_loop", "waiting_for_input") {
 		t.Fatalf("missing durable loop waiting action")
 	}
