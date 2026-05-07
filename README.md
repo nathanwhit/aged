@@ -334,7 +334,7 @@ The rebuilt daemon binary and logs live under `.aged/dev/`.
 - `POST /api/workers/{id}/apply`
 - `POST /api/workers/{id}/cancel`
 
-Durable loop evals can be launched with `go run ./cmd/aged-loop-eval`. The runner creates the eval task from `evals/durable-loop-pr-producer.md`, watches aged for a finite external horizon, cancels the still-running loop, and writes a JSON scorecard.
+Durable loop evals can be launched with `go run ./cmd/aged-loop-eval`. The runner creates the eval task from `evals/durable-loop-pr-producer.md`, watches aged for a finite external horizon, cancels the still-running loop, and writes a JSON scorecard. With `-repeat` and `-feedback-on-fail`, it can run as a local feedback loop that creates a follow-up aged task whenever a scorecard fails.
 
 External drivers can create tasks through the same endpoint as the UI. Include `source` and `externalId` to make creation idempotent across poller restarts. The built-in GitHub driver uses `source: "github-issue"` and `externalId: "owner/repo#123"`:
 

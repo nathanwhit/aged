@@ -21,17 +21,22 @@ import (
 const evalSource = "aged-loop-eval"
 
 type config struct {
-	baseURL      string
-	evalPath     string
-	outputPath   string
-	title        string
-	horizon      time.Duration
-	poll         time.Duration
-	cancel       bool
-	steerAfter   time.Duration
-	steering     string
-	workerKind   string
-	loopInterval int
+	baseURL       string
+	evalPath      string
+	outputPath    string
+	outputSet     bool
+	title         string
+	horizon       time.Duration
+	poll          time.Duration
+	cancel        bool
+	steerAfter    time.Duration
+	steering      string
+	workerKind    string
+	loopInterval  int
+	repeat        time.Duration
+	maxRuns       int
+	feedback      bool
+	feedbackTitle string
 }
 
 type evalDefinition struct {
@@ -57,6 +62,9 @@ type evalResult struct {
 	Checks               []evalCheck        `json:"checks"`
 	PullRequests         []pullRequestScore `json:"pullRequests,omitempty"`
 	EventsSample         []eventSample      `json:"eventsSample,omitempty"`
+	FeedbackCreated      bool               `json:"feedbackCreated"`
+	FeedbackTaskID       string             `json:"feedbackTaskId,omitempty"`
+	FeedbackError        string             `json:"feedbackError,omitempty"`
 }
 
 type evalMetrics struct {
@@ -131,11 +139,13 @@ func parseFlags() config {
 	flag.StringVar(&cfg.steering, "steering", envOr("AGED_LOOP_EVAL_STEERING", "Keep the next change narrow and check the existing PR state before opening anything new."), "steering message")
 	flag.StringVar(&cfg.workerKind, "worker-kind", envOr("AGED_LOOP_EVAL_WORKER_KIND", ""), "override metadata.loopWorkerKind for smoke runs")
 	flag.IntVar(&cfg.loopInterval, "loop-interval-seconds", envInt("AGED_LOOP_EVAL_LOOP_INTERVAL_SECONDS", -1), "override metadata.loopIntervalSeconds; -1 keeps eval metadata")
+	flag.DurationVar(&cfg.repeat, "repeat", envDuration("AGED_LOOP_EVAL_REPEAT", 0), "delay between eval runs; 0 runs once")
+	flag.IntVar(&cfg.maxRuns, "max-runs", envInt("AGED_LOOP_EVAL_MAX_RUNS", 1), "maximum eval runs; 0 means forever when -repeat is set")
+	flag.BoolVar(&cfg.feedback, "feedback-on-fail", envBool("AGED_LOOP_EVAL_FEEDBACK_ON_FAIL", false), "create a follow-up aged improvement task when any scorecard check fails")
+	flag.StringVar(&cfg.feedbackTitle, "feedback-title", envOr("AGED_LOOP_EVAL_FEEDBACK_TITLE", "Improve durable loop eval result"), "title for feedback tasks created by -feedback-on-fail")
 	flag.Parse()
 	cfg.baseURL = strings.TrimRight(strings.TrimSpace(cfg.baseURL), "/")
-	if cfg.outputPath == "" {
-		cfg.outputPath = filepath.Join("eval-results", "durable-loop-pr-producer-"+time.Now().UTC().Format("20060102T150405Z")+".json")
-	}
+	cfg.outputSet = strings.TrimSpace(cfg.outputPath) != ""
 	if cfg.poll <= 0 {
 		cfg.poll = time.Second
 	}
@@ -146,9 +156,48 @@ func parseFlags() config {
 }
 
 func run(ctx context.Context, cfg config) error {
+	runs := 0
+	for {
+		runs++
+		result, err := runOnce(ctx, cfg, runs)
+		if err != nil {
+			return err
+		}
+		if cfg.feedback && resultHasFailingChecks(result) {
+			task, err := createFeedbackTask(ctx, cfg, result)
+			if err != nil {
+				result.FeedbackError = err.Error()
+			} else {
+				result.FeedbackCreated = true
+				result.FeedbackTaskID = task.ID
+				fmt.Printf("created feedback task %s for eval task %s\n", task.ID, result.TaskID)
+			}
+		}
+		if err := writeResult(result); err != nil {
+			return err
+		}
+		fmt.Printf("wrote eval scorecard %s\n", result.OutputPath)
+		printSummary(result)
+		if cfg.feedback && result.FeedbackError != "" {
+			fmt.Printf("feedback task creation failed: %s\n", result.FeedbackError)
+		}
+		if cfg.repeat <= 0 || (cfg.maxRuns > 0 && runs >= cfg.maxRuns) {
+			return nil
+		}
+		timer := time.NewTimer(cfg.repeat)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func runOnce(ctx context.Context, cfg config, runIndex int) (evalResult, error) {
 	definition, err := loadEvalDefinition(cfg.evalPath)
 	if err != nil {
-		return err
+		return evalResult{}, err
 	}
 	if strings.TrimSpace(cfg.workerKind) != "" {
 		definition.Metadata["loopWorkerKind"] = strings.TrimSpace(cfg.workerKind)
@@ -158,12 +207,13 @@ func run(ctx context.Context, cfg config) error {
 	}
 	metadata, err := json.Marshal(definition.Metadata)
 	if err != nil {
-		return err
+		return evalResult{}, err
 	}
 	started := time.Now().UTC()
+	cfg.outputPath = outputPathForRun(cfg, started, runIndex)
 	task, err := createTask(ctx, cfg, definition.Prompt, metadata, started)
 	if err != nil {
-		return err
+		return evalResult{}, err
 	}
 	fmt.Printf("created eval task %s\n", task.ID)
 
@@ -174,12 +224,12 @@ func run(ctx context.Context, cfg config) error {
 	for {
 		snapshot, err := getSnapshot(ctx, cfg.baseURL)
 		if err != nil {
-			return err
+			return evalResult{}, err
 		}
 		preStop = snapshot
 		if shouldSteer(started, cfg, steered) {
 			if err := steerTask(ctx, cfg.baseURL, task.ID, cfg.steering); err != nil {
-				return err
+				return evalResult{}, err
 			}
 			now := time.Now().UTC()
 			steeringAt = &now
@@ -195,7 +245,7 @@ func run(ctx context.Context, cfg config) error {
 	canceled := false
 	if cfg.cancel && !terminalTaskStatus(taskStatus(preStop, task.ID)) {
 		if err := cancelTask(ctx, cfg.baseURL, task.ID); err != nil {
-			return err
+			return evalResult{}, err
 		}
 		canceled = true
 		fmt.Printf("canceled eval task %s at external horizon\n", task.ID)
@@ -203,15 +253,9 @@ func run(ctx context.Context, cfg config) error {
 	finalSnapshot := waitForSettledSnapshot(ctx, cfg, task.ID)
 	events, err := getTaskEvents(ctx, cfg.baseURL, task.ID, 1000)
 	if err != nil {
-		return err
+		return evalResult{}, err
 	}
-	result := buildResult(cfg, task.ID, started, preStop, finalSnapshot, events, canceled, steered, steeringAt)
-	if err := writeResult(result); err != nil {
-		return err
-	}
-	fmt.Printf("wrote eval scorecard %s\n", result.OutputPath)
-	printSummary(result)
-	return nil
+	return buildResult(cfg, task.ID, started, preStop, finalSnapshot, events, canceled, steered, steeringAt), nil
 }
 
 func loadEvalDefinition(path string) (evalDefinition, error) {
@@ -266,6 +310,64 @@ func createTask(ctx context.Context, cfg config, prompt string, metadata json.Ra
 	var task core.Task
 	err := postJSON(ctx, cfg.baseURL+"/api/tasks", req, http.StatusAccepted, &task)
 	return task, err
+}
+
+func createFeedbackTask(ctx context.Context, cfg config, result evalResult) (core.Task, error) {
+	failed := failedChecks(result)
+	metadata, err := json.Marshal(map[string]any{
+		"completionMode": "github",
+		"eval":           result.Name,
+		"evalTaskId":     result.TaskID,
+		"evalResultPath": result.OutputPath,
+		"failedChecks":   failed,
+	})
+	if err != nil {
+		return core.Task{}, err
+	}
+	req := core.CreateTaskRequest{
+		Title:      cfg.feedbackTitle,
+		Prompt:     feedbackPrompt(result, failed),
+		Source:     evalSource + "-feedback",
+		ExternalID: result.Name + "-feedback-" + result.StartedAt.Format("20060102T150405Z"),
+		Metadata:   metadata,
+	}
+	var task core.Task
+	err = postJSON(ctx, cfg.baseURL+"/api/tasks", req, http.StatusAccepted, &task)
+	return task, err
+}
+
+func feedbackPrompt(result evalResult, failed []string) string {
+	var b strings.Builder
+	b.WriteString("A durable-loop eval run produced failing checks. Inspect the scorecard, decide which failures are legitimate product or evaluator problems, and implement one narrow improvement. Open a PR only if there is a real code or documentation change.\n\n")
+	b.WriteString("Eval: ")
+	b.WriteString(result.Name)
+	b.WriteString("\n")
+	b.WriteString("Eval task ID: ")
+	b.WriteString(result.TaskID)
+	b.WriteString("\n")
+	b.WriteString("Scorecard path: ")
+	b.WriteString(result.OutputPath)
+	b.WriteString("\n")
+	b.WriteString("Task status before evaluator stop: ")
+	b.WriteString(string(result.TaskStatusBeforeStop))
+	b.WriteString("\n")
+	b.WriteString("Final task status: ")
+	b.WriteString(string(result.FinalTaskStatus))
+	b.WriteString("\n\n")
+	b.WriteString("Failed checks:\n")
+	for _, name := range failed {
+		b.WriteString("- ")
+		b.WriteString(name)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nScorecard summary:\n")
+	summary, _ := json.MarshalIndent(struct {
+		Metrics evalMetrics `json:"metrics"`
+		Checks  []evalCheck `json:"checks"`
+	}{Metrics: result.Metrics, Checks: result.Checks}, "", "  ")
+	b.Write(summary)
+	b.WriteString("\n\nDo not blindly optimize for the smoke worker. If a failure is expected for mock mode, improve the evaluator or documentation so real failures and expected smoke failures are distinguishable.")
+	return b.String()
 }
 
 func getSnapshot(ctx context.Context, baseURL string) (core.Snapshot, error) {
@@ -537,6 +639,25 @@ func scoreChecks(result evalResult) []evalCheck {
 	}
 }
 
+func resultHasFailingChecks(result evalResult) bool {
+	for _, check := range result.Checks {
+		if check.Status == "fail" {
+			return true
+		}
+	}
+	return false
+}
+
+func failedChecks(result evalResult) []string {
+	var failed []string
+	for _, check := range result.Checks {
+		if check.Status == "fail" {
+			failed = append(failed, check.Name)
+		}
+	}
+	return failed
+}
+
 func check(name string, pass bool, reason string) evalCheck {
 	status := "fail"
 	if pass {
@@ -566,9 +687,24 @@ func writeResult(result evalResult) error {
 	return os.WriteFile(result.OutputPath, append(payload, '\n'), 0o644)
 }
 
+func outputPathForRun(cfg config, started time.Time, runIndex int) string {
+	if strings.TrimSpace(cfg.outputPath) == "" {
+		return filepath.Join("eval-results", "durable-loop-pr-producer-"+started.Format("20060102T150405Z")+".json")
+	}
+	if cfg.outputSet && (cfg.repeat <= 0 && cfg.maxRuns == 1 || runIndex <= 1) {
+		return cfg.outputPath
+	}
+	ext := filepath.Ext(cfg.outputPath)
+	base := strings.TrimSuffix(cfg.outputPath, ext)
+	return fmt.Sprintf("%s-%s%s", base, started.Format("20060102T150405Z"), ext)
+}
+
 func printSummary(result evalResult) {
 	fmt.Printf("task status before stop: %s\n", result.TaskStatusBeforeStop)
 	fmt.Printf("final task status: %s\n", result.FinalTaskStatus)
+	if result.FeedbackCreated {
+		fmt.Printf("feedback task: %s\n", result.FeedbackTaskID)
+	}
 	for _, check := range result.Checks {
 		fmt.Printf("%s: %s (%s)\n", check.Status, check.Name, check.Reason)
 	}
