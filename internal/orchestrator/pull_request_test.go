@@ -13,8 +13,8 @@ import (
 	"aged/internal/core"
 )
 
-func TestSanitizeGitHubCLIEnvDropsCertificateOverrides(t *testing.T) {
-	got := sanitizeGitHubCLIEnv([]string{
+func TestSanitizeGitNetworkEnvDropsCertificateOverrides(t *testing.T) {
+	got := sanitizeGitNetworkEnv([]string{
 		"PATH=/opt/homebrew/bin:/usr/bin",
 		"HOME=/Users/test",
 		"SSL_CERT_FILE=/bad.pem",
@@ -35,12 +35,14 @@ func TestSanitizeGitHubCLIEnvDropsCertificateOverrides(t *testing.T) {
 	}
 }
 
-func TestCommandEnvOnlyCustomizesGitHubCLI(t *testing.T) {
-	if env := commandEnv("jj"); env != nil {
-		t.Fatalf("jj env = %v, want nil", env)
+func TestCommandEnvSanitizesGitHubNetworkCommands(t *testing.T) {
+	for _, name := range []string{"gh", "/usr/bin/git", "/opt/homebrew/bin/jj"} {
+		if env := commandEnv(name); env == nil {
+			t.Fatalf("%s env = nil, want sanitized environment", name)
+		}
 	}
-	if env := commandEnv("/opt/homebrew/bin/gh"); env == nil {
-		t.Fatalf("gh env = nil, want sanitized environment")
+	if env := commandEnv("go"); env != nil {
+		t.Fatalf("go env = %v, want nil", env)
 	}
 }
 
@@ -211,6 +213,34 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 	assertCommandContains(t, calls, []string{"git", "add", "-A"})
 	assertCommandContains(t, calls, []string{"git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+}
+
+func TestMaterializeGitPullRequestChangesIgnoresDirtySubmoduleOnlyStatus(t *testing.T) {
+	ctx := context.Background()
+	var calls [][]string
+	exec := func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		switch {
+		case name == "git" && containsSubsequence(args, []string{"status", "--porcelain=v1"}):
+			return " m tests/bench/testdata/lsp_benchdata\n", nil
+		case name == "git" && containsSubsequence(args, []string{"add", "-A"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"commit"}):
+			t.Fatalf("commit should not run when add -A staged no files")
+		default:
+			t.Fatalf("unexpected command %s %v", name, args)
+		}
+		return "", nil
+	}
+
+	err := materializeGitPullRequestChanges(ctx, exec, "/repo", "feature", PullRequestPublishSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCommandContains(t, calls, []string{"git", "add", "-A"})
 }
 
 func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {

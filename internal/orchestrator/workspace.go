@@ -1384,13 +1384,15 @@ func runCommand(ctx context.Context, dir string, name string, args ...string) (s
 }
 
 func commandEnv(name string) []string {
-	if filepath.Base(name) != "gh" {
+	switch filepath.Base(name) {
+	case "gh", "git", "jj":
+	default:
 		return nil
 	}
-	return sanitizeGitHubCLIEnv(os.Environ())
+	return sanitizeGitNetworkEnv(os.Environ())
 }
 
-func sanitizeGitHubCLIEnv(env []string) []string {
+func sanitizeGitNetworkEnv(env []string) []string {
 	drop := map[string]bool{
 		"SSL_CERT_FILE":       true,
 		"SSL_CERT_DIR":        true,
