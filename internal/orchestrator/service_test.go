@@ -2423,6 +2423,42 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	}
 }
 
+func TestServiceFailsDurableLoopWithMissingExplicitRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "should not run"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Keep making bounded progress.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "codex",
+			"loopIntervalSeconds": 0,
+			"completionMode":      "local",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	failed, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatalf("missing task %s", task.ID)
+	}
+	if !strings.Contains(failed.Error, `loop worker kind "codex" is not configured`) {
+		t.Fatalf("task error = %q", failed.Error)
+	}
+	if count := countEvents(snapshot.Events, core.EventWorkerCreated, task.ID); count != 0 {
+		t.Fatalf("worker.created count = %d, want 0", count)
+	}
+}
+
 func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
