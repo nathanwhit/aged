@@ -329,6 +329,87 @@ func TestCodexParserDowngradesRolloutRecordError(t *testing.T) {
 	}
 }
 
+func TestCodexOutputFilterSummarizesRepeatedInfrastructureWarnings(t *testing.T) {
+	filter := NewOutputFilter(ParserForKind("codex"))
+
+	lines := []string{
+		"2026-05-08T10:00:00.000000Z WARN codex_core_skills::loader: icon path /missing/icon.png does not exist",
+		"2026-05-08T10:00:01.000000Z WARN codex_core_skills::loader: icon path /missing/icon.png does not exist",
+		"2026-05-08T10:00:02.000000Z WARN codex_core_skills::loader: icon path /missing/icon.png does not exist",
+		"2026-05-08T10:00:03.000000Z WARN codex_core_plugins::manifest: defaultPrompt is deprecated",
+		"2026-05-08T10:00:04.000000Z WARN codex_core_plugins::manifest: defaultPrompt is deprecated",
+		"2026-05-08T10:00:05.000000Z WARN codex_app_server::in_process: queue full; dropping app event",
+		"2026-05-08T10:00:06.000000Z WARN codex_app_server::in_process: queue full; dropping app event",
+		"actual codex failure",
+	}
+
+	var events []Event
+	sink := recordingSink{}
+	for _, line := range lines {
+		if err := filter.EmitLine(context.Background(), &sink, "stderr", line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := filter.EmitLine(context.Background(), &sink, "stdout", `{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := filter.Flush(context.Background(), &sink); err != nil {
+		t.Fatal(err)
+	}
+	events = sink.events
+
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6: %+v", len(events), events)
+	}
+	if events[0].Kind != EventLog || !strings.Contains(events[0].Text, "codex_core_skills::loader") {
+		t.Fatalf("first warning event = %+v", events[0])
+	}
+	if events[3].Kind != EventError || events[3].Text != "actual codex failure" {
+		t.Fatalf("real stderr event = %+v", events[3])
+	}
+	if events[4].Kind != EventResult || events[4].Text != "done" {
+		t.Fatalf("result event = %+v", events[4])
+	}
+	summary := events[5]
+	if summary.Kind != EventLog || !strings.Contains(summary.Text, "suppressed 4 repeated Codex infrastructure warnings") {
+		t.Fatalf("summary event = %+v", summary)
+	}
+	for _, want := range []string{
+		"codex_core_skills::loader icon path warning (2)",
+		"codex_core_plugins::manifest defaultPrompt warning (1)",
+		"codex_app_server::in_process queue-full warning (1)",
+	} {
+		if !strings.Contains(summary.Text, want) {
+			t.Fatalf("summary %q missing %q", summary.Text, want)
+		}
+	}
+}
+
+func TestCodexOutputFilterLeavesUnknownStderrErrorsUnsuppressed(t *testing.T) {
+	filter := NewOutputFilter(ParserForKind("codex"))
+
+	var events []Event
+	sink := recordingSink{}
+	for i := 0; i < 3; i++ {
+		if err := filter.EmitLine(context.Background(), &sink, "stderr", "actual codex failure"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := filter.Flush(context.Background(), &sink); err != nil {
+		t.Fatal(err)
+	}
+	events = sink.events
+
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3: %+v", len(events), events)
+	}
+	for _, event := range events {
+		if event.Kind != EventError || event.Text != "actual codex failure" {
+			t.Fatalf("event = %+v, want unsuppressed stderr error", event)
+		}
+	}
+}
+
 func TestBenchmarkCompareRunnerReportsImprovement(t *testing.T) {
 	sink := &recordingSink{}
 	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
