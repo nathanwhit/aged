@@ -103,6 +103,7 @@ func TestTargetRegistrySkipsSSHWithoutRemoteWorkDir(t *testing.T) {
 
 func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=true",
 		"tool.codex=false",
@@ -129,6 +130,21 @@ func TestSSHRunnerProbeRejectsMissingWorkDir(t *testing.T) {
 	}
 	if len(executor.commands) != 0 {
 		t.Fatalf("probe should fail before ssh command, got %+v", executor.commands)
+	}
+}
+
+func TestSSHRunnerProbeRejectsUnpreparableWorkDirRoot(t *testing.T) {
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=false",
+		"checkoutRootError=mkdir: cannot create directory '/Users': Permission denied",
+		"tmux=true",
+		"repoPresent=false",
+		"cpuCount=4",
+	}, "\n")}
+	runner := SSHRunner{Executor: executor}
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/Users/nathan/project"})
+	if health.Status != "unhealthy" || !strings.Contains(health.Error, "Permission denied") {
+		t.Fatalf("health = %+v", health)
 	}
 }
 
@@ -222,6 +238,7 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 
 func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=true",
 		"diskAvailableKB=10485760",
@@ -243,6 +260,7 @@ func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
 
 func TestSSHRunnerProbeAllowsMissingRepoForPreparation(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=false",
 		"cpuCount=4",
@@ -466,7 +484,7 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 		if e.probeOutput != "" {
 			return e.probeOutput, nil
 		}
-		return "tmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
+		return "checkoutRootOK=true\ntmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
 	case strings.Contains(joined, "stdout.log"):
 		return "remote output\n", nil
 	case strings.Contains(joined, "stderr.log"):

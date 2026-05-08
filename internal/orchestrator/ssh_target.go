@@ -231,6 +231,7 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 	health.Reachable = true
 	health.Tmux = parseProbeBool(values["tmux"])
 	health.RepoPresent = parseProbeBool(values["repoPresent"])
+	checkoutRootOK := parseProbeBool(values["checkoutRootOK"])
 	health.Tools = map[string]bool{}
 	for key, value := range values {
 		name, ok := strings.CutPrefix(key, "tool.")
@@ -238,15 +239,17 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 			health.Tools[name] = parseProbeBool(value)
 		}
 	}
-	if health.Tmux {
+	if health.Tmux && checkoutRootOK {
 		health.Status = "ok"
 	} else {
 		health.Status = "unhealthy"
-		if !health.Tmux {
+		if !checkoutRootOK {
+			health.Error = nonEmpty(values["checkoutRootError"], "remote workDir parent is not writable")
+		} else if !health.Tmux {
 			health.Error = "tmux is not available"
 		}
 	}
-	if health.Tmux && !health.RepoPresent {
+	if health.Status == "ok" && !health.RepoPresent {
 		health.Error = "repo path will be prepared before worker start"
 	}
 	return health, resources
@@ -446,17 +449,34 @@ fi`, shellQuote(workDir), shellQuote(patchPath))
 
 func remoteProbeScript(workDir string) string {
 	return fmt.Sprintf(`%s
+work_dir=%s
+work_parent=$(dirname "$work_dir")
+checkout_root_error=""
+if [ -d "$work_dir" ]; then
+  checkout_root_ok=true
+elif checkout_root_error=$(mkdir -p "$work_parent" 2>&1); then
+  if [ -d "$work_parent" ] && [ -w "$work_parent" ]; then
+    checkout_root_ok=true
+  else
+    checkout_root_ok=false
+    checkout_root_error="remote workDir parent is not writable: $work_parent"
+  fi
+else
+  checkout_root_ok=false
+fi
+printf 'checkoutRootOK=%%s\n' "$checkout_root_ok"
+if [ "$checkout_root_ok" != true ]; then printf 'checkoutRootError=%%s\n' "$checkout_root_error"; fi
 printf 'tmux=%%s\n' "$(command -v tmux >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.codex=%%s\n' "$(command -v codex >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.claude=%%s\n' "$(command -v claude >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.git=%%s\n' "$(command -v git >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.jj=%%s\n' "$(command -v jj >/dev/null 2>&1 && echo true || echo false)"
-printf 'repoPresent=%%s\n' "$(test -d %s && echo true || echo false)"
-df -Pk %s 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
+printf 'repoPresent=%%s\n' "$(test -d "$work_dir" && echo true || echo false)"
+df -Pk "$work_parent" 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
 if [ -r /proc/meminfo ]; then awk '/MemTotal:/ { print "memoryTotalKB="$2 } /MemAvailable:/ { print "memoryAvailableKB="$2 }' /proc/meminfo; fi
 if [ -r /proc/loadavg ]; then awk '{ print "load1="$1 }' /proc/loadavg; else uptime | sed -n 's/.*load averages*: *\([0-9.]*\).*/load1=\1/p'; fi
 cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
-printf 'cpuCount=%%s\n' "$cpu_count"`, remoteWorkerEnvScript(), shellQuote(workDir), shellQuote(workDir))
+printf 'cpuCount=%%s\n' "$cpu_count"`, remoteWorkerEnvScript(), shellQuote(workDir))
 }
 
 func parseProbeValues(out string) map[string]string {

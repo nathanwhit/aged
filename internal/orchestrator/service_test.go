@@ -5876,6 +5876,7 @@ func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
 	defer store.Close()
 
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=false",
 		"repoPresent=false",
 		"cpuCount=4",
