@@ -207,7 +207,12 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 		Status:    "unknown",
 		CheckedAt: time.Now().UTC(),
 	}
-	workDir := nonEmpty(target.WorkDir, ".")
+	workDir := strings.TrimSpace(target.WorkDir)
+	if workDir == "" {
+		health.Status = "unhealthy"
+		health.Error = "remote workDir is required"
+		return health, core.TargetResources{}
+	}
 	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remoteProbeScript(workDir)))
 	if err != nil {
 		health.Status = "error"
