@@ -322,6 +322,44 @@ func TestGeneratedPullRequestBodyNormalizesWorkerReportSummary(t *testing.T) {
 	}
 }
 
+func TestDefaultPullRequestTitlePrefersExplicitTitle(t *testing.T) {
+	title := defaultPullRequestTitle("  Reduce repeated Codex infrastructure warning noise in worker output.  ", core.Task{
+		ID:    "task-1",
+		Title: "Task title",
+	}, "Fix fallback title selection.", WorkspaceChanges{})
+
+	if title != "Reduce repeated Codex infrastructure warning noise in worker output" {
+		t.Fatalf("title = %q", title)
+	}
+}
+
+func TestDefaultPullRequestTitleUsesTaskIntentBeforeWorkerReportProse(t *testing.T) {
+	title := defaultPullRequestTitle("", core.Task{
+		ID:       "task-1",
+		Title:    "The reviewer’s gap was valid. The prior fix rejected missing SSH",
+		Metadata: core.MustJSON(map[string]any{"intent": "Avoid selecting SSH targets whose checkout path is invalid"}),
+	}, "**Findings**\nThe reviewer’s gap was valid. The prior fix rejected missing SSH checkouts.\n\n**Commands Run**\ngo test ./internal/orchestrator", WorkspaceChanges{
+		ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/targets.go"}},
+	})
+
+	if title != "Avoid selecting SSH targets whose checkout path is invalid" {
+		t.Fatalf("title = %q", title)
+	}
+}
+
+func TestDefaultPullRequestTitleSkipsReportProseForChangedFiles(t *testing.T) {
+	title := defaultPullRequestTitle("", core.Task{
+		ID:    "task-1",
+		Title: "Codex worker output was parsed line-by-line and every stderr line",
+	}, "**Findings**\nCodex worker output was parsed line-by-line and every stderr line created warning noise.\n\n**Commands Run**\ngo test ./internal/orchestrator", WorkspaceChanges{
+		ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/workers.go"}},
+	})
+
+	if title != "Update internal orchestrator" {
+		t.Fatalf("title = %q", title)
+	}
+}
+
 func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	publisher := LocalPullRequestPublisher{
 		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {

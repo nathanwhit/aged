@@ -1129,10 +1129,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		"autoMerge":         project.PullRequestPolicy.AutoMerge,
 		"pullRequestPolicy": project.PullRequestPolicy,
 	}
-	title := strings.TrimSpace(req.Title)
-	if title == "" {
-		title = task.Title
-	}
+	title := defaultPullRequestTitle(req.Title, task, workerCompletionSummaryFromSnapshot(snapshot, workerID), s.pullRequestWorkspaceChanges(ctx, workerID))
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)

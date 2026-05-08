@@ -12,12 +12,7 @@ import (
 )
 
 func (s *Service) defaultPullRequestBody(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, sourceRoot string) string {
-	changes := WorkspaceChanges{}
-	if strings.TrimSpace(workerID) != "" {
-		if completed, err := s.completedWorkspaceChanges(ctx, workerID); err == nil {
-			changes = completed
-		}
-	}
+	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
 	generated := generatedPullRequestBody(task, workerID, summary, changes)
 	template, templatePath := pullRequestTemplate(sourceRoot)
@@ -33,6 +28,17 @@ func (s *Service) defaultPullRequestBody(ctx context.Context, snapshot core.Snap
 	builder.WriteString("`.\n\n")
 	builder.WriteString(generated)
 	return builder.String()
+}
+
+func (s *Service) pullRequestWorkspaceChanges(ctx context.Context, workerID string) WorkspaceChanges {
+	if strings.TrimSpace(workerID) == "" {
+		return WorkspaceChanges{}
+	}
+	changes, err := s.completedWorkspaceChanges(ctx, workerID)
+	if err != nil {
+		return WorkspaceChanges{}
+	}
+	return changes
 }
 
 func generatedPullRequestBody(task core.Task, workerID string, summary string, changes WorkspaceChanges) string {
@@ -81,6 +87,96 @@ func generatedPullRequestBody(task core.Task, workerID string, summary string, c
 		builder.WriteString("`\n")
 	}
 	return builder.String()
+}
+
+func defaultPullRequestTitle(explicit string, task core.Task, summary string, changes WorkspaceChanges) string {
+	if title := normalizePullRequestTitle(explicit, allowReportProseTitle); title != "" {
+		return title
+	}
+	for _, candidate := range taskTitleIntentCandidates(task) {
+		if title := normalizePullRequestTitle(candidate, rejectReportProseTitle); title != "" {
+			return title
+		}
+	}
+	changedFiles := make([]string, 0, len(changes.ChangedFiles))
+	for _, file := range changes.ChangedFiles {
+		if path := strings.TrimSpace(file.Path); path != "" {
+			changedFiles = append(changedFiles, path)
+		}
+	}
+	title := changeCommitMessage(changeCommitMessageContext{
+		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Aged task result"),
+		WorkerSummary: summary,
+		ChangedFiles:  changedFiles,
+	})
+	if normalized := normalizePullRequestTitle(title, rejectReportProseTitle); normalized != "" {
+		return normalized
+	}
+	if title := commitMessageFromChangedFiles(changedFiles); title != "" {
+		return title
+	}
+	if title := normalizePullRequestTitle(task.Title, rejectReportProseTitle); title != "" {
+		return title
+	}
+	return "aged task " + shortID(task.ID)
+}
+
+type reportProsePolicy bool
+
+const (
+	allowReportProseTitle  reportProsePolicy = false
+	rejectReportProseTitle reportProsePolicy = true
+)
+
+func normalizePullRequestTitle(value string, policy reportProsePolicy) string {
+	title := normalizeCommitMessageTitle(value)
+	if title == "" || isGenericCommitMessageTitle(title) {
+		return ""
+	}
+	if policy == rejectReportProseTitle && isWorkerReportProseTitle(title) {
+		return ""
+	}
+	return title
+}
+
+func taskTitleIntentCandidates(task core.Task) []string {
+	candidates := []string{task.Title}
+	var metadata map[string]any
+	if len(task.Metadata) > 0 && string(task.Metadata) != "null" {
+		_ = json.Unmarshal(task.Metadata, &metadata)
+	}
+	for _, key := range []string{"pullRequestTitle", "prTitle", "taskTitle", "intent", "objective", "title"} {
+		if value := stringMetadataValue(metadata[key]); value != "" {
+			candidates = append(candidates, value)
+		}
+	}
+	return candidates
+}
+
+func isWorkerReportProseTitle(value string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(value), " "))
+	normalized = strings.Trim(normalized, " .:-_#*`")
+	if normalized == "" {
+		return false
+	}
+	if strings.Count(value, ".") > 0 && strings.Contains(value, ". ") {
+		return true
+	}
+	for _, prefix := range []string{"the ", "this ", "that ", "these ", "those ", "we ", "i ", "codex ", "worker "} {
+		if strings.HasPrefix(normalized, prefix) && containsReportProseVerb(normalized) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsReportProseVerb(value string) bool {
+	for _, verb := range []string{" was ", " were ", " is ", " are ", " had ", " has ", " did ", " does "} {
+		if strings.Contains(value, verb) {
+			return true
+		}
+	}
+	return false
 }
 
 func pullRequestSummaryLine(task core.Task, summary string, changes WorkspaceChanges) string {
