@@ -106,18 +106,24 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 	}
 	stdoutOffset := 0
 	stderrOffset := 0
+	filter := worker.NewOutputFilter(parser)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		status, err := r.PollOnce(ctx, run, parser, sink, &stdoutOffset, &stderrOffset)
+		status, err := r.pollOnce(ctx, run, filter, sink, &stdoutOffset, &stderrOffset)
 		if err != nil {
+			_ = filter.Flush(ctx, sink)
 			return status, err
 		}
 		if status.Status == "succeeded" || status.Status == "failed" || status.Status == "canceled" {
+			if err := filter.Flush(ctx, sink); err != nil {
+				return status, err
+			}
 			return status, nil
 		}
 		select {
 		case <-ctx.Done():
+			_ = filter.Flush(ctx, sink)
 			return remoteStatus{Status: "canceled"}, ctx.Err()
 		case <-ticker.C:
 		}
@@ -125,10 +131,25 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 }
 
 func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Parser, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
+	filter := worker.NewOutputFilter(parser)
+	status, err := r.pollOnce(ctx, run, filter, sink, stdoutOffset, stderrOffset)
+	if err != nil {
+		_ = filter.Flush(ctx, sink)
+		return status, err
+	}
+	if status.Status == "succeeded" || status.Status == "failed" || status.Status == "canceled" {
+		if err := filter.Flush(ctx, sink); err != nil {
+			return status, err
+		}
+	}
+	return status, nil
+}
+
+func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.OutputFilter, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
 	stdout, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "stdout.log"))+" 2>/dev/null || true"))
-	emitNewRemoteLines(ctx, parser, sink, "stdout", stdout, stdoutOffset)
+	emitNewRemoteLines(ctx, filter, sink, "stdout", stdout, stdoutOffset)
 	stderr, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "stderr.log"))+" 2>/dev/null || true"))
-	emitNewRemoteLines(ctx, parser, sink, "stderr", stderr, stderrOffset)
+	emitNewRemoteLines(ctx, filter, sink, "stderr", stderr, stderrOffset)
 	rawStatus, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "status.json"))+" 2>/dev/null || printf '{\"status\":\"running\"}'"))
 	if err != nil {
 		return remoteStatus{Status: "unreachable", Error: strings.TrimSpace(rawStatus)}, err
@@ -522,7 +543,7 @@ func shortWorkerID(id string) string {
 	return id
 }
 
-func emitNewRemoteLines(ctx context.Context, parser worker.Parser, sink worker.Sink, stream string, content string, offset *int) {
+func emitNewRemoteLines(ctx context.Context, filter *worker.OutputFilter, sink worker.Sink, stream string, content string, offset *int) {
 	if *offset > len(content) {
 		*offset = 0
 	}
@@ -532,7 +553,7 @@ func emitNewRemoteLines(ctx context.Context, parser worker.Parser, sink worker.S
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		_ = sink.Event(ctx, parser.ParseLine(stream, line))
+		_ = filter.EmitLine(ctx, sink, stream, line)
 	}
 }
 
