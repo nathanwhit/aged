@@ -26,7 +26,10 @@ type WorkerChangesReview struct {
 	Changes   WorkspaceChanges  `json:"changes"`
 }
 
-var standaloneNoPRPattern = regexp.MustCompile(`\bno\s+pr\b`)
+var (
+	standaloneNoPRPattern  = regexp.MustCompile(`\bno\s+pr\b`)
+	githubPullRequestURLRE = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
+)
 
 type WorkerApplyResult struct {
 	WorkerID      string                 `json:"workerId"`
@@ -1027,6 +1030,19 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 			return core.PullRequest{}, err
 		}
 	}
+	repo := pullRequestTargetRepo(req, project, task)
+	base := nonEmpty(req.Base, project.DefaultBase)
+	draft := req.Draft || project.PullRequestPolicy.Draft
+	metadata := map[string]any{
+		"workerId":          workerID,
+		"taskTitle":         task.Title,
+		"workDir":           sourceRoot,
+		"projectId":         project.ID,
+		"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
+		"mergeAllowed":      project.PullRequestPolicy.AllowMerge,
+		"autoMerge":         project.PullRequestPolicy.AutoMerge,
+		"pullRequestPolicy": project.PullRequestPolicy,
+	}
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
 		title = task.Title
@@ -1035,32 +1051,29 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if body == "" {
 		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)
 	}
-	pr, err := s.prPublisher.Publish(ctx, PullRequestPublishSpec{
-		TaskID:        taskID,
-		WorkerID:      workerID,
-		WorkDir:       sourceRoot,
-		Repo:          pullRequestTargetRepo(req, project, task),
-		Base:          nonEmpty(req.Base, project.DefaultBase),
-		Branch:        req.Branch,
-		HeadRepoOwner: pullRequestHeadRepoOwner(project),
-		PushRemote:    project.PushRemote,
-		BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
-		Title:         title,
-		Body:          body,
-		Draft:         req.Draft || project.PullRequestPolicy.Draft,
-		Metadata: map[string]any{
-			"workerId":          workerID,
-			"taskTitle":         task.Title,
-			"workDir":           sourceRoot,
-			"projectId":         project.ID,
-			"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
-			"mergeAllowed":      project.PullRequestPolicy.AllowMerge,
-			"autoMerge":         project.PullRequestPolicy.AutoMerge,
-			"pullRequestPolicy": project.PullRequestPolicy,
-		},
-	})
+	pr, adopted, err := s.workerCreatedPullRequest(ctx, snapshot, task, workerID, repo, metadata)
 	if err != nil {
 		return core.PullRequest{}, err
+	}
+	if !adopted {
+		pr, err = s.prPublisher.Publish(ctx, PullRequestPublishSpec{
+			TaskID:        taskID,
+			WorkerID:      workerID,
+			WorkDir:       sourceRoot,
+			Repo:          repo,
+			Base:          base,
+			Branch:        req.Branch,
+			HeadRepoOwner: pullRequestHeadRepoOwner(project),
+			PushRemote:    project.PushRemote,
+			BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
+			Title:         title,
+			Body:          body,
+			Draft:         draft,
+			Metadata:      metadata,
+		})
+		if err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	if pr.ID == "" {
 		pr.ID = uuid.NewString()
@@ -1091,6 +1104,102 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		return core.PullRequest{}, err
 	}
 	return pr, nil
+}
+
+func (s *Service) workerCreatedPullRequest(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, targetRepo string, metadata map[string]any) (core.PullRequest, bool, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return core.PullRequest{}, false, nil
+	}
+	for _, value := range workerPullRequestURLs(snapshot, task.ID, workerID) {
+		repo, number := parsePullRequestURL(value)
+		if repo == "" || number == 0 {
+			continue
+		}
+		if strings.TrimSpace(targetRepo) != "" && !strings.EqualFold(repo, targetRepo) {
+			continue
+		}
+		pr := core.PullRequest{
+			ID:       watchedPullRequestID(core.PullRequest{Repo: repo, Number: number, URL: value}),
+			TaskID:   task.ID,
+			Repo:     repo,
+			Number:   number,
+			URL:      value,
+			Metadata: core.MustJSON(workerCreatedPullRequestMetadata(metadata, value)),
+		}
+		inspected, err := s.prPublisher.Inspect(ctx, pr)
+		if err != nil {
+			return core.PullRequest{}, false, fmt.Errorf("inspect worker-created pull request %s: %w", value, err)
+		}
+		inspected.ID = pr.ID
+		inspected.TaskID = task.ID
+		if inspected.Repo == "" {
+			inspected.Repo = repo
+		}
+		if inspected.Number == 0 {
+			inspected.Number = number
+		}
+		if inspected.URL == "" {
+			inspected.URL = value
+		}
+		if len(inspected.Metadata) == 0 {
+			inspected.Metadata = pr.Metadata
+		}
+		if strings.EqualFold(inspected.State, "MERGED") || strings.EqualFold(inspected.State, "CLOSED") {
+			continue
+		}
+		return inspected, true, nil
+	}
+	return core.PullRequest{}, false, nil
+}
+
+func workerCreatedPullRequestMetadata(metadata map[string]any, url string) map[string]any {
+	out := copyAnyMap(metadata)
+	out["workerCreated"] = true
+	out["adoptedFromWorkerOutput"] = true
+	out["workerOutputURL"] = url
+	return out
+}
+
+func workerPullRequestURLs(snapshot core.Snapshot, taskID string, workerID string) []string {
+	seen := map[string]bool{}
+	var urls []string
+	add := func(text string) {
+		for _, value := range githubPullRequestURLRE.FindAllString(text, -1) {
+			if seen[value] {
+				continue
+			}
+			seen[value] = true
+			urls = append(urls, value)
+		}
+	}
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.WorkerID != workerID {
+			continue
+		}
+		switch event.Type {
+		case core.EventWorkerOutput:
+			var payload worker.Event
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			add(payload.Text)
+			if len(payload.Raw) > 0 {
+				add(string(payload.Raw))
+			}
+		case core.EventWorkerCompleted:
+			var payload struct {
+				Summary string `json:"summary"`
+				Error   string `json:"error"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			add(payload.Summary)
+			add(payload.Error)
+		}
+	}
+	return urls
 }
 
 func (s *Service) pullRequestSourceRootForWorker(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, error) {
@@ -4098,6 +4207,14 @@ func sortedMapKeys(values map[string]string) []string {
 
 func copyStringMap(values map[string]string) map[string]string {
 	out := map[string]string{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func copyAnyMap(values map[string]any) map[string]any {
+	out := map[string]any{}
 	for key, value := range values {
 		out[key] = value
 	}
