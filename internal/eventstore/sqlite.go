@@ -962,19 +962,21 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 			}
 		case core.EventPRPublished:
 			var payload struct {
-				ID           string          `json:"id"`
-				Repo         string          `json:"repo"`
-				Number       int             `json:"number,omitempty"`
-				URL          string          `json:"url"`
-				Branch       string          `json:"branch"`
-				Base         string          `json:"base"`
-				Title        string          `json:"title"`
-				State        string          `json:"state,omitempty"`
-				Draft        bool            `json:"draft,omitempty"`
-				ChecksStatus string          `json:"checksStatus,omitempty"`
-				MergeStatus  string          `json:"mergeStatus,omitempty"`
-				ReviewStatus string          `json:"reviewStatus,omitempty"`
-				Metadata     json.RawMessage `json:"metadata,omitempty"`
+				ID               string          `json:"id"`
+				Repo             string          `json:"repo"`
+				Number           int             `json:"number,omitempty"`
+				URL              string          `json:"url"`
+				Branch           string          `json:"branch"`
+				Base             string          `json:"base"`
+				Title            string          `json:"title"`
+				State            string          `json:"state,omitempty"`
+				Draft            bool            `json:"draft,omitempty"`
+				ChecksStatus     string          `json:"checksStatus,omitempty"`
+				ChecksConclusion string          `json:"checksConclusion,omitempty"`
+				MergeStatus      string          `json:"mergeStatus,omitempty"`
+				Mergeable        string          `json:"mergeable,omitempty"`
+				ReviewStatus     string          `json:"reviewStatus,omitempty"`
+				Metadata         json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode pull_request.published: %w", err)
@@ -984,43 +986,61 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				id = fmt.Sprintf("%s#%d", payload.Repo, payload.Number)
 			}
 			pullRequests[id] = core.PullRequest{
-				ID:           id,
-				TaskID:       event.TaskID,
-				Repo:         payload.Repo,
-				Number:       payload.Number,
-				URL:          payload.URL,
-				Branch:       payload.Branch,
-				Base:         payload.Base,
-				Title:        payload.Title,
-				State:        payload.State,
-				Draft:        payload.Draft,
-				ChecksStatus: payload.ChecksStatus,
-				MergeStatus:  payload.MergeStatus,
-				ReviewStatus: payload.ReviewStatus,
-				CreatedAt:    event.At,
-				UpdatedAt:    event.At,
-				Metadata:     payload.Metadata,
+				ID:               id,
+				TaskID:           event.TaskID,
+				Repo:             payload.Repo,
+				Number:           payload.Number,
+				URL:              payload.URL,
+				Branch:           payload.Branch,
+				Base:             payload.Base,
+				Title:            payload.Title,
+				State:            payload.State,
+				Draft:            payload.Draft,
+				ChecksStatus:     payload.ChecksStatus,
+				ChecksConclusion: payload.ChecksConclusion,
+				MergeStatus:      payload.MergeStatus,
+				Mergeable:        payload.Mergeable,
+				ReviewStatus:     payload.ReviewStatus,
+				CreatedAt:        event.At,
+				UpdatedAt:        event.At,
+				Metadata:         payload.Metadata,
 			}
 		case core.EventPRStatusChecked:
 			var payload struct {
-				ID           string          `json:"id"`
-				State        string          `json:"state,omitempty"`
-				Draft        bool            `json:"draft,omitempty"`
-				ChecksStatus string          `json:"checksStatus,omitempty"`
-				MergeStatus  string          `json:"mergeStatus,omitempty"`
-				ReviewStatus string          `json:"reviewStatus,omitempty"`
-				Metadata     json.RawMessage `json:"metadata,omitempty"`
+				ID               string          `json:"id"`
+				State            string          `json:"state,omitempty"`
+				Draft            bool            `json:"draft,omitempty"`
+				ChecksStatus     string          `json:"checksStatus,omitempty"`
+				ChecksConclusion string          `json:"checksConclusion,omitempty"`
+				MergeStatus      string          `json:"mergeStatus,omitempty"`
+				Mergeable        string          `json:"mergeable,omitempty"`
+				ReviewStatus     string          `json:"reviewStatus,omitempty"`
+				Metadata         json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode pull_request.status_checked: %w", err)
 			}
 			pr := pullRequests[payload.ID]
 			if pr.ID != "" {
-				pr.State = payload.State
+				if payload.State != "" {
+					pr.State = payload.State
+				}
 				pr.Draft = payload.Draft
-				pr.ChecksStatus = payload.ChecksStatus
-				pr.MergeStatus = payload.MergeStatus
-				pr.ReviewStatus = payload.ReviewStatus
+				if payload.ChecksStatus != "" {
+					pr.ChecksStatus = payload.ChecksStatus
+				}
+				if payload.ChecksConclusion != "" {
+					pr.ChecksConclusion = payload.ChecksConclusion
+				}
+				if payload.MergeStatus != "" {
+					pr.MergeStatus = payload.MergeStatus
+				}
+				if payload.Mergeable != "" {
+					pr.Mergeable = payload.Mergeable
+				}
+				if payload.ReviewStatus != "" {
+					pr.ReviewStatus = payload.ReviewStatus
+				}
 				pr.UpdatedAt = event.At
 				if len(payload.Metadata) > 0 {
 					pr.Metadata = payload.Metadata

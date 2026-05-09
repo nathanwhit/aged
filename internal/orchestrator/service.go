@@ -1066,6 +1066,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		pr.ID = uuid.NewString()
 	}
 	pr.TaskID = taskID
+	pr = normalizePullRequestStatusFields(pr)
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_opened", "pr_opened", "Pull request opened.", map[string]any{
 		"pullRequestId": pr.ID,
 		"url":           pr.URL,
@@ -1200,6 +1201,7 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		if len(pr.Metadata) == 0 {
 			pr.Metadata = core.MustJSON(metadata)
 		}
+		pr = normalizePullRequestStatusFields(pr)
 		if err := s.recordPullRequestPublished(ctx, pr); err != nil {
 			return nil, err
 		}
@@ -1253,17 +1255,20 @@ func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.Pul
 	}
 	checked.ID = pr.ID
 	checked.TaskID = pr.TaskID
+	checked = normalizePullRequestStatusFields(checked)
 	event, err := s.append(ctx, core.Event{
 		Type:   core.EventPRStatusChecked,
 		TaskID: pr.TaskID,
 		Payload: core.MustJSON(map[string]any{
-			"id":           checked.ID,
-			"state":        checked.State,
-			"draft":        checked.Draft,
-			"checksStatus": checked.ChecksStatus,
-			"mergeStatus":  checked.MergeStatus,
-			"reviewStatus": checked.ReviewStatus,
-			"metadata":     checked.Metadata,
+			"id":               checked.ID,
+			"state":            checked.State,
+			"draft":            checked.Draft,
+			"checksStatus":     checked.ChecksStatus,
+			"checksConclusion": checked.ChecksConclusion,
+			"mergeStatus":      checked.MergeStatus,
+			"mergeable":        checked.Mergeable,
+			"reviewStatus":     checked.ReviewStatus,
+			"metadata":         checked.Metadata,
 		}),
 	})
 	if err != nil {
@@ -1575,13 +1580,15 @@ func (s *Service) recordPullRequestArtifact(ctx context.Context, pr core.PullReq
 		name = fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
 	}
 	return s.recordTaskArtifact(ctx, pr.TaskID, pr.ID, "github_pull_request", name, pr.URL, pr.Branch, map[string]any{
-		"repo":         pr.Repo,
-		"number":       pr.Number,
-		"state":        pr.State,
-		"draft":        pr.Draft,
-		"checksStatus": pr.ChecksStatus,
-		"mergeStatus":  pr.MergeStatus,
-		"reviewStatus": pr.ReviewStatus,
+		"repo":             pr.Repo,
+		"number":           pr.Number,
+		"state":            pr.State,
+		"draft":            pr.Draft,
+		"checksStatus":     pr.ChecksStatus,
+		"checksConclusion": pr.ChecksConclusion,
+		"mergeStatus":      pr.MergeStatus,
+		"mergeable":        pr.Mergeable,
+		"reviewStatus":     pr.ReviewStatus,
 	})
 }
 
@@ -1590,19 +1597,21 @@ func (s *Service) recordPullRequestPublished(ctx context.Context, pr core.PullRe
 		Type:   core.EventPRPublished,
 		TaskID: pr.TaskID,
 		Payload: core.MustJSON(map[string]any{
-			"id":           pr.ID,
-			"repo":         pr.Repo,
-			"number":       pr.Number,
-			"url":          pr.URL,
-			"branch":       pr.Branch,
-			"base":         pr.Base,
-			"title":        pr.Title,
-			"state":        pr.State,
-			"draft":        pr.Draft,
-			"checksStatus": pr.ChecksStatus,
-			"mergeStatus":  pr.MergeStatus,
-			"reviewStatus": pr.ReviewStatus,
-			"metadata":     pr.Metadata,
+			"id":               pr.ID,
+			"repo":             pr.Repo,
+			"number":           pr.Number,
+			"url":              pr.URL,
+			"branch":           pr.Branch,
+			"base":             pr.Base,
+			"title":            pr.Title,
+			"state":            pr.State,
+			"draft":            pr.Draft,
+			"checksStatus":     pr.ChecksStatus,
+			"checksConclusion": pr.ChecksConclusion,
+			"mergeStatus":      pr.MergeStatus,
+			"mergeable":        pr.Mergeable,
+			"reviewStatus":     pr.ReviewStatus,
+			"metadata":         pr.Metadata,
 		}),
 	})
 	return err

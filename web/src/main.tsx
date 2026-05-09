@@ -2827,7 +2827,9 @@ type DisplayPayload = {
   state?: string;
   draft?: boolean;
   checksStatus?: string;
+  checksConclusion?: string;
   mergeStatus?: string;
+  mergeable?: string;
   reviewStatus?: string;
   babysitterTaskId?: string;
   command?: string[];
@@ -3857,7 +3859,9 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
         state: String(payload.state ?? "") || undefined,
         draft: Boolean(payload.draft),
         checksStatus: String(payload.checksStatus ?? "") || undefined,
+        checksConclusion: String(payload.checksConclusion ?? "") || undefined,
         mergeStatus: String(payload.mergeStatus ?? "") || undefined,
+        mergeable: String(payload.mergeable ?? "") || undefined,
         reviewStatus: String(payload.reviewStatus ?? "") || undefined,
         createdAt: event.at,
         updatedAt: event.at,
@@ -3868,7 +3872,7 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
   if (event.type === "pull_request.status_checked") {
     const id = String(payload.id ?? "");
     const pr = snapshot.pullRequests.find((candidate) => candidate.id === id);
-    return pr ? { ...snapshot, pullRequests: upsertById(snapshot.pullRequests, { ...pr, state: String(payload.state ?? "") || pr.state, draft: Boolean(payload.draft), checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus, mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus, reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus, updatedAt: event.at, metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata }) } : snapshot;
+    return pr ? { ...snapshot, pullRequests: upsertById(snapshot.pullRequests, { ...pr, state: String(payload.state ?? "") || pr.state, draft: Boolean(payload.draft), checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus, checksConclusion: String(payload.checksConclusion ?? "") || pr.checksConclusion, mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus, mergeable: String(payload.mergeable ?? "") || pr.mergeable, reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus, updatedAt: event.at, metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata }) } : snapshot;
   }
   if (event.type === "pull_request.babysitter_started") {
     const id = String(payload.id ?? "");
@@ -4031,7 +4035,9 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
           state: String(payload.state ?? "") || undefined,
           draft: Boolean(payload.draft),
           checksStatus: String(payload.checksStatus ?? "") || undefined,
+          checksConclusion: String(payload.checksConclusion ?? "") || undefined,
           mergeStatus: String(payload.mergeStatus ?? "") || undefined,
+          mergeable: String(payload.mergeable ?? "") || undefined,
           reviewStatus: String(payload.reviewStatus ?? "") || undefined,
           createdAt: event.at,
           updatedAt: event.at,
@@ -4048,7 +4054,9 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
           state: String(payload.state ?? "") || pr.state,
           draft: Boolean(payload.draft),
           checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus,
+          checksConclusion: String(payload.checksConclusion ?? "") || pr.checksConclusion,
           mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus,
+          mergeable: String(payload.mergeable ?? "") || pr.mergeable,
           reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus,
           updatedAt: event.at,
           metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata,

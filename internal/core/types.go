@@ -276,7 +276,9 @@ type PullRequest struct {
 	State            string          `json:"state,omitempty"`
 	Draft            bool            `json:"draft,omitempty"`
 	ChecksStatus     string          `json:"checksStatus,omitempty"`
+	ChecksConclusion string          `json:"checksConclusion,omitempty"`
 	MergeStatus      string          `json:"mergeStatus,omitempty"`
+	Mergeable        string          `json:"mergeable,omitempty"`
 	ReviewStatus     string          `json:"reviewStatus,omitempty"`
 	BabysitterTaskID string          `json:"babysitterTaskId,omitempty"`
 	CreatedAt        time.Time       `json:"createdAt"`

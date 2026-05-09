@@ -215,6 +215,38 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 
+func TestInspectPullRequestPopulatesStatusAliasesFromGitHubPayload(t *testing.T) {
+	var jsonFields string
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name != "gh" || !containsSubsequence(args, []string{"pr", "view"}) {
+				t.Fatalf("unexpected command %s %v", name, args)
+			}
+			jsonFields = argAfter(args, "--json")
+			return `{"number":22,"url":"https://github.com/owner/repo/pull/22","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","state":"SUCCESS"}],"reviewDecision":"APPROVED","comments":[]}`, nil
+		},
+	}
+
+	pr, err := publisher.Inspect(context.Background(), core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 22,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jsonFields, "mergeable") {
+		t.Fatalf("json fields = %q, want mergeable", jsonFields)
+	}
+	if pr.ChecksStatus != "passing" || pr.ChecksConclusion != "success" {
+		t.Fatalf("checks = status %q conclusion %q", pr.ChecksStatus, pr.ChecksConclusion)
+	}
+	if pr.MergeStatus != "MERGEABLE" || pr.Mergeable != "MERGEABLE" {
+		t.Fatalf("merge = status %q mergeable %q", pr.MergeStatus, pr.Mergeable)
+	}
+}
+
 func TestMaterializeGitPullRequestChangesIgnoresDirtySubmoduleOnlyStatus(t *testing.T) {
 	ctx := context.Background()
 	var calls [][]string

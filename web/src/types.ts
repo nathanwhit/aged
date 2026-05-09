@@ -279,7 +279,9 @@ export type PullRequestState = {
   state?: string;
   draft?: boolean;
   checksStatus?: string;
+  checksConclusion?: string;
   mergeStatus?: string;
+  mergeable?: string;
   reviewStatus?: string;
   babysitterTaskId?: string;
   createdAt: string;
