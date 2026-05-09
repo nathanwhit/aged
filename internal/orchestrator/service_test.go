@@ -1266,6 +1266,128 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	}
 }
 
+func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "tighten the signing-agent classifier",
+			Spawns: []SpawnRequest{{
+				ID:         "review",
+				Role:       "reviewer",
+				Reason:     "Review whether the change is ready to publish.",
+				WorkerKind: "reviewer",
+			}},
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "publish the classifier fix",
+				Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:  "wait",
+			Message: "review feedback needs an implementation follow-up",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented classifier changes"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: `## Findings
+- Medium issue: internal/orchestrator/service.go still misclassifies signing-agent failures.
+
+## Recommended Next Turns
+- Tighten the signing-agent classifier before publishing.`}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Fix signing-agent classification",
+		Prompt: "Implement, review, and publish only when ready.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want blocking review finding to suppress publish", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_blocked_by_follow_up", "rejected") {
+		t.Fatalf("missing blocked publication action")
+	}
+	if len(brain.states) != 1 {
+		t.Fatalf("replan states = %d, want 1", len(brain.states))
+	}
+	if len(brain.states[0].Results) != 2 {
+		t.Fatalf("replan results = %d, want implementation plus review", len(brain.states[0].Results))
+	}
+}
+
+func TestServicePlanActionPublishesAfterCleanReviewFinding(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "tighten the signing-agent classifier",
+		Spawns: []SpawnRequest{{
+			ID:         "review",
+			Role:       "reviewer",
+			Reason:     "Review whether the change is ready to publish.",
+			WorkerKind: "reviewer",
+		}},
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish the classifier fix",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented classifier changes"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: `## Findings
+- No findings.
+
+## Recommended Next Turns
+- Publish the pull request.`}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Fix signing-agent classification",
+		Prompt: "Implement, review, and publish when ready.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want clean review to allow publish", publisher.publishCalls)
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_blocked_by_follow_up", "rejected") {
+		t.Fatalf("clean review should not block publication")
+	}
+}
+
 func TestServicePlanActionDoesNotPublishRejectedCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
