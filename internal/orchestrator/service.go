@@ -32,6 +32,8 @@ var (
 	githubPullRequestURLRE = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
 )
 
+const taskCancelReasonStartupRecovery = "startup_worker_recovery"
+
 type WorkerApplyResult struct {
 	WorkerID      string                 `json:"workerId"`
 	SourceRoot    string                 `json:"sourceRoot"`
@@ -751,7 +753,22 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	if err := s.cancelStaleLocalWorkers(ctx, snapshot); err != nil {
 		return err
 	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
 	if err := s.recoverOrphanedPlanningTasks(ctx, snapshot); err != nil {
+		return err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if err := s.retryStartupCanceledTasks(ctx, snapshot); err != nil {
+		return err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
 		return err
 	}
 	completed := map[string]bool{}
@@ -853,6 +870,65 @@ func taskPlanningStatusIsLatest(snapshot core.Snapshot, taskID string) bool {
 	return latestPlanningStatusEvent > 0 && latestPlanningStatusEvent == latestStatusEvent
 }
 
+func taskCanceledByStartupRecovery(snapshot core.Snapshot, taskID string) bool {
+	latestStatusEvent := int64(0)
+	latestCanceledStatusEvent := int64(0)
+	latestCanceledReason := ""
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
+			continue
+		}
+		latestStatusEvent = event.ID
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+			Reason string          `json:"reason,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Status != core.TaskCanceled {
+			continue
+		}
+		latestCanceledStatusEvent = event.ID
+		latestCanceledReason = payload.Reason
+	}
+	if latestCanceledStatusEvent == 0 || latestCanceledStatusEvent != latestStatusEvent {
+		return false
+	}
+	if latestCanceledReason == taskCancelReasonStartupRecovery {
+		return true
+	}
+	workerEvent := latestStartupCanceledWorkerEvent(snapshot, taskID)
+	return workerEvent > 0 && workerEvent < latestCanceledStatusEvent && !taskStatusEventBetween(snapshot, taskID, workerEvent, latestCanceledStatusEvent)
+}
+
+func latestStartupCanceledWorkerEvent(snapshot core.Snapshot, taskID string) int64 {
+	var latest int64
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventWorkerCompleted {
+			continue
+		}
+		var payload struct {
+			Status  core.WorkerStatus `json:"status"`
+			Summary string            `json:"summary,omitempty"`
+			Error   string            `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.Status != core.WorkerCanceled {
+			continue
+		}
+		if strings.Contains(payload.Summary, "daemon startup recovery") || strings.Contains(payload.Error, "recoverable process handle after daemon restart") {
+			latest = event.ID
+		}
+	}
+	return latest
+}
+
+func taskStatusEventBetween(snapshot core.Snapshot, taskID string, after int64, before int64) bool {
+	for _, event := range snapshot.Events {
+		if event.TaskID == taskID && event.Type == core.EventTaskStatus && event.ID > after && event.ID < before {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) cancelStaleLocalWorkers(ctx context.Context, snapshot core.Snapshot) error {
 	nodesByWorker := map[string]core.ExecutionNode{}
 	for _, node := range snapshot.ExecutionNodes {
@@ -886,9 +962,36 @@ func (s *Service) cancelStaleLocalWorkers(ctx context.Context, snapshot core.Sna
 			TaskID: worker.TaskID,
 			Payload: core.MustJSON(map[string]any{
 				"status": core.TaskCanceled,
+				"reason": taskCancelReasonStartupRecovery,
 			}),
 		}); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) retryStartupCanceledTasks(ctx context.Context, snapshot core.Snapshot) error {
+	for _, task := range snapshot.Tasks {
+		if task.Status != core.TaskCanceled || taskHasActiveWorkers(snapshot, task.ID) || !taskCanceledByStartupRecovery(snapshot, task.ID) {
+			continue
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   "startup_auto_retry",
+			"status": "retrying",
+			"reason": "task was automatically canceled during daemon startup recovery",
+		}); err != nil {
+			return err
+		}
+		if _, err := s.RetryTask(ctx, task.ID); err != nil {
+			if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   "startup_auto_retry",
+				"status": "failed",
+				"reason": "automatic retry after startup cancellation failed",
+				"error":  err.Error(),
+			}); actionErr != nil {
+				return actionErr
+			}
 		}
 	}
 	return nil
@@ -1042,6 +1145,57 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
 		s.runTask(taskCtx, task)
 	})
+	return task, nil
+}
+
+func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req core.UpdateLoopConfigRequest) (core.Task, error) {
+	if req.LoopIntervalSeconds == nil {
+		return core.Task{}, errors.New("loopIntervalSeconds is required")
+	}
+	if *req.LoopIntervalSeconds < 0 {
+		return core.Task{}, errors.New("loopIntervalSeconds must be >= 0")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Task{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return core.Task{}, eventstore.ErrNotFound
+	}
+	if taskExecutionMode(task) != executionModeLoop {
+		return core.Task{}, errors.New("task is not a durable loop")
+	}
+	if isTerminalTaskStatus(task.Status) {
+		return core.Task{}, errors.New("cannot update a terminal task")
+	}
+	metadataPatch := map[string]any{
+		"loopIntervalSeconds": *req.LoopIntervalSeconds,
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskUpdated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"metadataPatch": metadataPatch,
+		}),
+	}); err != nil {
+		return core.Task{}, err
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":                "loop_config_updated",
+		"status":              "updated",
+		"loopIntervalSeconds": *req.LoopIntervalSeconds,
+	}); err != nil {
+		return core.Task{}, err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Task{}, err
+	}
+	task, ok = findTask(snapshot, taskID)
+	if !ok {
+		return core.Task{}, eventstore.ErrNotFound
+	}
 	return task, nil
 }
 

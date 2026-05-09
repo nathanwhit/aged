@@ -211,7 +211,12 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 		t.Fatalf("published branch missing workflow: %q", contents)
 	}
 	assertCommandContains(t, calls, []string{"git", "add", "-A"})
-	assertCommandContains(t, calls, []string{"git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
+	assertCommandContains(t, calls, []string{"git", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
+	for _, call := range calls {
+		if slices.Contains(call, "user.name=aged") || slices.Contains(call, "user.email=aged@example.invalid") {
+			t.Fatalf("publish commit should not override git author config: %v", call)
+		}
+	}
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 

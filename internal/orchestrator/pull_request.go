@@ -294,7 +294,7 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 		Metadata:     spec.Metadata,
 		ChangedFiles: changedFiles,
 	})
-	if _, err := exec(ctx, dir, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
+	if _, err := exec(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return fmt.Errorf("commit git changes before publish: %w", err)
 	}
 	return nil
