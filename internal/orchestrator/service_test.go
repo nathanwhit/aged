@@ -3420,6 +3420,85 @@ func TestRecoverRemoteWorkersCancelsStaleLocalWorkers(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkersResumesOrphanedPullRequestFollowUpPlanning(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-dirty-pr"
+	appendInterruptedPullRequestFollowUpPlanning(t, ctx, store, taskID)
+
+	brain := &sequenceBrain{plans: []Plan{{
+		WorkerKind: "repair",
+		Prompt:     "repair dirty PR",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"repair": eventRunner{kind: "repair", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "repaired dirty PR branch",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/repair.go", Status: "modified"}},
+		},
+	})
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForEvent(t, store, core.EventWorkerCreated, taskID)
+	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "resumed") {
+		t.Fatalf("missing startup planning recovery action")
+	}
+	if !hasWorkerCreated(snapshot.Events, taskID, "repair") {
+		t.Fatalf("missing recovered repair worker")
+	}
+	if got := strings.Join(brain.steering, "\n"); !strings.Contains(got, "Merge status: DIRTY") {
+		t.Fatalf("recovered planning did not preserve PR steering: %q", got)
+	}
+}
+
+func TestRecoverRemoteWorkersMovesGenericOrphanedPlanningTaskToWaiting(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-orphan-planning"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Interrupted planning",
+			"prompt": "Plan was interrupted by daemon restart.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskPlanning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "waiting") {
+		t.Fatalf("missing startup planning recovery action")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
+		t.Fatalf("missing approval-needed event")
+	}
+}
+
 func TestCancelTaskCancelsPersistedActiveWorkers(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -6256,6 +6335,94 @@ func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
 		}
 	}
 	t.Fatalf("missing registered target: %+v", snapshot.Targets)
+}
+
+func appendInterruptedPullRequestFollowUpPlanning(t *testing.T, ctx context.Context, store eventstore.Store, taskID string) {
+	t.Helper()
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair dirty PR",
+			"prompt": "Fix the dirty pull request branch.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+		{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":           "pr-1",
+				"repo":         "owner/repo",
+				"number":       7,
+				"url":          "https://github.com/owner/repo/pull/7",
+				"branch":       "codex/aged-test",
+				"base":         "main",
+				"title":        "Repair dirty PR",
+				"state":        "OPEN",
+				"checksStatus": "passing",
+				"mergeStatus":  "DIRTY",
+				"reviewStatus": "",
+				"metadata":     map[string]any{"workerId": "worker-original"},
+			}),
+		},
+		{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":      "pr-1",
+				"attempt": 1,
+				"reason":  "pull_request_needs_work",
+			}),
+		},
+		{
+			Type:   core.EventTaskSteered,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"message": pullRequestFollowUpPrompt(core.PullRequest{
+					ID:           "pr-1",
+					TaskID:       taskID,
+					Repo:         "owner/repo",
+					Number:       7,
+					URL:          "https://github.com/owner/repo/pull/7",
+					Branch:       "codex/aged-test",
+					Base:         "main",
+					State:        "OPEN",
+					ChecksStatus: "passing",
+					MergeStatus:  "DIRTY",
+				}),
+			}),
+		},
+		{
+			Type:   core.EventApprovalDecided,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"approved": true,
+				"answer":   "resume dirty PR follow-up",
+				"reason":   "user_feedback",
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskPlanning,
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 type fixedBrain struct {

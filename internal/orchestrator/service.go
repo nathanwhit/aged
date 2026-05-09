@@ -751,6 +751,9 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	if err := s.cancelStaleLocalWorkers(ctx, snapshot); err != nil {
 		return err
 	}
+	if err := s.recoverOrphanedPlanningTasks(ctx, snapshot); err != nil {
+		return err
+	}
 	completed := map[string]bool{}
 	for _, event := range snapshot.Events {
 		if event.Type == core.EventWorkerCompleted {
@@ -778,6 +781,76 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 		go s.recoverRemoteWorker(context.Background(), node, run)
 	}
 	return nil
+}
+
+func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot core.Snapshot) error {
+	for _, task := range snapshot.Tasks {
+		if task.Status != core.TaskPlanning || taskHasActiveWorkers(snapshot, task.ID) {
+			continue
+		}
+		if !taskPlanningStatusIsLatest(snapshot, task.ID) {
+			continue
+		}
+		if resumingPullRequestFollowUp(snapshot, task.ID) {
+			feedback := latestTaskSteering(snapshot, task.ID)
+			if feedback == "" {
+				feedback = "Resume the interrupted pull request follow-up planning turn."
+			}
+			if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
+				return err
+			}
+			_, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskAction,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"kind":   "startup_planning_recovery",
+					"status": "resumed",
+					"reason": "daemon restarted while pull request follow-up planning was in progress",
+				}),
+			})
+			if err != nil {
+				return err
+			}
+			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				s.resumeWaitingTask(taskCtx, task.ID, feedback)
+			})
+			continue
+		}
+		_, err := s.append(ctx, core.Event{
+			Type:   core.EventTaskAction,
+			TaskID: task.ID,
+			Payload: core.MustJSON(map[string]any{
+				"kind":   "startup_planning_recovery",
+				"status": "waiting",
+				"reason": "daemon restarted while planning was in progress and no active worker could be recovered",
+			}),
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.waitForUserAction(ctx, task.ID, "", "startup_planning_recovery", "Planning was interrupted by daemon restart before a plan or worker was recorded. Retry or steer the task to continue.", nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func taskPlanningStatusIsLatest(snapshot core.Snapshot, taskID string) bool {
+	latestStatusEvent := int64(0)
+	latestPlanningStatusEvent := int64(0)
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
+			continue
+		}
+		latestStatusEvent = event.ID
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == core.TaskPlanning {
+			latestPlanningStatusEvent = event.ID
+		}
+	}
+	return latestPlanningStatusEvent > 0 && latestPlanningStatusEvent == latestStatusEvent
 }
 
 func (s *Service) cancelStaleLocalWorkers(ctx context.Context, snapshot core.Snapshot) error {
@@ -5565,6 +5638,14 @@ func taskSteering(snapshot core.Snapshot, taskID string) []string {
 		}
 	}
 	return out
+}
+
+func latestTaskSteering(snapshot core.Snapshot, taskID string) string {
+	steering := taskSteering(snapshot, taskID)
+	if len(steering) == 0 {
+		return ""
+	}
+	return steering[len(steering)-1]
 }
 
 func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
