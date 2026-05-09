@@ -2811,6 +2811,12 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 			"reason":   "user_feedback",
 		}),
 	})
+	if s.retryWaitingPublishPullRequestAction(ctx, task, snapshot) {
+		return
+	}
+	if s.retryWaitingFinalCandidatePublication(ctx, task, snapshot) {
+		return
+	}
 	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
 		return
 	}
@@ -2875,6 +2881,131 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 			_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 		}
 	}
+}
+
+func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
+	candidateWorkerID := strings.TrimSpace(task.FinalCandidateWorkerID)
+	if candidateWorkerID == "" || task.ObjectiveStatus != core.ObjectiveWaitingUser || task.ObjectivePhase != "approval_needed" {
+		return false
+	}
+	if !latestApprovalNeededMatches(snapshot, task.ID, candidateWorkerID, "ssh_signing_agent_failed") {
+		return false
+	}
+	_, results, err := retryGraphStateForTask(snapshot, task.ID)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return true
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying completion pull request publication after user remediation."); err != nil {
+		return true
+	}
+	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
+		return true
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "retrying"
+	s.retryFinalCandidateTask(ctx, task, results)
+	return true
+}
+
+func (s *Service) retryWaitingPublishPullRequestAction(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
+	action, workerID, ok := latestWaitingPublishPullRequestAction(snapshot, task.ID)
+	if !ok {
+		return false
+	}
+	if !latestApprovalNeededMatches(snapshot, task.ID, workerID, "ssh_signing_agent_failed") {
+		return false
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying pull request publication after user remediation."); err != nil {
+		return true
+	}
+	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
+		return true
+	}
+	req := publishPullRequestRequestFromAction(action)
+	req.WorkerID = workerID
+	pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
+	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
+			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     action.Kind,
+				"when":     nonEmpty(action.When, "after_success"),
+				"reason":   action.Reason,
+				"inputs":   action.Inputs,
+				"workerId": workerID,
+				"status":   "waiting",
+				"error":    err.Error(),
+			})
+			return true
+		}
+		_ = s.failTask(ctx, task.ID, err)
+		return true
+	}
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":          action.Kind,
+		"when":          nonEmpty(action.When, "after_success"),
+		"reason":        action.Reason,
+		"inputs":        action.Inputs,
+		"workerId":      workerID,
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+	}
+	return true
+}
+
+func latestWaitingPublishPullRequestAction(snapshot core.Snapshot, taskID string) (PlanAction, string, bool) {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind     string         `json:"kind"`
+			When     string         `json:"when"`
+			Reason   string         `json:"reason"`
+			Inputs   map[string]any `json:"inputs"`
+			WorkerID string         `json:"workerId"`
+			Status   string         `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return PlanAction{}, "", false
+		}
+		if payload.Kind != "publish_pull_request" || payload.Status != "waiting" || strings.TrimSpace(payload.WorkerID) == "" {
+			return PlanAction{}, "", false
+		}
+		return PlanAction{
+			Kind:     payload.Kind,
+			When:     payload.When,
+			Reason:   payload.Reason,
+			WorkerID: payload.WorkerID,
+			Inputs:   payload.Inputs,
+		}, payload.WorkerID, true
+	}
+	return PlanAction{}, "", false
+}
+
+func latestApprovalNeededMatches(snapshot core.Snapshot, taskID string, workerID string, reason string) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventApprovalNeeded || event.TaskID != taskID {
+			continue
+		}
+		if strings.TrimSpace(event.WorkerID) != strings.TrimSpace(workerID) {
+			return false
+		}
+		var payload struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false
+		}
+		return payload.Reason == reason
+	}
+	return false
 }
 
 func resumingPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
@@ -4118,6 +4249,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
 		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
+				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":     action.Kind,
+					"when":     nonEmpty(action.When, "after_success"),
+					"reason":   action.Reason,
+					"inputs":   action.Inputs,
+					"workerId": workerID,
+					"status":   "waiting",
+					"error":    err.Error(),
+				})
+				return false, nil
+			}
 			return false, err
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -4362,6 +4505,11 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 			reason:  "profiler_setup_required",
 			summary: "Profiling is blocked by VM or kernel profiling configuration.",
 			any:     []string{"perf_event_paranoid", "kernel.perf_event", "perf_event_open", "failed to open perf", "debug symbols", "dwarf"},
+		},
+		{
+			reason:  "ssh_signing_agent_failed",
+			summary: "PR publication is blocked by the local SSH signing agent.",
+			any:     []string{"signing error", "sign_and_send_pubkey", "ssh sign failed", "1password: agent returned an error", "failed to fill whole buffer", "could not write object of type commit"},
 		},
 		{
 			reason:  "ssh_setup_required",
