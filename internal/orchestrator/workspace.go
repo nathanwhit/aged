@@ -888,7 +888,7 @@ func copyGitWorkspaceChanges(ctx context.Context, source string, destination str
 		WorkerSummary: spec.WorkerSummary,
 		ChangedFiles:  changedFiles,
 	})
-	if _, err := runCommand(ctx, destination, "git", "-c", "user.name=aged", "-c", "user.email=aged@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
+	if _, err := runCommand(ctx, destination, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return fmt.Errorf("commit git base workspace diff: %w", err)
 	}
 	return nil

@@ -58,6 +58,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
+	mux.HandleFunc("PUT /api/tasks/{id}/loop-config", s.updateTaskLoopConfig)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.retryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
@@ -316,6 +317,20 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, task)
 }
 
+func (s *Server) updateTaskLoopConfig(w http.ResponseWriter, r *http.Request) {
+	var req core.UpdateLoopConfigRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	task, err := s.service.UpdateTaskLoopConfig(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
 func (s *Server) assistant(w http.ResponseWriter, r *http.Request) {
 	var req core.AssistantRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -569,7 +584,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "content-type, mcp-session-id, mcp-method, mcp-name, mcp-protocol-version")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

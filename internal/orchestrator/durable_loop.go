@@ -150,14 +150,55 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 				"error":     result.Error,
 			})
 		}
-		if config.Interval > 0 {
-			timer := time.NewTimer(config.Interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
+		config = s.latestDurableLoopConfig(ctx, task, config)
+		if err := s.waitDurableLoopInterval(ctx, task.ID, config.Interval); err != nil {
+			return
+		}
+	}
+}
+
+func (s *Service) latestDurableLoopConfig(ctx context.Context, task core.Task, fallback durableLoopConfig) durableLoopConfig {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return fallback
+	}
+	latest, ok := findTask(snapshot, task.ID)
+	if !ok {
+		return fallback
+	}
+	return durableLoopConfigFromTask(latest, s.runners)
+}
+
+func (s *Service) waitDurableLoopInterval(ctx context.Context, taskID string, interval time.Duration) error {
+	if interval <= 0 {
+		return nil
+	}
+	started := time.Now()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		latest := interval
+		snapshot, err := s.store.Snapshot(ctx)
+		if err == nil {
+			if task, ok := findTask(snapshot, taskID); ok {
+				latest = durableLoopConfigFromTask(task, s.runners).Interval
 			}
+		}
+		if latest <= 0 || time.Since(started) >= latest {
+			return nil
+		}
+		remaining := latest - time.Since(started)
+		wait := time.Second
+		if remaining < wait {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
 }
