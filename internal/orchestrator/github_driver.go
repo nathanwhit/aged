@@ -338,7 +338,7 @@ func (ghGitHubClient) ListIssues(ctx context.Context, repo string, labels []stri
 	}
 	out, err := runCommand(ctx, "", "gh", args...)
 	if err != nil {
-		return nil, err
+		return nil, wrapGitHubCommandError("list GitHub issues", err)
 	}
 	var payload []struct {
 		Number    int    `json:"number"`

@@ -76,7 +76,7 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if repo == "" {
 		resolved, err := exec(ctx, spec.WorkDir, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
 		if err != nil {
-			return core.PullRequest{}, fmt.Errorf("resolve GitHub repo: %w", err)
+			return core.PullRequest{}, wrapGitHubCommandError("resolve GitHub repo", err)
 		}
 		repo = strings.TrimSpace(resolved)
 	}
@@ -118,7 +118,7 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	if err != nil {
 		existing, existingErr := p.findExistingPullRequest(ctx, exec, spec.WorkDir, repo, head)
 		if existingErr != nil {
-			return core.PullRequest{}, fmt.Errorf("create GitHub pull request: %w; find existing pull request: %w", err, existingErr)
+			return core.PullRequest{}, fmt.Errorf("%w; %w", wrapGitHubCommandError("create GitHub pull request", err), wrapGitHubCommandError("find existing pull request", existingErr))
 		}
 		existing.ID = newPullRequestID()
 		existing.TaskID = spec.TaskID
@@ -192,7 +192,7 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 	}
 	out, err := exec(ctx, dir, "gh", args...)
 	if err != nil {
-		return core.PullRequest{}, err
+		return core.PullRequest{}, wrapGitHubCommandError("find existing pull request", err)
 	}
 	var prs []struct {
 		Number              int    `json:"number"`
@@ -359,7 +359,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	}
 	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments")
 	if err != nil {
-		return core.PullRequest{}, fmt.Errorf("inspect GitHub pull request: %w", err)
+		return core.PullRequest{}, wrapGitHubCommandError("inspect GitHub pull request", err)
 	}
 	var payload struct {
 		Number            int             `json:"number"`
@@ -451,7 +451,7 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 	}
 	out, err := exec(ctx, "", "gh", args...)
 	if err != nil {
-		return nil, fmt.Errorf("list GitHub pull requests: %w", err)
+		return nil, wrapGitHubCommandError("list GitHub pull requests", err)
 	}
 	var payload []struct {
 		Number            int             `json:"number"`
