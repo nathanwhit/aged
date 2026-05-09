@@ -185,6 +185,47 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPollDedupesRemoteCodexInfrastructureWarningsAcrossPolls(t *testing.T) {
+	warning := "2026-04-30T02:06:16.268038Z ERROR codex_core::session: failed to record rollout items: thread 019ddc1f-f8f0-7da0-a932-a956e7f51071 not found"
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			"",
+			`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}` + "\n",
+		},
+		stderr: []string{
+			warning + "\n",
+			warning + "\n" + warning + "\nactual codex failure\n",
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"succeeded","exit":0}`,
+		},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("codex"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	if got := sink.count(worker.EventLog, "stderr", warning); got != 1 {
+		t.Fatalf("remote infrastructure warning count = %d, want 1; events = %+v", got, sink.events)
+	}
+	if !sink.hasText(worker.EventLog, "stderr", "suppressed 1 repeated Codex infrastructure warnings") {
+		t.Fatalf("missing suppression summary: %+v", sink.events)
+	}
+	if !sink.has(worker.EventError, "stderr", "actual codex failure") {
+		t.Fatalf("real stderr failure was swallowed: %+v", sink.events)
+	}
+	if !sink.has(worker.EventResult, "stdout", "done") {
+		t.Fatalf("result was swallowed: %+v", sink.events)
+	}
+}
+
 func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -506,6 +547,50 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	}
 }
 
+type scriptedPollExecutor struct {
+	commands [][]string
+	stdout   []string
+	stderr   []string
+	status   []string
+	poll     int
+}
+
+func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, error) {
+	e.commands = append(e.commands, append([]string(nil), argv...))
+	joined := strings.Join(argv, " ")
+	index := e.poll
+	if index >= len(e.status) {
+		index = len(e.status) - 1
+	}
+	switch {
+	case strings.Contains(joined, "stdout.log"):
+		return valueAt(e.stdout, index), nil
+	case strings.Contains(joined, "stderr.log"):
+		return valueAt(e.stderr, index), nil
+	case strings.Contains(joined, "status.json"):
+		out := valueAt(e.status, index)
+		if e.poll < len(e.status)-1 {
+			e.poll++
+		}
+		return out, nil
+	default:
+		return "", nil
+	}
+}
+
+func valueAt(values []string, index int) string {
+	if len(values) == 0 {
+		return ""
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(values) {
+		index = len(values) - 1
+	}
+	return values[index]
+}
+
 func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input string) (string, error) {
 	e.commands = append(e.commands, append([]string(nil), argv...))
 	e.input = input
@@ -528,6 +613,25 @@ func (s *recordingWorkerSink) has(kind worker.EventKind, stream string, text str
 		}
 	}
 	return false
+}
+
+func (s *recordingWorkerSink) hasText(kind worker.EventKind, stream string, text string) bool {
+	for _, event := range s.events {
+		if event.Kind == kind && event.Stream == stream && strings.Contains(event.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *recordingWorkerSink) count(kind worker.EventKind, stream string, text string) int {
+	count := 0
+	for _, event := range s.events {
+		if event.Kind == kind && event.Stream == stream && event.Text == text {
+			count++
+		}
+	}
+	return count
 }
 
 func eventContains(events []core.Event, eventType core.EventType, text string) bool {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -342,14 +343,18 @@ func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, r
 	scanner := bufio.NewScanner(reader)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
+	filter := NewOutputFilter(parser)
 	for scanner.Scan() {
-		event := parser.ParseLine(stream, scanner.Text())
-		if err := sink.Event(ctx, event); err != nil {
+		if err := filter.EmitLine(ctx, sink, stream, scanner.Text()); err != nil {
 			errCh <- err
 			return
 		}
 	}
-	errCh <- scanner.Err()
+	if err := scanner.Err(); err != nil {
+		errCh <- err
+		return
+	}
+	errCh <- filter.Flush(ctx, sink)
 }
 
 func DefaultRunners() map[string]Runner {
@@ -411,6 +416,66 @@ func CodexReasoningEffort(value string) string {
 
 type Parser interface {
 	ParseLine(stream string, line string) Event
+}
+
+type OutputFilter struct {
+	parser     Parser
+	mu         sync.Mutex
+	suppressed map[string]int
+}
+
+func NewOutputFilter(parser Parser) *OutputFilter {
+	return &OutputFilter{parser: parser}
+}
+
+func (f *OutputFilter) EmitLine(ctx context.Context, sink Sink, stream string, line string) error {
+	event := f.parser.ParseLine(stream, line)
+	if key, ok := infrastructureWarningKey(stream, line, event); ok {
+		f.mu.Lock()
+		if f.suppressed == nil {
+			f.suppressed = map[string]int{}
+		}
+		if _, seen := f.suppressed[key]; seen {
+			f.suppressed[key]++
+			f.mu.Unlock()
+			return nil
+		}
+		f.suppressed[key] = 0
+		f.mu.Unlock()
+	}
+	return sink.Event(ctx, event)
+}
+
+func (f *OutputFilter) Flush(ctx context.Context, sink Sink) error {
+	f.mu.Lock()
+	var events []Event
+	for key, count := range f.suppressed {
+		if count > 0 {
+			events = append(events, Event{
+				Kind:   EventLog,
+				Stream: "stderr",
+				Text:   fmt.Sprintf("suppressed %d repeated Codex infrastructure warnings: %s", count, key),
+			})
+		}
+	}
+	f.suppressed = nil
+	f.mu.Unlock()
+	for _, event := range events {
+		if err := sink.Event(ctx, event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func infrastructureWarningKey(stream string, line string, event Event) (string, bool) {
+	if stream != "stderr" || event.Kind != EventLog {
+		return "", false
+	}
+	if strings.Contains(line, "failed to record rollout items: thread") && strings.Contains(line, "codex_core::session") {
+		return "failed to record Codex rollout items", true
+	}
+	return "", false
 }
 
 type parserFunc func(stream string, line string) Event
