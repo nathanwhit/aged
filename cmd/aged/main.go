@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -43,6 +44,8 @@ func main() {
 		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
 		targetsPath       = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
 		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")
+		prMonitor         = flag.Bool("pull-request-monitor", envBool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
+		prMonitorInterval = flag.Duration("pull-request-monitor-interval", envDuration("AGED_PULL_REQUEST_MONITOR_INTERVAL", time.Minute), "tracked pull request refresh interval")
 		discordDriverPath = flag.String("discord-driver", envOr("AGED_DISCORD_DRIVER", ""), "Discord driver config JSON path or inline JSON")
 		webDistPath       = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
 		authMode          = flag.String("auth", envOr("AGED_AUTH", "none"), "HTTP authentication mode: none or google")
@@ -173,6 +176,10 @@ func main() {
 		slog.Warn("recover workers", "error", err)
 	}
 	service.StartTargetProbes(ctx, 30*time.Second)
+	if *prMonitor {
+		service.StartPullRequestMonitor(ctx, *prMonitorInterval)
+		slog.Info("pull request monitor enabled", "interval", prMonitorInterval.String())
+	}
 	githubDriverConfig, err := orchestrator.LoadGitHubDriverConfig(*githubDriverPath)
 	if err != nil {
 		slog.Error("load github driver", "error", err)
@@ -256,6 +263,30 @@ func envOr(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func envFirst(keys ...string) string {

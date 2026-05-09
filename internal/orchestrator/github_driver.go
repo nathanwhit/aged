@@ -220,36 +220,10 @@ func (d *GitHubDriver) monitorPullRequests(ctx context.Context) error {
 	if !boolDefault(d.config.PullRequests.Enabled, true) {
 		return nil
 	}
-	snapshot, err := d.service.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	var errs []string
-	for _, pr := range snapshot.PullRequests {
-		if !d.monitorsPullRequestRepo(pr.Repo) {
-			continue
-		}
-		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
-			if err := d.service.ReconcilePullRequestTerminalTasks(ctx, pr.ID); err != nil {
-				errs = append(errs, fmt.Sprintf("%s reconcile terminal pr: %v", pr.ID, err))
-			}
-			continue
-		}
-		checked, err := d.service.RefreshPullRequest(ctx, pr.ID)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s refresh pr: %v", pr.ID, err))
-			continue
-		}
-		if boolDefault(d.config.PullRequests.AutoBabysit, true) && pullRequestNeedsBabysitter(checked) {
-			if err := d.service.ContinueTaskForPullRequest(ctx, pr.ID); err != nil {
-				errs = append(errs, fmt.Sprintf("%s continue pr task: %v", pr.ID, err))
-			}
-		}
-	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
+	return d.service.monitorPullRequests(ctx, pullRequestMonitorOptions{
+		AutoBabysit: boolDefault(d.config.PullRequests.AutoBabysit, true),
+		IncludeRepo: d.monitorsPullRequestRepo,
+	})
 }
 
 func (d *GitHubDriver) monitorsPullRequestRepo(repo string) bool {

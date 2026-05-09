@@ -449,6 +449,6 @@ func builtinPlugins() []core.Plugin {
 		{ID: "runner:shell", Name: "Shell Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"shell", "steering"}},
 		{ID: "runner:benchmark_compare", Name: "Benchmark Comparator", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"benchmark", "compare"}},
 		{ID: "driver:http", Name: "HTTP Task Driver", Kind: "driver", Enabled: true, BuiltIn: true, Capabilities: []string{"create-task", "dedupe-external-id"}},
-		{ID: "driver:github", Name: "GitHub via HTTP Driver", Kind: "driver", Enabled: false, BuiltIn: true, Capabilities: []string{"issues", "pull-requests", "status-refresh"}},
+		{ID: "driver:github", Name: "GitHub Issue Polling Driver", Kind: "driver", Enabled: false, BuiltIn: true, Capabilities: []string{"issues", "auto-publish"}},
 	}
 }

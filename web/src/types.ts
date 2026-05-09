@@ -88,6 +88,7 @@ export type PullRequestPolicy = {
   draft?: boolean;
   allowMerge?: boolean;
   autoMerge?: boolean;
+  monitorPullRequests?: boolean;
 };
 
 export type ProjectHealth = {

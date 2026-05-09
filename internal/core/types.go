@@ -243,10 +243,11 @@ type Project struct {
 }
 
 type PullRequestPolicy struct {
-	BranchPrefix string `json:"branchPrefix,omitempty"`
-	Draft        bool   `json:"draft,omitempty"`
-	AllowMerge   bool   `json:"allowMerge,omitempty"`
-	AutoMerge    bool   `json:"autoMerge,omitempty"`
+	BranchPrefix        string `json:"branchPrefix,omitempty"`
+	Draft               bool   `json:"draft,omitempty"`
+	AllowMerge          bool   `json:"allowMerge,omitempty"`
+	AutoMerge           bool   `json:"autoMerge,omitempty"`
+	MonitorPullRequests *bool  `json:"monitorPullRequests,omitempty"`
 }
 
 type ProjectHealth struct {

@@ -6301,6 +6301,7 @@ type fakePullRequestPublisher struct {
 	errOnce          error
 	errCount         int
 	status           core.PullRequest
+	inspectCalls     int
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
 }
@@ -6348,6 +6349,7 @@ func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPu
 }
 
 func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullRequest) (core.PullRequest, error) {
+	p.inspectCalls++
 	if p.status.ID == "" {
 		p.status.ID = pr.ID
 	}

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -976,8 +976,8 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
-  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string }) => Promise<void>;
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
@@ -995,6 +995,7 @@ function ProjectPanel({
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
+  const [monitorPullRequests, setMonitorPullRequests] = useState(true);
   const [projectFormOpen, setProjectFormOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState<Record<string, ProjectHealth>>({});
@@ -1014,6 +1015,7 @@ function ProjectPanel({
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
+    setMonitorPullRequests(project.pullRequestPolicy?.monitorPullRequests ?? true);
     setProjectFormOpen(true);
   }
 
@@ -1031,6 +1033,7 @@ function ProjectPanel({
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
+    setMonitorPullRequests(true);
     setProjectFormOpen(false);
   }
 
@@ -1053,6 +1056,7 @@ function ProjectPanel({
           draft: draftPRs,
           allowMerge,
           autoMerge,
+          monitorPullRequests,
         },
       };
       if (editingId) {
@@ -1162,6 +1166,10 @@ function ProjectPanel({
           <label className="checkbox-label">
             <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
             Auto-merge when policy allows
+          </label>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={monitorPullRequests} onChange={(event) => setMonitorPullRequests(event.target.checked)} />
+            Monitor tracked PRs
           </label>
           <button disabled={busy}>
             <FolderPlus size={16} />
