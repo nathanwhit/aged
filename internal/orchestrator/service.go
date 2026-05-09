@@ -1938,7 +1938,7 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	remote := s.remoteRuns[workerID]
 	s.mu.Unlock()
 	if cancel == nil {
-		return s.cancelPersistedRemoteWorker(ctx, workerID)
+		return s.cancelPersistedWorker(ctx, workerID)
 	}
 	if remote.Session != "" {
 		_ = s.sshRunner.Cancel(ctx, remote)
@@ -1947,37 +1947,56 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	return nil
 }
 
-func (s *Service) cancelPersistedRemoteWorker(ctx context.Context, workerID string) error {
+func (s *Service) cancelPersistedWorker(ctx context.Context, workerID string) error {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
 	node, run, ok := s.persistedRemoteRun(snapshot, workerID)
-	if !ok {
-		return eventstore.ErrNotFound
+	if ok {
+		if run.Session != "" {
+			_ = s.sshRunner.Cancel(ctx, run)
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   node.TaskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerCanceled,
+				"summary": "Remote worker was canceled from persisted daemon state.",
+				"error":   "remote worker did not have a live local cancellation handle",
+				"workspaceChanges": WorkspaceChanges{
+					Root:    run.RunDir,
+					CWD:     run.WorkDir,
+					Mode:    "remote",
+					VCSType: "ssh",
+				},
+			}),
+		}); err != nil {
+			return err
+		}
+		return nil
 	}
-	if run.Session != "" {
-		_ = s.sshRunner.Cancel(ctx, run)
+
+	for _, worker := range snapshot.Workers {
+		if worker.ID != workerID || isTerminalWorkerStatus(worker.Status) {
+			continue
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   worker.TaskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerCanceled,
+				"summary": "Worker was canceled from persisted daemon state.",
+				"error":   "worker did not have a live local cancellation handle",
+			}),
+		}); err != nil {
+			return err
+		}
+		return nil
 	}
-	if _, err := s.append(ctx, core.Event{
-		Type:     core.EventWorkerCompleted,
-		TaskID:   node.TaskID,
-		WorkerID: workerID,
-		Payload: core.MustJSON(map[string]any{
-			"status":  core.WorkerCanceled,
-			"summary": "Remote worker was canceled from persisted daemon state.",
-			"error":   "remote worker did not have a live local cancellation handle",
-			"workspaceChanges": WorkspaceChanges{
-				Root:    run.RunDir,
-				CWD:     run.WorkDir,
-				Mode:    "remote",
-				VCSType: "ssh",
-			},
-		}),
-	}); err != nil {
-		return err
-	}
-	return nil
+	return eventstore.ErrNotFound
 }
 
 func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (core.ExecutionNode, remoteRun, bool) {

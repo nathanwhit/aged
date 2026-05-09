@@ -3170,6 +3170,102 @@ func TestRecoverRemoteWorkersCancelsStaleLocalWorkers(t *testing.T) {
 	}
 }
 
+func TestCancelTaskCancelsPersistedActiveWorkers(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-replayed"
+	workerIDs := []string{"worker-running", "worker-queued"}
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Replayed task",
+			"prompt": "Was active before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, workerID := range workerIDs {
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-" + workerID,
+				"workerId":   workerID,
+				"workerKind": "codex",
+				"targetId":   "local",
+				"targetKind": "local",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: "worker-running",
+		Payload:  core.MustJSON(map[string]any{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !taskHasActiveWorkers(snapshot, taskID) {
+		t.Fatalf("taskHasActiveWorkers before cancel = false, want true")
+	}
+
+	if err := service.CancelTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskHasActiveWorkers(snapshot, taskID) {
+		t.Fatalf("taskHasActiveWorkers after cancel = true, want false")
+	}
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID == taskID && worker.Status != core.WorkerCanceled {
+			t.Fatalf("worker %s status = %q, want canceled", worker.ID, worker.Status)
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && node.Status != core.WorkerCanceled {
+			t.Fatalf("node %s status = %q, want canceled", node.ID, node.Status)
+		}
+	}
+	if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", status)
+	}
+}
+
 func TestCancelWorkerFallsBackToPersistedRemoteRun(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
