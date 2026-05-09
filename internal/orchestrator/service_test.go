@@ -1190,6 +1190,93 @@ func TestServiceCompletionPublishAdoptsWorkerCreatedPullRequest(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesExplicitPublishPullRequestActionAfterRecoverableSigningFailure(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		errOnce: errors.New(strings.Join([]string{
+			"push jj bookmark: exit status 255",
+			"sign_and_send_pubkey: signing failed for ED25519",
+			"failed to fill whole buffer",
+		}, "\n")),
+	}
+	brain := &sequenceBrain{plans: []Plan{{
+		WorkerKind: "change",
+		Prompt:     "make change",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "open a PR so review can happen while the objective continues",
+			Inputs: map[string]any{
+				"repo":   "owner/repo",
+				"base":   "release",
+				"branch": "aged/retry-explicit-publish",
+				"draft":  true,
+				"title":  "Retry explicit publish",
+			},
+		}},
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Implement feature", Prompt: "Do it, open a PR, and babysit it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("initial publish calls = %d, want 1", publisher.publishCalls)
+	}
+	originalSpec := publisher.published
+	if originalSpec.WorkerID == "" {
+		t.Fatalf("initial publish did not retain worker id: %+v", originalSpec)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "waiting") {
+		t.Fatalf("missing waiting publish_pull_request action")
+	}
+	if len(snapshot.PullRequests) != 0 {
+		t.Fatalf("pull requests = %+v, want none before retry", snapshot.PullRequests)
+	}
+
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "SSH signing agent is fixed; retry publication."}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = waitForPullRequests(t, store, task.ID, 1)
+	if publisher.publishCalls != 2 {
+		t.Fatalf("publish calls = %d, want retry publish", publisher.publishCalls)
+	}
+	retrySpec := publisher.published
+	if retrySpec.WorkerID != originalSpec.WorkerID {
+		t.Fatalf("retried worker = %q, want retained action candidate %q", retrySpec.WorkerID, originalSpec.WorkerID)
+	}
+	if retrySpec.Repo != originalSpec.Repo || retrySpec.Base != originalSpec.Base || retrySpec.Branch != originalSpec.Branch || retrySpec.Title != originalSpec.Title || retrySpec.Draft != originalSpec.Draft {
+		t.Fatalf("retried publish did not preserve action inputs:\ninitial=%+v\nretry=%+v", originalSpec, retrySpec)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 1 {
+		t.Fatalf("feedback reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 1 {
+		t.Fatalf("feedback replanned task; task.planned count = %d", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalDecided, task.ID, "") {
+		t.Fatalf("missing approval.decided event")
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "") {
+		t.Fatalf("missing completed publish_pull_request action")
+	}
+}
+
 func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
