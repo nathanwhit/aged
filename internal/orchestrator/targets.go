@@ -244,7 +244,7 @@ func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {
 		return TargetConfig{}, fmt.Errorf("execution target %q is not configured", id)
 	}
 	if !r.isAvailableLocked(target) {
-		return TargetConfig{}, fmt.Errorf("execution target %q is at capacity", id)
+		return TargetConfig{}, fmt.Errorf("execution target %q is not available", id)
 	}
 	return target, nil
 }
@@ -370,6 +370,9 @@ func (r *TargetRegistry) scoreLocked(target TargetConfig, size string) float64 {
 
 func (r *TargetRegistry) isAvailableLocked(target TargetConfig) bool {
 	if r.running[target.ID] >= target.Capacity.MaxWorkers {
+		return false
+	}
+	if target.Kind == TargetKindSSH && strings.TrimSpace(target.WorkDir) == "" {
 		return false
 	}
 	health, hasHealth := r.health[target.ID]

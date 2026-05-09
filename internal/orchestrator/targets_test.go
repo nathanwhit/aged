@@ -16,8 +16,8 @@ import (
 
 func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
-		{ID: "small", Kind: TargetKindSSH, Host: "small", Labels: map[string]string{"role": "general"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
-		{ID: "perf", Kind: TargetKindSSH, Host: "perf", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 8, MemoryGB: 64}},
+		{ID: "small", Kind: TargetKindSSH, Host: "small", WorkDir: "/repo-small", Labels: map[string]string{"role": "general"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
+		{ID: "perf", Kind: TargetKindSSH, Host: "perf", WorkDir: "/repo-perf", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 8, MemoryGB: 64}},
 	})
 	plan := Plan{
 		Prompt: "run benchmark",
@@ -37,8 +37,8 @@ func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 
 func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
-		{ID: "bad", Kind: TargetKindSSH, Host: "bad", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},
-		{ID: "good", Kind: TargetKindSSH, Host: "good", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1, MemoryGB: 16}},
+		{ID: "bad", Kind: TargetKindSSH, Host: "bad", WorkDir: "/repo-bad", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},
+		{ID: "good", Kind: TargetKindSSH, Host: "good", WorkDir: "/repo-good", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1, MemoryGB: 16}},
 	})
 	registry.UpdateHealth("bad", core.TargetHealth{Status: "unhealthy", Reachable: true, Tmux: false, RepoPresent: true}, core.TargetResources{})
 	registry.UpdateHealth("good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.2, MemoryAvailableMB: 8192})
@@ -64,7 +64,7 @@ func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
 func TestTargetRegistrySkipsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
 		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
-		{ID: "vm", Kind: TargetKindSSH, Host: "vm", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
 	})
 	registry.UpdateHealth("vm", core.TargetHealth{
 		Status: "ok",
@@ -80,8 +80,30 @@ func TestTargetRegistrySkipsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
 	}
 }
 
+func TestTargetRegistrySkipsSSHWithoutRemoteWorkDir(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm", Kind: TargetKindSSH, Host: "vm", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+	})
+
+	target, err := registry.Select(Plan{WorkerKind: "mock", Prompt: "run remotely"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %s, want local", target.ID)
+	}
+	snapshot := registry.Snapshot()
+	for _, state := range snapshot {
+		if state.ID == "vm" && state.Available {
+			t.Fatalf("ssh target without workDir should not be available: %+v", state)
+		}
+	}
+}
+
 func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=true",
 		"tool.codex=false",
@@ -96,6 +118,33 @@ func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	}
 	if !health.Tools["claude"] {
 		t.Fatalf("claude should be available: %+v", health.Tools)
+	}
+}
+
+func TestSSHRunnerProbeRejectsMissingWorkDir(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"})
+	if health.Status != "unhealthy" || !strings.Contains(health.Error, "workDir") {
+		t.Fatalf("health = %+v", health)
+	}
+	if len(executor.commands) != 0 {
+		t.Fatalf("probe should fail before ssh command, got %+v", executor.commands)
+	}
+}
+
+func TestSSHRunnerProbeRejectsUnpreparableWorkDirRoot(t *testing.T) {
+	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=false",
+		"checkoutRootError=mkdir: cannot create directory '/Users': Permission denied",
+		"tmux=true",
+		"repoPresent=false",
+		"cpuCount=4",
+	}, "\n")}
+	runner := SSHRunner{Executor: executor}
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/Users/nathan/project"})
+	if health.Status != "unhealthy" || !strings.Contains(health.Error, "Permission denied") {
+		t.Fatalf("health = %+v", health)
 	}
 }
 
@@ -189,6 +238,7 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 
 func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=true",
 		"diskAvailableKB=10485760",
@@ -210,6 +260,7 @@ func TestSSHRunnerProbeParsesTargetHealth(t *testing.T) {
 
 func TestSSHRunnerProbeAllowsMissingRepoForPreparation(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
+		"checkoutRootOK=true",
 		"tmux=true",
 		"repoPresent=false",
 		"cpuCount=4",
@@ -387,6 +438,34 @@ func TestServiceFallsBackToLocalWhenRemoteCheckoutIsDirty(t *testing.T) {
 	}
 }
 
+func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingWorkDir(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run work",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, NewLocalTargetRegistry(), SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	_, err := service.runSSHPlannedWorker(ctx, core.Task{ID: "task", Title: "Task"}, Plan{
+		WorkerKind: "mock",
+		Prompt:     "run work",
+		Metadata:   map[string]any{},
+	}, eventRunner{kind: "mock"}, TargetConfig{ID: "vm-missing-workdir", Kind: TargetKindSSH, Host: "vm"})
+	if err == nil || !strings.Contains(err.Error(), "remote workDir is required") {
+		t.Fatalf("err = %v, want missing workDir", err)
+	}
+	for _, argv := range executor.commands {
+		if strings.Contains(strings.Join(argv, " "), "git clone") {
+			t.Fatalf("remote prepare should not run without a remote workDir: %+v", executor.commands)
+		}
+	}
+}
+
 type fakeRemoteExecutor struct {
 	commands      [][]string
 	probeOutput   string
@@ -405,7 +484,7 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 		if e.probeOutput != "" {
 			return e.probeOutput, nil
 		}
-		return "tmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
+		return "checkoutRootOK=true\ntmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
 	case strings.Contains(joined, "stdout.log"):
 		return "remote output\n", nil
 	case strings.Contains(joined, "stderr.log"):
