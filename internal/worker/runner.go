@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -191,7 +192,10 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	go killProcessGroupOnCancel(ctx, cmd, done)
 
 	errCh := make(chan error, 2)
-	parser := parserFunc(parseJSONWorkerLine)
+	var parser Parser = parserFunc(parseJSONWorkerLine)
+	if r.kind == "codex" || r.kind == "claude" {
+		parser = ParserForKind(r.kind)
+	}
 	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
 	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
 	if promptOnStdin && stdin != nil {
@@ -449,17 +453,24 @@ func (f *OutputFilter) EmitLine(ctx context.Context, sink Sink, stream string, l
 func (f *OutputFilter) Flush(ctx context.Context, sink Sink) error {
 	f.mu.Lock()
 	var events []Event
+	var parts []string
+	total := 0
 	for key, count := range f.suppressed {
 		if count > 0 {
-			events = append(events, Event{
-				Kind:   EventLog,
-				Stream: "stderr",
-				Text:   fmt.Sprintf("suppressed %d repeated Codex infrastructure warnings: %s", count, key),
-			})
+			total += count
+			parts = append(parts, fmt.Sprintf("%s (%d)", key, count))
 		}
 	}
 	f.suppressed = nil
 	f.mu.Unlock()
+	if total > 0 {
+		sort.Strings(parts)
+		events = append(events, Event{
+			Kind:   EventLog,
+			Stream: "stderr",
+			Text:   fmt.Sprintf("suppressed %d repeated Codex infrastructure warnings: %s", total, strings.Join(parts, "; ")),
+		})
+	}
 	for _, event := range events {
 		if err := sink.Event(ctx, event); err != nil {
 			return err
@@ -472,10 +483,33 @@ func infrastructureWarningKey(stream string, line string, event Event) (string, 
 	if stream != "stderr" || event.Kind != EventLog {
 		return "", false
 	}
-	if strings.Contains(line, "failed to record rollout items: thread") && strings.Contains(line, "codex_core::session") {
-		return "failed to record Codex rollout items", true
+	if category, ok := knownCodexInfrastructureWarning(stream, line); ok {
+		return category.label, true
 	}
 	return "", false
+}
+
+type codexInfrastructureWarning struct {
+	label string
+}
+
+func knownCodexInfrastructureWarning(stream string, line string) (codexInfrastructureWarning, bool) {
+	if stream != "stderr" {
+		return codexInfrastructureWarning{}, false
+	}
+	lower := strings.ToLower(line)
+	switch {
+	case strings.Contains(line, "codex_core_skills::loader") && strings.Contains(lower, "icon"):
+		return codexInfrastructureWarning{label: "codex_core_skills::loader icon path warning"}, true
+	case strings.Contains(line, "codex_core_plugins::manifest") && strings.Contains(line, "defaultPrompt"):
+		return codexInfrastructureWarning{label: "codex_core_plugins::manifest defaultPrompt warning"}, true
+	case strings.Contains(line, "codex_app_server::in_process") && (strings.Contains(lower, "queue full") || strings.Contains(lower, "queue-full")):
+		return codexInfrastructureWarning{label: "codex_app_server::in_process queue-full warning"}, true
+	case strings.Contains(line, "failed to record rollout items: thread") && strings.Contains(line, "codex_core::session"):
+		return codexInfrastructureWarning{label: "failed to record Codex rollout items"}, true
+	default:
+		return codexInfrastructureWarning{}, false
+	}
 }
 
 type parserFunc func(stream string, line string) Event
@@ -487,7 +521,7 @@ func (f parserFunc) ParseLine(stream string, line string) Event {
 func ParserForKind(kind string) Parser {
 	switch kind {
 	case "codex":
-		return parserFunc(parseCodexWorkerLine)
+		return codexWorkerParser{}
 	case "claude":
 		return parserFunc(parseJSONWorkerLine)
 	default:
@@ -499,10 +533,16 @@ func ParserForKind(kind string) Parser {
 
 func parseCodexWorkerLine(stream string, line string) Event {
 	event := parseJSONWorkerLine(stream, line)
-	if stream == "stderr" && strings.Contains(line, "failed to record rollout items: thread") {
+	if _, ok := knownCodexInfrastructureWarning(stream, line); ok {
 		event.Kind = EventLog
 	}
 	return event
+}
+
+type codexWorkerParser struct{}
+
+func (codexWorkerParser) ParseLine(stream string, line string) Event {
+	return parseCodexWorkerLine(stream, line)
 }
 
 func parseJSONWorkerLine(stream string, line string) Event {
