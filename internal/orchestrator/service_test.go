@@ -1065,6 +1065,131 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 }
 
+func TestServicePlanActionAdoptsWorkerCreatedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: core.PullRequest{
+		Repo:         "owner/repo",
+		Number:       61,
+		URL:          "https://github.com/owner/repo/pull/61",
+		Branch:       "codex/ssh-checkout-root-health",
+		Base:         "main",
+		Title:        "Avoid SSH targets with invalid checkout roots",
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+	}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "open a PR so review can happen while the objective continues",
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{
+			worker.LogEvent("stdout", "https://github.com/owner/repo/pull/61"),
+			{Kind: worker.EventResult, Text: "implemented and opened https://github.com/owner/repo/pull/61"},
+		}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/ssh_target.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Avoid invalid SSH roots", Prompt: "Do it and open a PR."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want worker-created PR to be adopted", publisher.publishCalls)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	pr := snapshot.PullRequests[0]
+	if pr.ID != "github:owner/repo#61" || pr.Number != 61 || pr.Branch != "codex/ssh-checkout-root-health" {
+		t.Fatalf("adopted pr = %+v", pr)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "") {
+		t.Fatalf("missing completed publish action")
+	}
+	if len(pr.Metadata) == 0 || !strings.Contains(string(pr.Metadata), `"workerCreated":true`) {
+		t.Fatalf("pr metadata = %s", pr.Metadata)
+	}
+}
+
+func TestServiceCompletionPublishAdoptsWorkerCreatedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: core.PullRequest{
+		Repo:         "owner/repo",
+		Number:       61,
+		URL:          "https://github.com/owner/repo/pull/61",
+		Branch:       "codex/ssh-checkout-root-health",
+		Base:         "main",
+		Title:        "Avoid SSH targets with invalid checkout roots",
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+	}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "make change",
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{
+			worker.LogEvent("stdout", "Created pull request: https://github.com/owner/repo/pull/61"),
+			{Kind: worker.EventResult, Text: "implemented"},
+		}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/ssh_target.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Avoid invalid SSH roots",
+		Prompt: "Implement the fix.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+			"repo":           "owner/repo",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want completion publish to adopt worker-created PR", publisher.publishCalls)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	pr := snapshot.PullRequests[0]
+	if pr.ID != "github:owner/repo#61" || pr.Number != 61 || pr.TaskID != task.ID {
+		t.Fatalf("adopted pr = %+v", pr)
+	}
+}
+
 func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
