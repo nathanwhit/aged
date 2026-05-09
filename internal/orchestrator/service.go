@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -586,6 +587,91 @@ func (s *Service) StartTargetProbes(ctx context.Context, interval time.Duration)
 			}
 		}
 	}()
+}
+
+func (s *Service) StartPullRequestMonitor(ctx context.Context, interval time.Duration) {
+	if s == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		s.monitorPullRequestsLogged(ctx)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.monitorPullRequestsLogged(ctx)
+			}
+		}
+	}()
+}
+
+func (s *Service) monitorPullRequestsLogged(ctx context.Context) {
+	if err := s.MonitorPullRequestsOnce(ctx); err != nil {
+		slog.Warn("pull request monitor failed", "error", err)
+	}
+}
+
+func (s *Service) MonitorPullRequestsOnce(ctx context.Context) error {
+	return s.monitorPullRequests(ctx, pullRequestMonitorOptions{AutoBabysit: true})
+}
+
+type pullRequestMonitorOptions struct {
+	AutoBabysit bool
+	IncludeRepo func(string) bool
+}
+
+func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMonitorOptions) error {
+	if s == nil {
+		return nil
+	}
+	snapshot, err := s.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []string
+	for _, pr := range snapshot.PullRequests {
+		if options.IncludeRepo != nil && !options.IncludeRepo(pr.Repo) {
+			continue
+		}
+		if s.pullRequestMonitoringDisabled(snapshot, pr) {
+			continue
+		}
+		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+			if err := s.ReconcilePullRequestTerminalTasks(ctx, pr.ID); err != nil {
+				errs = append(errs, fmt.Sprintf("%s reconcile terminal pr: %v", pr.ID, err))
+			}
+			continue
+		}
+		checked, err := s.RefreshPullRequest(ctx, pr.ID)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s refresh pr: %v", pr.ID, err))
+			continue
+		}
+		if options.AutoBabysit && pullRequestNeedsBabysitter(checked) {
+			if err := s.ContinueTaskForPullRequest(ctx, pr.ID); err != nil {
+				errs = append(errs, fmt.Sprintf("%s continue pr task: %v", pr.ID, err))
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (s *Service) pullRequestMonitoringDisabled(snapshot core.Snapshot, pr core.PullRequest) bool {
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return false
+	}
+	project := s.projectForTask(task)
+	return project.PullRequestPolicy.MonitorPullRequests != nil && !*project.PullRequestPolicy.MonitorPullRequests
 }
 
 func (s *Service) RefreshTargetHealth(ctx context.Context) {

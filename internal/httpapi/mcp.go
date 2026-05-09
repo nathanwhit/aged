@@ -66,10 +66,11 @@ type mcpProjectPatch struct {
 }
 
 type mcpPullRequestPolicyPatch struct {
-	BranchPrefix *string `json:"branchPrefix"`
-	Draft        *bool   `json:"draft"`
-	AllowMerge   *bool   `json:"allowMerge"`
-	AutoMerge    *bool   `json:"autoMerge"`
+	BranchPrefix        *string `json:"branchPrefix"`
+	Draft               *bool   `json:"draft"`
+	AllowMerge          *bool   `json:"allowMerge"`
+	AutoMerge           *bool   `json:"autoMerge"`
+	MonitorPullRequests *bool   `json:"monitorPullRequests"`
 }
 
 type mcpTargetPatch struct {
@@ -517,6 +518,9 @@ func mergeMCPProjectPatch(current core.Project, patch mcpProjectPatch) core.Proj
 		if patch.PullRequestPolicy.AutoMerge != nil {
 			updated.PullRequestPolicy.AutoMerge = *patch.PullRequestPolicy.AutoMerge
 		}
+		if patch.PullRequestPolicy.MonitorPullRequests != nil {
+			updated.PullRequestPolicy.MonitorPullRequests = patch.PullRequestPolicy.MonitorPullRequests
+		}
 	}
 	updated.ID = current.ID
 	return updated
@@ -892,10 +896,11 @@ func mcpTools() []mcpTool {
 				"workspaceRoot": stringSchema("Optional workspace root override."),
 				"targetLabels":  objectUntypedSchema("Optional target label policy."),
 				"pullRequestPolicy": objectSchema(map[string]any{
-					"branchPrefix": stringSchema("Optional PR branch prefix."),
-					"draft":        map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
-					"allowMerge":   map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
-					"autoMerge":    map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+					"branchPrefix":        stringSchema("Optional PR branch prefix."),
+					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
+					"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
+					"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+					"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
 				}, nil),
 			}, []string{"id", "name", "localPath"}),
 		},
@@ -916,10 +921,11 @@ func mcpTools() []mcpTool {
 				"workspaceRoot": stringSchema("Optional workspace root override."),
 				"targetLabels":  objectUntypedSchema("Optional target label policy."),
 				"pullRequestPolicy": objectSchema(map[string]any{
-					"branchPrefix": stringSchema("Optional PR branch prefix."),
-					"draft":        map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
-					"allowMerge":   map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
-					"autoMerge":    map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+					"branchPrefix":        stringSchema("Optional PR branch prefix."),
+					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
+					"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
+					"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+					"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
 				}, nil),
 			}, []string{"id"}),
 		},

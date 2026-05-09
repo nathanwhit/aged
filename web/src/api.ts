@@ -54,6 +54,7 @@ export async function createProject(input: {
     draft?: boolean;
     allowMerge?: boolean;
     autoMerge?: boolean;
+    monitorPullRequests?: boolean;
   };
 }): Promise<Project> {
   const response = await fetch("/api/projects", {
@@ -84,6 +85,7 @@ export async function updateProject(id: string, input: {
     draft?: boolean;
     allowMerge?: boolean;
     autoMerge?: boolean;
+    monitorPullRequests?: boolean;
   };
 }): Promise<Project> {
   const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
