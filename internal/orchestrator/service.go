@@ -3714,12 +3714,153 @@ func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan,
 		if strings.TrimSpace(action.When) == "immediate" {
 			continue
 		}
+		if strings.TrimSpace(action.Kind) == "publish_pull_request" {
+			if blocker, ok := publicationBlockedByFollowUpFinding(results); ok {
+				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":           "publish_pull_request_blocked_by_follow_up",
+					"when":           nonEmpty(action.When, "after_success"),
+					"reason":         blocker.Reason,
+					"actionReason":   action.Reason,
+					"workerId":       blocker.WorkerID,
+					"spawnId":        blocker.SpawnID,
+					"role":           blocker.Role,
+					"status":         "rejected",
+					"findingSummary": blocker.Summary,
+				}); err != nil {
+					return false, err
+				}
+				continue
+			}
+		}
 		keepGoing, err := s.executePlanAction(ctx, task, action, results)
 		if err != nil || !keepGoing {
 			return keepGoing, err
 		}
 	}
 	return true, nil
+}
+
+type followUpPublicationBlocker struct {
+	WorkerID string
+	SpawnID  string
+	Role     string
+	Summary  string
+	Reason   string
+}
+
+func publicationBlockedByFollowUpFinding(results []WorkerTurnResult) (followUpPublicationBlocker, bool) {
+	for _, result := range results {
+		if result.Status != core.WorkerSucceeded {
+			continue
+		}
+		if !isReviewOrEvaluatorFollowUp(result) {
+			continue
+		}
+		if !resultRequiresFollowUp(result.Summary) {
+			continue
+		}
+		return followUpPublicationBlocker{
+			WorkerID: result.WorkerID,
+			SpawnID:  result.SpawnID,
+			Role:     result.Role,
+			Summary:  truncateStringForPrompt(strings.TrimSpace(result.Summary), 1000),
+			Reason:   "review/evaluator follow-up reported substantive findings that require another worker turn before publishing",
+		}, true
+	}
+	return followUpPublicationBlocker{}, false
+}
+
+func isReviewOrEvaluatorFollowUp(result WorkerTurnResult) bool {
+	if strings.TrimSpace(result.SpawnID) == "" && strings.TrimSpace(result.Role) == "" {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{result.Kind, result.Role, result.SpawnID}, " "))
+	for _, marker := range []string{"review", "evaluator", "evaluate", "validation", "validator", "critique", "audit"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func resultRequiresFollowUp(summary string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(summary), " "))
+	if normalized == "" {
+		return false
+	}
+	for _, clean := range []string{
+		"no findings",
+		"no issues",
+		"no blockers",
+		"looks good",
+		"approved",
+		"clean review",
+		"non-blocking",
+		"informational only",
+	} {
+		if strings.Contains(normalized, clean) && !containsRequiredFollowUpPhrase(normalized) {
+			return false
+		}
+	}
+	if containsRequiredFollowUpPhrase(normalized) {
+		return true
+	}
+	for _, rawLine := range strings.Split(summary, "\n") {
+		line := strings.ToLower(strings.Join(strings.Fields(rawLine), " "))
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "finding") && !strings.Contains(line, "issue") && !strings.Contains(line, "blocker") {
+			continue
+		}
+		for _, severity := range []string{"critical", "high", "medium", "major"} {
+			if lineContainsReviewSeverity(line, severity) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func lineContainsReviewSeverity(line string, severity string) bool {
+	for _, marker := range []string{
+		severity + ":",
+		severity + " -",
+		severity + " issue",
+		severity + " finding",
+		severity + " blocker",
+		"[" + severity + "]",
+		"severity: " + severity,
+	} {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRequiredFollowUpPhrase(normalized string) bool {
+	for _, phrase := range []string{
+		"requires follow-up",
+		"require follow-up",
+		"needs follow-up",
+		"need follow-up",
+		"required follow-up",
+		"must fix",
+		"needs to be fixed",
+		"need to be fixed",
+		"requires another worker",
+		"schedule another worker",
+		"request changes",
+		"changes requested",
+		"do not publish",
+		"not ready to publish",
+	} {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) executePlanAction(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) (bool, error) {
