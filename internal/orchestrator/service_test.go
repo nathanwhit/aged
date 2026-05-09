@@ -2496,10 +2496,10 @@ func TestServiceRefreshesPullRequestStatus(t *testing.T) {
 
 	publisher := &fakePullRequestPublisher{
 		status: core.PullRequest{
-			State:        "OPEN",
-			ChecksStatus: "failing",
-			MergeStatus:  "BLOCKED",
-			ReviewStatus: "CHANGES_REQUESTED",
+			State:            "OPEN",
+			ChecksConclusion: "SUCCESS",
+			Mergeable:        "MERGEABLE",
+			ReviewStatus:     "APPROVED",
 		},
 	}
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "run"}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
@@ -2535,15 +2535,18 @@ func TestServiceRefreshesPullRequestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pr.ChecksStatus != "failing" || pr.MergeStatus != "BLOCKED" || pr.ReviewStatus != "CHANGES_REQUESTED" {
+	if pr.ChecksStatus != "passing" || pr.ChecksConclusion != "SUCCESS" || pr.MergeStatus != "MERGEABLE" || pr.Mergeable != "MERGEABLE" || pr.ReviewStatus != "APPROVED" {
 		t.Fatalf("refreshed pr = %+v", pr)
 	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PullRequests[0].ChecksStatus != "failing" {
+	if snapshot.PullRequests[0].ChecksStatus != "passing" || snapshot.PullRequests[0].ChecksConclusion != "SUCCESS" || snapshot.PullRequests[0].MergeStatus != "MERGEABLE" || snapshot.PullRequests[0].Mergeable != "MERGEABLE" {
 		t.Fatalf("snapshot pr = %+v", snapshot.PullRequests[0])
+	}
+	if snapshot.Tasks[0].ObjectivePhase != "ready_to_merge" {
+		t.Fatalf("objective phase = %q, want ready_to_merge", snapshot.Tasks[0].ObjectivePhase)
 	}
 }
 

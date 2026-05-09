@@ -163,10 +163,16 @@ func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string)
 	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") {
 		return core.ObjectiveActive, "pr_needs_work"
 	}
-	if strings.EqualFold(pr.ChecksStatus, "success") && (pr.ReviewStatus == "" || strings.EqualFold(pr.ReviewStatus, "APPROVED")) {
+	if pullRequestChecksPassing(pr) && (pr.ReviewStatus == "" || strings.EqualFold(pr.ReviewStatus, "APPROVED")) {
 		return core.ObjectiveWaitingExternal, "ready_to_merge"
 	}
 	return core.ObjectiveWaitingExternal, "pr_open"
+}
+
+func pullRequestChecksPassing(pr core.PullRequest) bool {
+	checks := strings.ToLower(strings.TrimSpace(pr.ChecksStatus))
+	conclusion := strings.ToLower(strings.TrimSpace(pr.ChecksConclusion))
+	return checks == "passing" || checks == "success" || conclusion == "success"
 }
 
 func pullRequestObjectiveSummary(pr core.PullRequest, phase string) string {

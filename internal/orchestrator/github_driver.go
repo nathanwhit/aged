@@ -302,7 +302,8 @@ func pullRequestNeedsBabysitter(pr core.PullRequest) bool {
 		review == "CHANGES_REQUESTED" ||
 		review == "COMMENTED" ||
 		merge == "DIRTY" ||
-		merge == "BLOCKED"
+		merge == "BLOCKED" ||
+		merge == "CONFLICTING"
 }
 
 func boolDefault(value *bool, fallback bool) bool {

@@ -357,7 +357,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	if ref == "" {
 		return core.PullRequest{}, errors.New("inspect requires pull request url or number")
 	}
-	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,statusCheckRollup,reviewDecision,comments")
+	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments")
 	if err != nil {
 		return core.PullRequest{}, fmt.Errorf("inspect GitHub pull request: %w", err)
 	}
@@ -370,6 +370,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 		HeadRefName       string          `json:"headRefName"`
 		BaseRefName       string          `json:"baseRefName"`
 		MergeStateStatus  string          `json:"mergeStateStatus"`
+		Mergeable         string          `json:"mergeable"`
 		ReviewDecision    string          `json:"reviewDecision"`
 		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
 		Comments          []prComment     `json:"comments"`
@@ -385,9 +386,12 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	checked.Draft = payload.IsDraft
 	checked.Branch = payload.HeadRefName
 	checked.Base = payload.BaseRefName
-	checked.MergeStatus = payload.MergeStateStatus
+	checked.Mergeable = payload.Mergeable
+	checked.MergeStatus = pullRequestMergeStatus(payload.MergeStateStatus, payload.Mergeable)
 	checked.ReviewStatus = payload.ReviewDecision
-	checked.ChecksStatus = summarizeStatusCheckRollup(payload.StatusCheckRollup)
+	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
+	checked.ChecksStatus = checks.Status
+	checked.ChecksConclusion = checks.Conclusion
 	checked.Metadata = pullRequestMetadataWithComments(pr.Metadata, payload.Comments, &checked)
 	return checked, nil
 }
@@ -437,7 +441,7 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 	if state == "" {
 		state = "open"
 	}
-	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,statusCheckRollup,reviewDecision"
+	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision"
 	args := []string{"pr", "list", "--repo", repo, "--state", state, "--limit", strconv.Itoa(limit), "--json", jsonFields}
 	if strings.TrimSpace(spec.Author) != "" {
 		args = append(args, "--author", strings.TrimSpace(spec.Author))
@@ -458,6 +462,7 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 		HeadRefName       string          `json:"headRefName"`
 		BaseRefName       string          `json:"baseRefName"`
 		MergeStateStatus  string          `json:"mergeStateStatus"`
+		Mergeable         string          `json:"mergeable"`
 		ReviewDecision    string          `json:"reviewDecision"`
 		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
 	}
@@ -466,21 +471,24 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 	}
 	prs := make([]core.PullRequest, 0, len(payload))
 	for _, item := range payload {
+		checks := summarizeStatusCheckRollup(item.StatusCheckRollup)
 		prs = append(prs, core.PullRequest{
-			ID:           newPullRequestID(),
-			TaskID:       spec.TaskID,
-			Repo:         repo,
-			Number:       item.Number,
-			URL:          item.URL,
-			Branch:       item.HeadRefName,
-			Base:         item.BaseRefName,
-			Title:        item.Title,
-			State:        item.State,
-			Draft:        item.IsDraft,
-			ChecksStatus: summarizeStatusCheckRollup(item.StatusCheckRollup),
-			MergeStatus:  item.MergeStateStatus,
-			ReviewStatus: item.ReviewDecision,
-			Metadata:     core.MustJSON(spec.Metadata),
+			ID:               newPullRequestID(),
+			TaskID:           spec.TaskID,
+			Repo:             repo,
+			Number:           item.Number,
+			URL:              item.URL,
+			Branch:           item.HeadRefName,
+			Base:             item.BaseRefName,
+			Title:            item.Title,
+			State:            item.State,
+			Draft:            item.IsDraft,
+			ChecksStatus:     checks.Status,
+			ChecksConclusion: checks.Conclusion,
+			MergeStatus:      pullRequestMergeStatus(item.MergeStateStatus, item.Mergeable),
+			Mergeable:        item.Mergeable,
+			ReviewStatus:     item.ReviewDecision,
+			Metadata:         core.MustJSON(spec.Metadata),
 		})
 	}
 	return prs, nil
@@ -638,32 +646,38 @@ func firstURL(value string) string {
 	return trimmed
 }
 
-func summarizeStatusCheckRollup(raw json.RawMessage) string {
+type statusCheckRollupSummary struct {
+	Status     string
+	Conclusion string
+}
+
+func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
 	if len(raw) == 0 || string(raw) == "null" {
-		return ""
+		return statusCheckRollupSummary{}
 	}
 	var checks []struct {
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
+		State      string `json:"state"`
 	}
 	if err := json.Unmarshal(raw, &checks); err != nil {
-		return "unknown"
+		return statusCheckRollupSummary{Status: "unknown", Conclusion: "unknown"}
 	}
 	if len(checks) == 0 {
-		return "none"
+		return statusCheckRollupSummary{Status: "none", Conclusion: "none"}
 	}
 	pending := 0
 	failing := 0
 	success := 0
 	for _, check := range checks {
 		status := strings.ToUpper(check.Status)
-		conclusion := strings.ToUpper(check.Conclusion)
+		conclusion := strings.ToUpper(nonEmpty(check.Conclusion, check.State))
 		switch {
-		case conclusion == "FAILURE" || conclusion == "CANCELLED" || conclusion == "TIMED_OUT" || conclusion == "ACTION_REQUIRED":
+		case conclusion == "FAILURE" || conclusion == "ERROR" || conclusion == "CANCELLED" || conclusion == "TIMED_OUT" || conclusion == "ACTION_REQUIRED":
 			failing++
 		case conclusion == "SUCCESS" || conclusion == "NEUTRAL" || conclusion == "SKIPPED":
 			success++
-		case status != "COMPLETED":
+		case status != "" && status != "COMPLETED":
 			pending++
 		default:
 			pending++
@@ -671,13 +685,79 @@ func summarizeStatusCheckRollup(raw json.RawMessage) string {
 	}
 	switch {
 	case failing > 0:
-		return "failing"
+		return statusCheckRollupSummary{Status: "failing", Conclusion: "failure"}
 	case pending > 0:
-		return "pending"
+		return statusCheckRollupSummary{Status: "pending", Conclusion: "pending"}
 	case success == len(checks):
-		return "passing"
+		return statusCheckRollupSummary{Status: "passing", Conclusion: "success"}
 	default:
+		return statusCheckRollupSummary{Status: "unknown", Conclusion: "unknown"}
+	}
+}
+
+func pullRequestMergeStatus(mergeStateStatus string, mergeable string) string {
+	if strings.TrimSpace(mergeStateStatus) != "" {
+		return mergeStateStatus
+	}
+	return mergeable
+}
+
+func normalizePullRequestStatusFields(pr core.PullRequest) core.PullRequest {
+	if strings.TrimSpace(pr.ChecksStatus) == "" {
+		pr.ChecksStatus = checksStatusFromConclusion(pr.ChecksConclusion)
+	}
+	if strings.TrimSpace(pr.ChecksConclusion) == "" {
+		pr.ChecksConclusion = checksConclusionFromStatus(pr.ChecksStatus)
+	}
+	if strings.TrimSpace(pr.MergeStatus) == "" {
+		pr.MergeStatus = pr.Mergeable
+	}
+	if strings.TrimSpace(pr.Mergeable) == "" {
+		pr.Mergeable = mergeableFromStatus(pr.MergeStatus)
+	}
+	return pr
+}
+
+func checksStatusFromConclusion(conclusion string) string {
+	switch strings.ToUpper(strings.TrimSpace(conclusion)) {
+	case "SUCCESS", "NEUTRAL", "SKIPPED":
+		return "passing"
+	case "FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+		return "failing"
+	case "PENDING", "EXPECTED":
+		return "pending"
+	case "NONE":
+		return "none"
+	case "UNKNOWN":
 		return "unknown"
+	default:
+		return ""
+	}
+}
+
+func checksConclusionFromStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "passing", "success":
+		return "success"
+	case "failing", "failure":
+		return "failure"
+	case "pending":
+		return "pending"
+	case "none":
+		return "none"
+	case "unknown":
+		return "unknown"
+	default:
+		return ""
+	}
+}
+
+func mergeableFromStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "MERGEABLE", "CONFLICTING", "UNKNOWN":
+		return strings.ToUpper(strings.TrimSpace(status))
+	default:
+		return ""
 	}
 }
 
