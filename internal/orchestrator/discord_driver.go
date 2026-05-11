@@ -447,96 +447,82 @@ func (d *DiscordDriver) answerDiscordMessage(ctx context.Context, channel Discor
 }
 
 func (d *DiscordDriver) sendDiscordTaskDetail(ctx context.Context, channel DiscordChannelConfig, taskID string) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I inspect? Send the task id from the dashboard or task list.")
-	}
-	detail, err := d.service.TaskDetail(ctx, taskID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task detail error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(discordTaskDetail(detail)))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I inspect? Send the task id from the dashboard or task list.", "Task detail", func(taskID string) (string, error) {
+		detail, err := d.service.TaskDetail(ctx, taskID)
+		if err != nil {
+			return "", err
+		}
+		return truncateDiscordMessage(discordTaskDetail(detail)), nil
+	})
 }
 
 func (d *DiscordDriver) sendDiscordWorkerDetail(ctx context.Context, channel DiscordChannelConfig, workerID string) error {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which worker should I inspect? Send the worker id from the task detail.")
-	}
-	detail, err := d.service.WorkerDetail(ctx, workerID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Worker detail error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(discordWorkerDetail(detail)))
+	return d.sendDiscordServiceAction(ctx, channel, workerID, "Which worker should I inspect? Send the worker id from the task detail.", "Worker detail", func(workerID string) (string, error) {
+		detail, err := d.service.WorkerDetail(ctx, workerID)
+		if err != nil {
+			return "", err
+		}
+		return truncateDiscordMessage(discordWorkerDetail(detail)), nil
+	})
 }
 
 func (d *DiscordDriver) retryDiscordTask(ctx context.Context, channel DiscordChannelConfig, taskID string) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I retry?")
-	}
-	task, err := d.service.RetryTask(ctx, taskID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task retry error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Retrying task `%s`: %s", task.ID, task.Title))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I retry?", "Task retry", func(taskID string) (string, error) {
+		task, err := d.service.RetryTask(ctx, taskID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Retrying task `%s`: %s", task.ID, task.Title), nil
+	})
 }
 
 func (d *DiscordDriver) steerDiscordTask(ctx context.Context, channel DiscordChannelConfig, taskID string, steering string) error {
-	taskID = strings.TrimSpace(taskID)
-	steering = strings.TrimSpace(steering)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I steer?")
-	}
-	if steering == "" {
-		return d.client.SendMessage(ctx, channel.ID, "What steering message should I send?")
-	}
-	if err := d.requireDiscordTask(ctx, taskID); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task steer error: "+err.Error())
-	}
-	if err := d.service.SteerTask(ctx, taskID, core.SteeringRequest{Message: steering}); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task steer error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Sent steering to task `%s`.", taskID))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I steer?", "Task steer", func(taskID string) (string, error) {
+		steering = strings.TrimSpace(steering)
+		if steering == "" {
+			return "What steering message should I send?", nil
+		}
+		if err := d.requireDiscordTask(ctx, taskID); err != nil {
+			return "", err
+		}
+		if err := d.service.SteerTask(ctx, taskID, core.SteeringRequest{Message: steering}); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Sent steering to task `%s`.", taskID), nil
+	})
 }
 
 func (d *DiscordDriver) cancelDiscordTask(ctx context.Context, channel DiscordChannelConfig, taskID string) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I cancel?")
-	}
-	if err := d.requireDiscordTask(ctx, taskID); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task cancel error: "+err.Error())
-	}
-	if err := d.service.CancelTask(ctx, taskID); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task cancel error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Canceled task `%s`.", taskID))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I cancel?", "Task cancel", func(taskID string) (string, error) {
+		if err := d.requireDiscordTask(ctx, taskID); err != nil {
+			return "", err
+		}
+		if err := d.service.CancelTask(ctx, taskID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Canceled task `%s`.", taskID), nil
+	})
 }
 
 func (d *DiscordDriver) cancelDiscordWorker(ctx context.Context, channel DiscordChannelConfig, workerID string) error {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which worker should I cancel?")
-	}
-	if err := d.service.CancelWorker(ctx, workerID); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Worker cancel error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Canceled worker `%s`.", workerID))
+	return d.sendDiscordServiceAction(ctx, channel, workerID, "Which worker should I cancel?", "Worker cancel", func(workerID string) (string, error) {
+		if err := d.service.CancelWorker(ctx, workerID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Canceled worker `%s`.", workerID), nil
+	})
 }
 
 func (d *DiscordDriver) clearDiscordTask(ctx context.Context, channel DiscordChannelConfig, taskID string, confirmed bool) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I clear?")
-	}
-	if !confirmed {
-		return d.client.SendMessage(ctx, channel.ID, "Clearing hides the task from active snapshots. Repeat the request with an explicit confirmation if you want me to clear it.")
-	}
-	if err := d.service.ClearTask(ctx, taskID); err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task clear error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Cleared task `%s` from active snapshots.", taskID))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I clear?", "Task clear", func(taskID string) (string, error) {
+		if !confirmed {
+			return "Clearing hides the task from active snapshots. Repeat the request with an explicit confirmation if you want me to clear it.", nil
+		}
+		if err := d.service.ClearTask(ctx, taskID); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Cleared task `%s` from active snapshots.", taskID), nil
+	})
 }
 
 func (d *DiscordDriver) clearFinishedDiscordTasks(ctx context.Context, channel DiscordChannelConfig, confirmed bool) error {
@@ -551,96 +537,94 @@ func (d *DiscordDriver) clearFinishedDiscordTasks(ctx context.Context, channel D
 }
 
 func (d *DiscordDriver) publishDiscordPullRequest(ctx context.Context, channel DiscordChannelConfig, taskID string, req core.PublishPullRequestRequest, confirmed bool) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should I publish as a PR?")
-	}
-	if !confirmed {
-		return d.client.SendMessage(ctx, channel.ID, "Publishing a PR may apply worker changes, push a branch, and create external GitHub state. Repeat the request with an explicit confirmation if you want me to publish it.")
-	}
-	pr, err := d.service.PublishTaskPullRequest(ctx, taskID, req)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Publish PR error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, "Published pull request:\n"+discordPullRequestSummary(pr))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should I publish as a PR?", "Publish PR", func(taskID string) (string, error) {
+		if !confirmed {
+			return "Publishing a PR may apply worker changes, push a branch, and create external GitHub state. Repeat the request with an explicit confirmation if you want me to publish it.", nil
+		}
+		pr, err := d.service.PublishTaskPullRequest(ctx, taskID, req)
+		if err != nil {
+			return "", err
+		}
+		return "Published pull request:\n" + discordPullRequestSummary(pr), nil
+	})
 }
 
 func (d *DiscordDriver) watchDiscordPullRequests(ctx context.Context, channel DiscordChannelConfig, taskID string, req core.WatchPullRequestsRequest) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task should watch those PRs?")
-	}
-	prs, err := d.service.WatchPullRequests(ctx, taskID, req)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Watch PRs error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(discordPullRequestList("Watching pull requests:", prs)))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task should watch those PRs?", "Watch PRs", func(taskID string) (string, error) {
+		prs, err := d.service.WatchPullRequests(ctx, taskID, req)
+		if err != nil {
+			return "", err
+		}
+		return truncateDiscordMessage(discordPullRequestList("Watching pull requests:", prs)), nil
+	})
 }
 
 func (d *DiscordDriver) refreshDiscordPullRequest(ctx context.Context, channel DiscordChannelConfig, pullRequestID string) error {
-	pullRequestID = strings.TrimSpace(pullRequestID)
-	if pullRequestID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which pull request should I refresh?")
-	}
-	pr, err := d.service.RefreshPullRequest(ctx, pullRequestID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Refresh PR error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, "Refreshed pull request:\n"+discordPullRequestSummary(pr))
+	return d.sendDiscordServiceAction(ctx, channel, pullRequestID, "Which pull request should I refresh?", "Refresh PR", func(pullRequestID string) (string, error) {
+		pr, err := d.service.RefreshPullRequest(ctx, pullRequestID)
+		if err != nil {
+			return "", err
+		}
+		return "Refreshed pull request:\n" + discordPullRequestSummary(pr), nil
+	})
 }
 
 func (d *DiscordDriver) babysitDiscordPullRequest(ctx context.Context, channel DiscordChannelConfig, pullRequestID string) error {
-	pullRequestID = strings.TrimSpace(pullRequestID)
-	if pullRequestID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which pull request should I babysit?")
-	}
-	task, err := d.service.StartPullRequestBabysitter(ctx, pullRequestID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Babysit PR error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, fmt.Sprintf("Babysitting PR `%s` with task `%s`: %s", pullRequestID, task.ID, task.Title))
+	return d.sendDiscordServiceAction(ctx, channel, pullRequestID, "Which pull request should I babysit?", "Babysit PR", func(pullRequestID string) (string, error) {
+		task, err := d.service.StartPullRequestBabysitter(ctx, pullRequestID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Babysitting PR `%s` with task `%s`: %s", pullRequestID, task.ID, task.Title), nil
+	})
 }
 
 func (d *DiscordDriver) reviewDiscordWorkerChanges(ctx context.Context, channel DiscordChannelConfig, workerID string) error {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which worker should I review?")
-	}
-	review, err := d.service.ReviewWorkerChanges(ctx, workerID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Worker review error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, truncateDiscordMessage(discordWorkerChangesReview(review)))
+	return d.sendDiscordServiceAction(ctx, channel, workerID, "Which worker should I review?", "Worker review", func(workerID string) (string, error) {
+		review, err := d.service.ReviewWorkerChanges(ctx, workerID)
+		if err != nil {
+			return "", err
+		}
+		return truncateDiscordMessage(discordWorkerChangesReview(review)), nil
+	})
 }
 
 func (d *DiscordDriver) applyDiscordTaskResult(ctx context.Context, channel DiscordChannelConfig, taskID string, confirmed bool) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which task result should I apply?")
-	}
-	if !confirmed {
-		return d.client.SendMessage(ctx, channel.ID, "Applying a task result mutates the local source checkout. Repeat the request with an explicit confirmation if you want me to apply it.")
-	}
-	result, err := d.service.ApplyTaskResult(ctx, taskID)
-	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Task apply error: "+err.Error())
-	}
-	return d.client.SendMessage(ctx, channel.ID, discordApplyResult("Applied task result.", result))
+	return d.sendDiscordServiceAction(ctx, channel, taskID, "Which task result should I apply?", "Task apply", func(taskID string) (string, error) {
+		if !confirmed {
+			return "Applying a task result mutates the local source checkout. Repeat the request with an explicit confirmation if you want me to apply it.", nil
+		}
+		result, err := d.service.ApplyTaskResult(ctx, taskID)
+		if err != nil {
+			return "", err
+		}
+		return discordApplyResult("Applied task result.", result), nil
+	})
 }
 
 func (d *DiscordDriver) applyDiscordWorkerChanges(ctx context.Context, channel DiscordChannelConfig, workerID string, confirmed bool) error {
-	workerID = strings.TrimSpace(workerID)
-	if workerID == "" {
-		return d.client.SendMessage(ctx, channel.ID, "Which worker changes should I apply?")
+	return d.sendDiscordServiceAction(ctx, channel, workerID, "Which worker changes should I apply?", "Worker apply", func(workerID string) (string, error) {
+		if !confirmed {
+			return "Applying worker changes mutates the local source checkout. Repeat the request with an explicit confirmation if you want me to apply them.", nil
+		}
+		result, err := d.service.ApplyWorkerChanges(ctx, workerID)
+		if err != nil {
+			return "", err
+		}
+		return discordApplyResult("Applied worker changes.", result), nil
+	})
+}
+
+func (d *DiscordDriver) sendDiscordServiceAction(ctx context.Context, channel DiscordChannelConfig, id string, prompt string, action string, run func(string) (string, error)) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return d.client.SendMessage(ctx, channel.ID, prompt)
 	}
-	if !confirmed {
-		return d.client.SendMessage(ctx, channel.ID, "Applying worker changes mutates the local source checkout. Repeat the request with an explicit confirmation if you want me to apply them.")
-	}
-	result, err := d.service.ApplyWorkerChanges(ctx, workerID)
+	response, err := run(id)
 	if err != nil {
-		return d.client.SendMessage(ctx, channel.ID, "Worker apply error: "+err.Error())
+		return d.client.SendMessage(ctx, channel.ID, action+" error: "+err.Error())
 	}
-	return d.client.SendMessage(ctx, channel.ID, discordApplyResult("Applied worker changes.", result))
+	return d.client.SendMessage(ctx, channel.ID, response)
 }
 
 func (d *DiscordDriver) requireDiscordTask(ctx context.Context, taskID string) error {
