@@ -63,6 +63,9 @@ func main() {
 		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "aged daemon workspace mode")
 		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ""), "aged daemon workspace root; empty defaults to ~/.aged/workspaces")
 		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "aged daemon workspace cleanup policy")
+		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "aged daemon retained workspace artifact cleanup")
+		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "aged daemon retained workspace artifact cleanup dry run")
+		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envDuration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "aged daemon retained workspace artifact cleanup minimum age")
 		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "aged daemon GitHub driver config JSON path or inline JSON")
 		discordDriverPath = flag.String("discord-driver", envOr("AGED_DISCORD_DRIVER", ""), "aged daemon Discord driver config JSON path or inline JSON")
 		webDistPath       = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "aged dashboard dist directory")
@@ -99,6 +102,9 @@ func main() {
 			"-workspace-mode", *workspaceMode,
 			"-workspace-root", *workspaceRoot,
 			"-workspace-cleanup", *workspaceCleanup,
+			"-workspace-artifact-cleanup", strconv.FormatBool(*artifactCleanup),
+			"-workspace-artifact-cleanup-dry-run", strconv.FormatBool(*artifactDryRun),
+			"-workspace-artifact-cleanup-min-age", artifactMinAge.String(),
 			"-github-driver", *githubDriverPath,
 			"-discord-driver", *discordDriverPath,
 			"-web", *webDistPath,
@@ -343,4 +349,28 @@ func envOr(key string, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }

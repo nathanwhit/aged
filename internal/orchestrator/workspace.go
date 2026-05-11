@@ -94,16 +94,19 @@ const (
 )
 
 type WorkspaceCleanup struct {
-	Root          string          `json:"root"`
-	CWD           string          `json:"cwd"`
-	WorkspaceName string          `json:"workspaceName"`
-	Mode          string          `json:"mode"`
-	VCSType       string          `json:"vcsType"`
-	Policy        string          `json:"policy"`
-	Result        WorkspaceResult `json:"result"`
-	Cleaned       bool            `json:"cleaned"`
-	Reason        string          `json:"reason,omitempty"`
-	Error         string          `json:"error,omitempty"`
+	Root          string               `json:"root"`
+	CWD           string               `json:"cwd"`
+	WorkspaceName string               `json:"workspaceName"`
+	Mode          string               `json:"mode"`
+	VCSType       string               `json:"vcsType"`
+	Policy        string               `json:"policy"`
+	Result        WorkspaceResult      `json:"result"`
+	Cleaned       bool                 `json:"cleaned"`
+	Reason        string               `json:"reason,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	ArtifactDirs  []ArtifactDirCleanup `json:"artifactDirs,omitempty"`
+	BytesRemoved  int64                `json:"bytesRemoved,omitempty"`
+	DryRun        bool                 `json:"dryRun,omitempty"`
 }
 
 type WorkspaceMode string
@@ -117,6 +120,17 @@ const (
 	WorkspaceVCSJJ   WorkspaceVCS = "jj"
 	WorkspaceVCSGit  WorkspaceVCS = "git"
 )
+
+type ArtifactDirCleanup struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Bytes       int64  `json:"bytes,omitempty"`
+	Removed     bool   `json:"removed"`
+	WouldRemove bool   `json:"wouldRemove,omitempty"`
+	DryRun      bool   `json:"dryRun,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
 
 func NewWorkspaceManager(vcs WorkspaceVCS, mode WorkspaceMode, workspaceRoot string, cleanupPolicy WorkspaceCleanupPolicy) WorkspaceManager {
 	if vcs == "" {
