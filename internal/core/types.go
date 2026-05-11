@@ -336,7 +336,8 @@ type CreateTaskRequest struct {
 }
 
 type UpdateLoopConfigRequest struct {
-	LoopIntervalSeconds *int `json:"loopIntervalSeconds,omitempty"`
+	LoopIntervalSeconds *int    `json:"loopIntervalSeconds,omitempty"`
+	LoopPrompt          *string `json:"loopPrompt,omitempty"`
 }
 
 type AssistantRequest struct {
