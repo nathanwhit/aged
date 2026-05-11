@@ -250,6 +250,28 @@ func TestSSHRunnerPollDedupesRemoteCodexInfrastructureWarningsAcrossPolls(t *tes
 	}
 }
 
+func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
+	executor := &timeoutThenStatusExecutor{}
+	runner := SSHRunner{
+		Executor:           executor,
+		PollInterval:       time.Nanosecond,
+		PollCommandTimeout: time.Millisecond,
+	}
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("mock"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	if executor.statusCalls != 2 {
+		t.Fatalf("status calls = %d, want 2", executor.statusCalls)
+	}
+}
+
 func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -613,6 +635,27 @@ func valueAt(values []string, index int) string {
 		index = len(values) - 1
 	}
 	return values[index]
+}
+
+type timeoutThenStatusExecutor struct {
+	statusCalls int
+}
+
+func (e *timeoutThenStatusExecutor) Run(ctx context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(joined, "stdout.log"), strings.Contains(joined, "stderr.log"):
+		return "", nil
+	case strings.Contains(joined, "status.json"):
+		e.statusCalls++
+		if e.statusCalls == 1 {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		return `{"status":"succeeded","exit":0}`, nil
+	default:
+		return "", nil
+	}
 }
 
 func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input string) (string, error) {

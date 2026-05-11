@@ -3758,6 +3758,123 @@ func TestRecoverRemoteWorkersCancelsStaleLocalWorkers(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkersResumesRunningTaskWithTerminalGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-orphan-running-graph"
+	workerID := "worker-impl"
+	initial := Plan{WorkerKind: "codex", Prompt: "implement the cleanup"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Orphaned running graph",
+			"prompt": "Recover after follow-up setup failure.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(initial)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-impl",
+			"workerId":   workerID,
+			"workerKind": "codex",
+			"targetId":   "local",
+			"targetKind": "local",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "codex",
+			"metadata": map[string]any{"nodeID": "node-impl"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "implemented",
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "internal/cleanup.go", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	followUp := Plan{
+		WorkerKind: "codex",
+		Prompt:     "review the cleanup",
+		Metadata: map[string]any{
+			"nodeID":       "node-review",
+			"spawnID":      "review",
+			"spawnRole":    "reviewer",
+			"baseWorkerID": workerID,
+		},
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(followUp)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventExecutionStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId": "node-review",
+			"status": core.WorkerFailed,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:    "complete",
+		Rationale: "primary worker already produced the candidate",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if !hasTaskAction(snapshot.Events, taskID, "startup_running_recovery", "resumed") {
+		t.Fatalf("missing startup running recovery action")
+	}
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 1 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
+		t.Fatalf("recovery reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
 func TestRecoverRemoteWorkersResumesOrphanedPullRequestFollowUpPlanning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
