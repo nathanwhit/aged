@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"aged/internal/core"
@@ -177,34 +178,28 @@ func taskOrchestrationGraph(snapshot core.Snapshot, taskID string) *core.Orchest
 }
 
 func recentTaskEvents(events []core.Event, taskID string, limit int) []core.Event {
-	if limit <= 0 {
-		limit = defaultTaskDetailEventLimit
-	}
-	var out []core.Event
-	for index := len(events) - 1; index >= 0 && len(out) < limit; index-- {
-		if events[index].TaskID == taskID {
-			out = append(out, events[index])
-		}
-	}
-	for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
-		out[left], out[right] = out[right], out[left]
-	}
-	return out
+	return recentEvents(events, limit, func(event core.Event) bool {
+		return event.TaskID == taskID
+	})
 }
 
 func recentWorkerEvents(events []core.Event, workerID string, limit int) []core.Event {
+	return recentEvents(events, limit, func(event core.Event) bool {
+		return event.WorkerID == workerID
+	})
+}
+
+func recentEvents(events []core.Event, limit int, match func(core.Event) bool) []core.Event {
 	if limit <= 0 {
 		limit = defaultTaskDetailEventLimit
 	}
 	var out []core.Event
 	for index := len(events) - 1; index >= 0 && len(out) < limit; index-- {
-		if events[index].WorkerID == workerID {
+		if match(events[index]) {
 			out = append(out, events[index])
 		}
 	}
-	for left, right := 0, len(out)-1; left < right; left, right = left+1, right-1 {
-		out[left], out[right] = out[right], out[left]
-	}
+	slices.Reverse(out)
 	return out
 }
 
