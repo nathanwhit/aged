@@ -38,7 +38,8 @@ export async function createTask(input: {
 }
 
 export async function updateTaskLoopConfig(taskId: string, input: {
-  loopIntervalSeconds: number;
+  loopIntervalSeconds?: number;
+  loopPrompt?: string;
 }): Promise<Task> {
   const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, {
     method: "PUT",

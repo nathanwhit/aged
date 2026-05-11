@@ -1224,11 +1224,18 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 }
 
 func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req core.UpdateLoopConfigRequest) (core.Task, error) {
-	if req.LoopIntervalSeconds == nil {
-		return core.Task{}, errors.New("loopIntervalSeconds is required")
+	if req.LoopIntervalSeconds == nil && req.LoopPrompt == nil {
+		return core.Task{}, errors.New("loop config update requires loopIntervalSeconds or loopPrompt")
 	}
-	if *req.LoopIntervalSeconds < 0 {
+	if req.LoopIntervalSeconds != nil && *req.LoopIntervalSeconds < 0 {
 		return core.Task{}, errors.New("loopIntervalSeconds must be >= 0")
+	}
+	loopPrompt := ""
+	if req.LoopPrompt != nil {
+		loopPrompt = strings.TrimSpace(*req.LoopPrompt)
+		if loopPrompt == "" {
+			return core.Task{}, errors.New("loopPrompt must not be empty")
+		}
 	}
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -1244,8 +1251,19 @@ func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req c
 	if isTerminalTaskStatus(task.Status) {
 		return core.Task{}, errors.New("cannot update a terminal task")
 	}
-	metadataPatch := map[string]any{
-		"loopIntervalSeconds": *req.LoopIntervalSeconds,
+	metadataPatch := make(map[string]any)
+	action := map[string]any{
+		"kind":   "loop_config_updated",
+		"status": "updated",
+	}
+	if req.LoopIntervalSeconds != nil {
+		metadataPatch["loopIntervalSeconds"] = *req.LoopIntervalSeconds
+		action["loopIntervalSeconds"] = *req.LoopIntervalSeconds
+	}
+	if req.LoopPrompt != nil {
+		metadataPatch["loopPrompt"] = loopPrompt
+		action["loopPromptChanged"] = true
+		action["loopPromptPreview"] = truncateText(loopPrompt, 200)
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskUpdated,
@@ -1256,11 +1274,7 @@ func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req c
 	}); err != nil {
 		return core.Task{}, err
 	}
-	if err := s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":                "loop_config_updated",
-		"status":              "updated",
-		"loopIntervalSeconds": *req.LoopIntervalSeconds,
-	}); err != nil {
+	if err := s.recordTaskAction(ctx, taskID, action); err != nil {
 		return core.Task{}, err
 	}
 	snapshot, err = s.store.Snapshot(ctx)
@@ -4011,6 +4025,11 @@ func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun
 			Source:     "remote-worker",
 			ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
 			Metadata:   core.MustJSON(metadata),
+		}
+		var err error
+		req, err = NormalizeCreateTaskRequest(req)
+		if err != nil {
+			return fmt.Errorf("normalize task from remote callback %s: %w", callback.ID, err)
 		}
 		if _, err := s.CreateTask(ctx, req); err != nil {
 			return fmt.Errorf("create task from remote callback %s: %w", callback.ID, err)
