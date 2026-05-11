@@ -228,13 +228,13 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 		Status:    "unknown",
 		CheckedAt: time.Now().UTC(),
 	}
-	workDir := strings.TrimSpace(target.WorkDir)
-	if workDir == "" {
+	checkoutRoot := strings.TrimSpace(targetCheckoutRoot(target))
+	if checkoutRoot == "" {
 		health.Status = "unhealthy"
-		health.Error = "remote workDir is required"
+		health.Error = "remote checkoutRoot is required"
 		return health, core.TargetResources{}
 	}
-	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remoteProbeScript(workDir)))
+	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remoteProbeScript(checkoutRoot)))
 	if err != nil {
 		health.Status = "error"
 		health.Error = strings.TrimSpace(nonEmpty(out, err.Error()))
@@ -265,13 +265,13 @@ func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetH
 	} else {
 		health.Status = "unhealthy"
 		if !checkoutRootOK {
-			health.Error = nonEmpty(values["checkoutRootError"], "remote workDir parent is not writable")
+			health.Error = nonEmpty(values["checkoutRootError"], "remote checkoutRoot is not writable")
 		} else if !health.Tmux {
 			health.Error = "tmux is not available"
 		}
 	}
 	if health.Status == "ok" && !health.RepoPresent {
-		health.Error = "repo path will be prepared before worker start"
+		health.Error = "project checkout path will be prepared before worker start"
 	}
 	return health, resources
 }
@@ -468,19 +468,18 @@ else
 fi`, shellQuote(workDir), shellQuote(patchPath))
 }
 
-func remoteProbeScript(workDir string) string {
+func remoteProbeScript(checkoutRoot string) string {
 	return fmt.Sprintf(`%s
-work_dir=%s
-work_parent=$(dirname "$work_dir")
+checkout_root=%s
 checkout_root_error=""
-if [ -d "$work_dir" ]; then
+if [ -d "$checkout_root" ]; then
   checkout_root_ok=true
-elif checkout_root_error=$(mkdir -p "$work_parent" 2>&1); then
-  if [ -d "$work_parent" ] && [ -w "$work_parent" ]; then
+elif checkout_root_error=$(mkdir -p "$checkout_root" 2>&1); then
+  if [ -d "$checkout_root" ] && [ -w "$checkout_root" ]; then
     checkout_root_ok=true
   else
     checkout_root_ok=false
-    checkout_root_error="remote workDir parent is not writable: $work_parent"
+    checkout_root_error="remote checkoutRoot is not writable: $checkout_root"
   fi
 else
   checkout_root_ok=false
@@ -492,12 +491,12 @@ printf 'tool.codex=%%s\n' "$(command -v codex >/dev/null 2>&1 && echo true || ec
 printf 'tool.claude=%%s\n' "$(command -v claude >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.git=%%s\n' "$(command -v git >/dev/null 2>&1 && echo true || echo false)"
 printf 'tool.jj=%%s\n' "$(command -v jj >/dev/null 2>&1 && echo true || echo false)"
-printf 'repoPresent=%%s\n' "$(test -d "$work_dir" && echo true || echo false)"
-df -Pk "$work_parent" 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
+printf 'repoPresent=%%s\n' "$(test -d "$checkout_root" && echo true || echo false)"
+df -Pk "$checkout_root" 2>/dev/null | awk 'NR==2 { print "diskAvailableKB="$4; print "diskUsedPercent="$5 }'
 if [ -r /proc/meminfo ]; then awk '/MemTotal:/ { print "memoryTotalKB="$2 } /MemAvailable:/ { print "memoryAvailableKB="$2 }' /proc/meminfo; fi
 if [ -r /proc/loadavg ]; then awk '{ print "load1="$1 }' /proc/loadavg; else uptime | sed -n 's/.*load averages*: *\([0-9.]*\).*/load1=\1/p'; fi
 cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 0)"
-printf 'cpuCount=%%s\n' "$cpu_count"`, remoteWorkerEnvScript(), shellQuote(workDir))
+printf 'cpuCount=%%s\n' "$cpu_count"`, remoteWorkerEnvScript(), shellQuote(checkoutRoot))
 }
 
 func parseProbeValues(out string) map[string]string {

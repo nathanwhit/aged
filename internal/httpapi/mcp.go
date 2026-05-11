@@ -62,6 +62,7 @@ type mcpProjectPatch struct {
 	DefaultBase       *string                    `json:"defaultBase"`
 	WorkspaceRoot     *string                    `json:"workspaceRoot"`
 	TargetLabels      *map[string]string         `json:"targetLabels"`
+	RemoteCheckouts   *map[string]string         `json:"remoteCheckouts"`
 	PullRequestPolicy *mcpPullRequestPolicyPatch `json:"pullRequestPolicy"`
 }
 
@@ -81,6 +82,7 @@ type mcpTargetPatch struct {
 	Port                  *int                    `json:"port"`
 	IdentityFile          *string                 `json:"identityFile"`
 	InsecureIgnoreHostKey *bool                   `json:"insecureIgnoreHostKey"`
+	CheckoutRoot          *string                 `json:"checkoutRoot"`
 	WorkDir               *string                 `json:"workDir"`
 	WorkRoot              *string                 `json:"workRoot"`
 	Labels                *map[string]string      `json:"labels"`
@@ -505,6 +507,9 @@ func mergeMCPProjectPatch(current core.Project, patch mcpProjectPatch) core.Proj
 	if patch.TargetLabels != nil {
 		updated.TargetLabels = *patch.TargetLabels
 	}
+	if patch.RemoteCheckouts != nil {
+		updated.RemoteCheckouts = *patch.RemoteCheckouts
+	}
 	if patch.PullRequestPolicy != nil {
 		if patch.PullRequestPolicy.BranchPrefix != nil {
 			updated.PullRequestPolicy.BranchPrefix = strings.TrimSpace(*patch.PullRequestPolicy.BranchPrefix)
@@ -583,6 +588,9 @@ func mergeMCPTargetPatch(current core.TargetConfig, patch mcpTargetPatch) core.T
 	}
 	if patch.InsecureIgnoreHostKey != nil {
 		updated.InsecureIgnoreHostKey = *patch.InsecureIgnoreHostKey
+	}
+	if patch.CheckoutRoot != nil {
+		updated.CheckoutRoot = strings.TrimSpace(*patch.CheckoutRoot)
 	}
 	if patch.WorkDir != nil {
 		updated.WorkDir = strings.TrimSpace(*patch.WorkDir)
@@ -884,17 +892,18 @@ func mcpTools() []mcpTool {
 			Title:       "Create aged project",
 			Description: "Add a project/repository to the daemon.",
 			InputSchema: objectSchema(map[string]any{
-				"id":            stringSchema("Project id."),
-				"name":          stringSchema("Display name."),
-				"localPath":     stringSchema("Absolute path to local checkout on the daemon host."),
-				"repo":          stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
-				"upstreamRepo":  stringSchema("Optional upstream GitHub repo used as PR and issue target."),
-				"headRepoOwner": stringSchema("Optional GitHub owner for fork PR heads."),
-				"pushRemote":    stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
-				"vcs":           stringSchema("VCS kind: auto, jj, or git."),
-				"defaultBase":   stringSchema("Default PR base branch."),
-				"workspaceRoot": stringSchema("Optional workspace root override."),
-				"targetLabels":  objectUntypedSchema("Optional target label policy."),
+				"id":              stringSchema("Project id."),
+				"name":            stringSchema("Display name."),
+				"localPath":       stringSchema("Absolute path to local checkout on the daemon host."),
+				"repo":            stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
+				"upstreamRepo":    stringSchema("Optional upstream GitHub repo used as PR and issue target."),
+				"headRepoOwner":   stringSchema("Optional GitHub owner for fork PR heads."),
+				"pushRemote":      stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
+				"vcs":             stringSchema("VCS kind: auto, jj, or git."),
+				"defaultBase":     stringSchema("Default PR base branch."),
+				"workspaceRoot":   stringSchema("Optional workspace root override."),
+				"targetLabels":    objectUntypedSchema("Optional target label policy."),
+				"remoteCheckouts": objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
 				"pullRequestPolicy": objectSchema(map[string]any{
 					"branchPrefix":        stringSchema("Optional PR branch prefix."),
 					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
@@ -909,17 +918,18 @@ func mcpTools() []mcpTool {
 			Title:       "Update aged project",
 			Description: "Patch an existing project/repository. Omitted fields are preserved; pass empty strings, empty maps, or false only when intentionally setting or clearing that value. Project normalization restores defaults for fields such as name, vcs, defaultBase, and pullRequestPolicy.branchPrefix when left empty.",
 			InputSchema: objectSchema(map[string]any{
-				"id":            stringSchema("Project id to update."),
-				"name":          stringSchema("Display name."),
-				"localPath":     stringSchema("Absolute path to local checkout on the daemon host."),
-				"repo":          stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
-				"upstreamRepo":  stringSchema("Optional upstream GitHub repo used as PR and issue target."),
-				"headRepoOwner": stringSchema("Optional GitHub owner for fork PR heads."),
-				"pushRemote":    stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
-				"vcs":           stringSchema("VCS kind: auto, jj, or git."),
-				"defaultBase":   stringSchema("Default PR base branch."),
-				"workspaceRoot": stringSchema("Optional workspace root override."),
-				"targetLabels":  objectUntypedSchema("Optional target label policy."),
+				"id":              stringSchema("Project id to update."),
+				"name":            stringSchema("Display name."),
+				"localPath":       stringSchema("Absolute path to local checkout on the daemon host."),
+				"repo":            stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
+				"upstreamRepo":    stringSchema("Optional upstream GitHub repo used as PR and issue target."),
+				"headRepoOwner":   stringSchema("Optional GitHub owner for fork PR heads."),
+				"pushRemote":      stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
+				"vcs":             stringSchema("VCS kind: auto, jj, or git."),
+				"defaultBase":     stringSchema("Default PR base branch."),
+				"workspaceRoot":   stringSchema("Optional workspace root override."),
+				"targetLabels":    objectUntypedSchema("Optional target label policy."),
+				"remoteCheckouts": objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
 				"pullRequestPolicy": objectSchema(map[string]any{
 					"branchPrefix":        stringSchema("Optional PR branch prefix."),
 					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
@@ -1075,7 +1085,8 @@ func targetMCPProperties() map[string]any {
 		"port":                  map[string]any{"type": "integer", "description": "Optional SSH port."},
 		"identityFile":          stringSchema("Optional SSH identity file path."),
 		"insecureIgnoreHostKey": map[string]any{"type": "boolean", "description": "Skip SSH host key verification."},
-		"workDir":               stringSchema("Checkout path on the target."),
+		"checkoutRoot":          stringSchema("Root directory for derived per-project checkouts on the target."),
+		"workDir":               stringSchema("Compatibility alias for checkoutRoot."),
 		"workRoot":              stringSchema("Run directory root on the target."),
 		"labels":                map[string]any{"type": "object", "description": "Target labels used for placement.", "additionalProperties": map[string]any{"type": "string"}},
 		"capacity": objectSchema(map[string]any{

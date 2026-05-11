@@ -593,6 +593,9 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 		DefaultBase:   "main",
 		WorkspaceRoot: ".aged/workspaces",
 		TargetLabels:  map[string]string{"pool": "local"},
+		RemoteCheckouts: map[string]string{
+			"vm-1": "/srv/aged/checkouts/aged",
+		},
 	}
 	if _, err := store.SaveProject(ctx, project, true); err != nil {
 		t.Fatal(err)
@@ -614,7 +617,7 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 	if len(projects) != 1 {
 		t.Fatalf("projects = %d, want 1", len(projects))
 	}
-	if projects[0].Repo != "owner/aged" || projects[0].UpstreamRepo != "upstream/aged" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || projects[0].TargetLabels["pool"] != "local" {
+	if projects[0].Repo != "owner/aged" || projects[0].UpstreamRepo != "upstream/aged" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || projects[0].TargetLabels["pool"] != "local" || projects[0].RemoteCheckouts["vm-1"] != "/srv/aged/checkouts/aged" {
 		t.Fatalf("project = %+v", projects[0])
 	}
 }
@@ -722,7 +725,7 @@ func TestTargetsPersistInSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 1 || targets[0].ID != "vm-1" || targets[0].Host != "vm.local" || targets[0].Labels["location"] != "remote" || targets[0].Capacity.MaxWorkers != 2 {
+	if len(targets) != 1 || targets[0].ID != "vm-1" || targets[0].Host != "vm.local" || targets[0].Labels["location"] != "remote" || targets[0].Capacity.MaxWorkers != 2 || targets[0].CheckoutRoot != "/repo" {
 		t.Fatalf("targets = %+v", targets)
 	}
 	if err := store.DeleteTarget(ctx, "vm-1"); err != nil {

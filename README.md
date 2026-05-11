@@ -38,7 +38,7 @@ The dev-control server defaults to `-assistant auto`, so a `-worker codex` dev d
 
 Task titles are optional. When `title` is omitted or blank, aged asks the configured assistant for a short 1-8 word title and falls back to a local prompt-derived title if the assistant is unavailable.
 
-Remote execution targets can be registered dynamically through `POST /api/targets` / `PUT /api/targets/{id}` or through the dashboard Targets pane. They are persisted in SQLite and become available to the live scheduler without restarting the daemon.
+Remote execution targets can be registered dynamically through `POST /api/targets` / `PUT /api/targets/{id}` or through the dashboard Targets pane. They are persisted in SQLite and become available to the live scheduler without restarting the daemon. The dashboard exposes the SSH `checkoutRoot` on targets and per-target project checkout overrides as `target id` / `path` rows on projects.
 
 `-targets` / `AGED_TARGETS` still accept startup seed JSON:
 
@@ -52,7 +52,7 @@ Remote execution targets can be registered dynamically through `POST /api/target
       "user": "aged",
       "identityFile": "/Users/me/.ssh/id_ed25519",
       "insecureIgnoreHostKey": false,
-      "workDir": "/srv/aged/repo",
+      "checkoutRoot": "/srv/aged/checkouts",
       "workRoot": "/srv/aged/runs",
       "labels": { "role": "benchmark" },
       "capacity": { "maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32 }
@@ -64,7 +64,7 @@ Remote execution targets can be registered dynamically through `POST /api/target
 `identityFile` is optional. Leave it unset to use normal OpenSSH behavior, including `ssh-agent` and `~/.ssh/config`.
 
 SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
-Before starting a fresh remote worker, aged prepares the project checkout on the target: if `workDir` is missing it clones the configured project repo, and if `workDir` is a clean Git checkout it fetches origin and checks out the project `defaultBase` from `origin`. Dirty remote checkouts are rejected instead of being overwritten. Retry/follow-up workers reuse the previous remote workdir so partial work is preserved.
+Before starting a fresh remote worker, aged resolves a project-scoped checkout path for the selected target. A project `remoteCheckouts` entry for the target id wins; otherwise aged derives `checkoutRoot/<project-id>` from the target-level `checkoutRoot`. Existing target-level `workDir` configs remain accepted as a compatibility alias for `checkoutRoot`, but they are treated as a root for derived per-project checkouts rather than a single shared checkout. If the resolved checkout is missing, aged clones the configured project repo; if it is a Git checkout, aged fetches origin and checks out the project `defaultBase` from `origin`. Retry/follow-up workers reuse the previous remote workdir so partial work is preserved.
 Remote workers also write VCS change summaries and `diff.patch` into the run directory. When the remote workdir is a `jj` or Git checkout, aged reads those artifacts back into the normal `worker.completed.workspaceChanges` projection.
 Remote worker patches can be reviewed and applied through the normal worker apply endpoint. The current remote apply path applies `diff.patch` to the task project's local checkout with `git apply`, then records `worker.changes_applied`.
 
@@ -149,7 +149,8 @@ Projects are persisted in SQLite. On first startup with an empty database, aged 
       "localPath": "/Users/me/Documents/Code/aged",
       "repo": "owner/aged",
       "defaultBase": "main",
-      "targetLabels": { "role": "default" }
+      "targetLabels": { "role": "default" },
+      "remoteCheckouts": { "perf-1": "/srv/aged/custom/aged" }
     },
     {
       "id": "aged-fork",

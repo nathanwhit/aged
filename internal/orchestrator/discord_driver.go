@@ -112,6 +112,7 @@ type discordProjectPatch struct {
 	DefaultBase       *string                        `json:"defaultBase"`
 	WorkspaceRoot     *string                        `json:"workspaceRoot"`
 	TargetLabels      *map[string]string             `json:"targetLabels"`
+	RemoteCheckouts   *map[string]string             `json:"remoteCheckouts"`
 	PullRequestPolicy *discordPullRequestPolicyPatch `json:"pullRequestPolicy"`
 }
 
@@ -130,6 +131,7 @@ type discordTargetPatch struct {
 	Port                  *int                        `json:"port"`
 	IdentityFile          *string                     `json:"identityFile"`
 	InsecureIgnoreHostKey *bool                       `json:"insecureIgnoreHostKey"`
+	CheckoutRoot          *string                     `json:"checkoutRoot"`
 	WorkDir               *string                     `json:"workDir"`
 	WorkRoot              *string                     `json:"workRoot"`
 	Labels                *map[string]string          `json:"labels"`
@@ -718,6 +720,7 @@ func (d *DiscordDriver) createDiscordTarget(ctx context.Context, channel Discord
 	target.Host = strings.TrimSpace(target.Host)
 	target.User = strings.TrimSpace(target.User)
 	target.IdentityFile = strings.TrimSpace(target.IdentityFile)
+	target.CheckoutRoot = strings.TrimSpace(target.CheckoutRoot)
 	target.WorkDir = strings.TrimSpace(target.WorkDir)
 	target.WorkRoot = strings.TrimSpace(target.WorkRoot)
 	if target.ID == "" {
@@ -923,6 +926,7 @@ Return exactly one JSON object with this schema and no Markdown fence:
     "defaultBase": "optional default branch",
     "workspaceRoot": "optional workspace root override",
     "targetLabels": {},
+    "remoteCheckouts": {"target-id": "optional project checkout path override on that SSH target"},
     "pullRequestPolicy": {
       "branchPrefix": "optional PR branch prefix",
       "draft": false,
@@ -938,7 +942,8 @@ Return exactly one JSON object with this schema and no Markdown fence:
     "port": 22,
     "identityFile": "optional ssh identity file path",
     "insecureIgnoreHostKey": false,
-    "workDir": "checkout path on the target",
+    "checkoutRoot": "root directory for derived per-project checkouts on the target",
+    "workDir": "compatibility alias for checkoutRoot",
     "workRoot": "worker run root on the target",
     "labels": {},
     "capacity": {
@@ -2149,6 +2154,9 @@ func mergeDiscordProjectPatch(current core.Project, _ core.Project, patch discor
 	if patch.TargetLabels != nil {
 		updated.TargetLabels = *patch.TargetLabels
 	}
+	if patch.RemoteCheckouts != nil {
+		updated.RemoteCheckouts = *patch.RemoteCheckouts
+	}
 	if patch.PullRequestPolicy != nil {
 		if patch.PullRequestPolicy.BranchPrefix != nil {
 			updated.PullRequestPolicy.BranchPrefix = strings.TrimSpace(*patch.PullRequestPolicy.BranchPrefix)
@@ -2186,6 +2194,9 @@ func mergeDiscordTargetPatch(current core.TargetConfig, _ core.TargetConfig, pat
 	}
 	if patch.InsecureIgnoreHostKey != nil {
 		updated.InsecureIgnoreHostKey = *patch.InsecureIgnoreHostKey
+	}
+	if patch.CheckoutRoot != nil {
+		updated.CheckoutRoot = strings.TrimSpace(*patch.CheckoutRoot)
 	}
 	if patch.WorkDir != nil {
 		updated.WorkDir = strings.TrimSpace(*patch.WorkDir)

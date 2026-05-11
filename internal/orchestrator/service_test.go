@@ -6096,7 +6096,7 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 		t.Fatalf("workers = %+v", snapshot.Workers)
 	}
 	remoteWorker := snapshot.Workers[0]
-	wantPrompt := workerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo"})
+	wantPrompt := workerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default"})
 	if remoteWorker.Prompt != wantPrompt {
 		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
 	}
@@ -6105,6 +6105,57 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	}
 	if !hasEvent(snapshot.Events, core.EventWorkerOutput, task.ID, remoteWorker.ID) {
 		t.Fatalf("missing remote worker output")
+	}
+}
+
+func TestServiceRemoteWorkerUsesProjectCheckoutOverride(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo-root",
+		WorkRoot: "/runs",
+		Labels:   map[string]string{"role": "remote"},
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 4},
+	}})
+	executor := &fakeRemoteExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "remote",
+		Prompt:     "run remotely",
+		Metadata: map[string]any{
+			"targetLabels": map[string]any{"role": "remote"},
+		},
+	}}, map[string]worker.Runner{
+		"remote": buildOnlyRunner{kind: "remote", command: []string{"sh", "-lc", "echo remote output"}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	if _, err := service.CreateProject(ctx, core.Project{
+		ID:              "node",
+		LocalPath:       t.TempDir(),
+		Repo:            "owner/node",
+		RemoteCheckouts: map[string]string{"vm-1": "/custom/node"},
+		TargetLabels:    map[string]string{"role": "remote"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "node", Title: "Remote", Prompt: "Run on VM."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 {
+		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
+	}
+	if snapshot.ExecutionNodes[0].RemoteWorkDir != "/custom/node" {
+		t.Fatalf("remote workdir = %q, want override", snapshot.ExecutionNodes[0].RemoteWorkDir)
+	}
+	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
+	if !strings.Contains(joinedCommands, "/custom/node") {
+		t.Fatalf("remote commands did not use checkout override: %+v", executor.commands)
 	}
 }
 

@@ -168,6 +168,7 @@ type TargetConfig struct {
 	Port                  int               `json:"port,omitempty"`
 	IdentityFile          string            `json:"identityFile,omitempty"`
 	InsecureIgnoreHostKey bool              `json:"insecureIgnoreHostKey,omitempty"`
+	CheckoutRoot          string            `json:"checkoutRoot,omitempty"`
 	WorkDir               string            `json:"workDir,omitempty"`
 	WorkRoot              string            `json:"workRoot,omitempty"`
 	Labels                map[string]string `json:"labels,omitempty"`
@@ -239,6 +240,7 @@ type Project struct {
 	DefaultBase       string            `json:"defaultBase,omitempty"`
 	WorkspaceRoot     string            `json:"workspaceRoot,omitempty"`
 	TargetLabels      map[string]string `json:"targetLabels,omitempty"`
+	RemoteCheckouts   map[string]string `json:"remoteCheckouts,omitempty"`
 	PullRequestPolicy PullRequestPolicy `json:"pullRequestPolicy,omitempty"`
 }
 

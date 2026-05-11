@@ -34,6 +34,7 @@ type TargetConfig struct {
 	Port                  int               `json:"port,omitempty"`
 	IdentityFile          string            `json:"identityFile,omitempty"`
 	InsecureIgnoreHostKey bool              `json:"insecureIgnoreHostKey,omitempty"`
+	CheckoutRoot          string            `json:"checkoutRoot,omitempty"`
 	WorkDir               string            `json:"workDir,omitempty"`
 	WorkRoot              string            `json:"workRoot,omitempty"`
 	Labels                map[string]string `json:"labels,omitempty"`
@@ -110,7 +111,14 @@ func normalizeTargetConfig(config TargetConfig) (TargetConfig, error) {
 	config.Host = strings.TrimSpace(config.Host)
 	config.User = strings.TrimSpace(config.User)
 	config.IdentityFile = strings.TrimSpace(config.IdentityFile)
+	config.CheckoutRoot = strings.TrimSpace(config.CheckoutRoot)
 	config.WorkDir = strings.TrimSpace(config.WorkDir)
+	if config.CheckoutRoot == "" {
+		config.CheckoutRoot = config.WorkDir
+	}
+	if config.WorkDir == "" {
+		config.WorkDir = config.CheckoutRoot
+	}
 	config.WorkRoot = strings.TrimSpace(config.WorkRoot)
 	if config.Kind == TargetKindSSH && config.Host == "" {
 		return TargetConfig{}, errors.New("ssh target host is required")
@@ -136,6 +144,7 @@ func targetConfigFromCore(config core.TargetConfig) TargetConfig {
 		Port:                  config.Port,
 		IdentityFile:          config.IdentityFile,
 		InsecureIgnoreHostKey: config.InsecureIgnoreHostKey,
+		CheckoutRoot:          config.CheckoutRoot,
 		WorkDir:               config.WorkDir,
 		WorkRoot:              config.WorkRoot,
 		Labels:                config.Labels,
@@ -152,6 +161,7 @@ func coreTargetConfig(config TargetConfig) core.TargetConfig {
 		Port:                  config.Port,
 		IdentityFile:          config.IdentityFile,
 		InsecureIgnoreHostKey: config.InsecureIgnoreHostKey,
+		CheckoutRoot:          config.CheckoutRoot,
 		WorkDir:               config.WorkDir,
 		WorkRoot:              config.WorkRoot,
 		Labels:                config.Labels,
@@ -372,7 +382,7 @@ func (r *TargetRegistry) isAvailableLocked(target TargetConfig) bool {
 	if r.running[target.ID] >= target.Capacity.MaxWorkers {
 		return false
 	}
-	if target.Kind == TargetKindSSH && strings.TrimSpace(target.WorkDir) == "" {
+	if target.Kind == TargetKindSSH && strings.TrimSpace(targetCheckoutRoot(target)) == "" {
 		return false
 	}
 	health, hasHealth := r.health[target.ID]

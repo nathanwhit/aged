@@ -3541,9 +3541,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		plan.Metadata["planID"] = planID
 	}
 	project := s.projectForTask(task)
-	remoteWorkDir := strings.TrimSpace(target.WorkDir)
-	if remoteWorkDir == "" {
-		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: remote workDir is required")
+	remoteWorkDir, err := resolveRemoteCheckout(project, target)
+	if err != nil {
+		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w", err)
 	}
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")

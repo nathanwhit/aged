@@ -49,6 +49,7 @@ export async function createProject(input: {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  remoteCheckouts?: Record<string, string>;
   pullRequestPolicy?: {
     branchPrefix?: string;
     draft?: boolean;
@@ -80,6 +81,7 @@ export async function updateProject(id: string, input: {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  remoteCheckouts?: Record<string, string>;
   pullRequestPolicy?: {
     branchPrefix?: string;
     draft?: boolean;
@@ -145,6 +147,7 @@ export type TargetInput = {
   port?: number;
   identityFile?: string;
   insecureIgnoreHostKey?: boolean;
+  checkoutRoot?: string;
   workDir?: string;
   workRoot?: string;
   labels?: Record<string, string>;
