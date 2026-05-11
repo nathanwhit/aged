@@ -49,6 +49,23 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 	}
 }
 
+func TestExtractCodexAssistantOutputHandlesLargeJSONLine(t *testing.T) {
+	message := strings.Repeat("large-result-", 100000)
+	data := []byte(`{"type":"thread.started","thread_id":"thread-large"}` + "\n" +
+		`{"type":"item.completed","item":{"id":"msg","type":"agent_message","text":` + strconv.Quote(message) + `}}` + "\n")
+
+	content, sessionID, err := extractCodexAssistantOutput(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != message {
+		t.Fatalf("content length = %d, want %d", len(content), len(message))
+	}
+	if sessionID != "thread-large" {
+		t.Fatalf("session = %q", sessionID)
+	}
+}
+
 func TestCLIAssistantUsesClaudeStreamResult(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	stdinPath := filepath.Join(t.TempDir(), "stdin.txt")

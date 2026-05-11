@@ -80,7 +80,7 @@ func TestCommandRunnerHandlesLargeLines(t *testing.T) {
 	sink := &recordingSink{}
 
 	err := runner.Run(context.Background(), Spec{
-		Command: []string{"/bin/sh", "-c", "printf '%080000d\\n' 0"},
+		Command: []string{"/bin/sh", "-c", "printf '%02000000d\\n' 0"},
 	}, sink)
 	if err != nil {
 		t.Fatal(err)
@@ -88,8 +88,66 @@ func TestCommandRunnerHandlesLargeLines(t *testing.T) {
 	if len(sink.events) != 1 {
 		t.Fatalf("events = %d", len(sink.events))
 	}
-	if got := len(sink.events[0].Text); got != 80000 {
+	if got := len(sink.events[0].Text); got != 2000000 {
 		t.Fatalf("large line length = %d", got)
+	}
+}
+
+func TestStreamLinesHandlesLargeJSONEvent(t *testing.T) {
+	text := strings.Repeat("x", 2*1024*1024)
+	line := `{"type":"item.completed","item":{"id":"msg","type":"agent_message","text":"` + text + `"}}`
+	sink := &recordingSink{}
+	errCh := make(chan error, 1)
+
+	streamLines(context.Background(), sink, ParserForKind("codex"), "stdout", strings.NewReader(line+"\n"), errCh)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(sink.events))
+	}
+	if event := sink.events[0]; event.Kind != EventResult || event.Stream != "stdout" || event.Text != text || len(event.Raw) != len(line) {
+		t.Fatalf("event = kind %q stream %q text len %d raw len %d", event.Kind, event.Stream, len(event.Text), len(event.Raw))
+	}
+}
+
+func TestStreamLinesChunksOversizedTextLine(t *testing.T) {
+	line := strings.Repeat("z", maxStructuredOutputLineBytes+1024)
+	sink := &recordingSink{}
+	errCh := make(chan error, 1)
+
+	streamLines(context.Background(), sink, ParserForKind("mock"), "stdout", strings.NewReader(line+"\n"), errCh)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) < 2 {
+		t.Fatalf("events = %d, want chunked oversized line", len(sink.events))
+	}
+	if !strings.Contains(sink.events[0].Text, "oversized log line chunk 1") {
+		t.Fatalf("first chunk = %q", sink.events[0].Text[:min(len(sink.events[0].Text), 80)])
+	}
+	if !strings.Contains(sink.events[len(sink.events)-1].Text, "bytes 16777216-16778240+] ") {
+		t.Fatalf("last chunk missing explicit byte range: %q", sink.events[len(sink.events)-1].Text[:min(len(sink.events[len(sink.events)-1].Text), 120)])
+	}
+}
+
+func TestStreamLinesReportsOversizedJSONEventLine(t *testing.T) {
+	line := `{"type":"item.completed","item":{"type":"agent_message","text":"` + strings.Repeat("x", maxStructuredOutputLineBytes) + `"}}`
+	sink := &recordingSink{}
+	errCh := make(chan error, 1)
+
+	streamLines(context.Background(), sink, ParserForKind("codex"), "stdout", strings.NewReader(line+"\nnext log\n"), errCh)
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 2 {
+		t.Fatalf("events = %d, want oversized report and following log", len(sink.events))
+	}
+	if event := sink.events[0]; event.Kind != EventError || !strings.Contains(event.Text, "discarded oversized JSON event line from stdout") {
+		t.Fatalf("oversized event = %+v", event)
+	}
+	if event := sink.events[1]; event.Text != "next log" {
+		t.Fatalf("following log was poisoned: %+v", event)
 	}
 }
 

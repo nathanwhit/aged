@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -314,8 +313,8 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 		plugin.Driver.PID = cmd.Process.Pid
 		plugin.Driver.StartedAt = time.Now().UTC()
 		r.updatePlugin(index, plugin)
-		go r.captureDriverLogs(index, "stdout", stdout)
-		go r.captureDriverLogs(index, "stderr", stderr)
+		go r.captureDriverLogs(ctx, index, "stdout", stdout)
+		go r.captureDriverLogs(ctx, index, "stderr", stderr)
 		err := cmd.Wait()
 		plugin, ok = r.pluginAt(index)
 		if !ok {
@@ -368,11 +367,11 @@ func (r *PluginRegistry) clearDriverCancel(id string) {
 	delete(r.driverCancel, id)
 }
 
-func (r *PluginRegistry) captureDriverLogs(index int, stream string, reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		r.appendDriverLog(index, stream+": "+scanner.Text())
-	}
+func (r *PluginRegistry) captureDriverLogs(ctx context.Context, index int, stream string, reader io.Reader) {
+	_ = worker.StreamReaderLines(ctx, stream, reader, func(line string) error {
+		r.appendDriverLog(index, stream+": "+line)
+		return nil
+	}, nil)
 }
 
 func (r *PluginRegistry) appendDriverLog(index int, line string) {

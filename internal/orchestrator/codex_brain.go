@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -787,23 +786,21 @@ func truncateStringForPrompt(value string, maxBytes int) string {
 }
 
 func extractCodexAgentMessage(output []byte) (string, error) {
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var result string
-	for scanner.Scan() {
+	if err := forEachBufferedLine(bytes.NewReader(output), func(line []byte) error {
 		var payload map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &payload); err != nil {
-			continue
+		if err := json.Unmarshal(line, &payload); err != nil {
+			return nil
 		}
 		item, ok := payload["item"].(map[string]any)
 		if !ok || codexStringField(item, "type") != "agent_message" {
-			continue
+			return nil
 		}
 		if text := codexStringField(item, "text"); text != "" {
 			result = text
 		}
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(result) == "" {
