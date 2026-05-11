@@ -255,6 +255,7 @@ func TestDecodeReplanDecisionComplete(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "complete",
 		"finalCandidateWorkerId": "worker-123",
+		"pullRequestBody": "## Summary\n- Ready to publish.",
 		"rationale": "all follow-up work is done",
 		"message": "ready for user review",
 		"plan": null
@@ -273,6 +274,9 @@ func TestDecodeReplanDecisionComplete(t *testing.T) {
 	}
 	if decision.FinalCandidateWorkerID != "worker-123" {
 		t.Fatalf("final candidate = %q", decision.FinalCandidateWorkerID)
+	}
+	if !strings.Contains(decision.PullRequestBody, "Ready to publish") {
+		t.Fatalf("pull request body = %q", decision.PullRequestBody)
 	}
 }
 

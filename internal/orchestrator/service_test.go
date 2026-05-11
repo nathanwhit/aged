@@ -597,6 +597,52 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubCompletionModeUsesReplanPullRequestBody(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		decisions: []ReplanDecision{{
+			Action:          "complete",
+			Rationale:       "worker completed the remote follow-up",
+			PullRequestBody: "## Summary\n- Implemented the remote follow-up.\n\n## Validation\n- go test ./...",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Remote follow-up",
+		Prompt: "Implement the remote follow-up.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+			"source":         "remote-worker",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if !strings.Contains(publisher.published.Body, "Implemented the remote follow-up.") {
+		t.Fatalf("published body = %q, want replan-authored PR body", publisher.published.Body)
+	}
+}
+
 func TestServiceCanceledFollowUpDoesNotPublishPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
