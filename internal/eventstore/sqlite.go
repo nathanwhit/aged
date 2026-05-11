@@ -265,22 +265,7 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func (s *SQLiteStore) DeletePlugin(ctx context.Context, id string) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return errors.New("plugin id is required")
-	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM plugins WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	count, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return s.deleteByID(ctx, id, "plugin id is required", `DELETE FROM plugins WHERE id = ?`)
 }
 
 func (s *SQLiteStore) ListTargets(ctx context.Context) ([]core.TargetConfig, error) {
@@ -355,11 +340,15 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 func (s *SQLiteStore) DeleteTarget(ctx context.Context, id string) error {
+	return s.deleteByID(ctx, id, "target id is required", `DELETE FROM targets WHERE id = ?`)
+}
+
+func (s *SQLiteStore) deleteByID(ctx context.Context, id, requiredMsg, deleteSQL string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return errors.New("target id is required")
+		return errors.New(requiredMsg)
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id = ?`, id)
+	res, err := s.db.ExecContext(ctx, deleteSQL, id)
 	if err != nil {
 		return err
 	}
