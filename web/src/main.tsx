@@ -976,8 +976,8 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
-  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
@@ -992,6 +992,7 @@ function ProjectPanel({
   const [pushRemote, setPushRemote] = useState("");
   const [defaultBase, setDefaultBase] = useState("main");
   const [branchPrefix, setBranchPrefix] = useState("codex/aged-");
+  const [remoteCheckoutEntries, setRemoteCheckoutEntries] = useState<PluginConfigEntry[]>([]);
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
@@ -1012,6 +1013,7 @@ function ProjectPanel({
     setPushRemote(project.pushRemote ?? "");
     setDefaultBase(project.defaultBase ?? "main");
     setBranchPrefix(project.pullRequestPolicy?.branchPrefix ?? "codex/aged-");
+    setRemoteCheckoutEntries(configEntriesFromRecord(project.remoteCheckouts));
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
@@ -1030,6 +1032,7 @@ function ProjectPanel({
     setPushRemote("");
     setDefaultBase("main");
     setBranchPrefix("codex/aged-");
+    setRemoteCheckoutEntries([]);
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
@@ -1041,6 +1044,7 @@ function ProjectPanel({
     event.preventDefault();
     setBusy(true);
     try {
+      const parsedRemoteCheckouts = remoteCheckoutRecordFromEntries(remoteCheckoutEntries);
       const input = {
         id,
         name: name || undefined,
@@ -1051,6 +1055,7 @@ function ProjectPanel({
         pushRemote: pushRemote || undefined,
         vcs: "auto",
         defaultBase: defaultBase || undefined,
+        remoteCheckouts: Object.keys(parsedRemoteCheckouts).length ? parsedRemoteCheckouts : undefined,
         pullRequestPolicy: {
           branchPrefix: branchPrefix || undefined,
           draft: draftPRs,
@@ -1091,6 +1096,10 @@ function ProjectPanel({
     } catch (err) {
       onError((err as Error).message);
     }
+  }
+
+  function updateRemoteCheckoutEntry(entryId: string, values: Partial<PluginConfigEntry>) {
+    setRemoteCheckoutEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
   }
 
   return (
@@ -1155,6 +1164,23 @@ function ProjectPanel({
             PR branch prefix
             <input value={branchPrefix} onChange={(event) => setBranchPrefix(event.target.value)} placeholder="codex/aged-" />
           </label>
+          <fieldset className="target-label-field">
+            <legend>Remote checkouts</legend>
+            {remoteCheckoutEntries.length === 0 ? <p className="plugin-config-empty">No checkout overrides</p> : (
+              <div className="plugin-config-list">
+                {remoteCheckoutEntries.map((entry) => (
+                  <div className="plugin-config-row" key={entry.id}>
+                    <input value={entry.key} onChange={(event) => updateRemoteCheckoutEntry(entry.id, { key: event.target.value })} placeholder="perf-1" />
+                    <input value={entry.value} onChange={(event) => updateRemoteCheckoutEntry(entry.id, { value: event.target.value })} placeholder="/srv/aged/checkouts/node" />
+                    <button type="button" className="icon-button ghost danger-text" onClick={() => setRemoteCheckoutEntries((entries) => entries.filter((item) => item.id !== entry.id))} title="Remove checkout override">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button type="button" className="secondary compact" onClick={() => setRemoteCheckoutEntries((entries) => [...entries, pluginConfigEntry()])}>Add checkout</button>
+          </fieldset>
           <label className="checkbox-label">
             <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
             Draft PRs by default
@@ -2266,7 +2292,7 @@ function TargetPanel({
   const [port, setPort] = useState("");
   const [identityFile, setIdentityFile] = useState("");
   const [insecureIgnoreHostKey, setInsecureIgnoreHostKey] = useState(false);
-  const [workDir, setWorkDir] = useState("");
+  const [checkoutRoot, setCheckoutRoot] = useState("");
   const [workRoot, setWorkRoot] = useState("");
   const [maxWorkers, setMaxWorkers] = useState("1");
   const [cpuWeight, setCpuWeight] = useState("1");
@@ -2284,7 +2310,7 @@ function TargetPanel({
     setPort("");
     setIdentityFile("");
     setInsecureIgnoreHostKey(false);
-    setWorkDir("");
+    setCheckoutRoot("");
     setWorkRoot("");
     setMaxWorkers("1");
     setCpuWeight("1");
@@ -2301,7 +2327,7 @@ function TargetPanel({
     setPort(target.port ? String(target.port) : "");
     setIdentityFile(target.identityFile ?? "");
     setInsecureIgnoreHostKey(Boolean(target.insecureIgnoreHostKey));
-    setWorkDir(target.workDir ?? "");
+    setCheckoutRoot(target.checkoutRoot ?? target.workDir ?? "");
     setWorkRoot(target.workRoot ?? "");
     setMaxWorkers(String(target.capacity?.maxWorkers ?? 1));
     setCpuWeight(String(target.capacity?.cpuWeight ?? 1));
@@ -2327,7 +2353,7 @@ function TargetPanel({
         port: port.trim() ? Number(port) : undefined,
         identityFile: identityFile.trim() || undefined,
         insecureIgnoreHostKey,
-        workDir: workDir.trim() || undefined,
+        checkoutRoot: checkoutRoot.trim() || undefined,
         workRoot: workRoot.trim() || undefined,
         labels,
         capacity: {
@@ -2402,8 +2428,8 @@ function TargetPanel({
             <input value={identityFile} onChange={(event) => setIdentityFile(event.target.value)} placeholder="Blank uses ssh-agent or ~/.ssh/config" disabled={kind === "local"} />
           </label>
           <label className="target-wide-field">
-            Work dir
-            <input value={workDir} onChange={(event) => setWorkDir(event.target.value)} placeholder="/srv/aged/repos/aged" />
+            Checkout root
+            <input value={checkoutRoot} onChange={(event) => setCheckoutRoot(event.target.value)} placeholder="/srv/aged/checkouts" />
           </label>
           <label className="target-wide-field">
             Work root
@@ -2463,7 +2489,7 @@ function TargetPanel({
               {target.capacity.memoryGB ? ` | ${target.capacity.memoryGB} GB` : ""}
             </p>
             {target.kind === "ssh" && (
-              <p className="target-location">{[target.user, target.host].filter(Boolean).join("@") || target.host}{target.workDir ? ` · ${target.workDir}` : ""}</p>
+              <p className="target-location">{[target.user, target.host].filter(Boolean).join("@") || target.host}{target.checkoutRoot || target.workDir ? ` · ${target.checkoutRoot ?? target.workDir}` : ""}</p>
             )}
             {target.health?.status && (
               <div className="target-health">
@@ -2552,6 +2578,20 @@ function configRecordFromEntries(entries: PluginConfigEntry[]): Record<string, s
     if (!key) throw new Error("config fields need a key");
     if (Object.prototype.hasOwnProperty.call(out, key)) throw new Error(`duplicate config key ${key}`);
     out[key] = value;
+  }
+  return out;
+}
+
+function remoteCheckoutRecordFromEntries(entries: PluginConfigEntry[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const targetID = entry.key.trim();
+    const checkout = entry.value.trim();
+    if (!targetID && !checkout) continue;
+    if (!targetID) throw new Error("remote checkout entries need a target id");
+    if (!checkout) throw new Error(`remote checkout ${targetID} needs a path`);
+    if (Object.prototype.hasOwnProperty.call(out, targetID)) throw new Error(`duplicate remote checkout target ${targetID}`);
+    out[targetID] = checkout;
   }
   return out;
 }

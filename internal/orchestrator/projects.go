@@ -278,6 +278,17 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	project.VCS = strings.TrimSpace(project.VCS)
 	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
 	project.WorkspaceRoot = strings.TrimSpace(project.WorkspaceRoot)
+	if project.RemoteCheckouts != nil {
+		remoteCheckouts := map[string]string{}
+		for targetID, checkout := range project.RemoteCheckouts {
+			targetID = strings.TrimSpace(targetID)
+			checkout = strings.TrimSpace(checkout)
+			if targetID != "" && checkout != "" {
+				remoteCheckouts[targetID] = checkout
+			}
+		}
+		project.RemoteCheckouts = remoteCheckouts
+	}
 	project.PullRequestPolicy.BranchPrefix = strings.TrimSpace(project.PullRequestPolicy.BranchPrefix)
 	if project.ID == "" {
 		return core.Project{}, errors.New("project id is required")

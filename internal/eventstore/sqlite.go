@@ -119,11 +119,15 @@ CREATE TABLE IF NOT EXISTS targets (
 		{"upstream_repo", "TEXT NOT NULL DEFAULT ''"},
 		{"head_repo_owner", "TEXT NOT NULL DEFAULT ''"},
 		{"push_remote", "TEXT NOT NULL DEFAULT ''"},
+		{"remote_checkouts", "TEXT NOT NULL DEFAULT '{}'"},
 		{"pull_request_policy", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		if err := s.ensureProjectColumn(ctx, column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	if err := s.ensureTargetColumn(ctx, "checkout_root", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -151,6 +155,32 @@ func (s *SQLiteStore) ensureProjectColumn(ctx context.Context, name string, defi
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE projects ADD COLUMN %s %s", name, definition))
+	return err
+}
+
+func (s *SQLiteStore) ensureTargetColumn(ctx context.Context, name string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(targets)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE targets ADD COLUMN %s %s", name, definition))
 	return err
 }
 
@@ -253,7 +283,7 @@ func (s *SQLiteStore) DeletePlugin(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) ListTargets(ctx context.Context) ([]core.TargetConfig, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, kind, host, user, port, identity_file, insecure_ignore_host_key, work_dir, work_root, labels, capacity
+SELECT id, kind, host, user, port, identity_file, insecure_ignore_host_key, checkout_root, work_dir, work_root, labels, capacity
 FROM targets
 ORDER BY id ASC`)
 	if err != nil {
@@ -287,9 +317,13 @@ func (s *SQLiteStore) SaveTarget(ctx context.Context, target core.TargetConfig) 
 	if string(capacity) == "null" {
 		capacity = []byte("{}")
 	}
+	checkoutRoot := strings.TrimSpace(target.CheckoutRoot)
+	if checkoutRoot == "" {
+		checkoutRoot = strings.TrimSpace(target.WorkDir)
+	}
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO targets (id, kind, host, user, port, identity_file, insecure_ignore_host_key, work_dir, work_root, labels, capacity, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO targets (id, kind, host, user, port, identity_file, insecure_ignore_host_key, checkout_root, work_dir, work_root, labels, capacity, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	kind = excluded.kind,
 	host = excluded.host,
@@ -297,6 +331,7 @@ ON CONFLICT(id) DO UPDATE SET
 	port = excluded.port,
 	identity_file = excluded.identity_file,
 	insecure_ignore_host_key = excluded.insecure_ignore_host_key,
+	checkout_root = excluded.checkout_root,
 	work_dir = excluded.work_dir,
 	work_root = excluded.work_root,
 	labels = excluded.labels,
@@ -309,6 +344,7 @@ ON CONFLICT(id) DO UPDATE SET
 		target.Port,
 		target.IdentityFile,
 		boolInt(target.InsecureIgnoreHostKey),
+		checkoutRoot,
 		target.WorkDir,
 		target.WorkRoot,
 		string(labels),
@@ -450,7 +486,7 @@ func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy
+SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy
 FROM projects
 ORDER BY id ASC`)
 	if err != nil {
@@ -489,6 +525,13 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 	if string(labels) == "null" {
 		labels = []byte("{}")
 	}
+	remoteCheckouts, err := json.Marshal(project.RemoteCheckouts)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if string(remoteCheckouts) == "null" {
+		remoteCheckouts = []byte("{}")
+	}
 	policy, err := json.Marshal(project.PullRequestPolicy)
 	if err != nil {
 		return core.Project{}, err
@@ -504,8 +547,8 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 		return core.Project{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.ID,
 		project.Name,
 		project.LocalPath,
@@ -517,6 +560,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.DefaultBase,
 		project.WorkspaceRoot,
 		string(labels),
+		string(remoteCheckouts),
 		string(policy),
 		now,
 		now,
@@ -545,6 +589,13 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	if string(labels) == "null" {
 		labels = []byte("{}")
 	}
+	remoteCheckouts, err := json.Marshal(project.RemoteCheckouts)
+	if err != nil {
+		return core.Project{}, err
+	}
+	if string(remoteCheckouts) == "null" {
+		remoteCheckouts = []byte("{}")
+	}
 	policy, err := json.Marshal(project.PullRequestPolicy)
 	if err != nil {
 		return core.Project{}, err
@@ -556,8 +607,8 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	local_path = excluded.local_path,
@@ -569,6 +620,7 @@ ON CONFLICT(id) DO UPDATE SET
 	default_base = excluded.default_base,
 	workspace_root = excluded.workspace_root,
 	target_labels = excluded.target_labels,
+	remote_checkouts = excluded.remote_checkouts,
 	pull_request_policy = excluded.pull_request_policy,
 	updated_at = excluded.updated_at`,
 		project.ID,
@@ -582,6 +634,7 @@ ON CONFLICT(id) DO UPDATE SET
 		project.DefaultBase,
 		project.WorkspaceRoot,
 		string(labels),
+		string(remoteCheckouts),
 		string(policy),
 		now,
 		now,
@@ -1373,6 +1426,7 @@ type eventScanner interface {
 func scanProject(scanner eventScanner) (core.Project, error) {
 	var project core.Project
 	var labels string
+	var remoteCheckouts string
 	var policy string
 	if err := scanner.Scan(
 		&project.ID,
@@ -1386,12 +1440,18 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		&project.DefaultBase,
 		&project.WorkspaceRoot,
 		&labels,
+		&remoteCheckouts,
 		&policy,
 	); err != nil {
 		return core.Project{}, err
 	}
 	if labels != "" {
 		if err := json.Unmarshal([]byte(labels), &project.TargetLabels); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if remoteCheckouts != "" {
+		if err := json.Unmarshal([]byte(remoteCheckouts), &project.RemoteCheckouts); err != nil {
 			return core.Project{}, err
 		}
 	}
@@ -1456,12 +1516,19 @@ func scanTarget(scanner eventScanner) (core.TargetConfig, error) {
 		&target.Port,
 		&target.IdentityFile,
 		&insecure,
+		&target.CheckoutRoot,
 		&target.WorkDir,
 		&target.WorkRoot,
 		&labels,
 		&capacity,
 	); err != nil {
 		return core.TargetConfig{}, err
+	}
+	if target.CheckoutRoot == "" {
+		target.CheckoutRoot = target.WorkDir
+	}
+	if target.WorkDir == "" {
+		target.WorkDir = target.CheckoutRoot
 	}
 	target.InsecureIgnoreHostKey = insecure != 0
 	if labels != "" {

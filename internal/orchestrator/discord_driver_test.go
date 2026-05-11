@@ -1214,6 +1214,119 @@ func TestDiscordDriverManagesTargets(t *testing.T) {
 	}
 }
 
+func TestDiscordDriverUpdateTargetSyncsSSHCheckoutAliases(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedAssistantBrain{
+		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		answer: `{
+			"action": "update_target",
+			"targetId": "ssh-aliases",
+			"target": {"workDir": " /new-work "},
+			"proposedTask": null
+		}`,
+	}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, NewLocalTargetRegistry(), SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond})
+	_, err := service.RegisterTarget(ctx, core.TargetConfig{
+		ID:           "ssh-aliases",
+		Kind:         "ssh",
+		Host:         "example.invalid",
+		CheckoutRoot: "/old-checkout",
+		WorkDir:      "/old-work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeDiscordClient{
+		me: DiscordUser{ID: "bot", Bot: true},
+		messages: map[string][]DiscordMessage{
+			"chan": {{ID: "1", ChannelID: "chan", Content: "move ssh-aliases legacy checkout", Author: DiscordUser{ID: "user"}}},
+		},
+	}
+	driver := NewDiscordDriver(service, DiscordDriverConfig{
+		Enabled:        true,
+		ProcessHistory: true,
+		Channels:       []DiscordChannelConfig{{ID: "chan"}},
+	}, client)
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok := targetByID(snapshot.Targets, "ssh-aliases")
+	if !ok || target.CheckoutRoot != "/new-work" || target.WorkDir != "/new-work" {
+		t.Fatalf("workDir-only update target = %+v ok=%v", target, ok)
+	}
+
+	_, err = service.RegisterTarget(ctx, core.TargetConfig{
+		ID:           "ssh-aliases",
+		Kind:         "ssh",
+		Host:         "example.invalid",
+		CheckoutRoot: "/old-checkout",
+		WorkDir:      "/old-work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetAssistant(fixedAssistantBrain{
+		answer: `{
+			"action": "update_target",
+			"targetId": "ssh-aliases",
+			"target": {"checkoutRoot": " /new-checkout "},
+			"proposedTask": null
+		}`,
+	})
+	client.messages["chan"] = append(client.messages["chan"], DiscordMessage{ID: "2", ChannelID: "chan", Content: "move ssh-aliases checkout root", Author: DiscordUser{ID: "user"}})
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok = targetByID(snapshot.Targets, "ssh-aliases")
+	if !ok || target.CheckoutRoot != "/new-checkout" || target.WorkDir != "/new-checkout" {
+		t.Fatalf("checkoutRoot-only update target = %+v ok=%v", target, ok)
+	}
+
+	_, err = service.RegisterTarget(ctx, core.TargetConfig{
+		ID:           "ssh-aliases",
+		Kind:         "ssh",
+		Host:         "example.invalid",
+		CheckoutRoot: "/old-checkout",
+		WorkDir:      "/old-work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetAssistant(fixedAssistantBrain{
+		answer: `{
+			"action": "update_target",
+			"targetId": "ssh-aliases",
+			"target": {"checkoutRoot": " /explicit-checkout ", "workDir": " /explicit-work "},
+			"proposedTask": null
+		}`,
+	})
+	client.messages["chan"] = append(client.messages["chan"], DiscordMessage{ID: "3", ChannelID: "chan", Content: "set both ssh-aliases checkout aliases", Author: DiscordUser{ID: "user"}})
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, ok = targetByID(snapshot.Targets, "ssh-aliases")
+	if !ok || target.CheckoutRoot != "/explicit-checkout" || target.WorkDir != "/explicit-work" {
+		t.Fatalf("explicit alias update target = %+v ok=%v", target, ok)
+	}
+}
+
 func TestDiscordDriverManagesPluginsWithDeleteConfirmation(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

@@ -80,7 +80,7 @@ func TestTargetRegistrySkipsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
 	}
 }
 
-func TestTargetRegistrySkipsSSHWithoutRemoteWorkDir(t *testing.T) {
+func TestTargetRegistrySkipsSSHWithoutRemoteCheckoutRoot(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
 		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
 		{ID: "vm", Kind: TargetKindSSH, Host: "vm", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
@@ -96,7 +96,7 @@ func TestTargetRegistrySkipsSSHWithoutRemoteWorkDir(t *testing.T) {
 	snapshot := registry.Snapshot()
 	for _, state := range snapshot {
 		if state.ID == "vm" && state.Available {
-			t.Fatalf("ssh target without workDir should not be available: %+v", state)
+			t.Fatalf("ssh target without checkoutRoot should not be available: %+v", state)
 		}
 	}
 }
@@ -121,11 +121,11 @@ func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	}
 }
 
-func TestSSHRunnerProbeRejectsMissingWorkDir(t *testing.T) {
+func TestSSHRunnerProbeRejectsMissingCheckoutRoot(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
 	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"})
-	if health.Status != "unhealthy" || !strings.Contains(health.Error, "workDir") {
+	if health.Status != "unhealthy" || !strings.Contains(health.Error, "checkoutRoot") {
 		t.Fatalf("health = %+v", health)
 	}
 	if len(executor.commands) != 0 {
@@ -133,7 +133,7 @@ func TestSSHRunnerProbeRejectsMissingWorkDir(t *testing.T) {
 	}
 }
 
-func TestSSHRunnerProbeRejectsUnpreparableWorkDirRoot(t *testing.T) {
+func TestSSHRunnerProbeRejectsUnpreparableCheckoutRoot(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
 		"checkoutRootOK=false",
 		"checkoutRootError=mkdir: cannot create directory '/Users': Permission denied",
@@ -142,7 +142,7 @@ func TestSSHRunnerProbeRejectsUnpreparableWorkDirRoot(t *testing.T) {
 		"cpuCount=4",
 	}, "\n")}
 	runner := SSHRunner{Executor: executor}
-	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/Users/nathan/project"})
+	health, _ := runner.Probe(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm", CheckoutRoot: "/Users/nathan/project"})
 	if health.Status != "unhealthy" || !strings.Contains(health.Error, "Permission denied") {
 		t.Fatalf("health = %+v", health)
 	}
@@ -479,7 +479,7 @@ func TestServiceFallsBackToLocalWhenRemoteCheckoutIsDirty(t *testing.T) {
 	}
 }
 
-func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingWorkDir(t *testing.T) {
+func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingCheckoutRoot(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -497,8 +497,8 @@ func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingWorkDir(t *tes
 		Prompt:     "run work",
 		Metadata:   map[string]any{},
 	}, eventRunner{kind: "mock"}, TargetConfig{ID: "vm-missing-workdir", Kind: TargetKindSSH, Host: "vm"})
-	if err == nil || !strings.Contains(err.Error(), "remote workDir is required") {
-		t.Fatalf("err = %v, want missing workDir", err)
+	if err == nil || !strings.Contains(err.Error(), "remote checkoutRoot is required") {
+		t.Fatalf("err = %v, want missing checkoutRoot", err)
 	}
 	for _, argv := range executor.commands {
 		if strings.Contains(strings.Join(argv, " "), "git clone") {

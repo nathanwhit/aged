@@ -80,6 +80,7 @@ export type Project = {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  remoteCheckouts?: Record<string, string>;
   pullRequestPolicy?: PullRequestPolicy;
 };
 
@@ -239,6 +240,7 @@ export type TargetState = {
   port?: number;
   identityFile?: string;
   insecureIgnoreHostKey?: boolean;
+  checkoutRoot?: string;
   workDir?: string;
   workRoot?: string;
   labels?: Record<string, string>;

@@ -40,6 +40,15 @@ func postMCP(t *testing.T, serverURL string, body string) map[string]any {
 	return payload
 }
 
+type fakeMCPRemoteExecutor struct{}
+
+func (fakeMCPRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
+	if strings.Contains(strings.Join(argv, " "), "repoPresent=") {
+		return "checkoutRootOK=true\ntmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
+	}
+	return "", nil
+}
+
 func TestCreateTaskRejectsUserWorkerSelection(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
@@ -937,6 +946,74 @@ func TestMCPTargetAndPluginTools(t *testing.T) {
 	}
 	if !deleteTargetResult["ok"] {
 		t.Fatalf("delete target result = %+v", deleteTargetResult)
+	}
+}
+
+func TestMCPUpdateTargetSyncsSSHCheckoutAliases(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewServiceWithWorkspaceManagerAndTargets(
+		store,
+		orchestrator.StaticBrain{WorkerKind: "mock"},
+		worker.DefaultRunners(),
+		t.TempDir(),
+		nil,
+		orchestrator.NewLocalTargetRegistry(),
+		orchestrator.SSHRunner{Executor: fakeMCPRemoteExecutor{}},
+	)
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	registerConflictingTarget := func(checkoutRoot, workDir string) {
+		t.Helper()
+		_, err := service.RegisterTarget(ctx, core.TargetConfig{
+			ID:           "ssh-aliases",
+			Kind:         "ssh",
+			Host:         "example.invalid",
+			CheckoutRoot: checkoutRoot,
+			WorkDir:      workDir,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	updateTarget := func(arguments string) core.TargetConfig {
+		t.Helper()
+		result := postMCP(t, server.URL, fmt.Sprintf(`{
+			"jsonrpc": "2.0",
+			"id": "update-target",
+			"method": "tools/call",
+			"params": {"name": "aged_update_target", "arguments": %s}
+		}`, arguments))
+		content := result["result"].(map[string]any)["content"].([]any)[0].(map[string]any)
+		var target core.TargetConfig
+		if err := json.Unmarshal([]byte(content["text"].(string)), &target); err != nil {
+			t.Fatal(err)
+		}
+		return target
+	}
+
+	registerConflictingTarget("/old-checkout", "/old-work")
+	target := updateTarget(`{"id": "ssh-aliases", "workDir": " /new-work "}`)
+	if target.CheckoutRoot != "/new-work" || target.WorkDir != "/new-work" {
+		t.Fatalf("workDir-only update target = %+v", target)
+	}
+
+	registerConflictingTarget("/old-checkout", "/old-work")
+	target = updateTarget(`{"id": "ssh-aliases", "checkoutRoot": " /new-checkout "}`)
+	if target.CheckoutRoot != "/new-checkout" || target.WorkDir != "/new-checkout" {
+		t.Fatalf("checkoutRoot-only update target = %+v", target)
+	}
+
+	registerConflictingTarget("/old-checkout", "/old-work")
+	target = updateTarget(`{"id": "ssh-aliases", "checkoutRoot": " /explicit-checkout ", "workDir": " /explicit-work "}`)
+	if target.CheckoutRoot != "/explicit-checkout" || target.WorkDir != "/explicit-work" {
+		t.Fatalf("explicit alias update target = %+v", target)
 	}
 }
 
