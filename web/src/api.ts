@@ -37,6 +37,20 @@ export async function createTask(input: {
   return response.json();
 }
 
+export async function updateTaskLoopConfig(taskId: string, input: {
+  loopIntervalSeconds: number;
+}): Promise<Task> {
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response));
+  }
+  return response.json();
+}
+
 export async function createProject(input: {
   id: string;
   name?: string;

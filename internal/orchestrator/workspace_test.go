@@ -662,11 +662,14 @@ func initGitTestRepo(t *testing.T) string {
 	}
 	repo := t.TempDir()
 	runTestGit(t, repo, "init")
+	runTestGit(t, repo, "config", "user.name", "aged-test")
+	runTestGit(t, repo, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, repo, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("base\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runTestGit(t, repo, "add", "file.txt")
-	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "base")
+	runTestGit(t, repo, "commit", "-m", "base")
 	return repo
 }
 

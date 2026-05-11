@@ -759,6 +759,28 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				UpdatedAt:       event.At,
 				Metadata:        payload.Metadata,
 			}
+		case core.EventTaskUpdated:
+			var payload struct {
+				Title         string          `json:"title,omitempty"`
+				Prompt        string          `json:"prompt,omitempty"`
+				MetadataPatch json.RawMessage `json:"metadataPatch,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.updated: %w", err)
+			}
+			task, ok := tasks[event.TaskID]
+			if !ok {
+				continue
+			}
+			if payload.Title != "" {
+				task.Title = payload.Title
+			}
+			if payload.Prompt != "" {
+				task.Prompt = payload.Prompt
+			}
+			task.Metadata = mergeMetadataPatch(task.Metadata, payload.MetadataPatch)
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
 		case core.EventTaskStatus:
 			var payload struct {
 				Status core.TaskStatus `json:"status"`
@@ -1324,6 +1346,7 @@ SELECT id, at, type, task_id, worker_id, payload
 FROM events
 WHERE type IN (
 	'task.created',
+	'task.updated',
 	'task.status',
 	'task.final_candidate_selected',
 	'task.objective_updated',
@@ -1397,6 +1420,24 @@ func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMess
 	var workspacePayload any
 	if err := json.Unmarshal(workspace, &workspacePayload); err == nil {
 		out["workspace"] = workspacePayload
+	}
+	return core.MustJSON(out)
+}
+
+func mergeMetadataPatch(base json.RawMessage, patch json.RawMessage) json.RawMessage {
+	if len(patch) == 0 {
+		return base
+	}
+	out := map[string]any{}
+	if len(base) > 0 {
+		_ = json.Unmarshal(base, &out)
+	}
+	var patchValues map[string]any
+	if err := json.Unmarshal(patch, &patchValues); err != nil {
+		return base
+	}
+	for key, value := range patchValues {
+		out[key] = value
 	}
 	return core.MustJSON(out)
 }

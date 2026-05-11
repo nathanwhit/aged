@@ -42,6 +42,7 @@ type EventType string
 
 const (
 	EventTaskCreated       EventType = "task.created"
+	EventTaskUpdated       EventType = "task.updated"
 	EventTaskStatus        EventType = "task.status"
 	EventTaskPlanned       EventType = "task.planned"
 	EventTaskReplanned     EventType = "task.replanned"
@@ -332,6 +333,10 @@ type CreateTaskRequest struct {
 	Source     string          `json:"source,omitempty"`
 	ExternalID string          `json:"externalId,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+type UpdateLoopConfigRequest struct {
+	LoopIntervalSeconds *int `json:"loopIntervalSeconds,omitempty"`
 }
 
 type AssistantRequest struct {

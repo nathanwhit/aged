@@ -338,6 +338,13 @@ button {
   grid-column: 1 / -1;
 }
 
+.loop-settings {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(160px, 240px) max-content;
+}
+
 .checkbox-label {
   align-items: center;
   display: flex;
@@ -2220,6 +2227,7 @@ small {
   }
 
   .loop-config,
+  .loop-settings,
   .run-mode-control {
     grid-template-columns: 1fr;
   }

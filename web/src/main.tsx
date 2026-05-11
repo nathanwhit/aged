@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -272,7 +272,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -761,6 +761,11 @@ function isRetryableTask(task: Task): boolean {
 function isDurableLoopMetadata(metadata: Record<string, unknown> | undefined): boolean {
   const mode = String(metadata?.executionMode ?? "").trim().toLowerCase();
   return mode === "loop" || mode === "durable_loop" || mode === "agent_loop";
+}
+
+function durableLoopIntervalSeconds(metadata: Record<string, unknown> | undefined): number {
+  const value = Number(metadata?.loopIntervalSeconds ?? 60);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 60;
 }
 
 function canPublishPullRequest(task: Task): boolean {
@@ -1307,6 +1312,8 @@ function TaskDetail({
   onApply,
   onApplied,
   onSteer,
+  onUpdateLoopConfig,
+  onLoopConfigUpdated,
   retrying,
   onError,
 }: {
@@ -1320,14 +1327,19 @@ function TaskDetail({
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
+  onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds: number }) => Promise<Task>;
+  onLoopConfigUpdated: () => Promise<void>;
   retrying: boolean;
   onError: (message: string) => void;
 }) {
   const [message, setMessage] = useState("");
   const [applying, setApplying] = useState(false);
+  const [loopIntervalInput, setLoopIntervalInput] = useState("");
+  const [savingLoopConfig, setSavingLoopConfig] = useState(false);
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
+  const loopInterval = durableLoopIntervalSeconds(task.metadata);
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
   const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
@@ -1340,6 +1352,10 @@ function TaskDetail({
   useEffect(() => {
     setDiff(undefined);
   }, [finalWorkerId]);
+
+  useEffect(() => {
+    setLoopIntervalInput(String(loopInterval));
+  }, [loopInterval, task.id]);
 
   async function steer(event: React.FormEvent) {
     event.preventDefault();
@@ -1360,6 +1376,24 @@ function TaskDetail({
       onError((err as Error).message);
     } finally {
       setApplying(false);
+    }
+  }
+
+  async function updateLoopConfig(event: React.FormEvent) {
+    event.preventDefault();
+    const nextInterval = Number.parseInt(loopIntervalInput, 10);
+    if (!Number.isFinite(nextInterval) || nextInterval < 0) {
+      onError("Interval seconds must be 0 or greater.");
+      return;
+    }
+    setSavingLoopConfig(true);
+    try {
+      await onUpdateLoopConfig(task.id, { loopIntervalSeconds: nextInterval });
+      await onLoopConfigUpdated();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setSavingLoopConfig(false);
     }
   }
 
@@ -1432,6 +1466,18 @@ function TaskDetail({
       )}
       {approvals.length > 0 && <ApprovalPanel approvals={approvals} onUseMessage={setMessage} />}
       <WorkerProgressSpotlight update={workerUpdate} />
+      {durableLoop && (
+        <form className="loop-settings" onSubmit={updateLoopConfig}>
+          <label>
+            Interval seconds
+            <input type="number" min="0" step="30" value={loopIntervalInput} onChange={(event) => setLoopIntervalInput(event.target.value)} />
+          </label>
+          <button className="secondary compact" disabled={savingLoopConfig} title="Update durable loop interval">
+            <RefreshCw size={16} />
+            {savingLoopConfig ? "Saving" : "Update Interval"}
+          </button>
+        </form>
+      )}
       <form className="steer" onSubmit={steer}>
         <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this task..." required />
         <button className="icon-button" title="Send steering">
@@ -3753,6 +3799,21 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
     };
     return { ...snapshot, tasks: upsertById(snapshot.tasks, task) };
+  }
+  if (event.type === "task.updated" && event.taskId) {
+    const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
+    if (!task) return snapshot;
+    const metadataPatch = asRecord(payload.metadataPatch);
+    return {
+      ...snapshot,
+      tasks: upsertById(snapshot.tasks, {
+        ...task,
+        title: payloadValue(payload.title) || task.title,
+        prompt: payloadValue(payload.prompt) || task.prompt,
+        metadata: Object.keys(metadataPatch).length > 0 ? { ...(task.metadata ?? {}), ...metadataPatch } : task.metadata,
+        updatedAt: event.at,
+      }),
+    };
   }
   if (event.type === "task.status" && event.taskId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);

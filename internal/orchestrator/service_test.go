@@ -2783,6 +2783,133 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	}
 }
 
+func TestServiceUpdatesDurableLoopInterval(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventNeedsInput, Text: "pause after first iteration"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Keep making bounded progress.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 300,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+
+	updated, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{LoopIntervalSeconds: ptrInt(30)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(updated.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if intMetadata(metadata, "loopIntervalSeconds") != 30 {
+		t.Fatalf("loopIntervalSeconds = %v, want 30", metadata["loopIntervalSeconds"])
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "loop_config_updated", "updated") {
+		t.Fatalf("missing loop config update action")
+	}
+}
+
+func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"loop": eventRunner{kind: "loop"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	taskID := "loop-task"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Loop",
+			"prompt": "Keep making bounded progress.",
+			"metadata": map[string]any{
+				"executionMode":       "loop",
+				"loopWorkerKind":      "loop",
+				"loopIntervalSeconds": 30,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		done <- service.waitDurableLoopInterval(ctx, taskID, 30*time.Second)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if _, err := service.UpdateTaskLoopConfig(ctx, taskID, core.UpdateLoopConfigRequest{LoopIntervalSeconds: ptrInt(0)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("wait returned after %s, want it to observe the interval update promptly", elapsed)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+func TestServiceRejectsLoopIntervalUpdateForNonLoopTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "do it",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "One shot", Prompt: "Do it."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{LoopIntervalSeconds: ptrInt(30)})
+	if err == nil || !strings.Contains(err.Error(), "not a durable loop") {
+		t.Fatalf("error = %v, want durable loop rejection", err)
+	}
+}
+
 func TestServiceFailsDurableLoopWithMissingExplicitRunner(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2919,6 +3046,130 @@ func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	}
 	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
 		t.Fatalf("worker.created count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+}
+
+func TestRecoverRemoteWorkersRetriesStartupCanceledLocalTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-startup-canceled"
+	plan := Plan{WorkerKind: "retryable", Prompt: "resume startup-canceled work"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Startup canceled work",
+			"prompt": "Pick up where the worker left off.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: "old-worker",
+		Payload: core.MustJSON(map[string]any{
+			"kind":   "retryable",
+			"prompt": "old attempt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: plan}, map[string]worker.Runner{
+		"retryable": eventRunner{kind: "retryable", events: []worker.Event{{Kind: worker.EventResult, Text: "resumed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if !hasTaskAction(snapshot.Events, taskID, "startup_auto_retry", "retrying") {
+		t.Fatalf("missing startup auto-retry action")
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 2 {
+		t.Fatalf("worker.created count = %d, want 2", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCompleted, taskID) != 2 {
+		t.Fatalf("worker.completed count = %d, want 2", countEvents(snapshot.Events, core.EventWorkerCompleted, taskID))
+	}
+}
+
+func TestRecoverRemoteWorkersDoesNotRetryManualCanceledTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-manual-canceled"
+	plan := Plan{WorkerKind: "retryable", Prompt: "manual retry only"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Manual canceled work",
+			"prompt": "Do not retry automatically.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskCanceled,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: plan}, map[string]worker.Runner{
+		"retryable": eventRunner{kind: "retryable", events: []worker.Event{{Kind: worker.EventResult, Text: "should not run"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatalf("missing task %s", taskID)
+	}
+	if task.Status != core.TaskCanceled {
+		t.Fatalf("task status = %s, want canceled", task.Status)
+	}
+	if hasTaskAction(snapshot.Events, taskID, "startup_auto_retry", "retrying") {
+		t.Fatalf("manual cancellation was auto-retried")
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 0 {
+		t.Fatalf("worker.created count = %d, want 0", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
 	}
 }
 
@@ -6561,6 +6812,10 @@ func appendInterruptedPullRequestFollowUpPlanning(t *testing.T, ctx context.Cont
 			t.Fatal(err)
 		}
 	}
+}
+
+func ptrInt(value int) *int {
+	return &value
 }
 
 type fixedBrain struct {
