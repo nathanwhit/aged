@@ -65,15 +65,13 @@ func main() {
 
 	store, err := eventstore.OpenSQLite(ctx, *dbPath)
 	if err != nil {
-		slog.Error("open event store", "error", err)
-		os.Exit(1)
+		fatal("open event store", err)
 	}
 	defer store.Close()
 
 	absWorkDir, err := filepath.Abs(*workDir)
 	if err != nil {
-		slog.Error("resolve workdir", "error", err)
-		os.Exit(1)
+		fatal("resolve workdir", err)
 	}
 
 	var fallbackBrain orchestrator.BrainProvider
@@ -119,18 +117,15 @@ func main() {
 
 	targets, err := orchestrator.LoadTargetRegistry(*targetsPath)
 	if err != nil {
-		slog.Error("load execution targets", "error", err)
-		os.Exit(1)
+		fatal("load execution targets", err)
 	}
 	projects, err := orchestrator.LoadProjectRegistry(*projectsPath, absWorkDir)
 	if err != nil {
-		slog.Error("load projects", "error", err)
-		os.Exit(1)
+		fatal("load projects", err)
 	}
 	plugins, err := orchestrator.LoadPluginRegistry(*pluginsPath)
 	if err != nil {
-		slog.Error("load plugins", "error", err)
-		os.Exit(1)
+		fatal("load plugins", err)
 	}
 	plugins.Probe(ctx)
 	plugins.StartDrivers(ctx)
@@ -149,18 +144,15 @@ func main() {
 		orchestrator.NewSSHRunner(),
 	)
 	if err := service.LoadRegisteredTargets(ctx); err != nil {
-		slog.Error("initialize registered targets", "error", err)
-		os.Exit(1)
+		fatal("initialize registered targets", err)
 	}
 	if err := service.LoadProjects(ctx, projects); err != nil {
-		slog.Error("initialize projects", "error", err)
-		os.Exit(1)
+		fatal("initialize projects", err)
 	}
 	service.SetPluginRuntimeContext(ctx)
 	service.SetPlugins(plugins)
 	if err := service.LoadRegisteredPlugins(ctx); err != nil {
-		slog.Error("initialize registered plugins", "error", err)
-		os.Exit(1)
+		fatal("initialize registered plugins", err)
 	}
 	assistant, err := configureAssistant(*assistantMode, *workerKind, *brainMode, orchestrator.CLIAssistantConfig{
 		CodexPath:       *codexPath,
@@ -169,8 +161,7 @@ func main() {
 		ReasoningEffort: *assistantReason,
 	})
 	if err != nil {
-		slog.Error("configure assistant", "error", err)
-		os.Exit(1)
+		fatal("configure assistant", err)
 	}
 	if assistant != nil {
 		service.SetAssistant(assistant)
@@ -196,8 +187,7 @@ func main() {
 	}
 	githubDriverConfig, err := orchestrator.LoadGitHubDriverConfig(*githubDriverPath)
 	if err != nil {
-		slog.Error("load github driver", "error", err)
-		os.Exit(1)
+		fatal("load github driver", err)
 	}
 	if githubDriverConfig.Enabled {
 		driver := orchestrator.NewGitHubDriver(service, githubDriverConfig, nil)
@@ -206,8 +196,7 @@ func main() {
 	}
 	discordDriverConfig, err := orchestrator.LoadDiscordDriverConfig(*discordDriverPath)
 	if err != nil {
-		slog.Error("load discord driver", "error", err)
-		os.Exit(1)
+		fatal("load discord driver", err)
 	}
 	if discordDriverConfig.Enabled {
 		driver := orchestrator.NewDiscordDriver(service, discordDriverConfig, nil)
@@ -222,8 +211,7 @@ func main() {
 		RedirectURL:  *authRedirectURL,
 	})
 	if err != nil {
-		slog.Error("configure auth", "error", err)
-		os.Exit(1)
+		fatal("configure auth", err)
 	}
 	if *authMode == "google" && *authSessionKey == "" {
 		slog.Warn("using ephemeral auth session key; sessions will be invalid after daemon restart")
@@ -237,8 +225,7 @@ func main() {
 	go func() {
 		slog.Info("aged listening", "addr", "http://"+*addr, "db", *dbPath, "workdir", absWorkDir)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("serve", "error", err)
-			os.Exit(1)
+			fatal("serve", err)
 		}
 	}()
 
@@ -270,6 +257,11 @@ func configureAssistant(mode string, workerKind string, brainMode string, config
 	}
 	config.Kind = mode
 	return orchestrator.NewCLIAssistant(config)
+}
+
+func fatal(message string, err error) {
+	slog.Error(message, "error", err)
+	os.Exit(1)
 }
 
 func configureAuth(mode string, config httpapi.GoogleAuthConfig) (*httpapi.GoogleAuth, error) {
