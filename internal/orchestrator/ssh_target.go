@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,19 @@ type SSHRunner struct {
 	Executor           RemoteExecutor
 	PollInterval       time.Duration
 	PollCommandTimeout time.Duration
+	CallbackHandler    RemoteCallbackHandler
+}
+
+type RemoteCallbackHandler func(context.Context, remoteRun, []RemoteWorkerCallback) error
+
+type RemoteWorkerCallback struct {
+	ID             string
+	Type           string
+	Prompt         string
+	Title          string
+	ProjectID      string
+	ParentTaskID   string
+	ParentWorkerID string
 }
 
 type remoteRun struct {
@@ -26,6 +40,8 @@ type remoteRun struct {
 	Session   string       `json:"session"`
 	RunDir    string       `json:"runDir"`
 	WorkDir   string       `json:"workDir"`
+	TaskID    string       `json:"taskId,omitempty"`
+	WorkerID  string       `json:"workerId,omitempty"`
 	Status    string       `json:"status"`
 	StartedAt time.Time    `json:"startedAt"`
 }
@@ -74,6 +90,8 @@ func NewRemoteRun(target TargetConfig, spec worker.Spec) remoteRun {
 		Session:   "aged-" + shortWorkerID(spec.ID),
 		RunDir:    path.Join(nonEmpty(target.WorkRoot, "/tmp/aged-workers"), spec.ID),
 		WorkDir:   nonEmpty(nonEmpty(spec.WorkDir, target.WorkDir), "."),
+		TaskID:    spec.TaskID,
+		WorkerID:  spec.ID,
 		Status:    "running",
 		StartedAt: time.Now().UTC(),
 	}
@@ -84,6 +102,9 @@ func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string, stdi
 		r.Executor = execRemoteExecutor{}
 	}
 	if _, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "mkdir -p "+shellQuote(run.RunDir)+" && printf %s "+shellQuote(`{"status":"running"}`)+" > "+shellQuote(path.Join(run.RunDir, "status.json")))); err != nil {
+		return err
+	}
+	if err := r.installCallbackEnvironment(ctx, run); err != nil {
 		return err
 	}
 	if stdin != "" {
@@ -98,6 +119,25 @@ func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string, stdi
 	script := remoteStartScript(run, argv, stdin != "")
 	_, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", script))
 	return err
+}
+
+func (r SSHRunner) installCallbackEnvironment(ctx context.Context, run remoteRun) error {
+	inputExecutor, ok := r.Executor.(RemoteInputExecutor)
+	if !ok {
+		return errors.New("remote executor does not support worker callback helper upload")
+	}
+	binDir := path.Join(run.RunDir, "bin")
+	callbackDir := remoteCallbackDir(run)
+	if _, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "mkdir -p "+shellQuote(binDir)+" "+shellQuote(callbackDir))); err != nil {
+		return err
+	}
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remoteCallbackEnvPath(run))+" && chmod 600 "+shellQuote(remoteCallbackEnvPath(run))), remoteCallbackEnv(run)); err != nil {
+		return err
+	}
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remoteCreateTaskHelperPath(run))+" && chmod 700 "+shellQuote(remoteCreateTaskHelperPath(run))), remoteCreateTaskHelperScript()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser, sink worker.Sink) (remoteStatus, error) {
@@ -171,6 +211,9 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.O
 	if err != nil {
 		return remoteStatus{Status: "unreachable", Error: strings.TrimSpace(rawStatus)}, err
 	}
+	if err := r.drainRemoteCallbacks(ctx, run, sink); err != nil {
+		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain remote worker callbacks: " + err.Error()})
+	}
 	var status remoteStatus
 	if err := json.Unmarshal([]byte(strings.TrimSpace(rawStatus)), &status); err != nil {
 		return remoteStatus{}, err
@@ -179,6 +222,47 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.O
 		status.Status = "running"
 	}
 	return status, nil
+}
+
+func (r SSHRunner) drainRemoteCallbacks(ctx context.Context, run remoteRun, sink worker.Sink) error {
+	if r.CallbackHandler == nil {
+		return nil
+	}
+	raw, err := r.runPollCommand(ctx, run.Target, remoteCallbackReadScript(run))
+	if err != nil {
+		return err
+	}
+	callbacks, files, err := parseRemoteCallbackFiles(raw)
+	if err != nil {
+		return err
+	}
+	if len(callbacks) == 0 {
+		return nil
+	}
+	if err := r.CallbackHandler(ctx, run, callbacks); err != nil {
+		return err
+	}
+	if err := r.ackRemoteCallbacks(ctx, run, files); err != nil {
+		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "remote worker callbacks were handled but not acknowledged: " + err.Error()})
+	}
+	return nil
+}
+
+func (r SSHRunner) ackRemoteCallbacks(ctx context.Context, run remoteRun, files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	parts := []string{"rm", "-f"}
+	for _, file := range files {
+		if base := path.Base(file); base == file && strings.HasSuffix(base, ".json") {
+			parts = append(parts, shellQuote(path.Join(remoteCallbackDir(run), base)))
+		}
+	}
+	if len(parts) == 2 {
+		return nil
+	}
+	_, err := r.runPollCommand(ctx, run.Target, strings.Join(parts, " "))
+	return err
 }
 
 func (r SSHRunner) runPollCommand(ctx context.Context, target TargetConfig, script string) (string, error) {
@@ -392,11 +476,16 @@ func remoteStartScript(run remoteRun, argv []string, hasStdin bool) string {
 	if hasStdin {
 		stdinRedirect = " < " + shellQuote(remotePromptPath(run))
 	}
-	inner := fmt.Sprintf(`%s
+	inner := fmt.Sprintf(`AGED_REMOTE_CALLBACK_ENV=%s
+AGED_REMOTE_HELPER_BIN=%s
+export AGED_REMOTE_CALLBACK_ENV AGED_REMOTE_HELPER_BIN
+%s
 cd %s && (%s)%s > %s/stdout.log 2> %s/stderr.log
 code=$?
 %s
 if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
+		shellQuote(remoteCallbackEnvPath(run)),
+		shellQuote(path.Join(run.RunDir, "bin")),
 		remoteWorkerEnvScript(),
 		shellQuote(run.WorkDir),
 		command,
@@ -419,8 +508,166 @@ func remotePromptPath(run remoteRun) string {
 	return path.Join(run.RunDir, "prompt.txt")
 }
 
+func remoteCallbackEnvPath(run remoteRun) string {
+	return path.Join(run.RunDir, "callback.env")
+}
+
+func remoteCallbackDir(run remoteRun) string {
+	return path.Join(run.RunDir, "callbacks")
+}
+
+func remoteCreateTaskHelperPath(run remoteRun) string {
+	return path.Join(run.RunDir, "bin", "aged-create-task")
+}
+
+func remoteCallbackEnv(run remoteRun) string {
+	lines := []string{
+		"export AGED_PARENT_TASK_ID=" + shellQuote(run.TaskID),
+		"export AGED_PARENT_WORKER_ID=" + shellQuote(run.WorkerID),
+		"export AGED_WORKER_CALLBACK_DIR=" + shellQuote(remoteCallbackDir(run)),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func remoteCreateTaskHelperScript() string {
+	return `#!/bin/sh
+set -eu
+if [ -z "${AGED_WORKER_CALLBACK_DIR:-}" ]; then
+  echo "AGED_WORKER_CALLBACK_DIR is required" >&2
+  exit 2
+fi
+title=""
+project_id=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title) title="$2"; shift 2 ;;
+    --project-id) project_id="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+b64() {
+  if command -v base64 >/dev/null 2>&1; then base64 | tr -d '\n'
+  elif command -v openssl >/dev/null 2>&1; then openssl base64 -A
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())'
+  else echo "base64, openssl, or python3 is required" >&2; exit 2
+  fi
+}
+mkdir -p "$AGED_WORKER_CALLBACK_DIR"
+stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+tmp="$AGED_WORKER_CALLBACK_DIR/create-task.$stamp.$$.${RANDOM:-0}.tmp"
+out="${tmp%.tmp}.json"
+prompt_b64=$(cat | b64)
+title_b64=$(printf '%s' "$title" | b64)
+project_b64=$(printf '%s' "$project_id" | b64)
+parent_task_b64=$(printf '%s' "${AGED_PARENT_TASK_ID:-}" | b64)
+parent_worker_b64=$(printf '%s' "${AGED_PARENT_WORKER_ID:-}" | b64)
+printf '{"type":"create_task","promptBase64":"%s","titleBase64":"%s","projectIdBase64":"%s","parentTaskIdBase64":"%s","parentWorkerIdBase64":"%s"}\n' "$prompt_b64" "$title_b64" "$project_b64" "$parent_task_b64" "$parent_worker_b64" > "$tmp"
+mv "$tmp" "$out"
+printf 'queued %s\n' "$out"
+`
+}
+
+func remoteCallbackReadScript(run remoteRun) string {
+	return fmt.Sprintf(`dir=%s
+[ -d "$dir" ] || exit 0
+for file in "$dir"/*.json; do
+  [ -f "$file" ] || continue
+  base=$(basename "$file")
+  printf 'AGED-CALLBACK-FILE:%%s\n' "$base"
+  cat "$file"
+  printf '\nAGED-CALLBACK-END\n'
+done`, shellQuote(remoteCallbackDir(run)))
+}
+
+type remoteCallbackPayload struct {
+	Type                 string `json:"type"`
+	PromptBase64         string `json:"promptBase64"`
+	TitleBase64          string `json:"titleBase64,omitempty"`
+	ProjectIDBase64      string `json:"projectIdBase64,omitempty"`
+	ParentTaskIDBase64   string `json:"parentTaskIdBase64,omitempty"`
+	ParentWorkerIDBase64 string `json:"parentWorkerIdBase64,omitempty"`
+}
+
+func parseRemoteCallbackFiles(raw string) ([]RemoteWorkerCallback, []string, error) {
+	var callbacks []RemoteWorkerCallback
+	var files []string
+	lines := strings.Split(raw, "\n")
+	for i := 0; i < len(lines); i++ {
+		fileName, ok := strings.CutPrefix(lines[i], "AGED-CALLBACK-FILE:")
+		if !ok {
+			continue
+		}
+		fileName = strings.TrimSpace(fileName)
+		var body strings.Builder
+		for i++; i < len(lines) && lines[i] != "AGED-CALLBACK-END"; i++ {
+			if body.Len() > 0 {
+				body.WriteByte('\n')
+			}
+			body.WriteString(lines[i])
+		}
+		callback, err := decodeRemoteCallback(fileName, body.String())
+		if err != nil {
+			return nil, nil, err
+		}
+		callbacks = append(callbacks, callback)
+		files = append(files, fileName)
+	}
+	return callbacks, files, nil
+}
+
+func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, error) {
+	var payload remoteCallbackPayload
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &payload); err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback %s: %w", fileName, err)
+	}
+	decode := func(value string) (string, error) {
+		if value == "" {
+			return "", nil
+		}
+		bytes, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			bytes, err = base64.RawStdEncoding.DecodeString(value)
+		}
+		if err != nil {
+			return "", err
+		}
+		return string(bytes), nil
+	}
+	prompt, err := decode(payload.PromptBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback prompt %s: %w", fileName, err)
+	}
+	title, err := decode(payload.TitleBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback title %s: %w", fileName, err)
+	}
+	projectID, err := decode(payload.ProjectIDBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback project %s: %w", fileName, err)
+	}
+	parentTaskID, err := decode(payload.ParentTaskIDBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback parent task %s: %w", fileName, err)
+	}
+	parentWorkerID, err := decode(payload.ParentWorkerIDBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback parent worker %s: %w", fileName, err)
+	}
+	return RemoteWorkerCallback{
+		ID:             strings.TrimSuffix(path.Base(fileName), ".json"),
+		Type:           nonEmpty(payload.Type, "create_task"),
+		Prompt:         prompt,
+		Title:          title,
+		ProjectID:      projectID,
+		ParentTaskID:   parentTaskID,
+		ParentWorkerID: parentWorkerID,
+	}, nil
+}
+
 func remoteWorkerEnvScript() string {
-	return `for dir in "$HOME"/.local/share/fnm/node-versions/*/installation/bin "$HOME"/.local/share/mise/installs/node/*/bin "$HOME"/.asdf/installs/nodejs/*/bin "$HOME"/.local/share/mise/shims "$HOME"/.npm-global/bin "$HOME"/.bun/bin "$HOME"/.local/bin "$HOME"/.cargo/bin "$HOME"/.deno/bin /bin /usr/bin /sbin /usr/sbin /usr/local/bin /snap/bin /exe.dev/bin; do
+	return `if [ -f "$AGED_REMOTE_CALLBACK_ENV" ]; then . "$AGED_REMOTE_CALLBACK_ENV"; fi
+if [ -n "${AGED_REMOTE_HELPER_BIN:-}" ] && [ -d "$AGED_REMOTE_HELPER_BIN" ]; then PATH="$AGED_REMOTE_HELPER_BIN:$PATH"; fi
+for dir in "$HOME"/.local/share/fnm/node-versions/*/installation/bin "$HOME"/.local/share/mise/installs/node/*/bin "$HOME"/.asdf/installs/nodejs/*/bin "$HOME"/.local/share/mise/shims "$HOME"/.npm-global/bin "$HOME"/.bun/bin "$HOME"/.local/bin "$HOME"/.cargo/bin "$HOME"/.deno/bin /bin /usr/bin /sbin /usr/sbin /usr/local/bin /snap/bin /exe.dev/bin; do
   if [ -d "$dir" ]; then PATH="$dir:$PATH"; fi
 done
 export PATH`
