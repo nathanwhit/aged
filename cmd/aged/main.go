@@ -9,11 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"aged/internal/envutil"
 	"aged/internal/eventstore"
 	"aged/internal/httpapi"
 	"aged/internal/orchestrator"
@@ -22,41 +22,41 @@ import (
 
 func main() {
 	var (
-		addr              = flag.String("addr", envOr("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
-		dbPath            = flag.String("db", envOr("AGED_DB", "aged.db"), "SQLite database path")
-		workDir           = flag.String("workdir", envOr("AGED_WORKDIR", "."), "worker working directory")
-		projectsPath      = flag.String("projects", envOr("AGED_PROJECTS", ""), "JSON project registry config")
-		pluginsPath       = flag.String("plugins", envOr("AGED_PLUGINS", ""), "JSON plugin manifest config")
-		workerKind        = flag.String("worker", envOr("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
-		assistantMode     = flag.String("assistant", envOr("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
-		assistantReason   = flag.String("assistant-reasoning", envOr("AGED_ASSISTANT_REASONING", "medium"), "interactive assistant reasoning effort: default, low, medium, high, xhigh, or max")
-		brainMode         = flag.String("brain", envOr("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
-		promptPath        = flag.String("prompt", envOr("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
-		schedulerPrompt   = flag.String("scheduler-prompt", envOr("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
-		brainEndpoint     = flag.String("brain-endpoint", envOr("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
-		brainAPIKey       = flag.String("brain-api-key", envFirst("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
-		brainModel        = flag.String("brain-model", envOr("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
-		codexPath         = flag.String("codex-path", envOr("AGED_CODEX_PATH", "codex"), "Codex CLI path for the codex brain")
-		claudePath        = flag.String("claude-path", envOr("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for the assistant")
-		workspaceVCS      = flag.String("workspace-vcs", envOr("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
-		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
-		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ""), "directory for isolated worker workspaces; empty defaults to ~/.aged/workspaces")
-		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
-		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "remove allowlisted build artifact directories from stale retained worker workspaces")
-		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "report stale retained worker artifact cleanup without deleting directories")
-		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envDuration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "minimum terminal worker age before retained workspace artifact cleanup")
-		targetsPath       = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
-		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")
-		prMonitor         = flag.Bool("pull-request-monitor", envBool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
-		prMonitorInterval = flag.Duration("pull-request-monitor-interval", envDuration("AGED_PULL_REQUEST_MONITOR_INTERVAL", time.Minute), "tracked pull request refresh interval")
-		discordDriverPath = flag.String("discord-driver", envOr("AGED_DISCORD_DRIVER", ""), "Discord driver config JSON path or inline JSON")
-		webDistPath       = flag.String("web", envOr("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
-		authMode          = flag.String("auth", envOr("AGED_AUTH", "none"), "HTTP authentication mode: none or google")
-		googleClientID    = flag.String("google-client-id", envOr("AGED_GOOGLE_CLIENT_ID", ""), "Google OAuth client ID")
-		googleSecret      = flag.String("google-client-secret", envOr("AGED_GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret")
-		authEmails        = flag.String("auth-allowed-emails", envOr("AGED_AUTH_ALLOWED_EMAILS", ""), "comma-separated Google account emails allowed to access aged")
-		authSessionKey    = flag.String("auth-session-key", envOr("AGED_AUTH_SESSION_KEY", ""), "session signing key; use at least 32 random bytes")
-		authRedirectURL   = flag.String("auth-redirect-url", envOr("AGED_AUTH_REDIRECT_URL", ""), "public OAuth callback URL, for example https://aged.example.com/auth/callback")
+		addr              = flag.String("addr", envutil.String("AGED_ADDR", "127.0.0.1:8787"), "HTTP listen address")
+		dbPath            = flag.String("db", envutil.String("AGED_DB", "aged.db"), "SQLite database path")
+		workDir           = flag.String("workdir", envutil.String("AGED_WORKDIR", "."), "worker working directory")
+		projectsPath      = flag.String("projects", envutil.String("AGED_PROJECTS", ""), "JSON project registry config")
+		pluginsPath       = flag.String("plugins", envutil.String("AGED_PLUGINS", ""), "JSON plugin manifest config")
+		workerKind        = flag.String("worker", envutil.String("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
+		assistantMode     = flag.String("assistant", envutil.String("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
+		assistantReason   = flag.String("assistant-reasoning", envutil.String("AGED_ASSISTANT_REASONING", "medium"), "interactive assistant reasoning effort: default, low, medium, high, xhigh, or max")
+		brainMode         = flag.String("brain", envutil.String("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
+		promptPath        = flag.String("prompt", envutil.String("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
+		schedulerPrompt   = flag.String("scheduler-prompt", envutil.String("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
+		brainEndpoint     = flag.String("brain-endpoint", envutil.String("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
+		brainAPIKey       = flag.String("brain-api-key", envutil.First("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
+		brainModel        = flag.String("brain-model", envutil.String("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
+		codexPath         = flag.String("codex-path", envutil.String("AGED_CODEX_PATH", "codex"), "Codex CLI path for the codex brain")
+		claudePath        = flag.String("claude-path", envutil.String("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for the assistant")
+		workspaceVCS      = flag.String("workspace-vcs", envutil.String("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
+		workspaceMode     = flag.String("workspace-mode", envutil.String("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
+		workspaceRoot     = flag.String("workspace-root", envutil.String("AGED_WORKSPACE_ROOT", ""), "directory for isolated worker workspaces; empty defaults to ~/.aged/workspaces")
+		workspaceCleanup  = flag.String("workspace-cleanup", envutil.String("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
+		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "remove allowlisted build artifact directories from stale retained worker workspaces")
+		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "report stale retained worker artifact cleanup without deleting directories")
+		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "minimum terminal worker age before retained workspace artifact cleanup")
+		targetsPath       = flag.String("targets", envutil.String("AGED_TARGETS", ""), "JSON execution target pool config")
+		githubDriverPath  = flag.String("github-driver", envutil.String("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")
+		prMonitor         = flag.Bool("pull-request-monitor", envutil.Bool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
+		prMonitorInterval = flag.Duration("pull-request-monitor-interval", envutil.Duration("AGED_PULL_REQUEST_MONITOR_INTERVAL", time.Minute), "tracked pull request refresh interval")
+		discordDriverPath = flag.String("discord-driver", envutil.String("AGED_DISCORD_DRIVER", ""), "Discord driver config JSON path or inline JSON")
+		webDistPath       = flag.String("web", envutil.String("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
+		authMode          = flag.String("auth", envutil.String("AGED_AUTH", "none"), "HTTP authentication mode: none or google")
+		googleClientID    = flag.String("google-client-id", envutil.String("AGED_GOOGLE_CLIENT_ID", ""), "Google OAuth client ID")
+		googleSecret      = flag.String("google-client-secret", envutil.String("AGED_GOOGLE_CLIENT_SECRET", ""), "Google OAuth client secret")
+		authEmails        = flag.String("auth-allowed-emails", envutil.String("AGED_AUTH_ALLOWED_EMAILS", ""), "comma-separated Google account emails allowed to access aged")
+		authSessionKey    = flag.String("auth-session-key", envutil.String("AGED_AUTH_SESSION_KEY", ""), "session signing key; use at least 32 random bytes")
+		authRedirectURL   = flag.String("auth-redirect-url", envutil.String("AGED_AUTH_REDIRECT_URL", ""), "public OAuth callback URL, for example https://aged.example.com/auth/callback")
 	)
 	flag.Parse()
 
@@ -270,46 +270,6 @@ func configureAssistant(mode string, workerKind string, brainMode string, config
 	}
 	config.Kind = mode
 	return orchestrator.NewCLIAssistant(config)
-}
-
-func envOr(key string, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envBool(key string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envFirst(keys ...string) string {
-	for _, key := range keys {
-		if value := os.Getenv(key); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func configureAuth(mode string, config httpapi.GoogleAuthConfig) (*httpapi.GoogleAuth, error) {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"aged/internal/core"
+	"aged/internal/envutil"
 )
 
 const evalSource = "aged-loop-eval"
@@ -132,22 +133,22 @@ func main() {
 
 func parseFlags() config {
 	var cfg config
-	flag.StringVar(&cfg.baseURL, "addr", envOr("AGED_LOOP_EVAL_ADDR", "http://127.0.0.1:8787"), "aged daemon base URL")
-	flag.StringVar(&cfg.evalPath, "eval", envOr("AGED_LOOP_EVAL_PATH", "evals/durable-loop-pr-producer.md"), "eval markdown file")
-	flag.StringVar(&cfg.outputPath, "out", envOr("AGED_LOOP_EVAL_OUT", ""), "scorecard JSON output path")
-	flag.StringVar(&cfg.title, "title", envOr("AGED_LOOP_EVAL_TITLE", "Durable loop PR producer eval"), "task title")
-	flag.DurationVar(&cfg.horizon, "horizon", envDuration("AGED_LOOP_EVAL_HORIZON", 90*time.Minute), "external eval horizon before canceling/scoring")
-	flag.DurationVar(&cfg.poll, "poll", envDuration("AGED_LOOP_EVAL_POLL", 10*time.Second), "snapshot polling interval")
-	flag.BoolVar(&cfg.cancel, "cancel", envBool("AGED_LOOP_EVAL_CANCEL", true), "cancel the task when the horizon expires")
-	flag.DurationVar(&cfg.steerAfter, "steer-after", envDuration("AGED_LOOP_EVAL_STEER_AFTER", 0), "send steering after this delay; 0 disables")
-	flag.StringVar(&cfg.steering, "steering", envOr("AGED_LOOP_EVAL_STEERING", "Keep the next change narrow and check the existing PR state before opening anything new."), "steering message")
-	flag.StringVar(&cfg.workerKind, "worker-kind", envOr("AGED_LOOP_EVAL_WORKER_KIND", ""), "override metadata.loopWorkerKind for smoke runs")
-	flag.IntVar(&cfg.loopInterval, "loop-interval-seconds", envInt("AGED_LOOP_EVAL_LOOP_INTERVAL_SECONDS", -1), "override metadata.loopIntervalSeconds; -1 keeps eval metadata")
-	flag.DurationVar(&cfg.repeat, "repeat", envDuration("AGED_LOOP_EVAL_REPEAT", 0), "delay between eval runs; 0 runs once")
-	flag.IntVar(&cfg.maxRuns, "max-runs", envInt("AGED_LOOP_EVAL_MAX_RUNS", 1), "maximum eval runs; 0 means forever when -repeat is set")
-	flag.DurationVar(&cfg.staleAfter, "stale-worker-after", envDuration("AGED_LOOP_EVAL_STALE_WORKER_AFTER", 15*time.Minute), "fail the scorecard when a nonterminal worker has no activity for this long; 0 disables")
-	flag.BoolVar(&cfg.feedback, "feedback-on-fail", envBool("AGED_LOOP_EVAL_FEEDBACK_ON_FAIL", false), "create a follow-up aged improvement task when any scorecard check fails")
-	flag.StringVar(&cfg.feedbackTitle, "feedback-title", envOr("AGED_LOOP_EVAL_FEEDBACK_TITLE", "Improve durable loop eval result"), "title for feedback tasks created by -feedback-on-fail")
+	flag.StringVar(&cfg.baseURL, "addr", envutil.TrimmedString("AGED_LOOP_EVAL_ADDR", "http://127.0.0.1:8787"), "aged daemon base URL")
+	flag.StringVar(&cfg.evalPath, "eval", envutil.TrimmedString("AGED_LOOP_EVAL_PATH", "evals/durable-loop-pr-producer.md"), "eval markdown file")
+	flag.StringVar(&cfg.outputPath, "out", envutil.TrimmedString("AGED_LOOP_EVAL_OUT", ""), "scorecard JSON output path")
+	flag.StringVar(&cfg.title, "title", envutil.TrimmedString("AGED_LOOP_EVAL_TITLE", "Durable loop PR producer eval"), "task title")
+	flag.DurationVar(&cfg.horizon, "horizon", envutil.Duration("AGED_LOOP_EVAL_HORIZON", 90*time.Minute), "external eval horizon before canceling/scoring")
+	flag.DurationVar(&cfg.poll, "poll", envutil.Duration("AGED_LOOP_EVAL_POLL", 10*time.Second), "snapshot polling interval")
+	flag.BoolVar(&cfg.cancel, "cancel", envutil.Bool("AGED_LOOP_EVAL_CANCEL", true), "cancel the task when the horizon expires")
+	flag.DurationVar(&cfg.steerAfter, "steer-after", envutil.Duration("AGED_LOOP_EVAL_STEER_AFTER", 0), "send steering after this delay; 0 disables")
+	flag.StringVar(&cfg.steering, "steering", envutil.TrimmedString("AGED_LOOP_EVAL_STEERING", "Keep the next change narrow and check the existing PR state before opening anything new."), "steering message")
+	flag.StringVar(&cfg.workerKind, "worker-kind", envutil.TrimmedString("AGED_LOOP_EVAL_WORKER_KIND", ""), "override metadata.loopWorkerKind for smoke runs")
+	flag.IntVar(&cfg.loopInterval, "loop-interval-seconds", envutil.Int("AGED_LOOP_EVAL_LOOP_INTERVAL_SECONDS", -1), "override metadata.loopIntervalSeconds; -1 keeps eval metadata")
+	flag.DurationVar(&cfg.repeat, "repeat", envutil.Duration("AGED_LOOP_EVAL_REPEAT", 0), "delay between eval runs; 0 runs once")
+	flag.IntVar(&cfg.maxRuns, "max-runs", envutil.Int("AGED_LOOP_EVAL_MAX_RUNS", 1), "maximum eval runs; 0 means forever when -repeat is set")
+	flag.DurationVar(&cfg.staleAfter, "stale-worker-after", envutil.Duration("AGED_LOOP_EVAL_STALE_WORKER_AFTER", 15*time.Minute), "fail the scorecard when a nonterminal worker has no activity for this long; 0 disables")
+	flag.BoolVar(&cfg.feedback, "feedback-on-fail", envutil.Bool("AGED_LOOP_EVAL_FEEDBACK_ON_FAIL", false), "create a follow-up aged improvement task when any scorecard check fails")
+	flag.StringVar(&cfg.feedbackTitle, "feedback-title", envutil.TrimmedString("AGED_LOOP_EVAL_FEEDBACK_TITLE", "Improve durable loop eval result"), "title for feedback tasks created by -feedback-on-fail")
 	flag.Parse()
 	cfg.baseURL = strings.TrimRight(strings.TrimSpace(cfg.baseURL), "/")
 	cfg.outputSet = strings.TrimSpace(cfg.outputPath) != ""
@@ -884,47 +885,4 @@ func steeringMessage(sent bool, message string) string {
 		return ""
 	}
 	return message
-}
-
-func envOr(key string, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envBool(key string, fallback bool) bool {
-	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	switch value {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return fallback
-	}
-}
-
-func envInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	var parsed int
-	if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil {
-		return fallback
-	}
-	return parsed
 }
