@@ -3081,6 +3081,11 @@ func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun
 			ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
 			Metadata:   core.MustJSON(metadata),
 		}
+		var err error
+		req, err = NormalizeCreateTaskRequest(req)
+		if err != nil {
+			return fmt.Errorf("normalize task from remote callback %s: %w", callback.ID, err)
+		}
 		if _, err := s.CreateTask(ctx, req); err != nil {
 			return fmt.Errorf("create task from remote callback %s: %w", callback.ID, err)
 		}
