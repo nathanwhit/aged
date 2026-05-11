@@ -768,6 +768,11 @@ function durableLoopIntervalSeconds(metadata: Record<string, unknown> | undefine
   return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 60;
 }
 
+function durableLoopPromptValue(task: Task): string {
+  const prompt = String(task.metadata?.loopPrompt ?? "").trim();
+  return prompt || task.prompt;
+}
+
 function canPublishPullRequest(task: Task): boolean {
   return isTerminalTask(task) || Boolean(task.finalCandidateWorkerId);
 }
@@ -1327,7 +1332,7 @@ function TaskDetail({
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
-  onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds: number }) => Promise<Task>;
+  onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
   retrying: boolean;
   onError: (message: string) => void;
@@ -1335,11 +1340,14 @@ function TaskDetail({
   const [message, setMessage] = useState("");
   const [applying, setApplying] = useState(false);
   const [loopIntervalInput, setLoopIntervalInput] = useState("");
+  const [loopPromptInput, setLoopPromptInput] = useState("");
   const [savingLoopConfig, setSavingLoopConfig] = useState(false);
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
+  const currentLoopPrompt = durableLoopPromptValue(task);
+  const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
   const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
@@ -1355,7 +1363,8 @@ function TaskDetail({
 
   useEffect(() => {
     setLoopIntervalInput(String(loopInterval));
-  }, [loopInterval, task.id]);
+    setLoopPromptInput(currentLoopPrompt);
+  }, [currentLoopPrompt, loopInterval, task.id]);
 
   async function steer(event: React.FormEvent) {
     event.preventDefault();
@@ -1386,9 +1395,25 @@ function TaskDetail({
       onError("Interval seconds must be 0 or greater.");
       return;
     }
+    const nextPrompt = loopPromptInput.trim();
+    if (nextPrompt === "") {
+      onError("Loop prompt must not be empty.");
+      return;
+    }
+    const input: { loopIntervalSeconds?: number; loopPrompt?: string } = {};
+    if (nextInterval !== loopInterval) {
+      input.loopIntervalSeconds = nextInterval;
+    }
+    if (nextPrompt !== currentLoopPrompt) {
+      input.loopPrompt = nextPrompt;
+    }
+    if (input.loopIntervalSeconds === undefined && input.loopPrompt === undefined) {
+      onError("No loop config changes to save.");
+      return;
+    }
     setSavingLoopConfig(true);
     try {
-      await onUpdateLoopConfig(task.id, { loopIntervalSeconds: nextInterval });
+      await onUpdateLoopConfig(task.id, input);
       await onLoopConfigUpdated();
     } catch (err) {
       onError((err as Error).message);
@@ -1430,7 +1455,16 @@ function TaskDetail({
         <div>
           <h2>{task.title}</h2>
           {task.projectId && <small>Project {task.projectId}</small>}
-          <p>{task.prompt}</p>
+          <div className="task-prompt-block">
+            <small>{durableLoop ? "Original prompt" : "Prompt"}</small>
+            <p>{task.prompt}</p>
+            {hasCustomLoopPrompt && (
+              <>
+                <small>Current loop prompt</small>
+                <p>{currentLoopPrompt}</p>
+              </>
+            )}
+          </div>
         </div>
         <div className="detail-actions">
           <Status value={task.status} />
@@ -1472,9 +1506,13 @@ function TaskDetail({
             Interval seconds
             <input type="number" min="0" step="30" value={loopIntervalInput} onChange={(event) => setLoopIntervalInput(event.target.value)} />
           </label>
-          <button className="secondary compact" disabled={savingLoopConfig} title="Update durable loop interval">
+          <label className="loop-prompt-field">
+            Loop prompt
+            <textarea value={loopPromptInput} onChange={(event) => setLoopPromptInput(event.target.value)} rows={4} />
+          </label>
+          <button className="secondary compact" disabled={savingLoopConfig} title="Update durable loop settings">
             <RefreshCw size={16} />
-            {savingLoopConfig ? "Saving" : "Update Interval"}
+            {savingLoopConfig ? "Saving" : "Update Loop"}
           </button>
         </form>
       )}

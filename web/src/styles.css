@@ -345,6 +345,14 @@ button {
   grid-template-columns: minmax(160px, 240px) max-content;
 }
 
+.loop-settings .loop-prompt-field {
+  grid-column: 1 / -1;
+}
+
+.loop-settings button {
+  justify-self: start;
+}
+
 .checkbox-label {
   align-items: center;
   display: flex;
@@ -769,6 +777,21 @@ small {
   display: flex;
   gap: 16px;
   justify-content: space-between;
+}
+
+.task-prompt-block {
+  display: grid;
+  gap: 6px;
+}
+
+.task-prompt-block p {
+  margin: 0;
+}
+
+.task-prompt-block small {
+  color: #5e655f;
+  font-weight: 700;
+  text-transform: uppercase;
 }
 
 .objective-strip {
