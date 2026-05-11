@@ -15,6 +15,8 @@ import (
 )
 
 const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+const outputLineReadBufferBytes = 64 * 1024
+const maxStructuredOutputLineBytes = 16 * 1024 * 1024
 
 type Spec struct {
 	ID              string
@@ -344,21 +346,127 @@ func killProcessGroupOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan st
 }
 
 func streamLines(ctx context.Context, sink Sink, parser Parser, stream string, reader io.Reader, errCh chan<- error) {
-	scanner := bufio.NewScanner(reader)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
 	filter := NewOutputFilter(parser)
-	for scanner.Scan() {
-		if err := filter.EmitLine(ctx, sink, stream, scanner.Text()); err != nil {
-			errCh <- err
-			return
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	if err := StreamReaderLines(ctx, stream, reader, func(line string) error {
+		return filter.EmitLine(ctx, sink, stream, line)
+	}, func(stream string, discarded int) error {
+		return sink.Event(ctx, Event{
+			Kind:   EventError,
+			Stream: stream,
+			Text:   fmt.Sprintf("discarded oversized JSON event line from %s after %d bytes; maximum supported line length is %d bytes", stream, discarded, maxStructuredOutputLineBytes),
+		})
+	}); err != nil {
 		errCh <- err
 		return
 	}
 	errCh <- filter.Flush(ctx, sink)
+}
+
+// StreamReaderLines emits newline-delimited output without bufio.Scanner's token cap.
+func StreamReaderLines(ctx context.Context, stream string, reader io.Reader, emit func(string) error, oversizedJSON func(string, int) error) error {
+	bufReader := bufio.NewReaderSize(reader, outputLineReadBufferBytes)
+	var line []byte
+	discardingJSON := false
+	discarded := 0
+	chunkingText := false
+	textChunkIndex := 0
+	textLineBytes := 0
+	for {
+		fragment, isPrefix, err := bufReader.ReadLine()
+		if len(fragment) > 0 {
+			if discardingJSON {
+				discarded += len(fragment)
+			} else if chunkingText {
+				if emitErr := emitOversizedTextBytes(ctx, emit, fragment, &textChunkIndex, &textLineBytes); emitErr != nil {
+					return emitErr
+				}
+			} else {
+				line = append(line, fragment...)
+				if len(line) > maxStructuredOutputLineBytes && lineLooksLikeJSON(line) {
+					discardingJSON = true
+					discarded = len(line)
+					line = nil
+				} else if len(line) > maxStructuredOutputLineBytes {
+					chunkingText = true
+					if emitErr := emitOversizedTextBytes(ctx, emit, line, &textChunkIndex, &textLineBytes); emitErr != nil {
+						return emitErr
+					}
+					line = nil
+				}
+			}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if !isPrefix {
+			if discardingJSON {
+				if oversizedJSON != nil {
+					if emitErr := oversizedJSON(stream, discarded); emitErr != nil {
+						return emitErr
+					}
+				} else if emitErr := emit(fmt.Sprintf("[discarded oversized JSON-looking line from %s after %d bytes; maximum supported line length is %d bytes]", stream, discarded, maxStructuredOutputLineBytes)); emitErr != nil {
+					return emitErr
+				}
+				discardingJSON = false
+				discarded = 0
+			} else if chunkingText {
+				chunkingText = false
+				textChunkIndex = 0
+				textLineBytes = 0
+			} else if len(line) > 0 {
+				if emitErr := emit(string(line)); emitErr != nil {
+					return emitErr
+				}
+				line = nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+}
+
+func emitOversizedTextBytes(ctx context.Context, emit func(string) error, data []byte, chunkIndex *int, lineBytes *int) error {
+	const chunkBytes = 256 * 1024
+	for len(data) > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		size := chunkBytes
+		if size > len(data) {
+			size = len(data)
+		}
+		start := *lineBytes
+		*lineBytes += size
+		*chunkIndex = *chunkIndex + 1
+		text := fmt.Sprintf("[oversized log line chunk %d, bytes %d-%d+] %s", *chunkIndex, start, *lineBytes, string(data[:size]))
+		if err := emit(text); err != nil {
+			return err
+		}
+		data = data[size:]
+	}
+	return nil
+}
+
+func lineLooksLikeJSON(line []byte) bool {
+	for _, b := range line {
+		switch b {
+		case ' ', '\t', '\r':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func DefaultRunners() map[string]Runner {

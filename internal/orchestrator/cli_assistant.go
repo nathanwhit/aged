@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -200,21 +201,19 @@ func assistantReasoningEffort(value string) (string, bool) {
 
 func extractLastParsedResult(kind string, output string) string {
 	parser := worker.ParserForKind(kind)
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
 	var last string
-	for scanner.Scan() {
-		event := parser.ParseLine("stdout", scanner.Text())
+	_ = forEachBufferedLine(strings.NewReader(output), func(line []byte) error {
+		event := parser.ParseLine("stdout", string(line))
 		if strings.TrimSpace(event.Text) == "" {
-			continue
+			return nil
 		}
 		if event.Kind == worker.EventResult {
 			last = event.Text
 		} else if last == "" && event.Kind == worker.EventLog {
 			last = event.Text
 		}
-	}
+		return nil
+	})
 	return strings.TrimSpace(last)
 }
 
@@ -227,33 +226,50 @@ func extractCodexAssistantOutput(data []byte) (string, string, error) {
 }
 
 func extractCodexThreadID(data []byte) string {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
+	var threadID string
+	_ = forEachBufferedLine(bytes.NewReader(data), func(line []byte) error {
 		var payload map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &payload); err != nil {
-			continue
+		if err := json.Unmarshal(line, &payload); err != nil {
+			return nil
 		}
 		if payload["type"] == "thread.started" {
-			return stringMetadataValue(payload["thread_id"])
+			threadID = stringMetadataValue(payload["thread_id"])
 		}
-	}
-	return ""
+		return nil
+	})
+	return threadID
 }
 
 func extractClaudeSessionID(output string) string {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
-	for scanner.Scan() {
+	var sessionID string
+	_ = forEachBufferedLine(strings.NewReader(output), func(line []byte) error {
 		var payload map[string]any
-		if err := json.Unmarshal([]byte(scanner.Text()), &payload); err != nil {
-			continue
+		if err := json.Unmarshal(line, &payload); err != nil {
+			return nil
 		}
 		if payload["type"] == "system" && payload["subtype"] == "init" {
-			return stringMetadataValue(payload["session_id"])
+			sessionID = stringMetadataValue(payload["session_id"])
+		}
+		return nil
+	})
+	return sessionID
+}
+
+func forEachBufferedLine(reader io.Reader, fn func([]byte) error) error {
+	bufReader := bufio.NewReader(reader)
+	for {
+		line, err := bufReader.ReadBytes('\n')
+		line = bytes.TrimRight(line, "\r\n")
+		if len(line) > 0 {
+			if fnErr := fn(line); fnErr != nil {
+				return fnErr
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
-	return ""
 }

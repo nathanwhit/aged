@@ -120,6 +120,65 @@ func TestPluginRegistrySupervisesDriverLifecycle(t *testing.T) {
 	t.Fatalf("driver did not report lifecycle state: %+v", registry.Snapshot())
 }
 
+func TestPluginRegistryCapturesLargeDriverLogLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then printf '%02000000d\\n' 0; exit 0; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewPluginRegistry([]core.Plugin{{
+		ID:       "driver:test",
+		Name:     "Test Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry.StartDrivers(ctx)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		plugin := registry.Snapshot()[0]
+		if len(plugin.Driver.LogTail) > 0 {
+			line := plugin.Driver.LogTail[0]
+			if !strings.HasPrefix(line, "stdout: ") || len(strings.TrimPrefix(line, "stdout: ")) != 2000000 {
+				t.Fatalf("log line length = %d, prefix ok = %v", len(strings.TrimPrefix(line, "stdout: ")), strings.HasPrefix(line, "stdout: "))
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("driver did not capture large log line: %+v", registry.Snapshot())
+}
+
+func TestPluginRegistryLifecycleUpdatePreservesLargeDriverLogTail(t *testing.T) {
+	registry := NewPluginRegistry([]core.Plugin{{
+		ID:       "driver:test",
+		Name:     "Test Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Protocol: "aged-plugin-v1",
+	}})
+	stale := registry.Snapshot()[0]
+	largeLine := "stdout: " + strings.Repeat("l", 2*1024*1024)
+	registry.appendDriverLog(0, largeLine)
+
+	stale.Status = "running"
+	stale.Error = ""
+	stale.Driver.Managed = true
+	stale.Driver.PID = 1234
+	registry.updatePlugin(0, stale)
+
+	plugin := registry.Snapshot()[0]
+	if plugin.Status != "running" || !plugin.Driver.Managed || plugin.Driver.PID != 1234 {
+		t.Fatalf("lifecycle fields were not updated: %+v", plugin)
+	}
+	if len(plugin.Driver.LogTail) != 1 || plugin.Driver.LogTail[0] != largeLine {
+		t.Fatalf("log tail was not preserved: len=%d", len(plugin.Driver.LogTail))
+	}
+}
+
 func TestPluginRegistryExposesRunnerPlugins(t *testing.T) {
 	registry := NewPluginRegistry([]core.Plugin{{
 		ID:       "runner:lint",

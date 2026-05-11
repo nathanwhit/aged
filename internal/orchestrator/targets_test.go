@@ -185,6 +185,30 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPollsLargeRemoteLogLine(t *testing.T) {
+	largeLine := strings.Repeat("r", 2*1024*1024)
+	executor := &scriptedPollExecutor{
+		stdout: []string{largeLine + "\n"},
+		status: []string{`{"status":"succeeded","exit":0}`},
+	}
+	runner := SSHRunner{Executor: executor}
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	sink := &recordingWorkerSink{}
+	stdoutOffset := 0
+	stderrOffset := 0
+
+	status, err := runner.PollOnce(context.Background(), run, worker.ParserForKind("mock"), sink, &stdoutOffset, &stderrOffset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	if !sink.has(worker.EventLog, "stdout", largeLine) {
+		t.Fatalf("large remote output was not preserved: events=%d", len(sink.events))
+	}
+}
+
 func TestSSHRunnerPollDedupesRemoteCodexInfrastructureWarningsAcrossPolls(t *testing.T) {
 	warning := "2026-04-30T02:06:16.268038Z ERROR codex_core::session: failed to record rollout items: thread 019ddc1f-f8f0-7da0-a932-a956e7f51071 not found"
 	executor := &scriptedPollExecutor{

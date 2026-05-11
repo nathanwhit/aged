@@ -573,12 +573,18 @@ func emitNewRemoteLines(ctx context.Context, filter *worker.OutputFilter, sink w
 	}
 	next := content[*offset:]
 	*offset = len(content)
-	for _, line := range strings.Split(next, "\n") {
+	_ = worker.StreamReaderLines(ctx, stream, strings.NewReader(next), func(line string) error {
 		if strings.TrimSpace(line) == "" {
-			continue
+			return nil
 		}
-		_ = filter.EmitLine(ctx, sink, stream, line)
-	}
+		return filter.EmitLine(ctx, sink, stream, line)
+	}, func(stream string, discarded int) error {
+		return sink.Event(ctx, worker.Event{
+			Kind:   worker.EventError,
+			Stream: stream,
+			Text:   fmt.Sprintf("discarded oversized JSON event line from remote %s log after %d bytes", stream, discarded),
+		})
+	})
 }
 
 func remoteStatusToWorkerStatus(status remoteStatus) (core.WorkerStatus, error) {
