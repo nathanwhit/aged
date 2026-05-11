@@ -1,21 +1,36 @@
 import type { EventRecord, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
-export async function getSnapshot(options: { events?: "all" | "none" } = {}): Promise<Snapshot> {
-  const query = options.events === "none" ? "?events=none" : "";
-  const response = await fetch(`/api/snapshot${query}`);
+async function requestJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }
   return response.json();
 }
 
-export async function getTaskEvents(taskId: string, options: { limit?: number } = {}): Promise<EventRecord[]> {
-  const query = options.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/events${query}`);
+async function requestVoid(url: string, init?: RequestInit): Promise<void> {
+  const response = await fetch(url, init);
   if (!response.ok) {
     throw new Error(await errorMessage(response));
   }
-  return response.json();
+}
+
+function jsonInit(method: "POST" | "PUT", body: unknown): RequestInit {
+  return {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+export async function getSnapshot(options: { events?: "all" | "none" } = {}): Promise<Snapshot> {
+  const query = options.events === "none" ? "?events=none" : "";
+  return requestJSON(`/api/snapshot${query}`);
+}
+
+export async function getTaskEvents(taskId: string, options: { limit?: number } = {}): Promise<EventRecord[]> {
+  const query = options.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
+  return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/events${query}`);
 }
 
 export async function createTask(input: {
@@ -26,30 +41,14 @@ export async function createTask(input: {
   externalId?: string;
   metadata?: Record<string, unknown>;
 }): Promise<Task> {
-  const response = await fetch("/api/tasks", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/tasks", jsonInit("POST", input));
 }
 
 export async function updateTaskLoopConfig(taskId: string, input: {
   loopIntervalSeconds?: number;
   loopPrompt?: string;
 }): Promise<Task> {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, jsonInit("PUT", input));
 }
 
 export async function createProject(input: {
@@ -73,15 +72,7 @@ export async function createProject(input: {
     monitorPullRequests?: boolean;
   };
 }): Promise<Project> {
-  const response = await fetch("/api/projects", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/projects", jsonInit("POST", input));
 }
 
 export async function updateProject(id: string, input: {
@@ -105,53 +96,23 @@ export async function updateProject(id: string, input: {
     monitorPullRequests?: boolean;
   };
 }): Promise<Project> {
-  const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/projects/${encodeURIComponent(id)}`, jsonInit("PUT", input));
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+  return requestVoid(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function registerPlugin(input: Plugin): Promise<Plugin> {
-  const response = await fetch("/api/plugins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/plugins", jsonInit("POST", input));
 }
 
 export async function updatePlugin(id: string, input: Plugin): Promise<Plugin> {
-  const response = await fetch(`/api/plugins/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/plugins/${encodeURIComponent(id)}`, jsonInit("PUT", input));
 }
 
 export async function deletePlugin(id: string): Promise<void> {
-  const response = await fetch(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+  return requestVoid(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export type TargetInput = {
@@ -174,50 +135,23 @@ export type TargetInput = {
 };
 
 export async function createTarget(input: TargetInput): Promise<TargetState> {
-  const response = await fetch("/api/targets", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/targets", jsonInit("POST", input));
 }
 
 export async function updateTarget(id: string, input: TargetInput): Promise<TargetState> {
-  const response = await fetch(`/api/targets/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/targets/${encodeURIComponent(id)}`, jsonInit("PUT", input));
 }
 
 export async function deleteTarget(id: string): Promise<void> {
-  const response = await fetch(`/api/targets/${encodeURIComponent(id)}`, { method: "DELETE" });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+  return requestVoid(`/api/targets/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function refreshTargetHealth(id: string): Promise<TargetState> {
-  const response = await fetch(`/api/targets/${encodeURIComponent(id)}/health`, { method: "POST" });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/targets/${encodeURIComponent(id)}/health`, { method: "POST" });
 }
 
 export async function getProjectHealth(id: string): Promise<ProjectHealth> {
-  const response = await fetch(`/api/projects/${encodeURIComponent(id)}/health`);
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/projects/${encodeURIComponent(id)}/health`);
 }
 
 export async function askAssistant(input: {
@@ -225,101 +159,43 @@ export async function askAssistant(input: {
   message: string;
   context?: Record<string, unknown>;
 }): Promise<{ conversationId: string; message: string }> {
-  const response = await fetch("/api/assistant", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/assistant", jsonInit("POST", input));
 }
 
-export async function steerTask(taskId: string, message: string) {
-  const response = await fetch(`/api/tasks/${taskId}/steer`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+export async function steerTask(taskId: string, message: string): Promise<void> {
+  return requestVoid(`/api/tasks/${taskId}/steer`, jsonInit("POST", { message }));
 }
 
 export async function retryTask(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/retry`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/tasks/${taskId}/retry`, { method: "POST" });
 }
 
-export async function cancelTask(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/cancel`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+export async function cancelTask(taskId: string): Promise<void> {
+  return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
 }
 
-export async function clearTask(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/clear`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+export async function clearTask(taskId: string): Promise<void> {
+  return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
 }
 
 export async function clearFinishedTasks() {
-  const response = await fetch("/api/tasks/clear-terminal", {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON("/api/tasks/clear-terminal", { method: "POST" });
 }
 
-export async function cancelWorker(workerId: string) {
-  const response = await fetch(`/api/workers/${workerId}/cancel`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+export async function cancelWorker(workerId: string): Promise<void> {
+  return requestVoid(`/api/workers/${workerId}/cancel`, { method: "POST" });
 }
 
 export async function getWorkerChanges(workerId: string): Promise<WorkerChangesReview> {
-  const response = await fetch(`/api/workers/${workerId}/changes`);
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/workers/${workerId}/changes`);
 }
 
 export async function applyWorkerChanges(workerId: string) {
-  const response = await fetch(`/api/workers/${workerId}/apply`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/workers/${workerId}/apply`, { method: "POST" });
 }
 
 export async function applyTaskResult(taskId: string) {
-  const response = await fetch(`/api/tasks/${taskId}/apply`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/tasks/${taskId}/apply`, { method: "POST" });
 }
 
 export async function publishTaskPullRequest(taskId: string, input: {
@@ -331,47 +207,19 @@ export async function publishTaskPullRequest(taskId: string, input: {
   body?: string;
   draft?: boolean;
 } = {}): Promise<PullRequestState> {
-  const response = await fetch(`/api/tasks/${taskId}/pull-request`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/tasks/${taskId}/pull-request`, jsonInit("POST", input));
 }
 
 export async function watchTaskPullRequests(taskId: string, input: WatchPullRequestsInput): Promise<PullRequestState[]> {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/watch-pull-requests`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/watch-pull-requests`, jsonInit("POST", input));
 }
 
 export async function refreshPullRequest(id: string): Promise<PullRequestState> {
-  const response = await fetch(`/api/pull-requests/${id}/refresh`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/pull-requests/${id}/refresh`, { method: "POST" });
 }
 
 export async function babysitPullRequest(id: string) {
-  const response = await fetch(`/api/pull-requests/${id}/babysit`, {
-    method: "POST",
-  });
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  return requestJSON(`/api/pull-requests/${id}/babysit`, { method: "POST" });
 }
 
 async function errorMessage(response: Response): Promise<string> {
