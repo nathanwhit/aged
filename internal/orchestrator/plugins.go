@@ -189,7 +189,9 @@ func (r *PluginRegistry) Snapshot() []core.Plugin {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]core.Plugin, len(r.plugins))
-	copy(out, r.plugins)
+	for i, plugin := range r.plugins {
+		out[i] = clonePlugin(plugin)
+	}
 	return out
 }
 
@@ -380,7 +382,7 @@ func (r *PluginRegistry) appendDriverLog(index int, line string) {
 	if index < 0 || index >= len(r.plugins) {
 		return
 	}
-	tail := append(r.plugins[index].Driver.LogTail, line)
+	tail := append(append([]string(nil), r.plugins[index].Driver.LogTail...), line)
 	if len(tail) > 50 {
 		tail = tail[len(tail)-50:]
 	}
@@ -393,7 +395,7 @@ func (r *PluginRegistry) pluginAt(index int) (core.Plugin, bool) {
 	if index < 0 || index >= len(r.plugins) {
 		return core.Plugin{}, false
 	}
-	return r.plugins[index], true
+	return clonePlugin(r.plugins[index]), true
 }
 
 func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
@@ -402,7 +404,22 @@ func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
 	if index < 0 || index >= len(r.plugins) {
 		return
 	}
-	r.plugins[index] = plugin
+	plugin.Driver.LogTail = append([]string(nil), r.plugins[index].Driver.LogTail...)
+	r.plugins[index] = clonePlugin(plugin)
+}
+
+func clonePlugin(plugin core.Plugin) core.Plugin {
+	plugin.Command = append([]string(nil), plugin.Command...)
+	plugin.Capabilities = append([]string(nil), plugin.Capabilities...)
+	plugin.Driver.LogTail = append([]string(nil), plugin.Driver.LogTail...)
+	if plugin.Config != nil {
+		config := make(map[string]string, len(plugin.Config))
+		for key, value := range plugin.Config {
+			config[key] = value
+		}
+		plugin.Config = config
+	}
+	return plugin
 }
 
 func shouldRestartPlugin(plugin core.Plugin, err error) bool {

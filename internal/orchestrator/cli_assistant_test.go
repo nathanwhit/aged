@@ -66,6 +66,19 @@ func TestExtractCodexAssistantOutputHandlesLargeJSONLine(t *testing.T) {
 	}
 }
 
+func TestExtractClaudeAssistantOutputHandlesLargeJSONLine(t *testing.T) {
+	message := strings.Repeat("large-result-", 100000)
+	output := `{"type":"system","subtype":"init","session_id":"session-large"}` + "\n" +
+		`{"type":"result","subtype":"success","result":` + strconv.Quote(message) + `}` + "\n"
+
+	if got := extractLastParsedResult("claude", output); got != message {
+		t.Fatalf("message length = %d, want %d", len(got), len(message))
+	}
+	if sessionID := extractClaudeSessionID(output); sessionID != "session-large" {
+		t.Fatalf("session = %q", sessionID)
+	}
+}
+
 func TestCLIAssistantUsesClaudeStreamResult(t *testing.T) {
 	argsPath := filepath.Join(t.TempDir(), "args.txt")
 	stdinPath := filepath.Join(t.TempDir(), "stdin.txt")
