@@ -158,73 +158,47 @@ func (m AutoWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (
 		return PreparedWorkspace{}, err
 	}
 	if _, err := runJJ(ctx, absWorkDir, "root"); err == nil {
-		manager := NewJJWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy())
-		manager.CleanupPolicy = m.cleanupPolicy()
-		return manager.Prepare(ctx, spec)
+		return NewJJWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy()).Prepare(ctx, spec)
 	}
 	if _, err := runGit(ctx, absWorkDir, "rev-parse", "--show-toplevel"); err == nil {
-		manager := NewGitWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy())
-		manager.CleanupPolicy = m.cleanupPolicy()
-		return manager.Prepare(ctx, spec)
+		return NewGitWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy()).Prepare(ctx, spec)
 	}
 	return PreparedWorkspace{}, fmt.Errorf("workdir is not inside a supported VCS workspace: %s", absWorkDir)
 }
 
 func (m AutoWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
-	switch workspace.VCSType {
-	case "jj":
-		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		manager.CleanupPolicy = WorkspaceCleanupPolicy(workspace.CleanupPolicy)
-		return manager.Cleanup(ctx, workspace, result)
-	case "git":
-		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		manager.CleanupPolicy = WorkspaceCleanupPolicy(workspace.CleanupPolicy)
-		return manager.Cleanup(ctx, workspace, result)
-	default:
+	manager, ok := workspaceVCSManager(workspace)
+	if !ok {
 		cleanup := cleanupSkipped(workspace, result, "unsupported VCS type")
 		return cleanup, nil
 	}
+	return manager.Cleanup(ctx, workspace, result)
 }
 
 func (m AutoWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
-	switch workspace.VCSType {
-	case "jj":
-		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.DescribeChanges(ctx, workspace)
-	case "git":
-		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.DescribeChanges(ctx, workspace)
-	default:
+	manager, ok := workspaceVCSManager(workspace)
+	if !ok {
 		changes := baseWorkspaceChanges(workspace)
 		changes.Error = "unsupported VCS type"
 		return changes, nil
 	}
+	return manager.DescribeChanges(ctx, workspace)
 }
 
 func (m AutoWorkspaceManager) DescribeDiff(ctx context.Context, workspace PreparedWorkspace) (string, error) {
-	switch workspace.VCSType {
-	case "jj":
-		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.DescribeDiff(ctx, workspace)
-	case "git":
-		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.DescribeDiff(ctx, workspace)
-	default:
+	manager, ok := workspaceVCSManager(workspace)
+	if !ok {
 		return "", fmt.Errorf("unsupported VCS type %q", workspace.VCSType)
 	}
+	return manager.DescribeDiff(ctx, workspace)
 }
 
 func (m AutoWorkspaceManager) ApplyChanges(ctx context.Context, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
-	switch workspace.VCSType {
-	case "jj":
-		manager := NewJJWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.ApplyChanges(ctx, workspace, changes)
-	case "git":
-		manager := NewGitWorkspaceManager(WorkspaceMode(workspace.Mode), "", WorkspaceCleanupPolicy(workspace.CleanupPolicy))
-		return manager.ApplyChanges(ctx, workspace, changes)
-	default:
+	manager, ok := workspaceVCSManager(workspace)
+	if !ok {
 		return baseWorkerApplyResult(workspace, "unsupported"), fmt.Errorf("unsupported VCS type %q", workspace.VCSType)
 	}
+	return manager.ApplyChanges(ctx, workspace, changes)
 }
 
 func (m AutoWorkspaceManager) cleanupPolicy() WorkspaceCleanupPolicy {
@@ -234,13 +208,25 @@ func (m AutoWorkspaceManager) cleanupPolicy() WorkspaceCleanupPolicy {
 	return WorkspaceCleanupRetain
 }
 
-type JJWorkspaceManager struct {
-	Mode          WorkspaceMode
-	WorkspaceRoot string
-	CleanupPolicy WorkspaceCleanupPolicy
+type vcsWorkspaceManager interface {
+	WorkspaceManager
+	DescribeDiff(ctx context.Context, workspace PreparedWorkspace) (string, error)
 }
 
-func NewJJWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPolicy WorkspaceCleanupPolicy) JJWorkspaceManager {
+func workspaceVCSManager(workspace PreparedWorkspace) (vcsWorkspaceManager, bool) {
+	mode := WorkspaceMode(workspace.Mode)
+	cleanupPolicy := WorkspaceCleanupPolicy(workspace.CleanupPolicy)
+	switch workspace.VCSType {
+	case "jj":
+		return NewJJWorkspaceManager(mode, "", cleanupPolicy), true
+	case "git":
+		return NewGitWorkspaceManager(mode, "", cleanupPolicy), true
+	default:
+		return nil, false
+	}
+}
+
+func workspaceManagerDefaults(mode WorkspaceMode, workspaceRoot string, cleanupPolicy WorkspaceCleanupPolicy) (WorkspaceMode, string, WorkspaceCleanupPolicy) {
 	if mode == "" {
 		mode = WorkspaceModeIsolated
 	}
@@ -252,6 +238,24 @@ func NewJJWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPoli
 	if cleanupPolicy == "" {
 		cleanupPolicy = WorkspaceCleanupRetain
 	}
+	return mode, workspaceRoot, cleanupPolicy
+}
+
+func workspaceCleanupPolicy(policy WorkspaceCleanupPolicy) string {
+	if policy != "" {
+		return string(policy)
+	}
+	return string(WorkspaceCleanupRetain)
+}
+
+type JJWorkspaceManager struct {
+	Mode          WorkspaceMode
+	WorkspaceRoot string
+	CleanupPolicy WorkspaceCleanupPolicy
+}
+
+func NewJJWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPolicy WorkspaceCleanupPolicy) JJWorkspaceManager {
+	mode, workspaceRoot, cleanupPolicy = workspaceManagerDefaults(mode, workspaceRoot, cleanupPolicy)
 	return JJWorkspaceManager{
 		Mode:          mode,
 		WorkspaceRoot: workspaceRoot,
@@ -395,35 +399,23 @@ func (m JJWorkspaceManager) workspaceDestination(root string, spec WorkspaceSpec
 }
 
 func (m JJWorkspaceManager) cleanupPolicy() string {
-	if m.CleanupPolicy != "" {
-		return string(m.CleanupPolicy)
-	}
-	return string(WorkspaceCleanupRetain)
+	return workspaceCleanupPolicy(m.CleanupPolicy)
 }
 
 func (m JJWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
-	cleanup, shouldClean := cleanupDecision(workspace, result)
-	if !shouldClean {
-		return cleanup, nil
-	}
-	if workspace.Mode != string(WorkspaceModeIsolated) {
-		cleanup.Reason = "shared workspace is not removed"
-		return cleanup, nil
-	}
-	if workspace.WorkspaceName == "" || workspace.Root == "" || workspace.SourceRoot == "" {
-		cleanup.Error = "workspace cleanup requires workspace name, root, and source root"
-		return cleanup, errors.New(cleanup.Error)
-	}
-	if _, err := runJJ(ctx, workspace.SourceRoot, "workspace", "forget", workspace.WorkspaceName); err != nil {
-		cleanup.Error = err.Error()
-		return cleanup, fmt.Errorf("forget jj workspace: %w", err)
-	}
-	if err := os.RemoveAll(workspace.Root); err != nil {
-		cleanup.Error = err.Error()
-		return cleanup, fmt.Errorf("remove jj workspace directory: %w", err)
-	}
-	cleanup.Cleaned = true
-	return cleanup, nil
+	return cleanupWorkspace(ctx, workspace, result, func(ctx context.Context) (string, error) {
+		if workspace.WorkspaceName == "" || workspace.Root == "" || workspace.SourceRoot == "" {
+			err := errors.New("workspace cleanup requires workspace name, root, and source root")
+			return err.Error(), err
+		}
+		if _, err := runJJ(ctx, workspace.SourceRoot, "workspace", "forget", workspace.WorkspaceName); err != nil {
+			return err.Error(), fmt.Errorf("forget jj workspace: %w", err)
+		}
+		if err := os.RemoveAll(workspace.Root); err != nil {
+			return err.Error(), fmt.Errorf("remove jj workspace directory: %w", err)
+		}
+		return "", nil
+	})
 }
 
 func (m JJWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
@@ -545,17 +537,7 @@ type GitWorkspaceManager struct {
 }
 
 func NewGitWorkspaceManager(mode WorkspaceMode, workspaceRoot string, cleanupPolicy WorkspaceCleanupPolicy) GitWorkspaceManager {
-	if mode == "" {
-		mode = WorkspaceModeIsolated
-	}
-	if workspaceRoot == "" {
-		workspaceRoot = defaultWorkspaceRoot()
-	} else {
-		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
-	}
-	if cleanupPolicy == "" {
-		cleanupPolicy = WorkspaceCleanupRetain
-	}
+	mode, workspaceRoot, cleanupPolicy = workspaceManagerDefaults(mode, workspaceRoot, cleanupPolicy)
 	return GitWorkspaceManager{
 		Mode:          mode,
 		WorkspaceRoot: workspaceRoot,
@@ -674,13 +656,23 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 }
 
 func (m GitWorkspaceManager) cleanupPolicy() string {
-	if m.CleanupPolicy != "" {
-		return string(m.CleanupPolicy)
-	}
-	return string(WorkspaceCleanupRetain)
+	return workspaceCleanupPolicy(m.CleanupPolicy)
 }
 
 func (m GitWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
+	return cleanupWorkspace(ctx, workspace, result, func(ctx context.Context) (string, error) {
+		if workspace.Root == "" || workspace.SourceRoot == "" {
+			err := errors.New("workspace cleanup requires root and source root")
+			return err.Error(), err
+		}
+		if _, err := runGit(ctx, workspace.SourceRoot, "worktree", "remove", "--force", workspace.Root); err != nil {
+			return err.Error(), fmt.Errorf("remove git worktree: %w", err)
+		}
+		return "", nil
+	})
+}
+
+func cleanupWorkspace(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult, remove func(context.Context) (string, error)) (WorkspaceCleanup, error) {
 	cleanup, shouldClean := cleanupDecision(workspace, result)
 	if !shouldClean {
 		return cleanup, nil
@@ -689,13 +681,9 @@ func (m GitWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWork
 		cleanup.Reason = "shared workspace is not removed"
 		return cleanup, nil
 	}
-	if workspace.Root == "" || workspace.SourceRoot == "" {
-		cleanup.Error = "workspace cleanup requires root and source root"
-		return cleanup, errors.New(cleanup.Error)
-	}
-	if _, err := runGit(ctx, workspace.SourceRoot, "worktree", "remove", "--force", workspace.Root); err != nil {
-		cleanup.Error = err.Error()
-		return cleanup, fmt.Errorf("remove git worktree: %w", err)
+	if cleanupError, err := remove(ctx); err != nil {
+		cleanup.Error = cleanupError
+		return cleanup, err
 	}
 	cleanup.Cleaned = true
 	return cleanup, nil
