@@ -194,18 +194,7 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 	if err != nil {
 		return core.PullRequest{}, wrapGitHubCommandError("find existing pull request", err)
 	}
-	var prs []struct {
-		Number              int    `json:"number"`
-		URL                 string `json:"url"`
-		State               string `json:"state"`
-		Title               string `json:"title"`
-		IsDraft             bool   `json:"isDraft"`
-		HeadRefName         string `json:"headRefName"`
-		BaseRefName         string `json:"baseRefName"`
-		HeadRepositoryOwner struct {
-			Login string `json:"login"`
-		} `json:"headRepositoryOwner"`
-	}
+	var prs []githubPullRequestPayload
 	if err := json.Unmarshal([]byte(out), &prs); err != nil {
 		return core.PullRequest{}, err
 	}
@@ -213,15 +202,7 @@ func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, 
 		if hasHeadOwner && (!strings.EqualFold(pr.HeadRepositoryOwner.Login, headOwner) || pr.HeadRefName != headBranch) {
 			continue
 		}
-		return core.PullRequest{
-			Number: pr.Number,
-			URL:    pr.URL,
-			State:  pr.State,
-			Title:  pr.Title,
-			Draft:  pr.IsDraft,
-			Branch: pr.HeadRefName,
-			Base:   pr.BaseRefName,
-		}, nil
+		return pr.pullRequest(core.PullRequest{}), nil
 	}
 	return core.PullRequest{}, errors.New("no existing pull request found for branch")
 }
@@ -362,37 +343,14 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 		return core.PullRequest{}, wrapGitHubCommandError("inspect GitHub pull request", err)
 	}
 	var payload struct {
-		Number            int             `json:"number"`
-		URL               string          `json:"url"`
-		State             string          `json:"state"`
-		Title             string          `json:"title"`
-		IsDraft           bool            `json:"isDraft"`
-		HeadRefName       string          `json:"headRefName"`
-		BaseRefName       string          `json:"baseRefName"`
-		MergeStateStatus  string          `json:"mergeStateStatus"`
-		Mergeable         string          `json:"mergeable"`
-		ReviewDecision    string          `json:"reviewDecision"`
-		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
-		Comments          []prComment     `json:"comments"`
-		Reviews           []prReview      `json:"reviews"`
+		githubPullRequestPayload
+		Comments []prComment `json:"comments"`
+		Reviews  []prReview  `json:"reviews"`
 	}
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return core.PullRequest{}, fmt.Errorf("decode GitHub pull request: %w", err)
 	}
-	checked := pr
-	checked.Number = payload.Number
-	checked.URL = payload.URL
-	checked.State = payload.State
-	checked.Title = payload.Title
-	checked.Draft = payload.IsDraft
-	checked.Branch = payload.HeadRefName
-	checked.Base = payload.BaseRefName
-	checked.Mergeable = payload.Mergeable
-	checked.MergeStatus = pullRequestMergeStatus(payload.MergeStateStatus, payload.Mergeable)
-	checked.ReviewStatus = payload.ReviewDecision
-	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
-	checked.ChecksStatus = checks.Status
-	checked.ChecksConclusion = checks.Conclusion
+	checked := payload.pullRequest(pr)
 	threadFeedback, err := p.pullRequestReviewThreadFeedback(ctx, exec, checked)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -458,45 +416,54 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 	if err != nil {
 		return nil, wrapGitHubCommandError("list GitHub pull requests", err)
 	}
-	var payload []struct {
-		Number            int             `json:"number"`
-		URL               string          `json:"url"`
-		State             string          `json:"state"`
-		Title             string          `json:"title"`
-		IsDraft           bool            `json:"isDraft"`
-		HeadRefName       string          `json:"headRefName"`
-		BaseRefName       string          `json:"baseRefName"`
-		MergeStateStatus  string          `json:"mergeStateStatus"`
-		Mergeable         string          `json:"mergeable"`
-		ReviewDecision    string          `json:"reviewDecision"`
-		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
-	}
+	var payload []githubPullRequestPayload
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return nil, fmt.Errorf("decode GitHub pull request list: %w", err)
 	}
 	prs := make([]core.PullRequest, 0, len(payload))
 	for _, item := range payload {
-		checks := summarizeStatusCheckRollup(item.StatusCheckRollup)
-		prs = append(prs, core.PullRequest{
-			ID:               newPullRequestID(),
-			TaskID:           spec.TaskID,
-			Repo:             repo,
-			Number:           item.Number,
-			URL:              item.URL,
-			Branch:           item.HeadRefName,
-			Base:             item.BaseRefName,
-			Title:            item.Title,
-			State:            item.State,
-			Draft:            item.IsDraft,
-			ChecksStatus:     checks.Status,
-			ChecksConclusion: checks.Conclusion,
-			MergeStatus:      pullRequestMergeStatus(item.MergeStateStatus, item.Mergeable),
-			Mergeable:        item.Mergeable,
-			ReviewStatus:     item.ReviewDecision,
-			Metadata:         core.MustJSON(spec.Metadata),
-		})
+		prs = append(prs, item.pullRequest(core.PullRequest{
+			ID:       newPullRequestID(),
+			TaskID:   spec.TaskID,
+			Repo:     repo,
+			Metadata: core.MustJSON(spec.Metadata),
+		}))
 	}
 	return prs, nil
+}
+
+type githubPullRequestPayload struct {
+	Number              int             `json:"number"`
+	URL                 string          `json:"url"`
+	State               string          `json:"state"`
+	Title               string          `json:"title"`
+	IsDraft             bool            `json:"isDraft"`
+	HeadRefName         string          `json:"headRefName"`
+	BaseRefName         string          `json:"baseRefName"`
+	MergeStateStatus    string          `json:"mergeStateStatus"`
+	Mergeable           string          `json:"mergeable"`
+	ReviewDecision      string          `json:"reviewDecision"`
+	StatusCheckRollup   json.RawMessage `json:"statusCheckRollup"`
+	HeadRepositoryOwner struct {
+		Login string `json:"login"`
+	} `json:"headRepositoryOwner"`
+}
+
+func (payload githubPullRequestPayload) pullRequest(pr core.PullRequest) core.PullRequest {
+	pr.Number = payload.Number
+	pr.URL = payload.URL
+	pr.State = payload.State
+	pr.Title = payload.Title
+	pr.Draft = payload.IsDraft
+	pr.Branch = payload.HeadRefName
+	pr.Base = payload.BaseRefName
+	pr.Mergeable = payload.Mergeable
+	pr.MergeStatus = pullRequestMergeStatus(payload.MergeStateStatus, payload.Mergeable)
+	pr.ReviewStatus = payload.ReviewDecision
+	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
+	pr.ChecksStatus = checks.Status
+	pr.ChecksConclusion = checks.Conclusion
+	return pr
 }
 
 type prComment struct {
