@@ -8038,56 +8038,36 @@ func openTestStore(t *testing.T) *eventstore.SQLiteStore {
 
 func waitForTaskStatus(t *testing.T, store eventstore.Store, taskID string, status core.TaskStatus) core.Snapshot {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot, err := store.Snapshot(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+	return waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
 		for _, task := range snapshot.Tasks {
 			if task.ID == taskID && task.Status == status {
-				return snapshot
+				return true
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	snapshot, _ := store.Snapshot(context.Background())
-	t.Fatalf("task %s did not reach %s; snapshot = %+v", taskID, status, snapshot.Tasks)
-	return core.Snapshot{}
+		return false
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not reach %s; snapshot = %+v", taskID, status, snapshot.Tasks)
+	})
 }
 
 func waitForPullRequests(t *testing.T, store eventstore.Store, taskID string, count int) core.Snapshot {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot, err := store.Snapshot(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+	return waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
 		found := 0
 		for _, pr := range snapshot.PullRequests {
 			if pr.TaskID == taskID {
 				found++
 			}
 		}
-		if found >= count {
-			return snapshot
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	snapshot, _ := store.Snapshot(context.Background())
-	t.Fatalf("task %s did not publish %d pull requests; pull requests = %+v", taskID, count, snapshot.PullRequests)
-	return core.Snapshot{}
+		return found >= count
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not publish %d pull requests; pull requests = %+v", taskID, count, snapshot.PullRequests)
+	})
 }
 
 func waitForTaskStatusEventCount(t *testing.T, store eventstore.Store, taskID string, status core.TaskStatus, count int) core.Snapshot {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot, err := store.Snapshot(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+	return waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
 		found := 0
 		for _, event := range snapshot.Events {
 			if event.Type != core.EventTaskStatus || event.TaskID != taskID {
@@ -8103,35 +8083,31 @@ func waitForTaskStatusEventCount(t *testing.T, store eventstore.Store, taskID st
 				found++
 			}
 		}
-		if found >= count {
-			return snapshot
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	snapshot, _ := store.Snapshot(context.Background())
-	t.Fatalf("task %s did not record %d %s status events; events = %+v", taskID, count, status, snapshot.Events)
-	return core.Snapshot{}
+		return found >= count
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not record %d %s status events; events = %+v", taskID, count, status, snapshot.Events)
+	})
 }
 
 func waitForEvent(t *testing.T, store eventstore.Store, eventType core.EventType, taskID string) core.Snapshot {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		snapshot, err := store.Snapshot(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if hasEvent(snapshot.Events, eventType, taskID, "") {
-			return snapshot
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	snapshot, _ := store.Snapshot(context.Background())
-	t.Fatalf("task %s did not record event %s; events = %+v", taskID, eventType, snapshot.Events)
-	return core.Snapshot{}
+	return waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasEvent(snapshot.Events, eventType, taskID, "")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not record event %s; events = %+v", taskID, eventType, snapshot.Events)
+	})
 }
 
 func waitForEventCount(t *testing.T, store eventstore.Store, eventType core.EventType, taskID string, count int) core.Snapshot {
+	t.Helper()
+	return waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return countEvents(snapshot.Events, eventType, taskID) >= count
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not record %d events of type %s; events = %+v", taskID, count, eventType, snapshot.Events)
+	})
+}
+
+func waitForSnapshot(t *testing.T, store eventstore.Store, ready func(core.Snapshot) bool, failure func(core.Snapshot) string) core.Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -8139,13 +8115,16 @@ func waitForEventCount(t *testing.T, store eventstore.Store, eventType core.Even
 		if err != nil {
 			t.Fatal(err)
 		}
-		if countEvents(snapshot.Events, eventType, taskID) >= count {
+		if ready(snapshot) {
 			return snapshot
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	snapshot, _ := store.Snapshot(context.Background())
-	t.Fatalf("task %s did not record %d events of type %s; events = %+v", taskID, count, eventType, snapshot.Events)
+	snapshot, err := store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("%s", failure(snapshot))
 	return core.Snapshot{}
 }
 
