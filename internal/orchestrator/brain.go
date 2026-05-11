@@ -127,6 +127,9 @@ func (a PlanAction) Validate() error {
 	if strings.TrimSpace(a.Reason) == "" {
 		return errors.New("reason is required")
 	}
+	if strings.TrimSpace(a.Kind) == "publish_pull_request" && strings.TrimSpace(stringMetadata(a.Inputs, "body")) == "" {
+		return errors.New("publish_pull_request inputs.body is required")
+	}
 	return nil
 }
 

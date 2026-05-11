@@ -186,6 +186,41 @@ func TestApplyRemotePatchConflictDoesNotDirtySource(t *testing.T) {
 	}
 }
 
+func TestBaseWorkspaceSpecUsesGitBaseWorkerRecordedBaseChange(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+	service := NewServiceWithWorkspaceManager(store, StaticBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   "task",
+		WorkerID: "base-worker",
+		Payload: core.MustJSON(PreparedWorkspace{
+			CWD:        "/tmp/base-worker",
+			VCSType:    "git",
+			BaseChange: "base-worker-start",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := service.baseWorkspaceSpec(ctx, WorkspaceSpec{
+		TaskID:       "task",
+		WorkerID:     "followup-worker",
+		BaseRevision: "current-project-head",
+	}, "base-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.BaseWorkDir != "/tmp/base-worker" {
+		t.Fatalf("base workdir = %q", spec.BaseWorkDir)
+	}
+	if spec.BaseRevision != "base-worker-start" {
+		t.Fatalf("base revision = %q, want recorded base change", spec.BaseRevision)
+	}
+}
+
 func TestServiceDedupesExternalSourceTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -553,8 +588,8 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if !hasMilestone(task.Milestones, "candidate_ready") || !hasMilestone(task.Milestones, "pr_opened") {
 		t.Fatalf("milestones = %+v", task.Milestones)
 	}
-	if !strings.Contains(publisher.published.Body, "## Repo checklist") || !strings.Contains(publisher.published.Body, "`README.md` (modified)") || !strings.Contains(publisher.published.Body, "implemented") {
-		t.Fatalf("published body did not include template, changed files, and summary:\n%s", publisher.published.Body)
+	if publisher.published.Body != "" {
+		t.Fatalf("completion-mode publish invented a pull request body:\n%s", publisher.published.Body)
 	}
 	if applyCalls != 0 {
 		t.Fatalf("apply calls = %d, want 0", applyCalls)
@@ -1077,7 +1112,11 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 			Kind:   "publish_pull_request",
 			When:   "after_success",
 			Reason: "open a PR so review can happen while the objective continues",
-			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			Inputs: map[string]any{
+				"repo": "owner/repo",
+				"base": "main",
+				"body": "## Summary\n- Implement feature.\n\n## Validation\n- Worker completed successfully.",
+			},
 		}},
 	}}, map[string]worker.Runner{
 		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
@@ -1111,6 +1150,9 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	if publisher.published.WorkerID == "" || publisher.published.WorkDir != taskWorkspaceCWD(snapshot, task.ID) {
 		t.Fatalf("published from wrong worker workspace: %+v", publisher.published)
 	}
+	if !strings.Contains(publisher.published.Body, "Implement feature.") {
+		t.Fatalf("publish action body was not forwarded: %+v", publisher.published)
+	}
 }
 
 func TestServicePlanActionAdoptsWorkerCreatedPullRequest(t *testing.T) {
@@ -1137,7 +1179,7 @@ func TestServicePlanActionAdoptsWorkerCreatedPullRequest(t *testing.T) {
 			Kind:   "publish_pull_request",
 			When:   "after_success",
 			Reason: "open a PR so review can happen while the objective continues",
-			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main", "body": "Adopt the worker-created pull request."},
 		}},
 	}}, map[string]worker.Runner{
 		"change": eventRunner{kind: "change", events: []worker.Event{
@@ -1263,6 +1305,7 @@ func TestServiceRetriesExplicitPublishPullRequestActionAfterRecoverableSigningFa
 				"branch": "aged/retry-explicit-publish",
 				"draft":  true,
 				"title":  "Retry explicit publish",
+				"body":   "Retry explicit publish.",
 			},
 		}},
 	}}}
@@ -1283,6 +1326,7 @@ func TestServiceRetriesExplicitPublishPullRequestActionAfterRecoverableSigningFa
 		t.Fatal(err)
 	}
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	snapshot = waitForEventCount(t, store, core.EventTaskAction, task.ID, 2)
 	if publisher.publishCalls != 1 {
 		t.Fatalf("initial publish calls = %d, want 1", publisher.publishCalls)
 	}
@@ -1339,7 +1383,7 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 				Kind:   "publish_pull_request",
 				When:   "after_success",
 				Reason: "ship the first optimization and keep researching",
-				Inputs: map[string]any{"repo": "owner/repo", "continueAfterPublish": true},
+				Inputs: map[string]any{"repo": "owner/repo", "continueAfterPublish": true, "body": "Ship the first optimization."},
 			}},
 		},
 		decisions: []ReplanDecision{{
@@ -1353,7 +1397,7 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 					Kind:   "publish_pull_request",
 					When:   "after_success",
 					Reason: "ship the second optimization and keep the task owning both PRs",
-					Inputs: map[string]any{"repo": "owner/repo"},
+					Inputs: map[string]any{"repo": "owner/repo", "body": "Ship the second optimization."},
 				}},
 			},
 		}},
@@ -1421,7 +1465,7 @@ func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T)
 				Kind:   "publish_pull_request",
 				When:   "after_success",
 				Reason: "publish the classifier fix",
-				Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+				Inputs: map[string]any{"repo": "owner/repo", "base": "main", "body": "Publish the classifier fix."},
 			}},
 		},
 		decisions: []ReplanDecision{{
@@ -1487,7 +1531,7 @@ func TestServicePlanActionPublishesAfterCleanReviewFinding(t *testing.T) {
 			Kind:   "publish_pull_request",
 			When:   "after_success",
 			Reason: "publish the classifier fix",
-			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main", "body": "Publish the classifier fix."},
 		}},
 	}}, map[string]worker.Runner{
 		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented classifier changes"}}},
@@ -1537,7 +1581,7 @@ func TestServicePlanActionDoesNotPublishRejectedCandidate(t *testing.T) {
 				Kind:   "publish_pull_request",
 				When:   "after_success",
 				Reason: "publish a useful optimization PR when one is ready",
-				Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+				Inputs: map[string]any{"repo": "owner/repo", "base": "main", "body": "Publish the optimization when ready."},
 			}},
 		},
 		decisions: []ReplanDecision{{
@@ -4777,7 +4821,7 @@ func TestServiceTreatsWorkflowScopePushRejectionAsRecoverable(t *testing.T) {
 			Kind:   "publish_pull_request",
 			When:   "after_success",
 			Reason: "publish CI workflow",
-			Inputs: map[string]any{"repo": "owner/repo", "base": "main"},
+			Inputs: map[string]any{"repo": "owner/repo", "base": "main", "body": "Publish CI workflow."},
 		}},
 	}}, map[string]worker.Runner{"writer": eventRunner{
 		kind:   "writer",

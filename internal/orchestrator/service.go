@@ -1416,11 +1416,10 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		"autoMerge":         project.PullRequestPolicy.AutoMerge,
 		"pullRequestPolicy": project.PullRequestPolicy,
 	}
-	title := defaultPullRequestTitle(req.Title, task, workerCompletionSummaryFromSnapshot(snapshot, workerID), s.pullRequestWorkspaceChanges(ctx, workerID))
+	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
+	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
+	title := defaultPullRequestTitle(req.Title, task, summary, changes)
 	body := strings.TrimSpace(req.Body)
-	if body == "" {
-		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)
-	}
 	pr, adopted, err := s.workerCreatedPullRequest(ctx, snapshot, task, workerID, repo, metadata)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -6364,7 +6363,9 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 			spec.BaseRevision = base.WorkspaceName + "@"
 		}
 	case "git":
-		spec.BaseRevision = ""
+		if strings.TrimSpace(base.BaseChange) != "" {
+			spec.BaseRevision = base.BaseChange
+		}
 	}
 	return spec, nil
 }
