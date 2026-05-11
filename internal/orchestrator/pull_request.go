@@ -357,7 +357,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	if ref == "" {
 		return core.PullRequest{}, errors.New("inspect requires pull request url or number")
 	}
-	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments")
+	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments,reviews")
 	if err != nil {
 		return core.PullRequest{}, fmt.Errorf("inspect GitHub pull request: %w", err)
 	}
@@ -374,6 +374,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 		ReviewDecision    string          `json:"reviewDecision"`
 		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
 		Comments          []prComment     `json:"comments"`
+		Reviews           []prReview      `json:"reviews"`
 	}
 	if err := json.Unmarshal([]byte(out), &payload); err != nil {
 		return core.PullRequest{}, fmt.Errorf("decode GitHub pull request: %w", err)
@@ -392,7 +393,11 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
 	checked.ChecksStatus = checks.Status
 	checked.ChecksConclusion = checks.Conclusion
-	checked.Metadata = pullRequestMetadataWithComments(pr.Metadata, payload.Comments, &checked)
+	threadFeedback, err := p.pullRequestReviewThreadFeedback(ctx, exec, checked)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	checked.Metadata = pullRequestMetadataWithFeedback(pr.Metadata, pullRequestFeedback(payload.Comments, payload.Reviews, threadFeedback), &checked)
 	return checked, nil
 }
 
@@ -500,12 +505,144 @@ type prComment struct {
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
 	ViewerDidAuthor bool   `json:"viewerDidAuthor"`
-	Author          struct {
-		Login string `json:"login"`
-	} `json:"author"`
+	Author          prAuthor
 }
 
-func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, checked *core.PullRequest) json.RawMessage {
+type prReview struct {
+	ID          string   `json:"id"`
+	Body        string   `json:"body"`
+	SubmittedAt string   `json:"submittedAt"`
+	State       string   `json:"state"`
+	Author      prAuthor `json:"author"`
+}
+
+type prAuthor struct {
+	Login string `json:"login"`
+}
+
+type prFeedback struct {
+	ID              string
+	Body            string
+	CreatedAt       string
+	UpdatedAt       string
+	ViewerDidAuthor bool
+	Author          prAuthor
+	Source          string
+	Path            string
+	Line            int
+	URL             string
+}
+
+func pullRequestFeedback(comments []prComment, reviews []prReview, threadFeedback []prFeedback) []prFeedback {
+	feedback := make([]prFeedback, 0, len(comments)+len(reviews)+len(threadFeedback))
+	for _, comment := range comments {
+		feedback = append(feedback, prFeedback{
+			ID:              comment.ID,
+			Body:            comment.Body,
+			CreatedAt:       comment.CreatedAt,
+			UpdatedAt:       comment.UpdatedAt,
+			ViewerDidAuthor: comment.ViewerDidAuthor,
+			Author:          comment.Author,
+			Source:          "conversation",
+		})
+	}
+	for _, review := range reviews {
+		if strings.TrimSpace(review.Body) == "" {
+			continue
+		}
+		feedback = append(feedback, prFeedback{
+			ID:        review.ID,
+			Body:      review.Body,
+			CreatedAt: review.SubmittedAt,
+			UpdatedAt: review.SubmittedAt,
+			Author:    review.Author,
+			Source:    "review",
+		})
+	}
+	feedback = append(feedback, threadFeedback...)
+	return feedback
+}
+
+func (p LocalPullRequestPublisher) pullRequestReviewThreadFeedback(ctx context.Context, exec commandExecutor, pr core.PullRequest) ([]prFeedback, error) {
+	repo := strings.TrimSpace(pr.Repo)
+	if repo == "" {
+		repo, _ = parsePullRequestURL(pr.URL)
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" || pr.Number == 0 {
+		return nil, nil
+	}
+	const query = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          path
+          line
+          startLine
+          comments(first: 100) {
+            nodes {
+              id
+              body
+              createdAt
+              updatedAt
+              viewerDidAuthor
+              url
+              author { login }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	out, err := exec(ctx, "", "gh", "api", "graphql", "-f", "query="+query, "-f", "owner="+owner, "-f", "name="+name, "-F", fmt.Sprintf("number=%d", pr.Number))
+	if err != nil {
+		return nil, fmt.Errorf("inspect GitHub pull request review threads: %w", err)
+	}
+	var payload struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							IsResolved bool   `json:"isResolved"`
+							Path       string `json:"path"`
+							Line       int    `json:"line"`
+							StartLine  int    `json:"startLine"`
+							Comments   struct {
+								Nodes []prFeedback `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil, fmt.Errorf("decode GitHub pull request review threads: %w", err)
+	}
+	var feedback []prFeedback
+	for _, thread := range payload.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		if thread.IsResolved {
+			continue
+		}
+		line := thread.Line
+		if line == 0 {
+			line = thread.StartLine
+		}
+		for _, comment := range thread.Comments.Nodes {
+			comment.Source = "review_thread"
+			comment.Path = thread.Path
+			comment.Line = line
+			feedback = append(feedback, comment)
+		}
+	}
+	return feedback, nil
+}
+
+func pullRequestMetadataWithFeedback(raw json.RawMessage, feedback []prFeedback, checked *core.PullRequest) json.RawMessage {
 	metadata := map[string]any{}
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &metadata)
@@ -513,20 +650,40 @@ func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, 
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
-	baselineEstablished, _ := metadata["conversationCommentBaselineEstablished"].(bool)
-	previousSignature, _ := metadata["latestConversationCommentSignature"].(string)
-	triggeredSignature, _ := metadata["latestConversationCommentTriggeredSignature"].(string)
-	latest, ok := latestExternalConversationComment(comments)
+	baselineEstablished, _ := metadata["pullRequestFeedbackBaselineEstablished"].(bool)
+	if !baselineEstablished {
+		baselineEstablished, _ = metadata["conversationCommentBaselineEstablished"].(bool)
+	}
+	previousSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
+	if previousSignature == "" {
+		previousSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentSignature"]))
+	}
+	triggeredSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
+	if triggeredSignature == "" {
+		triggeredSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
+	}
+	latest, ok := latestExternalPullRequestFeedback(feedback)
 	if ok {
 		signature := latest.Signature()
 		shouldTrigger := baselineEstablished && signature != previousSignature
-		if !shouldTrigger && triggeredSignature != signature && commentAfterPullRequestWatch(latest, checked.CreatedAt) {
+		if !shouldTrigger && triggeredSignature != signature && feedbackAfterPullRequestWatch(latest, checked.CreatedAt) {
 			shouldTrigger = true
 		}
 		if shouldTrigger {
 			checked.ReviewStatus = "COMMENTED"
+			metadata["latestPullRequestFeedbackTriggeredSignature"] = signature
 			metadata["latestConversationCommentTriggeredSignature"] = signature
 		}
+		metadata["latestPullRequestFeedbackSignature"] = signature
+		metadata["latestPullRequestFeedbackId"] = latest.ID
+		metadata["latestPullRequestFeedbackAuthor"] = latest.Author.Login
+		metadata["latestPullRequestFeedbackCreatedAt"] = latest.CreatedAt
+		metadata["latestPullRequestFeedbackUpdatedAt"] = latest.UpdatedAt
+		metadata["latestPullRequestFeedbackBody"] = truncatePRCommentBody(latest.Body)
+		metadata["latestPullRequestFeedbackSource"] = latest.Source
+		metadata["latestPullRequestFeedbackPath"] = latest.Path
+		metadata["latestPullRequestFeedbackLine"] = latest.Line
+		metadata["latestPullRequestFeedbackURL"] = latest.URL
 		metadata["latestConversationCommentSignature"] = signature
 		metadata["latestConversationCommentId"] = latest.ID
 		metadata["latestConversationCommentAuthor"] = latest.Author.Login
@@ -534,47 +691,48 @@ func pullRequestMetadataWithComments(raw json.RawMessage, comments []prComment, 
 		metadata["latestConversationCommentUpdatedAt"] = latest.UpdatedAt
 		metadata["latestConversationCommentBody"] = truncatePRCommentBody(latest.Body)
 	}
+	metadata["pullRequestFeedbackBaselineEstablished"] = true
 	metadata["conversationCommentBaselineEstablished"] = true
 	return core.MustJSON(metadata)
 }
 
-func commentAfterPullRequestWatch(comment prComment, watchedAt time.Time) bool {
+func feedbackAfterPullRequestWatch(feedback prFeedback, watchedAt time.Time) bool {
 	if watchedAt.IsZero() {
 		return false
 	}
-	commentAt := strings.TrimSpace(comment.UpdatedAt)
-	if commentAt == "" {
-		commentAt = strings.TrimSpace(comment.CreatedAt)
+	feedbackAt := strings.TrimSpace(feedback.UpdatedAt)
+	if feedbackAt == "" {
+		feedbackAt = strings.TrimSpace(feedback.CreatedAt)
 	}
-	if commentAt == "" {
+	if feedbackAt == "" {
 		return false
 	}
-	parsed, err := time.Parse(time.RFC3339, commentAt)
+	parsed, err := time.Parse(time.RFC3339, feedbackAt)
 	if err != nil {
 		return false
 	}
 	return parsed.After(watchedAt)
 }
 
-func latestExternalConversationComment(comments []prComment) (prComment, bool) {
-	var latest prComment
-	for _, comment := range comments {
-		if comment.ID == "" || comment.ViewerDidAuthor {
+func latestExternalPullRequestFeedback(feedback []prFeedback) (prFeedback, bool) {
+	var latest prFeedback
+	for _, item := range feedback {
+		if item.ID == "" || strings.TrimSpace(item.Body) == "" || item.ViewerDidAuthor {
 			continue
 		}
-		if latest.ID == "" || comment.Signature() > latest.Signature() {
-			latest = comment
+		if latest.ID == "" || item.Signature() > latest.Signature() {
+			latest = item
 		}
 	}
 	return latest, latest.ID != ""
 }
 
-func (c prComment) Signature() string {
-	updated := strings.TrimSpace(c.UpdatedAt)
+func (f prFeedback) Signature() string {
+	updated := strings.TrimSpace(f.UpdatedAt)
 	if updated == "" {
-		updated = strings.TrimSpace(c.CreatedAt)
+		updated = strings.TrimSpace(f.CreatedAt)
 	}
-	return updated + ":" + strings.TrimSpace(c.ID)
+	return updated + ":" + strings.TrimSpace(f.Source) + ":" + strings.TrimSpace(f.ID)
 }
 
 func truncatePRCommentBody(body string) string {
@@ -621,15 +779,7 @@ func prHeadRef(owner string, branch string) string {
 }
 
 func defaultPRBody(spec PullRequestPublishSpec) string {
-	var builder strings.Builder
-	builder.WriteString("Created by aged.\n\n")
-	if spec.TaskID != "" {
-		builder.WriteString("- Task: `" + spec.TaskID + "`\n")
-	}
-	if spec.WorkerID != "" {
-		builder.WriteString("- Worker: `" + spec.WorkerID + "`\n")
-	}
-	return builder.String()
+	return ""
 }
 
 var urlPattern = regexp.MustCompile(`https?://\S+`)

@@ -126,6 +126,8 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 				return "https://github.com/upstream/repo/pull/9", nil
 			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
 				return `{"number":9,"url":"https://github.com/upstream/repo/pull/9","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"trunk","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"REVIEW_REQUIRED"}`, nil
+			case name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+				return `{}`, nil
 			default:
 				t.Fatalf("unexpected command %s %v", name, args)
 				return "", nil
@@ -224,6 +226,9 @@ func TestInspectPullRequestPopulatesStatusAliasesFromGitHubPayload(t *testing.T)
 	var jsonFields string
 	publisher := LocalPullRequestPublisher{
 		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+				return `{}`, nil
+			}
 			if name != "gh" || !containsSubsequence(args, []string{"pr", "view"}) {
 				t.Fatalf("unexpected command %s %v", name, args)
 			}
@@ -311,22 +316,6 @@ func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
 	}
 }
 
-func TestGeneratedPullRequestBodyNormalizesWorkerReportSummary(t *testing.T) {
-	body := generatedPullRequestBody(core.Task{
-		ID:    "task-1",
-		Title: "Publish aged worker changes",
-	}, "worker-1", "**Summary**\n- Improve generated PR body summaries.\n\n**Validation**\n- go test ./internal/orchestrator", WorkspaceChanges{
-		ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/pull_request_workflow.go"}},
-	})
-
-	if !strings.Contains(body, "- Improve generated PR body summaries") {
-		t.Fatalf("body summary was not normalized:\n%s", body)
-	}
-	if strings.Contains(body, "**Summary**") || strings.Contains(body, "**Validation**") {
-		t.Fatalf("body leaked report headings into summary:\n%s", body)
-	}
-}
-
 func TestDefaultPullRequestTitlePrefersExplicitTitle(t *testing.T) {
 	title := defaultPullRequestTitle("  Reduce repeated Codex infrastructure warning noise in worker output.  ", core.Task{
 		ID:    "task-1",
@@ -397,6 +386,16 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	delete(metadata, "latestConversationCommentCreatedAt")
 	delete(metadata, "latestConversationCommentUpdatedAt")
 	delete(metadata, "latestConversationCommentBody")
+	delete(metadata, "latestPullRequestFeedbackSignature")
+	delete(metadata, "latestPullRequestFeedbackId")
+	delete(metadata, "latestPullRequestFeedbackAuthor")
+	delete(metadata, "latestPullRequestFeedbackCreatedAt")
+	delete(metadata, "latestPullRequestFeedbackUpdatedAt")
+	delete(metadata, "latestPullRequestFeedbackBody")
+	delete(metadata, "latestPullRequestFeedbackSource")
+	delete(metadata, "latestPullRequestFeedbackPath")
+	delete(metadata, "latestPullRequestFeedbackLine")
+	delete(metadata, "latestPullRequestFeedbackURL")
 
 	withNewComment, err := publisher.Inspect(context.Background(), core.PullRequest{
 		Repo:     "owner/repo",
@@ -419,6 +418,74 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	}
 	if again.ReviewStatus == "COMMENTED" {
 		t.Fatalf("already-seen comment triggered again")
+	}
+}
+
+func TestInspectPullRequestFlagsNewReviewBody(t *testing.T) {
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name != "gh" {
+				t.Fatalf("command = %q, want gh", name)
+			}
+			if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+				return `{}`, nil
+			}
+			return "{\"number\":2,\"url\":\"https://github.com/owner/repo/pull/2\",\"state\":\"OPEN\",\"title\":\"Fix\",\"isDraft\":false,\"headRefName\":\"feature\",\"baseRefName\":\"main\",\"mergeStateStatus\":\"CLEAN\",\"statusCheckRollup\":[],\"reviewDecision\":\"\",\"comments\":[],\"reviews\":[{\"id\":\"PRR_1\",\"body\":\"Your title is wrong; it needs to start with `fix:`.\",\"submittedAt\":\"2026-05-01T04:35:10Z\",\"state\":\"COMMENTED\",\"author\":{\"login\":\"reviewer\"}}]}", nil
+		},
+	}
+
+	checked, err := publisher.Inspect(context.Background(), core.PullRequest{
+		Repo: "owner/repo",
+		URL:  "https://github.com/owner/repo/pull/2",
+		Metadata: core.MustJSON(map[string]any{
+			"pullRequestFeedbackBaselineEstablished": true,
+			"latestPullRequestFeedbackSignature":     "2026-05-01T04:31:10Z:conversation:IC_1",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked.ReviewStatus != "COMMENTED" {
+		t.Fatalf("review status = %q, want COMMENTED", checked.ReviewStatus)
+	}
+	if !strings.Contains(string(checked.Metadata), "needs to start") || !strings.Contains(string(checked.Metadata), `"latestPullRequestFeedbackSource":"review"`) {
+		t.Fatalf("metadata missing review body feedback: %s", checked.Metadata)
+	}
+}
+
+func TestInspectPullRequestFlagsNewInlineReviewThreadComment(t *testing.T) {
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name != "gh" {
+				t.Fatalf("command = %q, want gh", name)
+			}
+			if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+				return `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false,"path":"cli/tools/installer/global.rs","line":42,"startLine":0,"comments":{"nodes":[{"id":"PRRC_1","body":"This branch should not touch the installer output path.","createdAt":"2026-05-01T04:36:10Z","updatedAt":"2026-05-01T04:36:10Z","viewerDidAuthor":false,"url":"https://github.com/owner/repo/pull/2#discussion_r1","author":{"login":"reviewer"}}]}}]}}}}}`, nil
+			}
+			return `{"number":2,"url":"https://github.com/owner/repo/pull/2","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"","comments":[],"reviews":[]}`, nil
+		},
+	}
+
+	checked, err := publisher.Inspect(context.Background(), core.PullRequest{
+		Repo: "owner/repo",
+		URL:  "https://github.com/owner/repo/pull/2",
+		Metadata: core.MustJSON(map[string]any{
+			"pullRequestFeedbackBaselineEstablished": true,
+			"latestPullRequestFeedbackSignature":     "2026-05-01T04:31:10Z:conversation:IC_1",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked.ReviewStatus != "COMMENTED" {
+		t.Fatalf("review status = %q, want COMMENTED", checked.ReviewStatus)
+	}
+	if !strings.Contains(string(checked.Metadata), "installer output path") || !strings.Contains(string(checked.Metadata), "cli/tools/installer/global.rs") {
+		t.Fatalf("metadata missing inline review feedback: %s", checked.Metadata)
+	}
+	promptContext := pullRequestCommentPromptContext(checked)
+	if !strings.Contains(promptContext, "cli/tools/installer/global.rs:42") || !strings.Contains(promptContext, "installer output path") {
+		t.Fatalf("prompt context missing inline review location:\n%s", promptContext)
 	}
 }
 

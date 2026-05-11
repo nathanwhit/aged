@@ -764,6 +764,13 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.recoverOrphanedRunningGraphTasks(ctx, snapshot); err != nil {
+		return err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
 	if err := s.retryStartupCanceledTasks(ctx, snapshot); err != nil {
 		return err
 	}
@@ -852,9 +859,61 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 	return nil
 }
 
+func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot core.Snapshot) error {
+	for _, task := range snapshot.Tasks {
+		if task.Status != core.TaskRunning || taskHasActiveWorkers(snapshot, task.ID) {
+			continue
+		}
+		if !taskLatestStatusIs(snapshot, task.ID, core.TaskRunning) {
+			continue
+		}
+		initial, results, err := retryGraphStateForTask(snapshot, task.ID)
+		if err != nil || len(candidateResults(results)) == 0 {
+			if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   "startup_running_recovery",
+				"status": "waiting",
+				"reason": "daemon restarted while task was running, but no active worker or recoverable graph state was found",
+				"error":  errorString(err),
+			}); actionErr != nil {
+				return actionErr
+			}
+			if waitErr := s.waitForUserAction(ctx, task.ID, "", "startup_running_recovery", "Task was marked running after daemon restart, but no active worker could be recovered. Retry or steer the task to continue.", nil); waitErr != nil {
+				return waitErr
+			}
+			continue
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   "startup_running_recovery",
+			"status": "resumed",
+			"reason": "daemon restarted while task was running with no active workers; resuming from persisted graph results",
+		}); err != nil {
+			return err
+		}
+		if err := s.markTaskRetryPlanning(ctx, task.ID); err != nil {
+			return err
+		}
+		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
+		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+				s.retryFinalCandidateTask(taskCtx, task, results)
+				return
+			}
+			s.retryGraphTask(taskCtx, task, initial, results)
+		})
+	}
+	return nil
+}
+
 func taskPlanningStatusIsLatest(snapshot core.Snapshot, taskID string) bool {
+	return taskLatestStatusIs(snapshot, taskID, core.TaskPlanning)
+}
+
+func taskLatestStatusIs(snapshot core.Snapshot, taskID string, status core.TaskStatus) bool {
 	latestStatusEvent := int64(0)
-	latestPlanningStatusEvent := int64(0)
+	latestMatchingStatusEvent := int64(0)
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
 			continue
@@ -863,11 +922,11 @@ func taskPlanningStatusIsLatest(snapshot core.Snapshot, taskID string) bool {
 		var payload struct {
 			Status core.TaskStatus `json:"status"`
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == core.TaskPlanning {
-			latestPlanningStatusEvent = event.ID
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == status {
+			latestMatchingStatusEvent = event.ID
 		}
 	}
-	return latestPlanningStatusEvent > 0 && latestPlanningStatusEvent == latestStatusEvent
+	return latestMatchingStatusEvent > 0 && latestMatchingStatusEvent == latestStatusEvent
 }
 
 func taskCanceledByStartupRecovery(snapshot core.Snapshot, taskID string) bool {
@@ -1356,11 +1415,10 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		"autoMerge":         project.PullRequestPolicy.AutoMerge,
 		"pullRequestPolicy": project.PullRequestPolicy,
 	}
-	title := defaultPullRequestTitle(req.Title, task, workerCompletionSummaryFromSnapshot(snapshot, workerID), s.pullRequestWorkspaceChanges(ctx, workerID))
+	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
+	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
+	title := defaultPullRequestTitle(req.Title, task, summary, changes)
 	body := strings.TrimSpace(req.Body)
-	if body == "" {
-		body = s.defaultPullRequestBody(ctx, snapshot, task, workerID, sourceRoot)
-	}
 	pr, adopted, err := s.workerCreatedPullRequest(ctx, snapshot, task, workerID, repo, metadata)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -6304,7 +6362,9 @@ func (s *Service) baseWorkspaceSpec(ctx context.Context, spec WorkspaceSpec, bas
 			spec.BaseRevision = base.WorkspaceName + "@"
 		}
 	case "git":
-		spec.BaseRevision = ""
+		if strings.TrimSpace(base.BaseChange) != "" {
+			spec.BaseRevision = base.BaseChange
+		}
 	}
 	return spec, nil
 }
