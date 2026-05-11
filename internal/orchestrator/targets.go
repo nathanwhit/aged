@@ -135,6 +135,21 @@ func normalizeTargetConfig(config TargetConfig) (TargetConfig, error) {
 	return config, nil
 }
 
+func NormalizeSSHTargetCheckoutAliasesAfterPatch(config core.TargetConfig, checkoutRootSet bool, workDirSet bool) core.TargetConfig {
+	config.CheckoutRoot = strings.TrimSpace(config.CheckoutRoot)
+	config.WorkDir = strings.TrimSpace(config.WorkDir)
+	if TargetKind(config.Kind) != TargetKindSSH {
+		return config
+	}
+	if checkoutRootSet && !workDirSet {
+		config.WorkDir = config.CheckoutRoot
+	}
+	if workDirSet && !checkoutRootSet {
+		config.CheckoutRoot = config.WorkDir
+	}
+	return config
+}
+
 func targetConfigFromCore(config core.TargetConfig) TargetConfig {
 	return TargetConfig{
 		ID:                    config.ID,

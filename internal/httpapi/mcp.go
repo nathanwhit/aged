@@ -613,6 +613,7 @@ func mergeMCPTargetPatch(current core.TargetConfig, patch mcpTargetPatch) core.T
 		}
 	}
 	updated.ID = current.ID
+	updated = orchestrator.NormalizeSSHTargetCheckoutAliasesAfterPatch(updated, patch.CheckoutRoot != nil, patch.WorkDir != nil)
 	return updated
 }
 

@@ -2219,6 +2219,7 @@ func mergeDiscordTargetPatch(current core.TargetConfig, _ core.TargetConfig, pat
 		}
 	}
 	updated.ID = current.ID
+	updated = NormalizeSSHTargetCheckoutAliasesAfterPatch(updated, patch.CheckoutRoot != nil, patch.WorkDir != nil)
 	return updated
 }
 
