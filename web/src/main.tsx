@@ -1108,10 +1108,6 @@ function ProjectPanel({
     }
   }
 
-  function updateRemoteCheckoutEntry(entryId: string, values: Partial<PluginConfigEntry>) {
-    setRemoteCheckoutEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
-  }
-
   return (
     <section className="panel project-panel">
       <div className="panel-title">
@@ -1176,20 +1172,7 @@ function ProjectPanel({
           </label>
           <fieldset className="target-label-field">
             <legend>Remote checkouts</legend>
-            {remoteCheckoutEntries.length === 0 ? <p className="plugin-config-empty">No checkout overrides</p> : (
-              <div className="plugin-config-list">
-                {remoteCheckoutEntries.map((entry) => (
-                  <div className="plugin-config-row" key={entry.id}>
-                    <input value={entry.key} onChange={(event) => updateRemoteCheckoutEntry(entry.id, { key: event.target.value })} placeholder="perf-1" />
-                    <input value={entry.value} onChange={(event) => updateRemoteCheckoutEntry(entry.id, { value: event.target.value })} placeholder="/srv/aged/checkouts/node" />
-                    <button type="button" className="icon-button ghost danger-text" onClick={() => setRemoteCheckoutEntries((entries) => entries.filter((item) => item.id !== entry.id))} title="Remove checkout override">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <button type="button" className="secondary compact" onClick={() => setRemoteCheckoutEntries((entries) => [...entries, pluginConfigEntry()])}>Add checkout</button>
+            <KeyValueRows entries={remoteCheckoutEntries} setEntries={setRemoteCheckoutEntries} emptyText="No checkout overrides" keyPlaceholder="perf-1" valuePlaceholder="/srv/aged/checkouts/node" removeTitle="Remove checkout override" addLabel="Add checkout" />
           </fieldset>
           <label className="checkbox-label">
             <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
@@ -2420,10 +2403,6 @@ function TargetPanel({
     setShowForm(true);
   };
 
-  const updateLabelEntry = (entryId: string, values: Partial<PluginConfigEntry>) => {
-    setLabelEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
-  };
-
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
@@ -2533,20 +2512,7 @@ function TargetPanel({
           </label>
           <fieldset className="target-label-field">
             <legend>Labels</legend>
-            {labelEntries.length === 0 ? <p className="plugin-config-empty">No labels</p> : (
-              <div className="plugin-config-list">
-                {labelEntries.map((entry) => (
-                  <div className="plugin-config-row" key={entry.id}>
-                    <input value={entry.key} onChange={(event) => updateLabelEntry(entry.id, { key: event.target.value })} placeholder="location" />
-                    <input value={entry.value} onChange={(event) => updateLabelEntry(entry.id, { value: event.target.value })} placeholder="remote" />
-                    <button type="button" className="icon-button ghost danger-text" onClick={() => setLabelEntries((entries) => entries.filter((item) => item.id !== entry.id))} title="Remove label">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <button type="button" className="secondary compact" onClick={() => setLabelEntries((entries) => [...entries, pluginConfigEntry()])}>Add label</button>
+            <KeyValueRows entries={labelEntries} setEntries={setLabelEntries} emptyText="No labels" keyPlaceholder="location" valuePlaceholder="remote" removeTitle="Remove label" addLabel="Add label" />
           </fieldset>
           <div className="plugin-form-footer">
             <label className="checkbox-label">
@@ -2644,6 +2610,8 @@ type PluginConfigEntry = {
   key: string;
   value: string;
 };
+type KeyValueRowsProps = { entries: PluginConfigEntry[]; setEntries: React.Dispatch<React.SetStateAction<PluginConfigEntry[]>>; emptyText: string; keyPlaceholder: string; valuePlaceholder: string; removeTitle: string; addLabel: string };
+type RecordFromEntriesMessages = { missingKey: string; duplicateKey: (key: string) => string; missingValue?: (key: string) => string };
 
 function pluginConfigEntry(key = "", value = ""): PluginConfigEntry {
   return { id: `${Date.now()}-${Math.random()}`, key, value };
@@ -2653,31 +2621,66 @@ function configEntriesFromRecord(config?: Record<string, string>): PluginConfigE
   return Object.entries(config ?? {}).map(([key, value]) => pluginConfigEntry(key, value ?? ""));
 }
 
-function configRecordFromEntries(entries: PluginConfigEntry[]): Record<string, string> {
+function updateKeyValueEntry(setEntries: React.Dispatch<React.SetStateAction<PluginConfigEntry[]>>, entryId: string, values: Partial<PluginConfigEntry>) {
+  setEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
+}
+
+function KeyValueRows({
+  entries,
+  setEntries,
+  emptyText,
+  keyPlaceholder,
+  valuePlaceholder,
+  removeTitle,
+  addLabel,
+}: KeyValueRowsProps) {
+  return (
+    <>
+      {entries.length === 0 ? <p className="plugin-config-empty">{emptyText}</p> : (
+        <div className="plugin-config-list">
+          {entries.map((entry) => (
+            <div className="plugin-config-row" key={entry.id}>
+              <input value={entry.key} onChange={(event) => updateKeyValueEntry(setEntries, entry.id, { key: event.target.value })} placeholder={keyPlaceholder} />
+              <input value={entry.value} onChange={(event) => updateKeyValueEntry(setEntries, entry.id, { value: event.target.value })} placeholder={valuePlaceholder} />
+              <button type="button" className="icon-button ghost danger-text" onClick={() => setEntries((items) => items.filter((item) => item.id !== entry.id))} title={removeTitle}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button type="button" className="secondary compact" onClick={() => setEntries((items) => [...items, pluginConfigEntry()])}>{addLabel}</button>
+    </>
+  );
+}
+
+function recordFromEntries(entries: PluginConfigEntry[], messages: RecordFromEntriesMessages): Record<string, string> {
   const out: Record<string, string> = {};
   for (const entry of entries) {
     const key = entry.key.trim();
     const value = entry.value.trim();
     if (!key && !value) continue;
-    if (!key) throw new Error("config fields need a key");
-    if (Object.prototype.hasOwnProperty.call(out, key)) throw new Error(`duplicate config key ${key}`);
+    if (!key) throw new Error(messages.missingKey);
+    if (!value && messages.missingValue) throw new Error(messages.missingValue(key));
+    if (Object.prototype.hasOwnProperty.call(out, key)) throw new Error(messages.duplicateKey(key));
     out[key] = value;
   }
   return out;
 }
 
+function configRecordFromEntries(entries: PluginConfigEntry[]): Record<string, string> {
+  return recordFromEntries(entries, {
+    missingKey: "config fields need a key",
+    duplicateKey: (key) => `duplicate config key ${key}`,
+  });
+}
+
 function remoteCheckoutRecordFromEntries(entries: PluginConfigEntry[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const entry of entries) {
-    const targetID = entry.key.trim();
-    const checkout = entry.value.trim();
-    if (!targetID && !checkout) continue;
-    if (!targetID) throw new Error("remote checkout entries need a target id");
-    if (!checkout) throw new Error(`remote checkout ${targetID} needs a path`);
-    if (Object.prototype.hasOwnProperty.call(out, targetID)) throw new Error(`duplicate remote checkout target ${targetID}`);
-    out[targetID] = checkout;
-  }
-  return out;
+  return recordFromEntries(entries, {
+    missingKey: "remote checkout entries need a target id",
+    missingValue: (targetID) => `remote checkout ${targetID} needs a path`,
+    duplicateKey: (targetID) => `duplicate remote checkout target ${targetID}`,
+  });
 }
 
 function isSystemPlugin(plugin: Plugin): boolean {
@@ -2761,14 +2764,6 @@ function PluginPanel({
     setEnabledValue(plugin.enabled);
     setConfigEntries(configEntriesFromRecord(plugin.config));
     setShowForm(true);
-  };
-
-  const updateConfigEntry = (entryId: string, values: Partial<PluginConfigEntry>) => {
-    setConfigEntries((entries) => entries.map((entry) => entry.id === entryId ? { ...entry, ...values } : entry));
-  };
-
-  const removeConfigEntry = (entryId: string) => {
-    setConfigEntries((entries) => entries.filter((entry) => entry.id !== entryId));
   };
 
   const renderPluginCards = (items: Plugin[]) => (
@@ -2875,22 +2870,7 @@ function PluginPanel({
           </label>
           <fieldset className="plugin-config-field">
             <legend>Config</legend>
-            {configEntries.length === 0 ? (
-              <p className="plugin-config-empty">No config fields</p>
-            ) : (
-              <div className="plugin-config-list">
-                {configEntries.map((entry) => (
-                  <div className="plugin-config-row" key={entry.id}>
-                    <input value={entry.key} onChange={(event) => updateConfigEntry(entry.id, { key: event.target.value })} placeholder="restart" />
-                    <input value={entry.value} onChange={(event) => updateConfigEntry(entry.id, { value: event.target.value })} placeholder="on_failure" />
-                    <button type="button" className="icon-button ghost danger-text" onClick={() => removeConfigEntry(entry.id)} title="Remove config field">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <button type="button" className="secondary compact" onClick={() => setConfigEntries((entries) => [...entries, pluginConfigEntry()])}>Add field</button>
+            <KeyValueRows entries={configEntries} setEntries={setConfigEntries} emptyText="No config fields" keyPlaceholder="restart" valuePlaceholder="on_failure" removeTitle="Remove config field" addLabel="Add field" />
           </fieldset>
           <div className="plugin-form-footer">
             <label className="checkbox-label">
