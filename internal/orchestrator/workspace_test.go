@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -433,6 +434,54 @@ func TestGitWorkspaceManagerDescribesCommittedBaseCandidateChanges(t *testing.T)
 	}
 	if !strings.Contains(diff, "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml") {
 		t.Fatalf("diff does not include committed candidate file:\n%s", diff)
+	}
+}
+
+func TestGitWorkspaceManagerCopiesBaseCandidateFromRecordedBaseAfterSourceMoves(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	base, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "base-worker",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base.CWD, "file.txt"), []byte("base candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("source moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "unrelated.txt")
+	runTestGit(t, repo, "commit", "-m", "advance source")
+
+	followUp, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:       "task",
+		WorkerID:     "followup-worker",
+		WorkDir:      repo,
+		BaseWorkDir:  base.CWD,
+		BaseRevision: base.BaseChange,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(followUp.CWD, "unrelated.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("follow-up workspace included unrelated source movement: err=%v", err)
+	}
+	changes, err := manager.DescribeChanges(ctx, followUp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes.ChangedFiles) != 1 || changes.ChangedFiles[0] != (WorkspaceChangedFile{Path: "file.txt", Status: "modified"}) {
+		t.Fatalf("changed files = %+v", changes.ChangedFiles)
+	}
+	if strings.Contains(changes.DiffStat, "unrelated.txt") {
+		t.Fatalf("diff stat included unrelated source movement:\n%s", changes.DiffStat)
 	}
 }
 

@@ -4,31 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"aged/internal/core"
 )
-
-func (s *Service) defaultPullRequestBody(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, sourceRoot string) string {
-	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
-	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
-	generated := generatedPullRequestBody(task, workerID, summary, changes)
-	template, templatePath := pullRequestTemplate(sourceRoot)
-	if strings.TrimSpace(template) == "" {
-		return generated
-	}
-	var builder strings.Builder
-	builder.WriteString(strings.TrimSpace(template))
-	builder.WriteString("\n\n---\n\n")
-	builder.WriteString("## Aged context\n\n")
-	builder.WriteString("Repository PR template detected at `")
-	builder.WriteString(templatePath)
-	builder.WriteString("`.\n\n")
-	builder.WriteString(generated)
-	return builder.String()
-}
 
 func (s *Service) pullRequestWorkspaceChanges(ctx context.Context, workerID string) WorkspaceChanges {
 	if strings.TrimSpace(workerID) == "" {
@@ -39,54 +19,6 @@ func (s *Service) pullRequestWorkspaceChanges(ctx context.Context, workerID stri
 		return WorkspaceChanges{}
 	}
 	return changes
-}
-
-func generatedPullRequestBody(task core.Task, workerID string, summary string, changes WorkspaceChanges) string {
-	var builder strings.Builder
-	builder.WriteString("## Summary\n")
-	builder.WriteString("- ")
-	builder.WriteString(pullRequestSummaryLine(task, summary, changes))
-	builder.WriteString("\n\n")
-	if len(changes.ChangedFiles) > 0 {
-		builder.WriteString("## Changed files\n")
-		for _, file := range changes.ChangedFiles {
-			path := strings.TrimSpace(file.Path)
-			if path == "" {
-				continue
-			}
-			status := strings.TrimSpace(file.Status)
-			if status != "" {
-				builder.WriteString("- `")
-				builder.WriteString(path)
-				builder.WriteString("` (")
-				builder.WriteString(status)
-				builder.WriteString(")\n")
-			} else {
-				builder.WriteString("- `")
-				builder.WriteString(path)
-				builder.WriteString("`\n")
-			}
-		}
-		builder.WriteString("\n")
-	}
-	if strings.TrimSpace(changes.DiffStat) != "" {
-		builder.WriteString("## Diffstat\n")
-		builder.WriteString("```text\n")
-		builder.WriteString(strings.TrimSpace(changes.DiffStat))
-		builder.WriteString("\n```\n\n")
-	}
-	builder.WriteString("## Validation\n")
-	builder.WriteString("- Worker completed successfully before PR publication.\n\n")
-	builder.WriteString("## Aged task\n")
-	builder.WriteString("- Task: `")
-	builder.WriteString(task.ID)
-	builder.WriteString("`\n")
-	if strings.TrimSpace(workerID) != "" {
-		builder.WriteString("- Worker: `")
-		builder.WriteString(workerID)
-		builder.WriteString("`\n")
-	}
-	return builder.String()
 }
 
 func defaultPullRequestTitle(explicit string, task core.Task, summary string, changes WorkspaceChanges) string {
@@ -105,7 +37,7 @@ func defaultPullRequestTitle(explicit string, task core.Task, summary string, ch
 		}
 	}
 	title := changeCommitMessage(changeCommitMessageContext{
-		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Aged task result"),
+		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Task result"),
 		WorkerSummary: summary,
 		ChangedFiles:  changedFiles,
 	})
@@ -179,21 +111,6 @@ func containsReportProseVerb(value string) bool {
 	return false
 }
 
-func pullRequestSummaryLine(task core.Task, summary string, changes WorkspaceChanges) string {
-	changedFiles := make([]string, 0, len(changes.ChangedFiles))
-	for _, file := range changes.ChangedFiles {
-		if path := strings.TrimSpace(file.Path); path != "" {
-			changedFiles = append(changedFiles, path)
-		}
-	}
-	return changeCommitMessage(changeCommitMessageContext{
-		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Aged task result"),
-		TaskTitle:     task.Title,
-		WorkerSummary: summary,
-		ChangedFiles:  changedFiles,
-	})
-}
-
 func workerCompletionSummaryFromSnapshot(snapshot core.Snapshot, workerID string) string {
 	if strings.TrimSpace(workerID) == "" {
 		return ""
@@ -211,42 +128,6 @@ func workerCompletionSummaryFromSnapshot(snapshot core.Snapshot, workerID string
 		}
 	}
 	return ""
-}
-
-func pullRequestTemplate(root string) (string, string) {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return "", ""
-	}
-	candidates := []string{
-		filepath.Join(root, ".github", "pull_request_template.md"),
-		filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE.md"),
-		filepath.Join(root, "PULL_REQUEST_TEMPLATE.md"),
-		filepath.Join(root, "pull_request_template.md"),
-	}
-	if entries, err := os.ReadDir(filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE")); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if strings.HasSuffix(strings.ToLower(name), ".md") {
-				candidates = append(candidates, filepath.Join(root, ".github", "PULL_REQUEST_TEMPLATE", name))
-			}
-		}
-	}
-	for _, candidate := range candidates {
-		body, err := os.ReadFile(candidate)
-		if err != nil || strings.TrimSpace(string(body)) == "" {
-			continue
-		}
-		rel, relErr := filepath.Rel(root, candidate)
-		if relErr != nil {
-			rel = candidate
-		}
-		return string(body), filepath.ToSlash(rel)
-	}
-	return "", ""
 }
 
 func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string) {
@@ -300,7 +181,7 @@ Repeatedly inspect CI status, review comments, and mergeability. If checks fail 
 func pullRequestFollowUpPrompt(pr core.PullRequest) string {
 	comment := pullRequestCommentPromptContext(pr)
 	if comment != "" {
-		comment = "\nLatest PR conversation comment:\n" + comment + "\n"
+		comment = "\nLatest PR feedback:\n" + comment + "\n"
 	}
 	return fmt.Sprintf(`GitHub pull request %s#%d needs follow-up work on the existing task.
 
@@ -325,12 +206,21 @@ func pullRequestCommentPromptContext(pr core.PullRequest) string {
 	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
 		return ""
 	}
-	body := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentBody"]))
+	body := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackBody"]))
+	if body == "" {
+		body = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentBody"]))
+	}
 	if body == "" {
 		return ""
 	}
-	author := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentAuthor"]))
-	createdAt := strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentCreatedAt"]))
+	author := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackAuthor"]))
+	if author == "" {
+		author = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentAuthor"]))
+	}
+	createdAt := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackCreatedAt"]))
+	if createdAt == "" {
+		createdAt = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentCreatedAt"]))
+	}
 	prefix := ""
 	if author != "" {
 		prefix = "@" + author
@@ -341,8 +231,34 @@ func pullRequestCommentPromptContext(pr core.PullRequest) string {
 		}
 		prefix += "(" + createdAt + ")"
 	}
+	source := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSource"]))
+	if source != "" && source != "conversation" {
+		if prefix != "" {
+			prefix += " "
+		}
+		prefix += "[" + strings.ReplaceAll(source, "_", " ") + "]"
+	}
+	location := pullRequestFeedbackLocation(metadata)
+	if location != "" {
+		if prefix != "" {
+			prefix += " "
+		}
+		prefix += location
+	}
 	if prefix == "" {
 		return body
 	}
 	return prefix + ":\n" + body
+}
+
+func pullRequestFeedbackLocation(metadata map[string]any) string {
+	path := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackPath"]))
+	if path == "" {
+		return ""
+	}
+	line := intMetadata(metadata, "latestPullRequestFeedbackLine")
+	if line > 0 {
+		return path + ":" + strconv.Itoa(line)
+	}
+	return path
 }
