@@ -399,8 +399,11 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
 		return nil, err
 	}
-	for _, pr := range prs {
-		pr.ID = watchedPullRequestID(pr)
+	for index, pr := range prs {
+		pr.ID = existingPullRequestID(snapshot, taskID, pr)
+		if pr.ID == "" {
+			pr.ID = watchedPullRequestID(pr)
+		}
 		pr.TaskID = taskID
 		if pr.Repo == "" {
 			pr.Repo = repo
@@ -415,8 +418,43 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		if err := s.recordPullRequestArtifact(ctx, pr); err != nil {
 			return nil, err
 		}
+		prs[index] = pr
 	}
 	return prs, nil
+}
+
+func existingPullRequestID(snapshot core.Snapshot, taskID string, pr core.PullRequest) string {
+	for _, existing := range snapshot.PullRequests {
+		if existing.TaskID != taskID {
+			continue
+		}
+		if samePullRequestIdentity(existing, pr) {
+			return existing.ID
+		}
+	}
+	return ""
+}
+
+func samePullRequestIdentity(a core.PullRequest, b core.PullRequest) bool {
+	aRepo := strings.TrimSpace(a.Repo)
+	bRepo := strings.TrimSpace(b.Repo)
+	if aRepo != "" && bRepo != "" && strings.EqualFold(aRepo, bRepo) && a.Number > 0 && a.Number == b.Number {
+		return true
+	}
+	aURL := strings.TrimSpace(a.URL)
+	bURL := strings.TrimSpace(b.URL)
+	if aURL != "" && bURL != "" && strings.EqualFold(aURL, bURL) {
+		return true
+	}
+	if aURL != "" && bRepo != "" && b.Number > 0 {
+		repo, number := parsePullRequestURL(aURL)
+		return strings.EqualFold(repo, bRepo) && number == b.Number
+	}
+	if bURL != "" && aRepo != "" && a.Number > 0 {
+		repo, number := parsePullRequestURL(bURL)
+		return strings.EqualFold(repo, aRepo) && number == a.Number
+	}
+	return false
 }
 
 func watchedPullRequestID(pr core.PullRequest) string {
@@ -714,7 +752,26 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, "pr_needs_work", "Pull request needs follow-up work from checks or review."); err != nil {
 		return err
 	}
-	return s.SteerTask(ctx, pr.TaskID, core.SteeringRequest{Message: pullRequestFollowUpPrompt(pr)})
+	if err := s.SteerTask(ctx, pr.TaskID, core.SteeringRequest{Message: pullRequestFollowUpPrompt(pr)}); err != nil {
+		return err
+	}
+	return s.markPullRequestFeedbackTriggered(ctx, pr)
+}
+
+func (s *Service) markPullRequestFeedbackTriggered(ctx context.Context, pr core.PullRequest) error {
+	metadata, changed := pullRequestMetadataMarkFeedbackTriggered(pr.Metadata)
+	if !changed {
+		return nil
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":       pr.ID,
+			"metadata": metadata,
+		}),
+	})
+	return err
 }
 
 func activePullRequestBabysitter(snapshot core.Snapshot, pr core.PullRequest) core.Task {

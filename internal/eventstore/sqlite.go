@@ -727,6 +727,8 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 	workers := map[string]core.Worker{}
 	nodes := map[string]core.ExecutionNode{}
 	pullRequests := map[string]core.PullRequest{}
+	pullRequestAliases := map[string]string{}
+	pullRequestIdentities := map[string]string{}
 	clearedTasks := map[string]bool{}
 	workerNodes := map[string]string{}
 	workspaceMetadata := map[string]json.RawMessage{}
@@ -1060,7 +1062,7 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 			if id == "" {
 				id = fmt.Sprintf("%s#%d", payload.Repo, payload.Number)
 			}
-			pullRequests[id] = core.PullRequest{
+			next := core.PullRequest{
 				ID:               id,
 				TaskID:           event.TaskID,
 				Repo:             payload.Repo,
@@ -1080,6 +1082,12 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				UpdatedAt:        event.At,
 				Metadata:         payload.Metadata,
 			}
+			id = resolvePullRequestSnapshotID(id, next, pullRequests, pullRequestAliases, pullRequestIdentities)
+			next.ID = id
+			if previous := pullRequests[id]; previous.ID != "" {
+				next = mergePublishedPullRequest(previous, next)
+			}
+			pullRequests[id] = next
 		case core.EventPRStatusChecked:
 			var payload struct {
 				ID               string          `json:"id"`
@@ -1095,7 +1103,11 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
 				return core.Snapshot{}, fmt.Errorf("decode pull_request.status_checked: %w", err)
 			}
-			pr := pullRequests[payload.ID]
+			id := payload.ID
+			if alias := pullRequestAliases[id]; alias != "" {
+				id = alias
+			}
+			pr := pullRequests[id]
 			if pr.ID != "" {
 				if payload.State != "" {
 					pr.State = payload.State
@@ -1118,9 +1130,9 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				}
 				pr.UpdatedAt = event.At
 				if len(payload.Metadata) > 0 {
-					pr.Metadata = payload.Metadata
+					pr.Metadata = mergePullRequestMetadata(pr.Metadata, payload.Metadata)
 				}
-				pullRequests[payload.ID] = pr
+				pullRequests[id] = pr
 			}
 		case core.EventPRBabysitter:
 			var payload struct {
@@ -1217,6 +1229,153 @@ func upsertTaskArtifact(items []core.TaskArtifact, next core.TaskArtifact) []cor
 		return items
 	}
 	return append(items, next)
+}
+
+func resolvePullRequestSnapshotID(id string, next core.PullRequest, pullRequests map[string]core.PullRequest, aliases map[string]string, identities map[string]string) string {
+	if alias := aliases[id]; alias != "" {
+		return alias
+	}
+	identity := pullRequestSnapshotIdentity(next)
+	if identity == "" {
+		return id
+	}
+	if existingID := identities[identity]; existingID != "" {
+		if existingID != id {
+			aliases[id] = existingID
+		}
+		return existingID
+	}
+	for existingID, existing := range pullRequests {
+		if pullRequestSnapshotIdentity(existing) == identity {
+			if existingID != id {
+				aliases[id] = existingID
+			}
+			identities[identity] = existingID
+			return existingID
+		}
+	}
+	identities[identity] = id
+	return id
+}
+
+func pullRequestSnapshotIdentity(pr core.PullRequest) string {
+	repo := strings.ToLower(strings.TrimSpace(pr.Repo))
+	number := pr.Number
+	if (repo == "" || number == 0) && strings.TrimSpace(pr.URL) != "" {
+		urlRepo, urlNumber := pullRequestURLIdentity(pr.URL)
+		if repo == "" {
+			repo = urlRepo
+		}
+		if number == 0 {
+			number = urlNumber
+		}
+	}
+	if pr.TaskID == "" || repo == "" || number == 0 {
+		return ""
+	}
+	return pr.TaskID + "\x00" + repo + "#" + fmt.Sprint(number)
+}
+
+func pullRequestURLIdentity(value string) (string, int) {
+	value = strings.TrimSpace(value)
+	const marker = "github.com/"
+	index := strings.Index(value, marker)
+	if index < 0 {
+		return "", 0
+	}
+	path := strings.Trim(value[index+len(marker):], "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 4 || parts[2] != "pull" {
+		return "", 0
+	}
+	var number int
+	if _, err := fmt.Sscanf(parts[3], "%d", &number); err != nil {
+		return "", 0
+	}
+	return strings.ToLower(parts[0] + "/" + parts[1]), number
+}
+
+func mergePublishedPullRequest(previous core.PullRequest, next core.PullRequest) core.PullRequest {
+	next.CreatedAt = previous.CreatedAt
+	if next.TaskID == "" {
+		next.TaskID = previous.TaskID
+	}
+	if next.Repo == "" {
+		next.Repo = previous.Repo
+	}
+	if next.Number == 0 {
+		next.Number = previous.Number
+	}
+	if next.URL == "" {
+		next.URL = previous.URL
+	}
+	if next.Branch == "" {
+		next.Branch = previous.Branch
+	}
+	if next.Base == "" {
+		next.Base = previous.Base
+	}
+	if next.Title == "" {
+		next.Title = previous.Title
+	}
+	if next.State == "" {
+		next.State = previous.State
+	}
+	if !next.Draft && previous.Draft {
+		next.Draft = previous.Draft
+	}
+	if next.ChecksStatus == "" {
+		next.ChecksStatus = previous.ChecksStatus
+	}
+	if next.ChecksConclusion == "" {
+		next.ChecksConclusion = previous.ChecksConclusion
+	}
+	if next.MergeStatus == "" {
+		next.MergeStatus = previous.MergeStatus
+	}
+	if next.Mergeable == "" {
+		next.Mergeable = previous.Mergeable
+	}
+	if next.ReviewStatus == "" {
+		next.ReviewStatus = previous.ReviewStatus
+	}
+	next.Metadata = mergePullRequestMetadata(previous.Metadata, next.Metadata)
+	return next
+}
+
+func mergePullRequestMetadata(previous json.RawMessage, next json.RawMessage) json.RawMessage {
+	if len(next) == 0 {
+		return previous
+	}
+	if len(previous) == 0 {
+		return next
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(previous, &merged); err != nil || merged == nil {
+		return next
+	}
+	var incoming map[string]any
+	if err := json.Unmarshal(next, &incoming); err != nil || incoming == nil {
+		return next
+	}
+	for key, value := range incoming {
+		merged[key] = value
+	}
+	clearMissingTriggeredFeedback(merged, incoming, "latestPullRequestFeedback")
+	clearMissingTriggeredFeedback(merged, incoming, "latestConversationComment")
+	return core.MustJSON(merged)
+}
+
+func clearMissingTriggeredFeedback(merged map[string]any, incoming map[string]any, prefix string) {
+	signatureKey := prefix + "Signature"
+	triggeredKey := prefix + "TriggeredSignature"
+	if _, ok := incoming[signatureKey]; !ok {
+		return
+	}
+	if _, ok := incoming[triggeredKey]; ok {
+		return
+	}
+	delete(merged, triggeredKey)
 }
 
 func filterClearedWorkers(values map[string]core.Worker, cleared map[string]bool) map[string]core.Worker {

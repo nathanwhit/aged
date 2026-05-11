@@ -386,6 +386,7 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	delete(metadata, "latestConversationCommentCreatedAt")
 	delete(metadata, "latestConversationCommentUpdatedAt")
 	delete(metadata, "latestConversationCommentBody")
+	delete(metadata, "latestConversationCommentTriggeredSignature")
 	delete(metadata, "latestPullRequestFeedbackSignature")
 	delete(metadata, "latestPullRequestFeedbackId")
 	delete(metadata, "latestPullRequestFeedbackAuthor")
@@ -396,6 +397,7 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 	delete(metadata, "latestPullRequestFeedbackPath")
 	delete(metadata, "latestPullRequestFeedbackLine")
 	delete(metadata, "latestPullRequestFeedbackURL")
+	delete(metadata, "latestPullRequestFeedbackTriggeredSignature")
 
 	withNewComment, err := publisher.Inspect(context.Background(), core.PullRequest{
 		Repo:     "owner/repo",
@@ -412,6 +414,11 @@ func TestInspectPullRequestFlagsNewConversationCommentOnce(t *testing.T) {
 		t.Fatalf("metadata missing comment body: %s", withNewComment.Metadata)
 	}
 
+	markedMetadata, changed := pullRequestMetadataMarkFeedbackTriggered(withNewComment.Metadata)
+	if !changed {
+		t.Fatal("new comment metadata was not marked handled")
+	}
+	withNewComment.Metadata = markedMetadata
 	again, err := publisher.Inspect(context.Background(), withNewComment)
 	if err != nil {
 		t.Fatal(err)
@@ -513,6 +520,11 @@ func TestInspectPullRequestFlagsCommentAfterWatchOnUpgrade(t *testing.T) {
 		t.Fatalf("review status = %q, want COMMENTED", checked.ReviewStatus)
 	}
 
+	markedMetadata, changed := pullRequestMetadataMarkFeedbackTriggered(checked.Metadata)
+	if !changed {
+		t.Fatal("upgrade comment metadata was not marked handled")
+	}
+	checked.Metadata = markedMetadata
 	again, err := publisher.Inspect(context.Background(), checked)
 	if err != nil {
 		t.Fatal(err)

@@ -632,12 +632,13 @@ func pullRequestMetadataWithFeedback(raw json.RawMessage, feedback []prFeedback,
 	latest, ok := latestExternalPullRequestFeedback(feedback)
 	if ok {
 		signature := latest.Signature()
-		shouldTrigger := baselineEstablished && signature != previousSignature
+		shouldTrigger := baselineEstablished && triggeredSignature != signature
 		if !shouldTrigger && triggeredSignature != signature && feedbackAfterPullRequestWatch(latest, checked.CreatedAt) {
 			shouldTrigger = true
 		}
 		if shouldTrigger {
 			checked.ReviewStatus = "COMMENTED"
+		} else if !baselineEstablished && previousSignature == "" && triggeredSignature == "" {
 			metadata["latestPullRequestFeedbackTriggeredSignature"] = signature
 			metadata["latestConversationCommentTriggeredSignature"] = signature
 		}
@@ -661,6 +662,55 @@ func pullRequestMetadataWithFeedback(raw json.RawMessage, feedback []prFeedback,
 	metadata["pullRequestFeedbackBaselineEstablished"] = true
 	metadata["conversationCommentBaselineEstablished"] = true
 	return core.MustJSON(metadata)
+}
+
+func pullRequestMetadataMarkFeedbackTriggered(raw json.RawMessage) (json.RawMessage, bool) {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	if metadata == nil {
+		return raw, false
+	}
+	signature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
+	if signature == "" {
+		signature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentSignature"]))
+	}
+	if signature == "" {
+		return raw, false
+	}
+	triggeredSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
+	if triggeredSignature == "" {
+		triggeredSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
+	}
+	if triggeredSignature == signature {
+		return raw, false
+	}
+	metadata["latestPullRequestFeedbackTriggeredSignature"] = signature
+	metadata["latestConversationCommentTriggeredSignature"] = signature
+	return core.MustJSON(metadata), true
+}
+
+func pullRequestHasUntriggeredFeedback(pr core.PullRequest) bool {
+	if len(pr.Metadata) == 0 {
+		return false
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		return false
+	}
+	signature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
+	if signature == "" {
+		signature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentSignature"]))
+	}
+	if signature == "" {
+		return false
+	}
+	triggeredSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
+	if triggeredSignature == "" {
+		triggeredSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
+	}
+	return triggeredSignature != signature
 }
 
 func feedbackAfterPullRequestWatch(feedback prFeedback, watchedAt time.Time) bool {

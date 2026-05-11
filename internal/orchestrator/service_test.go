@@ -2922,6 +2922,187 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	}
 }
 
+func TestServiceRecoveredRemoteWorkerContinuesDurableLoop(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventNeedsInput, Text: "need user input"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not replan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	taskID := "loop-task"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Loop",
+			"prompt": "Keep looking for bugs.",
+			"metadata": map[string]any{
+				"executionMode":       "loop",
+				"loopWorkerKind":      "loop",
+				"loopIntervalSeconds": 0,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskPlanned,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"workerKind": "loop",
+			"prompt":     "iteration 1",
+			"metadata": map[string]any{
+				"executionMode":  "loop",
+				"loopIteration":  1,
+				"loopWorkerKind": "loop",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   "worker-1",
+			"workerKind": "loop",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind": "loop",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "iteration 1 complete",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.resumeRecoveredRemoteTask(ctx, taskID)
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if runner.callsValue() != 1 {
+		t.Fatalf("runner calls = %d, want 1", runner.callsValue())
+	}
+	if !strings.Contains(runner.promptValue(), "iteration 2") {
+		t.Fatalf("runner prompt did not resume at iteration 2:\n%s", runner.promptValue())
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, taskID) != 0 {
+		t.Fatalf("loop recovery should not enter normal replan")
+	}
+	if countEvents(snapshot.Events, core.EventTaskStatus, taskID) == 0 || snapshot.Tasks[0].Status != core.TaskWaiting {
+		t.Fatalf("task = %+v", snapshot.Tasks)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "durable_loop", "waiting_for_input") {
+		t.Fatalf("missing durable loop waiting action")
+	}
+}
+
+func TestServiceRetriesSucceededDurableLoopTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventNeedsInput, Text: "need user input"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not replan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	taskID := "loop-task"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Loop",
+			"prompt": "Keep looking for bugs.",
+			"metadata": map[string]any{
+				"executionMode":       "loop",
+				"loopWorkerKind":      "loop",
+				"loopIntervalSeconds": 0,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskPlanned,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"workerKind": "loop",
+			"prompt":     "iteration 1",
+			"metadata": map[string]any{
+				"executionMode":  "loop",
+				"loopIteration":  1,
+				"loopWorkerKind": "loop",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if runner.callsValue() != 1 {
+		t.Fatalf("runner calls = %d, want 1", runner.callsValue())
+	}
+	if countEvents(snapshot.Events, core.EventTaskReplanned, taskID) != 0 {
+		t.Fatalf("loop retry should not enter normal replan")
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "durable_loop", "waiting_for_input") {
+		t.Fatalf("missing durable loop waiting action")
+	}
+}
+
 func TestServiceUpdatesDurableLoopInterval(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

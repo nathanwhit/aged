@@ -137,7 +137,7 @@ func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string)
 	case "CLOSED":
 		return core.ObjectiveAbandoned, "pr_closed"
 	}
-	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") {
+	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") || pullRequestHasUntriggeredFeedback(pr) {
 		return core.ObjectiveActive, "pr_needs_work"
 	}
 	if pullRequestChecksPassing(pr) && (pr.ReviewStatus == "" || strings.EqualFold(pr.ReviewStatus, "APPROVED")) {
