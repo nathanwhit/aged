@@ -4344,6 +4344,13 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	if source != "remote-worker" || !strings.Contains(externalID, callbackID) {
 		t.Fatalf("external ref = %q %q", source, externalID)
 	}
+	var metadata map[string]any
+	if err := json.Unmarshal(found.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "github" {
+		t.Fatalf("metadata = %+v, want remote follow-up to default to GitHub completion", metadata)
+	}
 	if !eventContains(snapshot.Events, core.EventWorkerOutput, "remote worker queued follow-up task") {
 		t.Fatalf("missing parent worker callback event")
 	}
