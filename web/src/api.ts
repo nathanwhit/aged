@@ -162,7 +162,7 @@ export async function askAssistant(input: {
   return requestJSON("/api/assistant", jsonInit("POST", input));
 }
 
-export async function steerTask(taskId: string, message: string) {
+export async function steerTask(taskId: string, message: string): Promise<void> {
   return requestVoid(`/api/tasks/${taskId}/steer`, jsonInit("POST", { message }));
 }
 
@@ -170,11 +170,11 @@ export async function retryTask(taskId: string) {
   return requestJSON(`/api/tasks/${taskId}/retry`, { method: "POST" });
 }
 
-export async function cancelTask(taskId: string) {
+export async function cancelTask(taskId: string): Promise<void> {
   return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
 }
 
-export async function clearTask(taskId: string) {
+export async function clearTask(taskId: string): Promise<void> {
   return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
 }
 
@@ -182,7 +182,7 @@ export async function clearFinishedTasks() {
   return requestJSON("/api/tasks/clear-terminal", { method: "POST" });
 }
 
-export async function cancelWorker(workerId: string) {
+export async function cancelWorker(workerId: string): Promise<void> {
   return requestVoid(`/api/workers/${workerId}/cancel`, { method: "POST" });
 }
 
