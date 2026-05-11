@@ -107,6 +107,50 @@ type mcpPluginPatch struct {
 	Config       *map[string]string `json:"config"`
 }
 
+type mcpToolCallParams struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type mcpTaskIDRequest struct {
+	TaskID string `json:"taskId"`
+}
+
+type mcpWorkerIDRequest struct {
+	WorkerID string `json:"workerId"`
+}
+
+type mcpProjectIDRequest struct {
+	ProjectID string `json:"projectId"`
+}
+
+type mcpTargetIDRequest struct {
+	TargetID string `json:"targetId"`
+}
+
+type mcpPluginIDRequest struct {
+	PluginID string `json:"pluginId"`
+}
+
+type mcpPullRequestIDRequest struct {
+	PullRequestID string `json:"pullRequestId"`
+}
+
+type mcpTaskMessageRequest struct {
+	TaskID  string `json:"taskId"`
+	Message string `json:"message"`
+}
+
+type mcpPublishPRRequest struct {
+	TaskID string `json:"taskId"`
+	core.PublishPullRequestRequest
+}
+
+type mcpWatchPRsRequest struct {
+	TaskID string `json:"taskId"`
+	core.WatchPullRequestsRequest
+}
+
 func (s *Server) mcpInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":            "aged",
@@ -192,10 +236,7 @@ func (s *Server) handleMCP(r *http.Request, req mcpRequest) (any, error) {
 }
 
 func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) {
-	var params struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
+	var params mcpToolCallParams
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return nil, invalidMCPParams(err)
 	}
@@ -205,10 +246,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 	case "aged_snapshot":
 		result, err = s.service.Snapshot(r.Context())
 	case "aged_task_detail":
-		var req struct {
-			TaskID string `json:"taskId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
 		if err == nil && strings.TrimSpace(req.TaskID) == "" {
 			err = errors.New("taskId is required")
 		}
@@ -216,10 +254,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.TaskDetail(r.Context(), req.TaskID)
 		}
 	case "aged_worker_detail":
-		var req struct {
-			WorkerID string `json:"workerId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpWorkerIDRequest](params.Arguments)
 		if err == nil && strings.TrimSpace(req.WorkerID) == "" {
 			err = errors.New("workerId is required")
 		}
@@ -227,76 +262,50 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.WorkerDetail(r.Context(), req.WorkerID)
 		}
 	case "aged_list_projects":
-		var snapshot core.Snapshot
-		snapshot, err = s.service.Snapshot(r.Context())
-		if err == nil {
-			result = snapshot.Projects
-		}
+		result, err = s.mcpSnapshotField(r.Context(), func(snapshot core.Snapshot) any { return snapshot.Projects })
 	case "aged_list_targets":
-		var snapshot core.Snapshot
-		snapshot, err = s.service.Snapshot(r.Context())
-		if err == nil {
-			result = snapshot.Targets
-		}
+		result, err = s.mcpSnapshotField(r.Context(), func(snapshot core.Snapshot) any { return snapshot.Targets })
 	case "aged_create_target":
-		var req core.TargetConfig
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[core.TargetConfig](params.Arguments)
 		if err == nil {
 			result, err = s.service.RegisterTarget(r.Context(), req)
 		}
 	case "aged_update_target":
-		var req mcpTargetPatch
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTargetPatch](params.Arguments)
 		if err == nil {
 			result, err = s.updateMCPTarget(r.Context(), req)
 		}
 	case "aged_delete_target":
-		var req struct {
-			TargetID string `json:"targetId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTargetIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.DeleteTarget(r.Context(), req.TargetID)
 			result = map[string]any{"ok": true}
 		}
 	case "aged_target_health":
-		var req struct {
-			TargetID string `json:"targetId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTargetIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.refreshMCPTargetHealth(r.Context(), req.TargetID)
 		}
 	case "aged_list_plugins":
-		var snapshot core.Snapshot
-		snapshot, err = s.service.Snapshot(r.Context())
-		if err == nil {
-			result = snapshot.Plugins
-		}
+		result, err = s.mcpSnapshotField(r.Context(), func(snapshot core.Snapshot) any { return snapshot.Plugins })
 	case "aged_create_plugin":
-		var req core.Plugin
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[core.Plugin](params.Arguments)
 		if err == nil {
 			result, err = s.service.RegisterPlugin(r.Context(), req)
 		}
 	case "aged_update_plugin":
-		var req mcpPluginPatch
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpPluginPatch](params.Arguments)
 		if err == nil {
 			result, err = s.updateMCPPlugin(r.Context(), req)
 		}
 	case "aged_delete_plugin":
-		var req struct {
-			PluginID string `json:"pluginId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpPluginIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.DeletePlugin(r.Context(), req.PluginID)
 			result = map[string]any{"ok": true}
 		}
 	case "aged_create_task":
-		var req core.CreateTaskRequest
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[core.CreateTaskRequest](params.Arguments)
 		if err == nil {
 			req, err = orchestrator.NormalizeCreateTaskRequest(req)
 		}
@@ -304,40 +313,28 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.CreateTask(r.Context(), req)
 		}
 	case "aged_create_project":
-		var req core.Project
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[core.Project](params.Arguments)
 		if err == nil {
 			result, err = s.service.CreateProject(r.Context(), req)
 		}
 	case "aged_update_project":
-		var req mcpProjectPatch
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpProjectPatch](params.Arguments)
 		if err == nil {
 			result, err = s.updateMCPProject(r.Context(), req)
 		}
 	case "aged_delete_project":
-		var req struct {
-			ProjectID string `json:"projectId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpProjectIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.DeleteProject(r.Context(), req.ProjectID)
 			result = map[string]any{"ok": true}
 		}
 	case "aged_project_health":
-		var req struct {
-			ProjectID string `json:"projectId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpProjectIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.ProjectHealth(r.Context(), req.ProjectID)
 		}
 	case "aged_publish_pr":
-		var req struct {
-			TaskID string `json:"taskId"`
-			core.PublishPullRequestRequest
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpPublishPRRequest](params.Arguments)
 		if err == nil && strings.TrimSpace(req.TaskID) == "" {
 			err = errors.New("taskId is required")
 		}
@@ -345,11 +342,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.PublishTaskPullRequest(r.Context(), req.TaskID, req.PublishPullRequestRequest)
 		}
 	case "aged_watch_prs":
-		var req struct {
-			TaskID string `json:"taskId"`
-			core.WatchPullRequestsRequest
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpWatchPRsRequest](params.Arguments)
 		if err == nil && strings.TrimSpace(req.TaskID) == "" {
 			err = errors.New("taskId is required")
 		}
@@ -357,34 +350,22 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.WatchPullRequests(r.Context(), req.TaskID, req.WatchPullRequestsRequest)
 		}
 	case "aged_refresh_pr":
-		var req struct {
-			PullRequestID string `json:"pullRequestId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpPullRequestIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.RefreshPullRequest(r.Context(), req.PullRequestID)
 		}
 	case "aged_babysit_pr":
-		var req struct {
-			PullRequestID string `json:"pullRequestId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpPullRequestIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.StartPullRequestBabysitter(r.Context(), req.PullRequestID)
 		}
 	case "aged_retry_task":
-		var req struct {
-			TaskID string `json:"taskId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.RetryTask(r.Context(), req.TaskID)
 		}
 	case "aged_clear_task":
-		var req struct {
-			TaskID string `json:"taskId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.ClearTask(r.Context(), req.TaskID)
 			result = map[string]any{"ok": true}
@@ -395,54 +376,35 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.service.ClearTerminalTasks(r.Context())
 		}
 	case "aged_steer_task":
-		var req struct {
-			TaskID  string `json:"taskId"`
-			Message string `json:"message"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskMessageRequest](params.Arguments)
 		if err == nil {
 			err = s.service.SteerTask(r.Context(), req.TaskID, core.SteeringRequest{Message: req.Message})
 			result = map[string]any{"ok": true}
 		}
 	case "aged_cancel_task":
-		var req struct {
-			TaskID string `json:"taskId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.CancelTask(r.Context(), req.TaskID)
 			result = map[string]any{"ok": true}
 		}
 	case "aged_cancel_worker":
-		var req struct {
-			WorkerID string `json:"workerId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpWorkerIDRequest](params.Arguments)
 		if err == nil {
 			err = s.service.CancelWorker(r.Context(), req.WorkerID)
 			result = map[string]any{"ok": true}
 		}
 	case "aged_review_worker_changes":
-		var req struct {
-			WorkerID string `json:"workerId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpWorkerIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.ReviewWorkerChanges(r.Context(), req.WorkerID)
 		}
 	case "aged_apply_worker_changes":
-		var req struct {
-			WorkerID string `json:"workerId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpWorkerIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.ApplyWorkerChanges(r.Context(), req.WorkerID)
 		}
 	case "aged_apply_task_result":
-		var req struct {
-			TaskID string `json:"taskId"`
-		}
-		err = decodeMCPArgs(params.Arguments, &req)
+		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
 		if err == nil {
 			result, err = s.service.ApplyTaskResult(r.Context(), req.TaskID)
 		}
@@ -453,6 +415,14 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		return nil, err
 	}
 	return mcpToolResult(result), nil
+}
+
+func (s *Server) mcpSnapshotField(ctx context.Context, field func(core.Snapshot) any) (any, error) {
+	snapshot, err := s.service.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return field(snapshot), nil
 }
 
 func (s *Server) updateMCPProject(ctx context.Context, patch mcpProjectPatch) (core.Project, error) {
@@ -793,6 +763,11 @@ func decodeMCPArgs(raw json.RawMessage, out any) error {
 		return invalidMCPParams(err)
 	}
 	return nil
+}
+
+func decodeMCPArg[T any](raw json.RawMessage) (T, error) {
+	var out T
+	return out, decodeMCPArgs(raw, &out)
 }
 
 func mcpTools() []mcpTool {
