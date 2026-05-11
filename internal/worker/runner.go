@@ -164,11 +164,7 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return errors.New("empty worker command")
 	}
 
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if spec.WorkDir != "" {
-		cmd.Dir = spec.WorkDir
-	}
+	cmd := newWorkerCommand(ctx, argv, spec.WorkDir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -189,17 +185,12 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	done := make(chan struct{})
-	defer close(done)
-	go killProcessGroupOnCancel(ctx, cmd, done)
+	defer killOnCancel(ctx, cmd)()
 
-	errCh := make(chan error, 2)
 	var parser Parser = parserFunc(parseJSONWorkerLine)
 	if r.kind == "codex" || r.kind == "claude" {
 		parser = ParserForKind(r.kind)
 	}
-	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
-	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
 	if promptOnStdin && stdin != nil {
 		go func() {
 			_, _ = io.WriteString(stdin, spec.Prompt)
@@ -209,15 +200,11 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		go forwardSteering(ctx, sink, spec.Steering, stdin, r.steeringFormatter)
 	}
 
-	for i := 0; i < 2; i++ {
-		if streamErr := <-errCh; streamErr != nil {
-			_ = cmd.Wait()
-			return streamErr
-		}
+	if err := waitCommandOutput(ctx, sink, parser, cmd, stdout, stderr); err != nil {
+		return err
 	}
-	waitErr := cmd.Wait()
-	if waitErr != nil {
-		return fmt.Errorf("worker command failed: %w", waitErr)
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("worker command failed: %w", err)
 	}
 	return nil
 }
@@ -275,11 +262,7 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if len(argv) == 0 {
 		return errors.New("empty plugin runner command")
 	}
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if spec.WorkDir != "" {
-		cmd.Dir = spec.WorkDir
-	}
+	cmd := newWorkerCommand(ctx, argv, spec.WorkDir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -295,9 +278,7 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	done := make(chan struct{})
-	defer close(done)
-	go killProcessGroupOnCancel(ctx, cmd, done)
+	defer killOnCancel(ctx, cmd)()
 	payload := struct {
 		ID              string   `json:"id"`
 		TaskID          string   `json:"taskId"`
@@ -322,8 +303,29 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return err
 	}
 	_ = stdin.Close()
+	if err := waitCommandOutput(ctx, sink, ParserForKind(r.kind), cmd, stdout, stderr); err != nil {
+		return err
+	}
+	return cmd.Wait()
+}
+
+func newWorkerCommand(ctx context.Context, argv []string, workDir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	return cmd
+}
+
+func killOnCancel(ctx context.Context, cmd *exec.Cmd) func() {
+	done := make(chan struct{})
+	go killProcessGroupOnCancel(ctx, cmd, done)
+	return func() { close(done) }
+}
+
+func waitCommandOutput(ctx context.Context, sink Sink, parser Parser, cmd *exec.Cmd, stdout io.Reader, stderr io.Reader) error {
 	errCh := make(chan error, 2)
-	parser := ParserForKind(r.kind)
 	go streamLines(ctx, sink, parser, "stdout", stdout, errCh)
 	go streamLines(ctx, sink, parser, "stderr", stderr, errCh)
 	for i := 0; i < 2; i++ {
@@ -332,7 +334,7 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 			return err
 		}
 	}
-	return cmd.Wait()
+	return nil
 }
 
 func killProcessGroupOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
