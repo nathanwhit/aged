@@ -47,10 +47,11 @@ type remoteRun struct {
 }
 
 type RemoteCheckoutSpec struct {
-	RepoURL     string
-	WorkDir     string
-	DefaultBase string
-	BaseRef     string
+	RepoURL       string
+	WorkDir       string
+	WorkerWorkDir string
+	DefaultBase   string
+	BaseRef       string
 }
 
 type remoteStatus struct {
@@ -396,11 +397,11 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		r.Executor = execRemoteExecutor{}
 	}
 	read := func(name string) string {
-		out, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true"))
+		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
 		return strings.TrimSpace(out)
 	}
 	readRaw := func(name string) string {
-		out, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true"))
+		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
 		return strings.TrimRight(out, "\r\n")
 	}
 	vcs := read("vcs.txt")
@@ -691,6 +692,7 @@ work_dir=%[1]s
 repo_url=%[2]s
 base=%[3]s
 base_ref=%[4]s
+worker_work_dir=%[5]s
 if [ -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(git status --porcelain)" ]; then
@@ -721,19 +723,31 @@ else
   cd "$work_dir"
   git fetch origin --prune
 fi
+checkout_ref=HEAD
 if [ -n "$base" ]; then
   if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
-    git checkout --detach "origin/$base"
+    checkout_ref="origin/$base"
+    git checkout --detach "$checkout_ref"
   elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
-    git checkout --detach "$base_ref"
+    checkout_ref="$base_ref"
+    git checkout --detach "$checkout_ref"
   else
     git checkout "$base"
     git pull --ff-only
+    checkout_ref=HEAD
   fi
 elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
-  git checkout --detach "$base_ref"
+  checkout_ref="$base_ref"
+  git checkout --detach "$checkout_ref"
 fi
-echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase), shellQuote(spec.BaseRef))
+if [ -n "$worker_work_dir" ]; then
+  mkdir -p "$(dirname "$worker_work_dir")"
+  git worktree prune >/dev/null 2>&1 || true
+  git worktree add --detach "$worker_work_dir" "$checkout_ref"
+  echo "prepared git worktree $worker_work_dir from $checkout_ref via $work_dir"
+else
+  echo "prepared git checkout $work_dir"
+fi`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase), shellQuote(spec.BaseRef), shellQuote(spec.WorkerWorkDir))
 }
 
 func remoteApplyPatchScript(workDir string, patchPath string) string {

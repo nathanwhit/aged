@@ -4305,7 +4305,7 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 
 	callbackID := "create-task.20260511T000000Z.1.0"
 	callbackOutput := "AGED-CALLBACK-FILE:" + callbackID + ".json\n" +
-		`{"type":"create_task","promptBase64":"` + base64.StdEncoding.EncodeToString([]byte("follow up from remote")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Remote follow-up")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("task-parent")) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("worker-parent")) + `"}` + "\n" +
+		`{"type":"create_task","promptBase64":"` + base64.StdEncoding.EncodeToString([]byte("follow up from remote")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Remote follow-up")) + `","projectIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("default")) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("worker-parent")) + `"}` + "\n" +
 		"AGED-CALLBACK-END\n"
 	executor := &fakeRemoteExecutor{callbackOutput: callbackOutput}
 	targets := NewTargetRegistry([]TargetConfig{{
@@ -4320,8 +4320,18 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 		WorkerKind: "mock",
 		Prompt:     "run remotely",
 	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+	agedDir := t.TempDir()
+	nodeDir := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "aged", Name: "Aged", LocalPath: agedDir, Repo: "owner/aged", DefaultBase: "main"},
+		{ID: "node", Name: "Node", LocalPath: nodeDir, Repo: "owner/node", DefaultBase: "main"},
+	}, "aged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
 
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Parent", Prompt: "Run remote parent."})
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "node", Title: "Parent", Prompt: "Run remote parent."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4339,6 +4349,9 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	}
 	if found.ID == "" || found.Prompt != "follow up from remote" {
 		t.Fatalf("missing created follow-up task: %+v", snapshot.Tasks)
+	}
+	if found.ProjectID != "node" {
+		t.Fatalf("follow-up project = %q, want parent project node", found.ProjectID)
 	}
 	source, externalID := taskExternalRef(found)
 	if source != "remote-worker" || !strings.Contains(externalID, callbackID) {
@@ -6671,7 +6684,8 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 		t.Fatalf("workers = %+v", snapshot.Workers)
 	}
 	remoteWorker := snapshot.Workers[0]
-	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default"})
+	wantCWD := "/runs/" + remoteWorker.ID + "/worktree"
+	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: wantCWD})
 	if remoteWorker.Prompt != wantPrompt {
 		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
 	}
@@ -6725,12 +6739,16 @@ func TestServiceRemoteWorkerUsesProjectCheckoutOverride(t *testing.T) {
 	if len(snapshot.ExecutionNodes) != 1 {
 		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
 	}
-	if snapshot.ExecutionNodes[0].RemoteWorkDir != "/custom/node" {
-		t.Fatalf("remote workdir = %q, want override", snapshot.ExecutionNodes[0].RemoteWorkDir)
+	wantWorkDir := "/runs/" + snapshot.ExecutionNodes[0].WorkerID + "/worktree"
+	if snapshot.ExecutionNodes[0].RemoteWorkDir != wantWorkDir {
+		t.Fatalf("remote workdir = %q, want isolated worktree %q", snapshot.ExecutionNodes[0].RemoteWorkDir, wantWorkDir)
 	}
 	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
 	if !strings.Contains(joinedCommands, "/custom/node") {
 		t.Fatalf("remote commands did not use checkout override: %+v", executor.commands)
+	}
+	if !strings.Contains(joinedCommands, wantWorkDir) {
+		t.Fatalf("remote commands did not use isolated worktree: %+v", executor.commands)
 	}
 }
 

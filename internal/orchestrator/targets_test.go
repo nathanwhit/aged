@@ -279,6 +279,27 @@ func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerDescribeChangesTimesOutHungArtifactRead(t *testing.T) {
+	executor := &timeoutDiffPatchExecutor{}
+	runner := SSHRunner{Executor: executor, PollCommandTimeout: time.Millisecond}
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+
+	start := time.Now()
+	changes := runner.DescribeChanges(context.Background(), run)
+	if time.Since(start) > time.Second {
+		t.Fatalf("DescribeChanges did not bound hung artifact read")
+	}
+	if executor.diffPatchCalls != 1 {
+		t.Fatalf("diff patch calls = %d, want 1", executor.diffPatchCalls)
+	}
+	if changes.VCSType != "git" || !changes.Dirty || len(changes.ChangedFiles) != 1 || changes.ChangedFiles[0].Path != "main.go" {
+		t.Fatalf("changes = %+v", changes)
+	}
+	if changes.Diff != "" {
+		t.Fatalf("diff = %q, want empty after timed-out read", changes.Diff)
+	}
+}
+
 func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -386,7 +407,7 @@ func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
 		t.Fatal("missing prepare command")
 	}
 	joined := strings.Join(executor.commands[0], " ")
-	for _, want := range []string{"git clone", "git fetch origin --prune", `git cat-file -e "$base_ref^{commit}"`, `git checkout --detach "$base_ref"`, "origin/$base"} {
+	for _, want := range []string{"git clone", "git fetch origin --prune", `git cat-file -e "$base_ref^{commit}"`, `git checkout --detach "$checkout_ref"`, "origin/$base"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("prepare command missing %q:\n%s", want, joined)
 		}
@@ -419,6 +440,30 @@ func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 	for _, blocked := range []string{"remote checkout is dirty", "exit 20", `[ -z "${dirty:-}" ]`} {
 		if strings.Contains(joined, blocked) {
 			t.Fatalf("prepare command still rejects dirty checkout with %q:\n%s", blocked, joined)
+		}
+	}
+}
+
+func TestSSHRunnerPrepareCheckoutCreatesWorkerWorktree(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:       "https://github.com/nathanwhit/aged.git",
+		WorkDir:       "/srv/aged/repos/aged",
+		WorkerWorkDir: "/runs/worker-123/worktree",
+		DefaultBase:   "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		"worker_work_dir=",
+		"/runs/worker-123/worktree",
+		`git worktree add --detach "$worker_work_dir" "$checkout_ref"`,
+		"prepared git worktree",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
 		}
 	}
 }
@@ -667,6 +712,32 @@ func (e *timeoutThenStatusExecutor) Run(ctx context.Context, argv []string) (str
 			return "", ctx.Err()
 		}
 		return `{"status":"succeeded","exit":0}`, nil
+	default:
+		return "", nil
+	}
+}
+
+type timeoutDiffPatchExecutor struct {
+	diffPatchCalls int
+}
+
+func (e *timeoutDiffPatchExecutor) Run(ctx context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(joined, "vcs.txt"):
+		return "git\n", nil
+	case strings.Contains(joined, "root.txt"):
+		return "/repo\n", nil
+	case strings.Contains(joined, "changes.txt"):
+		return " M main.go\n", nil
+	case strings.Contains(joined, "diffstat.txt"):
+		return " main.go | 2 +-\n", nil
+	case strings.Contains(joined, "diff.patch"):
+		e.diffPatchCalls++
+		<-ctx.Done()
+		return "", ctx.Err()
+	case strings.Contains(joined, "stdout.log"), strings.Contains(joined, "stderr.log"):
+		return "", nil
 	default:
 		return "", nil
 	}

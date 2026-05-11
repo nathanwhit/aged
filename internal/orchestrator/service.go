@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -2840,10 +2841,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		plan.Metadata["planID"] = planID
 	}
 	project := s.projectForTask(task)
-	remoteWorkDir, err := resolveRemoteCheckout(project, target)
+	remoteCheckoutDir, err := resolveRemoteCheckout(project, target)
 	if err != nil {
 		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w", err)
 	}
+	remoteWorkDir := remoteCheckoutDir
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
 	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
@@ -2875,11 +2877,16 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, TaskID: task.ID, WorkDir: remoteWorkDir})
 	if !reusedWorkspace {
+		remoteWorkDir = path.Join(remoteRun.RunDir, "worktree")
+		remoteRun.WorkDir = remoteWorkDir
+	}
+	if !reusedWorkspace {
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
-			RepoURL:     projectCloneURL(project),
-			WorkDir:     remoteWorkDir,
-			DefaultBase: project.DefaultBase,
-			BaseRef:     projectWorkspaceBaseCommit(ctx, project),
+			RepoURL:       projectCloneURL(project),
+			WorkDir:       remoteCheckoutDir,
+			WorkerWorkDir: remoteWorkDir,
+			DefaultBase:   project.DefaultBase,
+			BaseRef:       projectWorkspaceBaseCommit(ctx, project),
 		})
 		if err != nil {
 			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
@@ -3065,16 +3072,24 @@ func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun
 		if prompt == "" {
 			return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
 		}
+		parentTaskID := nonEmpty(callback.ParentTaskID, run.TaskID)
+		parentWorkerID := nonEmpty(callback.ParentWorkerID, run.WorkerID)
+		projectID := strings.TrimSpace(callback.ProjectID)
+		if (projectID == "" || projectID == "default") && parentTaskID != "" {
+			if project, err := s.projectForTaskID(ctx, parentTaskID); err == nil {
+				projectID = project.ID
+			}
+		}
 		metadata := map[string]any{
 			"source":           "remote_worker",
-			"parentTaskId":     nonEmpty(callback.ParentTaskID, run.TaskID),
-			"parentWorkerId":   nonEmpty(callback.ParentWorkerID, run.WorkerID),
+			"parentTaskId":     parentTaskID,
+			"parentWorkerId":   parentWorkerID,
 			"remoteTargetId":   run.Target.ID,
 			"remoteSession":    run.Session,
 			"remoteCallbackId": callback.ID,
 		}
 		req := core.CreateTaskRequest{
-			ProjectID:  strings.TrimSpace(callback.ProjectID),
+			ProjectID:  projectID,
 			Title:      strings.TrimSpace(callback.Title),
 			Prompt:     prompt,
 			Source:     "remote-worker",
