@@ -16,8 +16,9 @@ import (
 )
 
 type SSHRunner struct {
-	Executor     RemoteExecutor
-	PollInterval time.Duration
+	Executor           RemoteExecutor
+	PollInterval       time.Duration
+	PollCommandTimeout time.Duration
 }
 
 type remoteRun struct {
@@ -42,6 +43,8 @@ type remoteStatus struct {
 	Error  string `json:"error,omitempty"`
 }
 
+var errSSHPollCommandTimeout = errors.New("ssh poll command timed out")
+
 type execRemoteExecutor struct{}
 
 func (execRemoteExecutor) Run(ctx context.Context, argv []string) (string, error) {
@@ -59,8 +62,9 @@ func (execRemoteExecutor) RunInput(ctx context.Context, argv []string, input str
 
 func NewSSHRunner() SSHRunner {
 	return SSHRunner{
-		Executor:     execRemoteExecutor{},
-		PollInterval: 2 * time.Second,
+		Executor:           execRemoteExecutor{},
+		PollInterval:       2 * time.Second,
+		PollCommandTimeout: 30 * time.Second,
 	}
 }
 
@@ -109,12 +113,25 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 	filter := worker.NewOutputFilter(parser)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	consecutivePollTimeouts := 0
 	for {
 		status, err := r.pollOnce(ctx, run, filter, sink, &stdoutOffset, &stderrOffset)
 		if err != nil {
+			if errors.Is(err, errSSHPollCommandTimeout) && consecutivePollTimeouts < 1 {
+				consecutivePollTimeouts++
+				_ = filter.Flush(ctx, sink)
+				select {
+				case <-ctx.Done():
+					_ = filter.Flush(ctx, sink)
+					return remoteStatus{Status: "canceled"}, ctx.Err()
+				case <-ticker.C:
+				}
+				continue
+			}
 			_ = filter.Flush(ctx, sink)
 			return status, err
 		}
+		consecutivePollTimeouts = 0
 		if status.Status == "succeeded" || status.Status == "failed" || status.Status == "canceled" {
 			if err := filter.Flush(ctx, sink); err != nil {
 				return status, err
@@ -146,11 +163,11 @@ func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 }
 
 func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.OutputFilter, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
-	stdout, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "stdout.log"))+" 2>/dev/null || true"))
+	stdout, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stdout.log"))+" 2>/dev/null || true")
 	emitNewRemoteLines(ctx, filter, sink, "stdout", stdout, stdoutOffset)
-	stderr, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "stderr.log"))+" 2>/dev/null || true"))
+	stderr, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stderr.log"))+" 2>/dev/null || true")
 	emitNewRemoteLines(ctx, filter, sink, "stderr", stderr, stderrOffset)
-	rawStatus, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, "status.json"))+" 2>/dev/null || printf '{\"status\":\"running\"}'"))
+	rawStatus, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "status.json"))+" 2>/dev/null || printf '{\"status\":\"running\"}'")
 	if err != nil {
 		return remoteStatus{Status: "unreachable", Error: strings.TrimSpace(rawStatus)}, err
 	}
@@ -162,6 +179,20 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.O
 		status.Status = "running"
 	}
 	return status, nil
+}
+
+func (r SSHRunner) runPollCommand(ctx context.Context, target TargetConfig, script string) (string, error) {
+	timeout := r.PollCommandTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := r.Executor.Run(commandCtx, sshArgs(target, "sh", "-lc", script))
+	if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+		return out, fmt.Errorf("%w after %s", errSSHPollCommandTimeout, timeout)
+	}
+	return out, err
 }
 
 func (r SSHRunner) Cancel(ctx context.Context, run remoteRun) error {
