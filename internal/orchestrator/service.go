@@ -121,6 +121,17 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	return b.String()
 }
 
+func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
+	prompt = workerExecutionPrompt(prompt, workspace)
+	var b strings.Builder
+	b.WriteString("# Original Orchestrator\n\n")
+	b.WriteString("This worker is running on a remote execution target under an existing aged orchestrator. Do not start a new aged daemon or orchestrator from this worker.\n\n")
+	b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
+	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, and `AGED_WORKER_CALLBACK_DIR`.\n\n")
+	b.WriteString(prompt)
+	return b.String()
+}
+
 func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string, steering []string, contextKind string) string {
 	var b strings.Builder
 	if contextKind == "durable_loop" {
@@ -797,11 +808,13 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 			continue
 		}
 		run := remoteRun{
-			Target:  target,
-			Session: node.RemoteSession,
-			RunDir:  node.RemoteRunDir,
-			WorkDir: node.RemoteWorkDir,
-			Status:  "running",
+			Target:   target,
+			Session:  node.RemoteSession,
+			RunDir:   node.RemoteRunDir,
+			WorkDir:  node.RemoteWorkDir,
+			TaskID:   node.TaskID,
+			WorkerID: node.WorkerID,
+			Status:   "running",
 		}
 		go s.recoverRemoteWorker(context.Background(), node, run)
 	}
@@ -1079,7 +1092,9 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: node.TaskID, workerID: node.WorkerID, state: runState}
-	status, err := s.sshRunner.Poll(workerCtx, run, worker.ParserForKind(node.WorkerKind), sink)
+	sshRunner := s.sshRunner
+	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
+	status, err := sshRunner.Poll(workerCtx, run, worker.ParserForKind(node.WorkerKind), sink)
 	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		statusErr = err
@@ -2500,11 +2515,13 @@ func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (c
 			return core.ExecutionNode{}, remoteRun{}, false
 		}
 		return node, remoteRun{
-			Target:  target,
-			Session: node.RemoteSession,
-			RunDir:  node.RemoteRunDir,
-			WorkDir: node.RemoteWorkDir,
-			Status:  "running",
+			Target:   target,
+			Session:  node.RemoteSession,
+			RunDir:   node.RemoteRunDir,
+			WorkDir:  node.RemoteWorkDir,
+			TaskID:   node.TaskID,
+			WorkerID: node.WorkerID,
+			Status:   "running",
 		}, true
 	}
 	return core.ExecutionNode{}, remoteRun{}, false
@@ -3787,7 +3804,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			}
 		}
 	}
-	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, WorkDir: remoteWorkDir})
+	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, TaskID: task.ID, WorkDir: remoteWorkDir})
 	if !reusedWorkspace {
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
 			RepoURL:     projectCloneURL(project),
@@ -3841,7 +3858,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		ID:              workerID,
 		TaskID:          task.ID,
 		Kind:            plan.WorkerKind,
-		Prompt:          workerExecutionPrompt(plan.Prompt, workspace),
+		Prompt:          remoteWorkerExecutionPrompt(plan.Prompt, workspace),
 		WorkDir:         remoteWorkDir,
 		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
@@ -3947,7 +3964,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
-	status, err := s.sshRunner.Poll(workerCtx, remoteRun, worker.ParserForKind(plan.WorkerKind), sink)
+	sshRunner := s.sshRunner
+	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
+	status, err := sshRunner.Poll(workerCtx, remoteRun, worker.ParserForKind(plan.WorkerKind), sink)
 	workerStatus, statusErr := remoteStatusToWorkerStatus(status)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		statusErr = err
@@ -3966,6 +3985,51 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	})
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
+}
+
+func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun, callbacks []RemoteWorkerCallback) error {
+	for _, callback := range callbacks {
+		if callback.Type != "" && callback.Type != "create_task" {
+			return fmt.Errorf("unsupported remote worker callback %q from %s", callback.Type, callback.ID)
+		}
+		prompt := strings.TrimSpace(callback.Prompt)
+		if prompt == "" {
+			return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
+		}
+		metadata := map[string]any{
+			"source":           "remote_worker",
+			"parentTaskId":     nonEmpty(callback.ParentTaskID, run.TaskID),
+			"parentWorkerId":   nonEmpty(callback.ParentWorkerID, run.WorkerID),
+			"remoteTargetId":   run.Target.ID,
+			"remoteSession":    run.Session,
+			"remoteCallbackId": callback.ID,
+		}
+		req := core.CreateTaskRequest{
+			ProjectID:  strings.TrimSpace(callback.ProjectID),
+			Title:      strings.TrimSpace(callback.Title),
+			Prompt:     prompt,
+			Source:     "remote-worker",
+			ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
+			Metadata:   core.MustJSON(metadata),
+		}
+		if _, err := s.CreateTask(ctx, req); err != nil {
+			return fmt.Errorf("create task from remote callback %s: %w", callback.ID, err)
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   run.TaskID,
+			WorkerID: run.WorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind":       "log",
+				"stream":     "stdout",
+				"text":       "remote worker queued follow-up task: " + prompt,
+				"callbackId": callback.ID,
+			}),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, result WorkerTurnResult) bool {
