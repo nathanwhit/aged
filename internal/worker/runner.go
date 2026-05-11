@@ -337,6 +337,13 @@ func waitCommandOutput(ctx context.Context, sink Sink, parser Parser, cmd *exec.
 	return nil
 }
 
+func newWorkerCommand(ctx context.Context, argv []string, workDir string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Dir = workDir
+	return cmd
+}
+
 func killProcessGroupOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
 	select {
 	case <-ctx.Done():
