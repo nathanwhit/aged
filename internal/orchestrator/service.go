@@ -403,12 +403,13 @@ func (s *Service) ProjectHealth(ctx context.Context, id string) (core.ProjectHea
 		} else {
 			health.GitHubStatus = "repo_detected"
 		}
-		if _, err := runCommand(ctx, project.LocalPath, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
-			health.GitHubStatus = "auth_not_ready"
+		if authStatus, err := githubAuthStatus(ctx, project.LocalPath); err != nil {
+			health.GitHubStatus = authStatus
+			addError(err.Error())
 		} else if health.GitHubStatus == "repo_detected" {
 			health.GitHubStatus = "ok"
 		} else {
-			health.GitHubStatus = "auth_ok"
+			health.GitHubStatus = authStatus
 		}
 	}
 	health.DetectedBase = detectDefaultBase(ctx, project.LocalPath, project.Repo)

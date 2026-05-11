@@ -72,6 +72,54 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestProjectHealthCatchesGitHubGraphQLBadCredentials(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	fakeBin := t.TempDir()
+	ghPath := filepath.Join(fakeBin, "gh")
+	script := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo "github.com"
+  exit 0
+fi
+cat >&2 <<'JSON'
+{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest","status":"401"}
+JSON
+exit 1
+`
+	if err := os.WriteFile(ghPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	projectDir := t.TempDir()
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	if _, err := service.CreateProject(ctx, core.Project{
+		ID:          "repo",
+		LocalPath:   projectDir,
+		Repo:        "fork-owner/repo",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := service.ProjectHealth(ctx, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.OK {
+		t.Fatalf("health OK = true, want false: %+v", health)
+	}
+	if health.GitHubStatus != "auth_bad_credentials" {
+		t.Fatalf("github status = %q, want auth_bad_credentials; errors=%v", health.GitHubStatus, health.Errors)
+	}
+	if !strings.Contains(strings.Join(health.Errors, "\n"), "GitHub credentials rejected (401 Bad credentials)") {
+		t.Fatalf("health errors = %v", health.Errors)
+	}
+}
+
 func TestServicePassesReasoningEffortToWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
