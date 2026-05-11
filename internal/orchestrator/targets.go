@@ -50,14 +50,7 @@ type TargetRegistry struct {
 }
 
 func NewLocalTargetRegistry() *TargetRegistry {
-	return NewTargetRegistry([]TargetConfig{{
-		ID:   "local",
-		Kind: TargetKindLocal,
-		Labels: map[string]string{
-			"location": "local",
-		},
-		Capacity: TargetCapacity{MaxWorkers: 16, CPUWeight: 1},
-	}})
+	return NewTargetRegistry([]TargetConfig{defaultLocalTargetConfig()})
 }
 
 func LoadTargetRegistry(path string) (*TargetRegistry, error) {
@@ -95,9 +88,18 @@ func NewTargetRegistry(configs []TargetConfig) *TargetRegistry {
 		registry.targets[normalized.ID] = normalized
 	}
 	if len(registry.targets) == 0 {
-		registry.targets["local"] = NewLocalTargetRegistry().targets["local"]
+		registry.targets["local"] = defaultLocalTargetConfig()
 	}
 	return registry
+}
+
+func defaultLocalTargetConfig() TargetConfig {
+	return TargetConfig{
+		ID:       "local",
+		Kind:     TargetKindLocal,
+		Labels:   map[string]string{"location": "local"},
+		Capacity: TargetCapacity{MaxWorkers: 16, CPUWeight: 1},
+	}
 }
 
 func normalizeTargetConfig(config TargetConfig) (TargetConfig, error) {
@@ -288,14 +290,7 @@ func (r *TargetRegistry) SelectLocalFallback() (TargetConfig, error) {
 	if _, ok := r.targets["local"]; ok {
 		return TargetConfig{}, errors.New("local execution target is at capacity")
 	}
-	target := TargetConfig{
-		ID:   "local",
-		Kind: TargetKindLocal,
-		Labels: map[string]string{
-			"location": "local",
-		},
-		Capacity: TargetCapacity{MaxWorkers: 16, CPUWeight: 1},
-	}
+	target := defaultLocalTargetConfig()
 	r.targets[target.ID] = target
 	return target, nil
 }

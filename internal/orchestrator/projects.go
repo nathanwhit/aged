@@ -89,18 +89,7 @@ func (r *ProjectRegistry) Snapshot() []core.Project {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]core.Project, 0, len(r.projects))
-	for _, project := range r.projects {
-		out = append(out, project)
-	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].ID < out[i].ID {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out
+	return r.sortedProjectsLocked()
 }
 
 func (r *ProjectRegistry) Default() core.Project {
@@ -236,12 +225,13 @@ func (r *ProjectRegistry) FindByIssueRepo(repo string) (core.Project, bool) {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, project := range r.sortedProjectsLocked() {
+	projects := r.sortedProjectsLocked()
+	for _, project := range projects {
 		if strings.ToLower(project.UpstreamRepo) == repo {
 			return project, true
 		}
 	}
-	for _, project := range r.sortedProjectsLocked() {
+	for _, project := range projects {
 		if strings.ToLower(project.Repo) == repo {
 			return project, true
 		}
