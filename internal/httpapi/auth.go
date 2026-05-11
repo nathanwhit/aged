@@ -170,15 +170,7 @@ func (a *GoogleAuth) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookie,
-		Value:    state,
-		Path:     "/auth",
-		MaxAge:   int((10 * time.Minute).Seconds()),
-		HttpOnly: true,
-		Secure:   secureCookie(r),
-		SameSite: http.SameSiteLaxMode,
-	})
+	setAuthCookie(w, r, oauthStateCookie, state, "/auth", int((10 * time.Minute).Seconds()))
 	values := url.Values{}
 	values.Set("client_id", a.clientID)
 	values.Set("redirect_uri", a.redirectURI(r))
@@ -214,37 +206,13 @@ func (a *GoogleAuth) callback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthStateCookie,
-		Value:    "",
-		Path:     "/auth",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   secureCookie(r),
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    encoded,
-		Path:     "/",
-		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
-		HttpOnly: true,
-		Secure:   secureCookie(r),
-		SameSite: http.SameSiteLaxMode,
-	})
+	setAuthCookie(w, r, oauthStateCookie, "", "/auth", -1)
+	setAuthCookie(w, r, sessionCookie, encoded, "/", int((7 * 24 * time.Hour).Seconds()))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (a *GoogleAuth) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   secureCookie(r),
-		SameSite: http.SameSiteLaxMode,
-	})
+	setAuthCookie(w, r, sessionCookie, "", "/", -1)
 	http.Redirect(w, r, "/auth/login", http.StatusFound)
 }
 
@@ -406,6 +374,18 @@ func randomToken(size int) (string, error) {
 
 func secureCookie(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, name, value, path string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     path,
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   secureCookie(r),
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func parseClaimBool(value any) (bool, error) {
