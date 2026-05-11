@@ -81,6 +81,7 @@ type ReplanDecision struct {
 	Action                 string         `json:"action"`
 	Plan                   *Plan          `json:"plan,omitempty"`
 	FinalCandidateWorkerID string         `json:"finalCandidateWorkerId,omitempty"`
+	PullRequestBody        string         `json:"pullRequestBody,omitempty"`
 	Rationale              string         `json:"rationale,omitempty"`
 	Message                string         `json:"message,omitempty"`
 	Metadata               map[string]any `json:"metadata,omitempty"`

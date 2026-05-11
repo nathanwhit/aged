@@ -288,6 +288,7 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		Action                 string          `json:"action"`
 		Plan                   json.RawMessage `json:"plan,omitempty"`
 		FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
+		PullRequestBody        string          `json:"pullRequestBody,omitempty"`
 		Rationale              string          `json:"rationale,omitempty"`
 		Message                string          `json:"message,omitempty"`
 		Metadata               map[string]any  `json:"metadata,omitempty"`
@@ -298,6 +299,7 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 	decision := ReplanDecision{
 		Action:                 raw.Action,
 		FinalCandidateWorkerID: raw.FinalCandidateWorkerID,
+		PullRequestBody:        raw.PullRequestBody,
 		Rationale:              raw.Rationale,
 		Message:                raw.Message,
 		Metadata:               raw.Metadata,
@@ -532,9 +534,10 @@ func (b *CodexBrain) prompt(task core.Task, steering []string) string {
 func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 	payload := map[string]any{
 		"task": map[string]any{
-			"id":     task.ID,
-			"title":  task.Title,
-			"prompt": task.Prompt,
+			"id":             task.ID,
+			"title":          task.Title,
+			"prompt":         task.Prompt,
+			"completionMode": taskCompletionModeFromTask(task),
 		},
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
@@ -554,9 +557,10 @@ func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
 	payload := map[string]any{
 		"task": map[string]any{
-			"id":     task.ID,
-			"title":  task.Title,
-			"prompt": task.Prompt,
+			"id":             task.ID,
+			"title":          task.Title,
+			"prompt":         task.Prompt,
+			"completionMode": taskCompletionModeFromTask(task),
 		},
 		"state": compactOrchestrationStateForPrompt(state),
 		"availableWorkers": []map[string]string{
@@ -582,6 +586,7 @@ The JSON object must have exactly these top-level fields:
 {
   "action": "complete",
   "finalCandidateWorkerId": "worker-id-or-empty",
+  "pullRequestBody": "string",
   "rationale": "string",
   "message": "string",
   "plan": null
@@ -590,6 +595,8 @@ The JSON object must have exactly these top-level fields:
 Field rules:
 - "action" must be exactly one of "continue", "complete", "wait", or "fail".
 - Use "complete" when the task appears done.
+- When action is "complete" and the task completionMode is "github", write the pull request description in "pullRequestBody". This body must be ready to publish and should include the meaningful summary and validation details the reviewer needs. Do not include changed-file lists or diffstats because the PR diff already shows them.
+- When action is not "complete" or the task completionMode is not "github", set "pullRequestBody" to an empty string.
 - When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id that should be the final task result. If no existing candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
 - When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty.
 - Use "continue" when another worker turn is needed.

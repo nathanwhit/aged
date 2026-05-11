@@ -3170,7 +3170,10 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		}
 	}
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
-		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{WorkerID: candidateWorkerID}); err != nil {
+		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
+			WorkerID: candidateWorkerID,
+			Body:     s.latestCompletionPullRequestBody(ctx, taskID),
+		}); err != nil {
 			publishErr := fmt.Errorf("publish completion pull request: %w", err)
 			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, recoveryState); handled {
 				return recoverErr
@@ -3190,6 +3193,30 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+func (s *Service) latestCompletionPullRequestBody(ctx context.Context, taskID string) string {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return ""
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.Type != core.EventTaskReplanned {
+			continue
+		}
+		var payload struct {
+			Decision ReplanDecision `json:"decision"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Decision.Action != "complete" {
+			continue
+		}
+		return strings.TrimSpace(payload.Decision.PullRequestBody)
+	}
+	return ""
 }
 
 func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, completionReason string) (bool, error) {
