@@ -157,7 +157,14 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	if err := runner.Start(context.Background(), run, []string{"sh", "-lc", "echo ok"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(executor.commands) < 2 || !strings.Contains(strings.Join(executor.commands[1], " "), "tmux new-session") {
+	sawTmux := false
+	for _, command := range executor.commands {
+		if strings.Contains(strings.Join(command, " "), "tmux new-session") {
+			sawTmux = true
+			break
+		}
+	}
+	if !sawTmux {
 		t.Fatalf("start command = %+v", executor.commands)
 	}
 	sink := &recordingWorkerSink{}
@@ -306,6 +313,7 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 	var sawPromptUpload bool
 	var sawPromptRedirect bool
 	var sawPathBootstrap bool
+	var sawCallbackHelper bool
 	for _, argv := range executor.commands {
 		joined := strings.Join(argv, " ")
 		if strings.Contains(joined, "cat >") && strings.Contains(joined, "prompt.txt") {
@@ -317,9 +325,12 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 		if strings.Contains(joined, ".local/share/mise/shims") {
 			sawPathBootstrap = true
 		}
+		if strings.Contains(joined, "aged-create-task") || strings.Contains(joined, "callback.env") {
+			sawCallbackHelper = true
+		}
 	}
-	if !sawPromptUpload || !sawPromptRedirect || !sawPathBootstrap {
-		t.Fatalf("commands did not upload prompt, redirect stdin, and bootstrap PATH: %+v", executor.commands)
+	if !sawPromptUpload || !sawPromptRedirect || !sawPathBootstrap || !sawCallbackHelper {
+		t.Fatalf("commands did not upload prompt, install callback helper, redirect stdin, and bootstrap PATH: %+v", executor.commands)
 	}
 }
 
@@ -554,11 +565,12 @@ func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingCheckoutRoot(t
 }
 
 type fakeRemoteExecutor struct {
-	commands      [][]string
-	probeOutput   string
-	prepareOutput string
-	prepareErr    error
-	input         string
+	commands       [][]string
+	probeOutput    string
+	prepareOutput  string
+	prepareErr     error
+	callbackOutput string
+	input          string
 }
 
 func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
@@ -567,6 +579,8 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	switch {
 	case e.prepareErr != nil && strings.Contains(joined, "git clone"):
 		return e.prepareOutput, e.prepareErr
+	case e.callbackOutput != "" && strings.Contains(joined, "AGED-CALLBACK-FILE"):
+		return e.callbackOutput, nil
 	case strings.Contains(joined, "repoPresent="):
 		if e.probeOutput != "" {
 			return e.probeOutput, nil
@@ -660,7 +674,10 @@ func (e *timeoutThenStatusExecutor) Run(ctx context.Context, argv []string) (str
 
 func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input string) (string, error) {
 	e.commands = append(e.commands, append([]string(nil), argv...))
-	e.input = input
+	joined := strings.Join(argv, " ")
+	if strings.Contains(joined, "prompt.txt") || strings.Contains(joined, "base.patch") {
+		e.input = input
+	}
 	return "", nil
 }
 

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2924,6 +2925,62 @@ func TestServiceUpdatesDurableLoopInterval(t *testing.T) {
 	}
 }
 
+func TestServiceUpdatesDurableLoopPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventNeedsInput, Text: "pause after first iteration"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Original durable objective.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 300,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+
+	updated, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{LoopPrompt: ptrString("  Updated standing loop objective.  ")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Prompt != "Original durable objective." {
+		t.Fatalf("task prompt = %q, want original prompt preserved", updated.Prompt)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(updated.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringMetadataValue(metadata["loopPrompt"]); got != "Updated standing loop objective." {
+		t.Fatalf("loopPrompt = %q, want updated standing objective", got)
+	}
+	config := durableLoopConfigFromTask(updated, service.runners)
+	if config.Prompt != "Updated standing loop objective." {
+		t.Fatalf("config prompt = %q, want updated loop prompt", config.Prompt)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "loop_config_updated", "updated") {
+		t.Fatalf("missing loop config update action")
+	}
+}
+
 func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -4238,6 +4295,57 @@ func TestCancelWorkerFallsBackToPersistedRemoteRun(t *testing.T) {
 	}
 	if !foundKill {
 		t.Fatalf("expected remote tmux kill command, got %+v", executor.commands)
+	}
+}
+
+func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	callbackID := "create-task.20260511T000000Z.1.0"
+	callbackOutput := "AGED-CALLBACK-FILE:" + callbackID + ".json\n" +
+		`{"type":"create_task","promptBase64":"` + base64.StdEncoding.EncodeToString([]byte("follow up from remote")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Remote follow-up")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("task-parent")) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte("worker-parent")) + `"}` + "\n" +
+		"AGED-CALLBACK-END\n"
+	executor := &fakeRemoteExecutor{callbackOutput: callbackOutput}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Parent", Prompt: "Run remote parent."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found core.Task
+	for _, candidate := range snapshot.Tasks {
+		if candidate.Title == "Remote follow-up" {
+			found = candidate
+			break
+		}
+	}
+	if found.ID == "" || found.Prompt != "follow up from remote" {
+		t.Fatalf("missing created follow-up task: %+v", snapshot.Tasks)
+	}
+	source, externalID := taskExternalRef(found)
+	if source != "remote-worker" || !strings.Contains(externalID, callbackID) {
+		t.Fatalf("external ref = %q %q", source, externalID)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "remote worker queued follow-up task") {
+		t.Fatalf("missing parent worker callback event")
 	}
 }
 
@@ -6556,7 +6664,7 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 		t.Fatalf("workers = %+v", snapshot.Workers)
 	}
 	remoteWorker := snapshot.Workers[0]
-	wantPrompt := workerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default"})
+	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default"})
 	if remoteWorker.Prompt != wantPrompt {
 		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
 	}
@@ -7024,6 +7132,10 @@ func appendInterruptedPullRequestFollowUpPlanning(t *testing.T, ctx context.Cont
 }
 
 func ptrInt(value int) *int {
+	return &value
+}
+
+func ptrString(value string) *string {
 	return &value
 }
 
