@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -60,13 +61,17 @@ func NewPluginRegistry(plugins []core.Plugin) *PluginRegistry {
 	for _, plugin := range byID {
 		out = append(out, plugin)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind == out[j].Kind {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].Kind < out[j].Kind
-	})
+	sortPlugins(out)
 	return &PluginRegistry{plugins: out, driverCancel: map[string]context.CancelFunc{}, probeCommand: runPluginCommand}
+}
+
+func sortPlugins(plugins []core.Plugin) {
+	slices.SortFunc(plugins, func(a, b core.Plugin) int {
+		if a.Kind == b.Kind {
+			return strings.Compare(a.ID, b.ID)
+		}
+		return strings.Compare(a.Kind, b.Kind)
+	})
 }
 
 func normalizePlugin(plugin core.Plugin) (core.Plugin, error) {
@@ -124,12 +129,7 @@ func (r *PluginRegistry) Register(plugin core.Plugin) (core.Plugin, error) {
 	if !replaced {
 		r.plugins = append(r.plugins, normalized)
 	}
-	sort.Slice(r.plugins, func(i, j int) bool {
-		if r.plugins[i].Kind == r.plugins[j].Kind {
-			return r.plugins[i].ID < r.plugins[j].ID
-		}
-		return r.plugins[i].Kind < r.plugins[j].Kind
-	})
+	sortPlugins(r.plugins)
 	return normalized, nil
 }
 
@@ -222,7 +222,7 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 			continue
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		out, err := r.probeCommand(probeCtx, append(append([]string{}, plugin.Command...), "describe"))
+		out, err := r.probeCommand(probeCtx, pluginCommand(plugin, "describe"))
 		cancel()
 		if err != nil {
 			plugin.Status = "error"
@@ -294,7 +294,7 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 		if !ok || !plugin.Enabled {
 			return
 		}
-		argv := append(append([]string{}, plugin.Command...), "serve")
+		argv := pluginCommand(plugin, "serve")
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		stdout, outErr := cmd.StdoutPipe()
 		stderr, errErr := cmd.StderrPipe()
@@ -382,7 +382,7 @@ func (r *PluginRegistry) appendDriverLog(index int, line string) {
 	if index < 0 || index >= len(r.plugins) {
 		return
 	}
-	tail := append(append([]string(nil), r.plugins[index].Driver.LogTail...), line)
+	tail := append(slices.Clone(r.plugins[index].Driver.LogTail), line)
 	if len(tail) > 50 {
 		tail = tail[len(tail)-50:]
 	}
@@ -404,22 +404,20 @@ func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
 	if index < 0 || index >= len(r.plugins) {
 		return
 	}
-	plugin.Driver.LogTail = append([]string(nil), r.plugins[index].Driver.LogTail...)
+	plugin.Driver.LogTail = slices.Clone(r.plugins[index].Driver.LogTail)
 	r.plugins[index] = clonePlugin(plugin)
 }
 
 func clonePlugin(plugin core.Plugin) core.Plugin {
-	plugin.Command = append([]string(nil), plugin.Command...)
-	plugin.Capabilities = append([]string(nil), plugin.Capabilities...)
-	plugin.Driver.LogTail = append([]string(nil), plugin.Driver.LogTail...)
-	if plugin.Config != nil {
-		config := make(map[string]string, len(plugin.Config))
-		for key, value := range plugin.Config {
-			config[key] = value
-		}
-		plugin.Config = config
-	}
+	plugin.Command = slices.Clone(plugin.Command)
+	plugin.Capabilities = slices.Clone(plugin.Capabilities)
+	plugin.Driver.LogTail = slices.Clone(plugin.Driver.LogTail)
+	plugin.Config = maps.Clone(plugin.Config)
 	return plugin
+}
+
+func pluginCommand(plugin core.Plugin, subcommand string) []string {
+	return append(slices.Clone(plugin.Command), subcommand)
 }
 
 func shouldRestartPlugin(plugin core.Plugin, err error) bool {
