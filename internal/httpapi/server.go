@@ -112,48 +112,30 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
-	var project core.Project
-	if err := decodeJSON(r, &project); err != nil {
-		writeError(w, err)
+	project, ok := decodeRequest[core.Project](w, r)
+	if !ok {
 		return
 	}
 	created, err := s.service.CreateProject(r.Context(), project)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, created)
+	writeResult(w, http.StatusCreated, created, err)
 }
 
 func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
-	var project core.Project
-	if err := decodeJSON(r, &project); err != nil {
-		writeError(w, err)
+	project, ok := decodeRequest[core.Project](w, r)
+	if !ok {
 		return
 	}
 	updated, err := s.service.UpdateProject(r.Context(), r.PathValue("id"), project)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
+	writeResult(w, http.StatusOK, updated, err)
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.DeleteProject(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.DeleteProject(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) projectHealth(w http.ResponseWriter, r *http.Request) {
 	health, err := s.service.ProjectHealth(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, health)
+	writeResult(w, http.StatusOK, health, err)
 }
 
 func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
@@ -166,23 +148,17 @@ func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) registerTarget(w http.ResponseWriter, r *http.Request) {
-	var target core.TargetConfig
-	if err := decodeJSON(r, &target); err != nil {
-		writeError(w, err)
+	target, ok := decodeRequest[core.TargetConfig](w, r)
+	if !ok {
 		return
 	}
 	registered, err := s.service.RegisterTarget(r.Context(), target)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, registered)
+	writeResult(w, http.StatusCreated, registered, err)
 }
 
 func (s *Server) updateTarget(w http.ResponseWriter, r *http.Request) {
-	var target core.TargetConfig
-	if err := decodeJSON(r, &target); err != nil {
-		writeError(w, err)
+	target, ok := decodeRequest[core.TargetConfig](w, r)
+	if !ok {
 		return
 	}
 	if target.ID == "" {
@@ -193,11 +169,7 @@ func (s *Server) updateTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registered, err := s.service.RegisterTarget(r.Context(), target)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, registered)
+	writeResult(w, http.StatusOK, registered, err)
 }
 
 func (s *Server) refreshTargetHealth(w http.ResponseWriter, r *http.Request) {
@@ -218,11 +190,7 @@ func (s *Server) refreshTargetHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.DeleteTarget(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.DeleteTarget(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
@@ -235,23 +203,17 @@ func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) registerPlugin(w http.ResponseWriter, r *http.Request) {
-	var plugin core.Plugin
-	if err := decodeJSON(r, &plugin); err != nil {
-		writeError(w, err)
+	plugin, ok := decodeRequest[core.Plugin](w, r)
+	if !ok {
 		return
 	}
 	registered, err := s.service.RegisterPlugin(r.Context(), plugin)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, registered)
+	writeResult(w, http.StatusCreated, registered, err)
 }
 
 func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) {
-	var plugin core.Plugin
-	if err := decodeJSON(r, &plugin); err != nil {
-		writeError(w, err)
+	plugin, ok := decodeRequest[core.Plugin](w, r)
+	if !ok {
 		return
 	}
 	if plugin.ID == "" {
@@ -262,46 +224,29 @@ func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	registered, err := s.service.RegisterPlugin(r.Context(), plugin)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, registered)
+	writeResult(w, http.StatusOK, registered, err)
 }
 
 func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.DeletePlugin(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.DeletePlugin(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	afterID := parseInt64(r.URL.Query().Get("after"))
 	limit := int(parseInt64(r.URL.Query().Get("limit")))
 	events, err := s.service.Events(r.Context(), afterID, limit)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, events)
+	writeResult(w, http.StatusOK, events, err)
 }
 
 func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 	limit := int(parseInt64(r.URL.Query().Get("limit")))
 	events, err := s.service.TaskEvents(r.Context(), r.PathValue("id"), limit)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, events)
+	writeResult(w, http.StatusOK, events, err)
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
-	var req core.CreateTaskRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+	req, ok := decodeRequest[core.CreateTaskRequest](w, r)
+	if !ok {
 		return
 	}
 	req, err := orchestrator.NormalizeCreateTaskRequest(req)
@@ -310,39 +255,25 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.service.CreateTask(r.Context(), req)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, task)
+	writeResult(w, http.StatusAccepted, task, err)
 }
 
 func (s *Server) updateTaskLoopConfig(w http.ResponseWriter, r *http.Request) {
-	var req core.UpdateLoopConfigRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+	req, ok := decodeRequest[core.UpdateLoopConfigRequest](w, r)
+	if !ok {
 		return
 	}
 	task, err := s.service.UpdateTaskLoopConfig(r.Context(), r.PathValue("id"), req)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, task)
+	writeResult(w, http.StatusOK, task, err)
 }
 
 func (s *Server) assistant(w http.ResponseWriter, r *http.Request) {
-	var req core.AssistantRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+	req, ok := decodeRequest[core.AssistantRequest](w, r)
+	if !ok {
 		return
 	}
 	response, err := s.service.Ask(r.Context(), req)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, response)
+	writeResult(w, http.StatusOK, response, err)
 }
 
 func (s *Server) lookupTask(w http.ResponseWriter, r *http.Request) {
@@ -359,94 +290,53 @@ func (s *Server) lookupTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) steerTask(w http.ResponseWriter, r *http.Request) {
-	var req core.SteeringRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+	req, ok := decodeRequest[core.SteeringRequest](w, r)
+	if !ok {
 		return
 	}
-	if err := s.service.SteerTask(r.Context(), r.PathValue("id"), req); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.SteerTask(r.Context(), r.PathValue("id"), req))
 }
 
 func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 	task, err := s.service.RetryTask(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, task)
+	writeResult(w, http.StatusAccepted, task, err)
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.CancelTask(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.CancelTask(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) clearTask(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.ClearTask(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.ClearTask(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) clearTerminalTasks(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ClearTerminalTasks(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) cancelWorker(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.CancelWorker(r.Context(), r.PathValue("id")); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeNoContent(w, s.service.CancelWorker(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) reviewWorkerChanges(w http.ResponseWriter, r *http.Request) {
 	review, err := s.service.ReviewWorkerChanges(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, review)
+	writeResult(w, http.StatusOK, review, err)
 }
 
 func (s *Server) applyWorkerChanges(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ApplyWorkerChanges(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) applyTaskResult(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.ApplyTaskResult(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) recommendApplyPolicy(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.RecommendApplyPolicy(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) publishTaskPullRequest(w http.ResponseWriter, r *http.Request) {
@@ -458,43 +348,26 @@ func (s *Server) publishTaskPullRequest(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	result, err := s.service.PublishTaskPullRequest(r.Context(), r.PathValue("id"), req)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) watchTaskPullRequests(w http.ResponseWriter, r *http.Request) {
-	var req core.WatchPullRequestsRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, err)
+	req, ok := decodeRequest[core.WatchPullRequestsRequest](w, r)
+	if !ok {
 		return
 	}
 	result, err := s.service.WatchPullRequests(r.Context(), r.PathValue("id"), req)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) refreshPullRequest(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.RefreshPullRequest(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) startPullRequestBabysitter(w http.ResponseWriter, r *http.Request) {
 	result, err := s.service.StartPullRequestBabysitter(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeResult(w, http.StatusAccepted, result, err)
 }
 
 func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
@@ -541,10 +414,35 @@ func decodeJSON(r *http.Request, out any) error {
 	return decoder.Decode(out)
 }
 
+func decodeRequest[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
+	var req T
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return req, false
+	}
+	return req, true
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeResult(w http.ResponseWriter, status int, value any, err error) {
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, status, value)
+}
+
+func writeNoContent(w http.ResponseWriter, err error) {
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeError(w http.ResponseWriter, err error) {
