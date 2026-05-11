@@ -1507,25 +1507,21 @@ func cleanDiscordReference(value string) string {
 }
 
 func compactDiscordTaskIDs(tasks []core.Task) string {
-	var ids []string
-	for _, task := range tasks {
-		ids = append(ids, "`"+shortDiscordID(task.ID)+"`")
-	}
-	return strings.Join(ids, ", ")
+	return compactDiscordIDs(tasks, func(task core.Task) string { return task.ID })
 }
 
 func compactDiscordWorkerIDs(workers []core.Worker) string {
-	var ids []string
-	for _, worker := range workers {
-		ids = append(ids, "`"+shortDiscordID(worker.ID)+"`")
-	}
-	return strings.Join(ids, ", ")
+	return compactDiscordIDs(workers, func(worker core.Worker) string { return worker.ID })
 }
 
 func compactDiscordPullRequestIDs(prs []core.PullRequest) string {
-	var ids []string
-	for _, pr := range prs {
-		ids = append(ids, "`"+shortDiscordID(pr.ID)+"`")
+	return compactDiscordIDs(prs, func(pr core.PullRequest) string { return pr.ID })
+}
+
+func compactDiscordIDs[T any](items []T, id func(T) string) string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, "`"+shortDiscordID(id(item))+"`")
 	}
 	return strings.Join(ids, ", ")
 }
@@ -1590,24 +1586,8 @@ func discordTaskDetail(detail TaskDetail) string {
 			builder.WriteString("\n")
 		}
 	}
-	if len(detail.RecentEvents) > 0 {
-		builder.WriteString("Recent events:\n")
-		start := len(detail.RecentEvents) - 5
-		if start < 0 {
-			start = 0
-		}
-		for _, event := range detail.RecentEvents[start:] {
-			builder.WriteString(fmt.Sprintf("- `%s` %s\n", event.Type, truncateText(discordEventSummary(event), 180)))
-		}
-	}
-	if len(detail.AvailableActions) > 0 {
-		builder.WriteString("Available actions: ")
-		var actions []string
-		for _, action := range detail.AvailableActions {
-			actions = append(actions, "`"+action.Name+"`")
-		}
-		builder.WriteString(strings.Join(actions, ", "))
-	}
+	appendDiscordRecentEvents(&builder, detail.RecentEvents)
+	appendDiscordAvailableActions(&builder, detail.AvailableActions)
 	return strings.TrimSpace(builder.String())
 }
 
@@ -1638,25 +1618,31 @@ func discordWorkerDetail(detail WorkerDetail) string {
 	if detail.Worker.Applied {
 		builder.WriteString("Applied: yes\n")
 	}
-	if len(detail.RecentEvents) > 0 {
-		builder.WriteString("Recent events:\n")
-		start := len(detail.RecentEvents) - 5
-		if start < 0 {
-			start = 0
-		}
-		for _, event := range detail.RecentEvents[start:] {
-			builder.WriteString(fmt.Sprintf("- `%s` %s\n", event.Type, truncateText(discordEventSummary(event), 180)))
-		}
-	}
-	if len(detail.Worker.AvailableActions) > 0 {
-		builder.WriteString("Available actions: ")
-		var actions []string
-		for _, action := range detail.Worker.AvailableActions {
-			actions = append(actions, "`"+action.Name+"`")
-		}
-		builder.WriteString(strings.Join(actions, ", "))
-	}
+	appendDiscordRecentEvents(&builder, detail.RecentEvents)
+	appendDiscordAvailableActions(&builder, detail.Worker.AvailableActions)
 	return strings.TrimSpace(builder.String())
+}
+
+func appendDiscordRecentEvents(builder *strings.Builder, events []core.Event) {
+	if len(events) == 0 {
+		return
+	}
+	builder.WriteString("Recent events:\n")
+	for _, event := range discordTail(events, 5) {
+		builder.WriteString(fmt.Sprintf("- `%s` %s\n", event.Type, truncateText(discordEventSummary(event), 180)))
+	}
+}
+
+func appendDiscordAvailableActions(builder *strings.Builder, available []AvailableAction) {
+	if len(available) == 0 {
+		return
+	}
+	builder.WriteString("Available actions: ")
+	actions := make([]string, 0, len(available))
+	for _, action := range available {
+		actions = append(actions, "`"+action.Name+"`")
+	}
+	builder.WriteString(strings.Join(actions, ", "))
 }
 
 func discordWorkerChangesReview(review WorkerChangesReview) string {
@@ -1760,9 +1746,7 @@ func discordAssistantIndex(channelID string, userID string, selectedProject core
 }
 
 func compactDiscordTasks(tasks []core.Task, limit int) []map[string]any {
-	if limit > 0 && len(tasks) > limit {
-		tasks = tasks[len(tasks)-limit:]
-	}
+	tasks = discordTail(tasks, limit)
 	out := make([]map[string]any, 0, len(tasks))
 	for _, task := range tasks {
 		out = append(out, map[string]any{
@@ -1784,9 +1768,7 @@ func compactDiscordTasks(tasks []core.Task, limit int) []map[string]any {
 }
 
 func compactDiscordWorkers(workers []core.Worker, limit int) []map[string]any {
-	if limit > 0 && len(workers) > limit {
-		workers = workers[len(workers)-limit:]
-	}
+	workers = discordTail(workers, limit)
 	out := make([]map[string]any, 0, len(workers))
 	for _, worker := range workers {
 		prompt := strings.TrimSpace(worker.Prompt)
@@ -1809,9 +1791,7 @@ func compactDiscordWorkers(workers []core.Worker, limit int) []map[string]any {
 }
 
 func compactDiscordExecutionNodes(nodes []core.ExecutionNode, limit int) []map[string]any {
-	if limit > 0 && len(nodes) > limit {
-		nodes = nodes[len(nodes)-limit:]
-	}
+	nodes = discordTail(nodes, limit)
 	out := make([]map[string]any, 0, len(nodes))
 	for _, node := range nodes {
 		out = append(out, map[string]any{
@@ -1833,9 +1813,7 @@ func compactDiscordExecutionNodes(nodes []core.ExecutionNode, limit int) []map[s
 }
 
 func compactDiscordPullRequests(prs []core.PullRequest, limit int) []map[string]any {
-	if limit > 0 && len(prs) > limit {
-		prs = prs[len(prs)-limit:]
-	}
+	prs = discordTail(prs, limit)
 	out := make([]map[string]any, 0, len(prs))
 	for _, pr := range prs {
 		out = append(out, map[string]any{
@@ -1901,9 +1879,7 @@ func compactDiscordPlugins(plugins []core.Plugin) []map[string]any {
 }
 
 func compactDiscordEventSummaries(events []core.Event, limit int) []map[string]any {
-	if limit > 0 && len(events) > limit {
-		events = events[len(events)-limit:]
-	}
+	events = discordTail(events, limit)
 	out := make([]map[string]any, 0, len(events))
 	for _, event := range events {
 		out = append(out, map[string]any{
@@ -1959,11 +1935,11 @@ func discordEventSummary(event core.Event) string {
 	return ""
 }
 
-func compactDiscordEvents(events []core.Event, limit int) []core.Event {
-	if limit <= 0 || len(events) <= limit {
-		return events
+func discordTail[T any](items []T, limit int) []T {
+	if limit <= 0 || len(items) <= limit {
+		return items
 	}
-	return events[len(events)-limit:]
+	return items[len(items)-limit:]
 }
 
 func discordProjectList(projects []core.Project) string {
