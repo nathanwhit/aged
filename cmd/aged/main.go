@@ -42,6 +42,9 @@ func main() {
 		workspaceMode     = flag.String("workspace-mode", envOr("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
 		workspaceRoot     = flag.String("workspace-root", envOr("AGED_WORKSPACE_ROOT", ""), "directory for isolated worker workspaces; empty defaults to ~/.aged/workspaces")
 		workspaceCleanup  = flag.String("workspace-cleanup", envOr("AGED_WORKSPACE_CLEANUP", "retain"), "workspace cleanup policy: retain, delete_on_success, or delete_on_terminal")
+		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "remove allowlisted build artifact directories from stale retained worker workspaces")
+		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envBool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "report stale retained worker artifact cleanup without deleting directories")
+		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envDuration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "minimum terminal worker age before retained workspace artifact cleanup")
 		targetsPath       = flag.String("targets", envOr("AGED_TARGETS", ""), "JSON execution target pool config")
 		githubDriverPath  = flag.String("github-driver", envOr("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")
 		prMonitor         = flag.Bool("pull-request-monitor", envBool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
@@ -174,6 +177,17 @@ func main() {
 	}
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		slog.Warn("recover workers", "error", err)
+	}
+	if *artifactCleanup {
+		report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, orchestrator.RetainedWorkspaceArtifactCleanupOptions{
+			MinAge: *artifactMinAge,
+			DryRun: *artifactDryRun,
+		})
+		if err != nil {
+			slog.Warn("cleanup retained workspace artifacts", "error", err)
+		} else if report.Scanned > 0 {
+			slog.Info("cleanup retained workspace artifacts", "scanned", report.Scanned, "cleaned", report.Cleaned, "skipped", report.Skipped, "bytesRemoved", report.BytesRemoved, "dryRun", report.DryRun)
+		}
 	}
 	service.StartTargetProbes(ctx, 30*time.Second)
 	if *prMonitor {
