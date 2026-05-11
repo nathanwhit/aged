@@ -191,55 +191,39 @@ func (s *devServer) rebuildAndRestart(ctx context.Context) runResult {
 		StartedAt: time.Now().UTC(),
 	}
 	var log bytes.Buffer
+	finish := func(err error) runResult {
+		result.EndedAt = time.Now().UTC()
+		result.Output = log.String()
+		if err != nil {
+			result.Error = err.Error()
+		}
+		s.lastRun = result
+		return result
+	}
 
 	if err := s.stopDaemon(&log); err != nil {
-		result.EndedAt = time.Now().UTC()
-		result.Output = log.String()
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	if err := s.killDaemonPortListeners(ctx, &log); err != nil {
-		result.EndedAt = time.Now().UTC()
-		result.Output = log.String()
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.binaryPath), 0o755); err != nil {
-		result.EndedAt = time.Now().UTC()
-		result.Output = log.String()
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	if err := runCommand(ctx, s.repoRoot, &log, "go", "build", "-o", s.binaryPath, "./cmd/aged"); err != nil {
-		result.EndedAt = time.Now().UTC()
-		result.Output = log.String()
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	if err := runCommand(ctx, filepath.Join(s.repoRoot, "web"), &log, "npm", "run", "build"); err != nil {
-		result.EndedAt = time.Now().UTC()
-		result.Output = log.String()
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	cmd, err := s.startDaemon(&log)
-	result.EndedAt = time.Now().UTC()
-	result.Output = log.String()
 	if err != nil {
-		result.Error = err.Error()
-		s.lastRun = result
-		return result
+		return finish(err)
 	}
 	result.OK = true
 	result.Running = true
 	result.PID = cmd.Process.Pid
-	s.lastRun = result
-	return result
+	return finish(nil)
 }
 
 func (s *devServer) stopDaemon(log *bytes.Buffer) error {
