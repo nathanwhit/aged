@@ -256,8 +256,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.DeleteTarget(r.Context(), req.TargetID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.DeleteTarget(r.Context(), req.TargetID))
 		}
 	case "aged_target_health":
 		var req struct {
@@ -291,8 +290,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.DeletePlugin(r.Context(), req.PluginID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.DeletePlugin(r.Context(), req.PluginID))
 		}
 	case "aged_create_task":
 		var req core.CreateTaskRequest
@@ -321,8 +319,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.DeleteProject(r.Context(), req.ProjectID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.DeleteProject(r.Context(), req.ProjectID))
 		}
 	case "aged_project_health":
 		var req struct {
@@ -386,8 +383,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.ClearTask(r.Context(), req.TaskID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.ClearTask(r.Context(), req.TaskID))
 		}
 	case "aged_clear_finished_tasks":
 		err = decodeMCPArgs(params.Arguments, &struct{}{})
@@ -401,8 +397,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.SteerTask(r.Context(), req.TaskID, core.SteeringRequest{Message: req.Message})
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.SteerTask(r.Context(), req.TaskID, core.SteeringRequest{Message: req.Message}))
 		}
 	case "aged_cancel_task":
 		var req struct {
@@ -410,8 +405,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.CancelTask(r.Context(), req.TaskID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.CancelTask(r.Context(), req.TaskID))
 		}
 	case "aged_cancel_worker":
 		var req struct {
@@ -419,8 +413,7 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		}
 		err = decodeMCPArgs(params.Arguments, &req)
 		if err == nil {
-			err = s.service.CancelWorker(r.Context(), req.WorkerID)
-			result = map[string]any{"ok": true}
+			result, err = mcpOK(s.service.CancelWorker(r.Context(), req.WorkerID))
 		}
 	case "aged_review_worker_changes":
 		var req struct {
@@ -784,6 +777,8 @@ func mcpToolResult(value any) any {
 		}},
 	}
 }
+
+func mcpOK(err error) (any, error) { return map[string]any{"ok": true}, err }
 
 func decodeMCPArgs(raw json.RawMessage, out any) error {
 	if len(raw) == 0 || string(raw) == "null" {
