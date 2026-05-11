@@ -396,11 +396,11 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		r.Executor = execRemoteExecutor{}
 	}
 	read := func(name string) string {
-		out, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true"))
+		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
 		return strings.TrimSpace(out)
 	}
 	readRaw := func(name string) string {
-		out, _ := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true"))
+		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
 		return strings.TrimRight(out, "\r\n")
 	}
 	vcs := read("vcs.txt")
