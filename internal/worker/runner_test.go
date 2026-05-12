@@ -331,18 +331,32 @@ func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 func TestDefaultClaudeRunnerUsesEffortFlag(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "review this", ReasoningEffort: "xhigh"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--effort", "xhigh"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--effort", "xhigh"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+	if countArgs(got, "--dangerously-skip-permissions") != 1 {
+		t.Fatalf("skip permissions flag count = %d in %#v", countArgs(got, "--dangerously-skip-permissions"), got)
 	}
 }
 
 func TestDefaultClaudeRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["claude"]
 	got := runner.BuildCommand(Spec{Prompt: "continue", ResumeSessionID: "session-1"})
-	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--resume", "session-1"}
+	want := []string{"claude", "--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions", "--resume", "session-1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+	if countArgs(got, "--dangerously-skip-permissions") != 1 {
+		t.Fatalf("skip permissions flag count = %d in %#v", countArgs(got, "--dangerously-skip-permissions"), got)
+	}
+}
+
+func TestAppendArgIfMissingDoesNotDuplicateClaudeSkipPermissions(t *testing.T) {
+	args := appendArgIfMissing([]string{"claude", "--dangerously-skip-permissions"}, "--dangerously-skip-permissions")
+	want := []string{"claude", "--dangerously-skip-permissions"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
 	}
 }
 
@@ -540,4 +554,14 @@ func (s *recordingSink) has(kind EventKind, stream string, text string) bool {
 		}
 	}
 	return false
+}
+
+func countArgs(args []string, arg string) int {
+	count := 0
+	for _, existing := range args {
+		if existing == arg {
+			count++
+		}
+	}
+	return count
 }
