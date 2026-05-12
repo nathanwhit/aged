@@ -126,7 +126,12 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if err != nil {
 		return core.PullRequest{}, err
 	}
+	var publishWorkspace PreparedWorkspace
 	if workerID != "" {
+		publishWorkspace, err = s.workspaceForWorker(ctx, workerID)
+		if err != nil {
+			return core.PullRequest{}, err
+		}
 		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
 		if err != nil {
 			return core.PullRequest{}, err
@@ -167,6 +172,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 			Title:         title,
 			Body:          body,
 			Draft:         draft,
+			ResetWorkDir:  shouldResetPullRequestWorkDirAfterPublish(publishWorkspace),
 			Metadata:      metadata,
 		})
 		if err != nil {
@@ -285,6 +291,10 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		return core.PullRequest{}, err
 	}
 	return updated, nil
+}
+
+func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {
+	return workspace.VCSType == "ssh" || workspace.Mode == string(WorkspaceModeShared)
 }
 
 func (s *Service) workerCreatedPullRequest(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, targetRepo string, metadata map[string]any) (core.PullRequest, bool, error) {

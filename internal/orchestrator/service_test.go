@@ -1249,6 +1249,11 @@ func TestServicePlanActionAdoptsWorkerCreatedPullRequest(t *testing.T) {
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
 	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "")
+	}, func(snapshot core.Snapshot) string {
+		return "missing completed publish action"
+	})
 	if publisher.publishCalls != 0 {
 		t.Fatalf("publish calls = %d, want worker-created PR to be adopted", publisher.publishCalls)
 	}
@@ -1392,6 +1397,11 @@ func TestServiceRetriesExplicitPublishPullRequestActionAfterRecoverableSigningFa
 		t.Fatal(err)
 	}
 	snapshot = waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "")
+	}, func(snapshot core.Snapshot) string {
+		return "missing completed publish_pull_request action"
+	})
 	if publisher.publishCalls != 2 {
 		t.Fatalf("publish calls = %d, want retry publish", publisher.publishCalls)
 	}
@@ -5831,6 +5841,154 @@ func TestServicePublishesRemoteWorkerPullRequestAfterApplyingPatch(t *testing.T)
 	if !hasEvent(snapshot.Events, core.EventPRPublished, taskID, "") {
 		t.Fatal("missing pr.published event")
 	}
+}
+
+func TestServiceSeparateTopLevelRemotePullRequestsStartFromProjectBase(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	sourceRoot := initGitTestRepo(t)
+	runTestGit(t, sourceRoot, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, sourceRoot, "remote", "add", "origin", remote)
+	runTestGit(t, sourceRoot, "push", "-u", "origin", "main")
+
+	createCalls := 0
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			switch {
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				createCalls++
+				if strings.Contains(strings.Join(args, " "), "first-pr") {
+					return "https://github.com/owner/repo/pull/31", nil
+				}
+				return "https://github.com/owner/repo/pull/32", nil
+			case name == "gh" && len(args) >= 3 && args[0] == "pr" && args[1] == "view":
+				if strings.Contains(args[2], "/31") {
+					return `{"number":31,"url":"https://github.com/owner/repo/pull/31","state":"OPEN","title":"First","isDraft":false,"headRefName":"first-pr","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":""}`, nil
+				}
+				return `{"number":32,"url":"https://github.com/owner/repo/pull/32","state":"OPEN","title":"Second","isDraft":false,"headRefName":"second-pr","baseRefName":"main","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, sourceRoot, fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	appendRemotePublishCandidate := func(taskID string, workerID string, title string, diff string, changedPath string) {
+		t.Helper()
+		if _, err := store.Append(ctx, core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  title,
+				"prompt": title,
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(PreparedWorkspace{
+				Root:          "/runs/" + workerID,
+				CWD:           "/repo",
+				SourceRoot:    "/repo",
+				WorkspaceName: "aged-remote",
+				Mode:          "remote",
+				VCSType:       "ssh",
+				TaskID:        taskID,
+				WorkerID:      workerID,
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.WorkerSucceeded,
+				"workspaceChanges": WorkspaceChanges{
+					Root:    "/runs/" + workerID,
+					CWD:     "/repo",
+					Mode:    "remote",
+					VCSType: "git",
+					Dirty:   true,
+					Diff:    diff,
+					ChangedFiles: []WorkspaceChangedFile{{
+						Path:   changedPath,
+						Status: "added",
+					}},
+				},
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status":                 core.TaskSucceeded,
+				"finalCandidateWorkerId": workerID,
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	appendRemotePublishCandidate("task-one", "worker-one", "First task", newFilePatch("first.txt", "first\n"), "first.txt")
+	if _, err := service.PublishTaskPullRequest(ctx, "task-one", core.PublishPullRequestRequest{
+		Repo:     "owner/repo",
+		Base:     "main",
+		Branch:   "first-pr",
+		WorkerID: "worker-one",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if contents := runTestGit(t, sourceRoot, "show", "first-pr:first.txt"); contents != "first\n" {
+		t.Fatalf("first branch content = %q", contents)
+	}
+	if _, err := runCommand(ctx, sourceRoot, "git", "cat-file", "-e", "HEAD:first.txt"); err == nil {
+		t.Fatal("source checkout still contains first task change after publishing")
+	}
+
+	appendRemotePublishCandidate("task-two", "worker-two", "Second task", newFilePatch("second.txt", "second\n"), "second.txt")
+	if _, err := service.PublishTaskPullRequest(ctx, "task-two", core.PublishPullRequestRequest{
+		Repo:     "owner/repo",
+		Base:     "main",
+		Branch:   "second-pr",
+		WorkerID: "worker-two",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if createCalls != 2 {
+		t.Fatalf("gh pr create calls = %d, want 2", createCalls)
+	}
+	if contents := runTestGit(t, sourceRoot, "show", "second-pr:second.txt"); contents != "second\n" {
+		t.Fatalf("second branch content = %q", contents)
+	}
+	if _, err := runCommand(ctx, sourceRoot, "git", "cat-file", "-e", "second-pr:first.txt"); err == nil {
+		t.Fatal("second top-level PR branch included the first task change")
+	}
+}
+
+func newFilePatch(path string, body string) string {
+	var builder strings.Builder
+	builder.WriteString("diff --git a/")
+	builder.WriteString(path)
+	builder.WriteString(" b/")
+	builder.WriteString(path)
+	builder.WriteString("\nnew file mode 100644\n--- /dev/null\n+++ b/")
+	builder.WriteString(path)
+	builder.WriteString("\n@@ -0,0 +1 @@\n+")
+	builder.WriteString(strings.TrimSuffix(body, "\n"))
+	builder.WriteString("\n")
+	return builder.String()
 }
 
 func TestServiceRecordsBenchmarkResultArtifact(t *testing.T) {
