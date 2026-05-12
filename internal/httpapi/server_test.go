@@ -457,6 +457,140 @@ func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
 	}
 }
 
+func TestGitHubDriverEndpointHotTogglesConfig(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	service.Drivers().SetGitHubClient(fakeHTTPGitHubClient{})
+	if _, err := service.Drivers().StartGitHubDriver(ctx, orchestrator.GitHubDriverConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/drivers/github", strings.NewReader(`{
+		"enabled": true,
+		"intervalSeconds": 3600,
+		"issueLimit": 5,
+		"issues": [{"repo": "owner/repo", "labels": ["aged"], "projectId": "default"}],
+		"pullRequests": {"enabled": true, "autoPublish": false, "autoBabysit": false, "draft": true}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var state orchestrator.GitHubDriverRuntimeState
+	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || !state.Config.Enabled || state.Config.IntervalSeconds != 3600 || state.Config.IssueLimit != 5 {
+		t.Fatalf("state = %+v", state)
+	}
+
+	res, err = http.Get(server.URL + "/api/drivers/github")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || len(state.Config.Issues) != 1 || state.Config.Issues[0].Repo != "owner/repo" {
+		t.Fatalf("get state = %+v", state)
+	}
+}
+
+func TestDiscordDriverEndpointHotTogglesConfig(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	service.Drivers().SetDiscordClient(fakeHTTPDiscordClient{})
+	if _, err := service.Drivers().StartDiscordDriver(ctx, orchestrator.DiscordDriverConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/drivers/discord", strings.NewReader(`{
+		"enabled": true,
+		"token": "secret-token",
+		"intervalSeconds": 3600,
+		"messageLimit": 5,
+		"channels": [{"id": "chan", "taskPrefix": "task:"}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var state orchestrator.DiscordDriverRuntimeState
+	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || !state.Config.Enabled || state.Config.IntervalSeconds != 3600 || state.Config.MessageLimit != 5 || state.Config.Token != "" {
+		t.Fatalf("state = %+v", state)
+	}
+
+	res, err = http.Get(server.URL + "/api/drivers/discord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if err := json.NewDecoder(res.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || len(state.Config.Channels) != 1 || state.Config.Channels[0].ID != "chan" || state.Config.Token != "" {
+		t.Fatalf("get state = %+v", state)
+	}
+}
+
+type fakeHTTPGitHubClient struct{}
+
+func (fakeHTTPGitHubClient) ListIssues(context.Context, string, []string, int) ([]orchestrator.GitHubIssue, error) {
+	return nil, nil
+}
+
+type fakeHTTPDiscordClient struct{}
+
+func (fakeHTTPDiscordClient) Me(context.Context) (orchestrator.DiscordUser, error) {
+	return orchestrator.DiscordUser{ID: "bot", Bot: true}, nil
+}
+
+func (fakeHTTPDiscordClient) ListMessages(context.Context, string, string, int) ([]orchestrator.DiscordMessage, error) {
+	return nil, nil
+}
+
+func (fakeHTTPDiscordClient) SendMessage(context.Context, string, string) error {
+	return nil
+}
+
 func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
@@ -1116,7 +1250,8 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"headRepoOwner": "owner",
 		"pushRemote": "fork",
 		"vcs": "git",
-		"defaultBase": "main"
+		"defaultBase": "main",
+		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5}
 	}`, projectDir)
 	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -1131,7 +1266,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -1139,7 +1274,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 {
 		t.Fatalf("projects = %+v", projects)
 	}
 }

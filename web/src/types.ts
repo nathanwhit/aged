@@ -81,7 +81,15 @@ export type Project = {
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
   remoteCheckouts?: Record<string, string>;
+  githubIssues?: GitHubIssuePolicy;
   pullRequestPolicy?: PullRequestPolicy;
+};
+
+export type GitHubIssuePolicy = {
+  enabled?: boolean;
+  labels?: string[];
+  issueLimit?: number;
+  autoPublish?: boolean;
 };
 
 export type PullRequestPolicy = {
@@ -129,6 +137,62 @@ export type Plugin = {
     restartPolicy?: string;
     logTail?: string[];
   };
+};
+
+export type GitHubDriverConfig = {
+  enabled: boolean;
+  intervalSeconds?: number;
+  issueLimit?: number;
+  issues?: {
+    repo: string;
+    labels?: string[];
+    projectId?: string;
+    enabled?: boolean;
+    issueLimit?: number;
+    autoPublish?: boolean;
+  }[];
+  pullRequests?: {
+    enabled?: boolean;
+    repos?: string[];
+    autoPublish?: boolean;
+    autoBabysit?: boolean;
+    draft?: boolean;
+  };
+};
+
+export type GitHubDriverState = {
+  config: GitHubDriverConfig;
+  running: boolean;
+  startedAt?: string;
+  updatedAt?: string;
+  lastRunAt?: string;
+  lastError?: string;
+};
+
+export type DiscordDriverConfig = {
+  enabled: boolean;
+  token?: string;
+  intervalSeconds?: number;
+  messageLimit?: number;
+  processHistory?: boolean;
+  assistantProjectId?: string;
+  channels?: {
+    id: string;
+    projectId?: string;
+    defaultProjectId?: string;
+    allowedUserIds?: string[];
+    requireMention?: boolean;
+    taskPrefix?: string;
+  }[];
+};
+
+export type DiscordDriverState = {
+  config: DiscordDriverConfig;
+  running: boolean;
+  startedAt?: string;
+  updatedAt?: string;
+  lastRunAt?: string;
+  lastError?: string;
 };
 
 export type Worker = {

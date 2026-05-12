@@ -50,6 +50,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/plugins", s.registerPlugin)
 	mux.HandleFunc("PUT /api/plugins/{id}", s.updatePlugin)
 	mux.HandleFunc("DELETE /api/plugins/{id}", s.deletePlugin)
+	mux.HandleFunc("GET /api/drivers/github", s.githubDriver)
+	mux.HandleFunc("PUT /api/drivers/github", s.updateGitHubDriver)
+	mux.HandleFunc("GET /api/drivers/discord", s.discordDriver)
+	mux.HandleFunc("PUT /api/drivers/discord", s.updateDiscordDriver)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.HandleFunc("GET /api/events/stream", s.eventStream)
 	mux.HandleFunc("POST /api/assistant", s.assistant)
@@ -229,6 +233,32 @@ func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w, s.service.DeletePlugin(r.Context(), r.PathValue("id")))
+}
+
+func (s *Server) githubDriver(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.service.Drivers().GitHubState())
+}
+
+func (s *Server) updateGitHubDriver(w http.ResponseWriter, r *http.Request) {
+	config, ok := decodeRequest[orchestrator.GitHubDriverConfig](w, r)
+	if !ok {
+		return
+	}
+	state, err := s.service.Drivers().ConfigureGitHubDriver(config)
+	writeResult(w, http.StatusOK, state, err)
+}
+
+func (s *Server) discordDriver(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.service.Drivers().DiscordState())
+}
+
+func (s *Server) updateDiscordDriver(w http.ResponseWriter, r *http.Request) {
+	config, ok := decodeRequest[orchestrator.DiscordDriverConfig](w, r)
+	if !ok {
+		return
+	}
+	state, err := s.service.Drivers().ConfigureDiscordDriver(config)
+	writeResult(w, http.StatusOK, state, err)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {

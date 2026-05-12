@@ -191,7 +191,25 @@ GitHub driver:
 go run ./cmd/aged -github-driver github-driver.json
 ```
 
-It uses local `gh` auth, creates idempotent issue tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work.
+It uses local `gh` auth, creates idempotent issue tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work. The same config can be read or hot-swapped while the daemon is running:
+
+```sh
+curl http://localhost:8787/api/drivers/github
+curl -X PUT http://localhost:8787/api/drivers/github \
+  -H 'content-type: application/json' \
+  -d '{"enabled":true,"issues":[{"repo":"owner/repo","labels":["aged"]}]}'
+```
+
+Projects can also opt into issue polling directly with `githubIssues`; the driver uses the project's `upstreamRepo` when present, otherwise `repo`, and routes created issue tasks back to that project:
+
+```json
+{
+  "id": "repo",
+  "repo": "fork-owner/repo",
+  "upstreamRepo": "owner/repo",
+  "githubIssues": { "enabled": true, "labels": ["aged"], "issueLimit": 20 }
+}
+```
 
 Discord driver:
 
@@ -199,7 +217,7 @@ Discord driver:
 go run ./cmd/aged -discord-driver discord-driver.json
 ```
 
-It polls configured bot channels, answers through the assistant, can propose or create tasks, supports `task: <prompt>` and `do it`, and can create projects from chat.
+It polls configured bot channels, answers through the assistant, can propose or create tasks, supports `task: <prompt>` and `do it`, and can create projects from chat. The Discord driver is managed by the same runtime driver registry as the GitHub driver and can be read or hot-swapped with `GET` / `PUT /api/drivers/discord`; state responses redact the bot token.
 
 Plugins use `-plugins` / `AGED_PLUGINS`. Enabled `aged-plugin-v1` command plugins are probed with `command... describe`; driver plugins may be supervised with `command... serve`, and runner plugins become worker kinds.
 

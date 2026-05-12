@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	default_base TEXT NOT NULL DEFAULT '',
 	workspace_root TEXT NOT NULL DEFAULT '',
 	target_labels TEXT NOT NULL DEFAULT '{}',
+	github_issues TEXT NOT NULL DEFAULT '{}',
 	pull_request_policy TEXT NOT NULL DEFAULT '{}',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
@@ -131,6 +132,7 @@ CREATE TABLE IF NOT EXISTS targets (
 		{"head_repo_owner", "TEXT NOT NULL DEFAULT ''"},
 		{"push_remote", "TEXT NOT NULL DEFAULT ''"},
 		{"remote_checkouts", "TEXT NOT NULL DEFAULT '{}'"},
+		{"github_issues", "TEXT NOT NULL DEFAULT '{}'"},
 		{"pull_request_policy", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		if err := s.ensureColumn(ctx, "projects", column.name, column.definition); err != nil {
@@ -445,7 +447,7 @@ func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy
+SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, pull_request_policy
 FROM projects
 ORDER BY id ASC`)
 	if err != nil {
@@ -485,6 +487,10 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 	if err != nil {
 		return core.Project{}, err
 	}
+	githubIssues, err := jsonString(project.GitHubIssues, "{}")
+	if err != nil {
+		return core.Project{}, err
+	}
 	policy, err := jsonString(project.PullRequestPolicy, "")
 	if err != nil {
 		return core.Project{}, err
@@ -500,8 +506,8 @@ func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (
 		return core.Project{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.ID,
 		project.Name,
 		project.LocalPath,
@@ -514,6 +520,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.WorkspaceRoot,
 		labels,
 		remoteCheckouts,
+		githubIssues,
 		policy,
 		now,
 		now,
@@ -543,6 +550,10 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	if err != nil {
 		return core.Project{}, err
 	}
+	githubIssues, err := jsonString(project.GitHubIssues, "{}")
+	if err != nil {
+		return core.Project{}, err
+	}
 	policy, err := jsonString(project.PullRequestPolicy, "")
 	if err != nil {
 		return core.Project{}, err
@@ -554,8 +565,8 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	local_path = excluded.local_path,
@@ -568,6 +579,7 @@ ON CONFLICT(id) DO UPDATE SET
 	workspace_root = excluded.workspace_root,
 	target_labels = excluded.target_labels,
 	remote_checkouts = excluded.remote_checkouts,
+	github_issues = excluded.github_issues,
 	pull_request_policy = excluded.pull_request_policy,
 	updated_at = excluded.updated_at`,
 		project.ID,
@@ -582,6 +594,7 @@ ON CONFLICT(id) DO UPDATE SET
 		project.WorkspaceRoot,
 		labels,
 		remoteCheckouts,
+		githubIssues,
 		policy,
 		now,
 		now,
@@ -1575,6 +1588,7 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 	var project core.Project
 	var labels string
 	var remoteCheckouts string
+	var githubIssues string
 	var policy string
 	if err := scanner.Scan(
 		&project.ID,
@@ -1589,6 +1603,7 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		&project.WorkspaceRoot,
 		&labels,
 		&remoteCheckouts,
+		&githubIssues,
 		&policy,
 	); err != nil {
 		return core.Project{}, err
@@ -1600,6 +1615,11 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 	}
 	if remoteCheckouts != "" {
 		if err := json.Unmarshal([]byte(remoteCheckouts), &project.RemoteCheckouts); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if githubIssues != "" {
+		if err := json.Unmarshal([]byte(githubIssues), &project.GitHubIssues); err != nil {
 			return core.Project{}, err
 		}
 	}

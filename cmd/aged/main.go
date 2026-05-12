@@ -189,18 +189,22 @@ func main() {
 	if err != nil {
 		fatal("load github driver", err)
 	}
-	if githubDriverConfig.Enabled {
-		driver := orchestrator.NewGitHubDriver(service, githubDriverConfig, nil)
-		go driver.Run(ctx)
+	githubDriverState, err := service.Drivers().StartGitHubDriver(ctx, githubDriverConfig)
+	if err != nil {
+		fatal("start github driver", err)
+	}
+	if githubDriverState.Config.Enabled {
 		slog.Info("github driver enabled", "intervalSeconds", githubDriverConfig.IntervalSeconds)
 	}
 	discordDriverConfig, err := orchestrator.LoadDiscordDriverConfig(*discordDriverPath)
 	if err != nil {
 		fatal("load discord driver", err)
 	}
-	if discordDriverConfig.Enabled {
-		driver := orchestrator.NewDiscordDriver(service, discordDriverConfig, nil)
-		go driver.Run(ctx)
+	discordDriverState, err := service.Drivers().StartDiscordDriver(ctx, discordDriverConfig)
+	if err != nil {
+		fatal("start discord driver", err)
+	}
+	if discordDriverState.Config.Enabled {
 		slog.Info("discord driver enabled", "intervalSeconds", discordDriverConfig.IntervalSeconds, "channels", len(discordDriverConfig.Channels))
 	}
 	auth, err := configureAuth(*authMode, httpapi.GoogleAuthConfig{
