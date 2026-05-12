@@ -62,22 +62,24 @@ type ClearTasksResult struct {
 }
 
 type Service struct {
-	store       eventstore.Store
-	broker      *Broker
-	brain       BrainProvider
-	assistant   AssistantProvider
-	titles      TitleGenerator
-	runners     map[string]worker.Runner
-	workDir     string
-	projects    *ProjectRegistry
-	plugins     *PluginRegistry
-	pluginCtx   context.Context
-	drivers     *DriverRegistry
-	workspaces  WorkspaceManager
-	targets     *TargetRegistry
-	sshRunner   SSHRunner
-	prPublisher PullRequestPublisher
-	remoteApply func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
+	store         eventstore.Store
+	broker        *Broker
+	brain         BrainProvider
+	assistant     AssistantProvider
+	titles        TitleGenerator
+	runners       map[string]worker.Runner
+	baseRunners   map[string]worker.Runner
+	pluginRunners map[string]struct{}
+	workDir       string
+	projects      *ProjectRegistry
+	plugins       *PluginRegistry
+	pluginCtx     context.Context
+	drivers       *DriverRegistry
+	workspaces    WorkspaceManager
+	targets       *TargetRegistry
+	sshRunner     SSHRunner
+	prPublisher   PullRequestPublisher
+	remoteApply   func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
 
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
@@ -214,25 +216,27 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		}}, "default")
 	}
 	service := &Service{
-		store:       store,
-		broker:      NewBroker(),
-		brain:       brain,
-		runners:     runners,
-		workDir:     workDir,
-		projects:    projects,
-		plugins:     NewPluginRegistry(builtinPlugins()),
-		workspaces:  workspaces,
-		targets:     targets,
-		sshRunner:   sshRunner,
-		prPublisher: NewLocalPullRequestPublisher(),
-		remoteApply: applyRemotePatch,
-		cancels:     map[string]context.CancelFunc{},
-		taskCancels: map[string]context.CancelFunc{},
-		taskRuns:    map[string]string{},
-		tasks:       map[string]string{},
-		steering:    map[string]chan string{},
-		remoteRuns:  map[string]remoteRun{},
-		workerCaps:  map[string]worker.Capabilities{},
+		store:         store,
+		broker:        NewBroker(),
+		brain:         brain,
+		runners:       runners,
+		baseRunners:   cloneRunnerMap(runners),
+		pluginRunners: map[string]struct{}{},
+		workDir:       workDir,
+		projects:      projects,
+		plugins:       NewPluginRegistry(builtinPlugins()),
+		workspaces:    workspaces,
+		targets:       targets,
+		sshRunner:     sshRunner,
+		prPublisher:   NewLocalPullRequestPublisher(),
+		remoteApply:   applyRemotePatch,
+		cancels:       map[string]context.CancelFunc{},
+		taskCancels:   map[string]context.CancelFunc{},
+		taskRuns:      map[string]string{},
+		tasks:         map[string]string{},
+		steering:      map[string]chan string{},
+		remoteRuns:    map[string]remoteRun{},
+		workerCaps:    map[string]worker.Capabilities{},
 	}
 	service.drivers = NewDriverRegistry(service)
 	return service
@@ -559,8 +563,49 @@ func (s *Service) DeletePlugin(ctx context.Context, id string) error {
 	if err := s.plugins.Delete(id); err != nil {
 		return err
 	}
-	delete(s.runners, strings.TrimPrefix(id, "runner:"))
+	s.syncPluginRunners()
 	return nil
+}
+
+func cloneRunnerMap(in map[string]worker.Runner) map[string]worker.Runner {
+	out := make(map[string]worker.Runner, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// syncPluginRunners reconciles s.runners with the current set of enabled
+// runner plugins. Runner kinds that were previously contributed by a plugin
+// but no longer appear (because the plugin was disabled, deleted, or had its
+// protocol/kind/command changed) are removed, restoring any built-in/static
+// runner of the same kind that was supplied at construction time.
+func (s *Service) syncPluginRunners() {
+	if s.runners == nil {
+		s.runners = map[string]worker.Runner{}
+	}
+	if s.pluginRunners == nil {
+		s.pluginRunners = map[string]struct{}{}
+	}
+	var current map[string]worker.Runner
+	if s.plugins != nil {
+		current = s.plugins.RunnerPlugins()
+	}
+	for kind := range s.pluginRunners {
+		if _, stillPresent := current[kind]; stillPresent {
+			continue
+		}
+		if base, ok := s.baseRunners[kind]; ok {
+			s.runners[kind] = base
+		} else {
+			delete(s.runners, kind)
+		}
+		delete(s.pluginRunners, kind)
+	}
+	for kind, runner := range current {
+		s.runners[kind] = runner
+		s.pluginRunners[kind] = struct{}{}
+	}
 }
 
 func (s *Service) registerPluginRuntime(plugin core.Plugin, probe bool) (core.Plugin, error) {
@@ -580,9 +625,7 @@ func (s *Service) registerPluginRuntime(plugin core.Plugin, probe bool) (core.Pl
 			}
 		}
 	}
-	for kind, runner := range s.plugins.RunnerPlugins() {
-		s.runners[kind] = runner
-	}
+	s.syncPluginRunners()
 	if registered.Kind == "driver" && registered.Enabled {
 		ctx := s.pluginCtx
 		if ctx == nil {

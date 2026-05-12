@@ -594,6 +594,11 @@ type fakeRemoteExecutor struct {
 	input          string
 }
 
+type gatedRemoteStatusExecutor struct {
+	release       chan struct{}
+	statusStarted chan struct{}
+}
+
 func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
 	e.commands = append(e.commands, append([]string(nil), argv...))
 	joined := strings.Join(argv, " ")
@@ -613,6 +618,37 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 		return "", nil
 	case strings.Contains(joined, "status.json"):
 		return `{"status":"succeeded","exit":0}`, nil
+	case strings.Contains(joined, "vcs.txt"):
+		return "git\n", nil
+	case strings.Contains(joined, "root.txt"):
+		return "/repo\n", nil
+	case strings.Contains(joined, "changes.txt"):
+		return " M main.go\n", nil
+	case strings.Contains(joined, "diffstat.txt"):
+		return " main.go | 2 +-\n", nil
+	case strings.Contains(joined, "diff.patch"):
+		return "diff --git a/main.go b/main.go\n", nil
+	default:
+		return "", nil
+	}
+}
+
+func (e *gatedRemoteStatusExecutor) Run(_ context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(joined, "stdout.log"), strings.Contains(joined, "stderr.log"):
+		return "", nil
+	case strings.Contains(joined, "status.json"):
+		select {
+		case e.statusStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-e.release:
+			return `{"status":"succeeded","exit":0}`, nil
+		default:
+			return `{"status":"running"}`, nil
+		}
 	case strings.Contains(joined, "vcs.txt"):
 		return "git\n", nil
 	case strings.Contains(joined, "root.txt"):
@@ -726,6 +762,95 @@ func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input st
 		e.input = input
 	}
 	return "", nil
+}
+
+func appendRecoverableRemoteWorker(t *testing.T, ctx context.Context, store eventstore.Store, taskID string, workerID string) {
+	t.Helper()
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "run remotely"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-remote",
+			"workerId":      workerID,
+			"workerKind":    "codex",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-worker",
+			"remoteRunDir":  "/runs/aged-worker",
+			"remoteWorkDir": "/repo",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+			"metadata": map[string]any{
+				"nodeID": "node-remote",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-worker"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForTargetRunning(t *testing.T, targets *TargetRegistry, targetID string, running int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if targetRunning(targets, targetID) == running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("target %s running count = %d, want %d", targetID, targetRunning(targets, targetID), running)
+}
+
+func targetRunning(targets *TargetRegistry, targetID string) int {
+	for _, target := range targets.Snapshot() {
+		if target.ID == targetID {
+			return target.Running
+		}
+	}
+	return 0
 }
 
 type recordingWorkerSink struct {
