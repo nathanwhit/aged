@@ -299,10 +299,10 @@ func (d *DiscordDriver) pollChannel(ctx context.Context, channel DiscordChannelC
 		if message.ID == "" {
 			continue
 		}
-		d.setLastSeen(channel.ID, message.ID)
 		if err := d.handleMessage(ctx, channel, message); err != nil {
 			return err
 		}
+		d.setLastSeen(channel.ID, message.ID)
 	}
 	d.markInitialized(channel.ID)
 	return nil
