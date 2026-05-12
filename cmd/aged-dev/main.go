@@ -49,6 +49,28 @@ type runResult struct {
 	PID       int       `json:"pid,omitempty"`
 }
 
+type daemonConfig struct {
+	daemonAddr        string
+	dbPath            string
+	workDir           string
+	projectsPath      string
+	pluginsPath       string
+	workerKind        string
+	assistantMode     string
+	assistantReason   string
+	brainMode         string
+	workspaceVCS      string
+	workspaceMode     string
+	workspaceRoot     string
+	workspaceCleanup  string
+	artifactCleanup   bool
+	artifactDryRun    bool
+	artifactMinAge    time.Duration
+	githubDriverPath  string
+	discordDriverPath string
+	webDistPath       string
+}
+
 func main() {
 	var (
 		addr              = flag.String("addr", envutil.String("AGED_DEV_ADDR", "127.0.0.1:8790"), "dev control server listen address")
@@ -90,27 +112,27 @@ func main() {
 		binaryPath: binaryPath,
 		logPath:    logPath,
 		daemonAddr: *daemonAddr,
-		daemonArgs: []string{
-			"-addr", *daemonAddr,
-			"-db", *dbPath,
-			"-worker", *workerKind,
-			"-assistant", *assistantMode,
-			"-assistant-reasoning", *assistantReason,
-			"-brain", *brainMode,
-			"-workdir", *workDir,
-			"-projects", *projectsPath,
-			"-plugins", *pluginsPath,
-			"-workspace-vcs", *workspaceVCS,
-			"-workspace-mode", *workspaceMode,
-			"-workspace-root", *workspaceRoot,
-			"-workspace-cleanup", *workspaceCleanup,
-			"-workspace-artifact-cleanup", strconv.FormatBool(*artifactCleanup),
-			"-workspace-artifact-cleanup-dry-run", strconv.FormatBool(*artifactDryRun),
-			"-workspace-artifact-cleanup-min-age", artifactMinAge.String(),
-			"-github-driver", *githubDriverPath,
-			"-discord-driver", *discordDriverPath,
-			"-web", *webDistPath,
-		},
+		daemonArgs: buildDaemonArgs(daemonConfig{
+			daemonAddr:        *daemonAddr,
+			dbPath:            *dbPath,
+			workerKind:        *workerKind,
+			assistantMode:     *assistantMode,
+			assistantReason:   *assistantReason,
+			brainMode:         *brainMode,
+			workDir:           *workDir,
+			projectsPath:      *projectsPath,
+			pluginsPath:       *pluginsPath,
+			workspaceVCS:      *workspaceVCS,
+			workspaceMode:     *workspaceMode,
+			workspaceRoot:     *workspaceRoot,
+			workspaceCleanup:  *workspaceCleanup,
+			artifactCleanup:   *artifactCleanup,
+			artifactDryRun:    *artifactDryRun,
+			artifactMinAge:    *artifactMinAge,
+			githubDriverPath:  *githubDriverPath,
+			discordDriverPath: *discordDriverPath,
+			webDistPath:       *webDistPath,
+		}),
 		daemonEnv: os.Environ(),
 	}
 
@@ -157,6 +179,30 @@ func main() {
 		slog.Error("stop managed daemon", "error", err)
 	}
 	control.mu.Unlock()
+}
+
+func buildDaemonArgs(config daemonConfig) []string {
+	return []string{
+		"-addr", config.daemonAddr,
+		"-db", config.dbPath,
+		"-worker", config.workerKind,
+		"-assistant", config.assistantMode,
+		"-assistant-reasoning", config.assistantReason,
+		"-brain", config.brainMode,
+		"-workdir", config.workDir,
+		"-projects", config.projectsPath,
+		"-plugins", config.pluginsPath,
+		"-workspace-vcs", config.workspaceVCS,
+		"-workspace-mode", config.workspaceMode,
+		"-workspace-root", config.workspaceRoot,
+		"-workspace-cleanup", config.workspaceCleanup,
+		"-workspace-artifact-cleanup=" + strconv.FormatBool(config.artifactCleanup),
+		"-workspace-artifact-cleanup-dry-run=" + strconv.FormatBool(config.artifactDryRun),
+		"-workspace-artifact-cleanup-min-age", config.artifactMinAge.String(),
+		"-github-driver", config.githubDriverPath,
+		"-discord-driver", config.discordDriverPath,
+		"-web", config.webDistPath,
+	}
 }
 
 func (s *devServer) status(w http.ResponseWriter, _ *http.Request) {
