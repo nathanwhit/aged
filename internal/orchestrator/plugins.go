@@ -223,7 +223,7 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	for index, plugin := range r.Snapshot() {
+	for _, plugin := range r.Snapshot() {
 		if !plugin.Enabled || len(plugin.Command) == 0 || plugin.Protocol != "aged-plugin-v1" {
 			continue
 		}
@@ -233,20 +233,20 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 		if err != nil {
 			plugin.Status = "error"
 			plugin.Error = strings.TrimSpace(err.Error())
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			continue
 		}
 		var described core.Plugin
 		if err := json.Unmarshal(bytes.TrimSpace(out), &described); err != nil {
 			plugin.Status = "error"
 			plugin.Error = "decode plugin describe: " + err.Error()
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			continue
 		}
 		if described.ID != "" && described.ID != plugin.ID {
 			plugin.Status = "error"
 			plugin.Error = "plugin described mismatched id " + described.ID
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			continue
 		}
 		plugin.Status = "ready"
@@ -269,7 +269,7 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 		if len(described.Config) > 0 {
 			plugin.Config = described.Config
 		}
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(plugin)
 	}
 }
 
@@ -277,7 +277,7 @@ func (r *PluginRegistry) StartDrivers(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	for index, plugin := range r.Snapshot() {
+	for _, plugin := range r.Snapshot() {
 		if !plugin.Enabled || plugin.Kind != "driver" || plugin.Protocol != "aged-plugin-v1" || len(plugin.Command) == 0 {
 			continue
 		}
@@ -287,16 +287,16 @@ func (r *PluginRegistry) StartDrivers(ctx context.Context) {
 		plugin.Driver.Managed = true
 		plugin.Driver.RestartPolicy = nonEmpty(plugin.Config["restart"], "on_failure")
 		plugin.Status = "starting"
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(plugin)
 		driverCtx, cancel := context.WithCancel(ctx)
 		r.setDriverCancel(plugin.ID, cancel)
-		go r.superviseDriver(driverCtx, index, plugin.ID)
+		go r.superviseDriver(driverCtx, plugin.ID)
 	}
 }
 
-func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id string) {
+func (r *PluginRegistry) superviseDriver(ctx context.Context, id string) {
 	for {
-		plugin, ok := r.pluginAt(index, id)
+		plugin, ok := r.pluginByID(id)
 		if !ok || !plugin.Enabled {
 			return
 		}
@@ -307,24 +307,24 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 		if outErr != nil || errErr != nil {
 			plugin.Status = "error"
 			plugin.Error = strings.TrimSpace(nonEmpty(errorString(outErr), errorString(errErr)))
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			return
 		}
 		if err := cmd.Start(); err != nil {
 			plugin.Status = "error"
 			plugin.Error = err.Error()
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			return
 		}
 		plugin.Status = "running"
 		plugin.Error = ""
 		plugin.Driver.PID = cmd.Process.Pid
 		plugin.Driver.StartedAt = time.Now().UTC()
-		r.updatePlugin(index, plugin)
-		go r.captureDriverLogs(ctx, index, plugin.ID, "stdout", stdout)
-		go r.captureDriverLogs(ctx, index, plugin.ID, "stderr", stderr)
+		r.updatePlugin(plugin)
+		go r.captureDriverLogs(ctx, plugin.ID, "stdout", stdout)
+		go r.captureDriverLogs(ctx, plugin.ID, "stderr", stderr)
 		err := cmd.Wait()
-		plugin, ok = r.pluginAt(index, id)
+		plugin, ok = r.pluginByID(id)
 		if !ok {
 			return
 		}
@@ -341,7 +341,7 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 				plugin.Driver.RestartPolicy = ""
 			}
 			plugin.Error = ""
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(plugin)
 			r.clearDriverCancel(plugin.ID)
 			return
 		}
@@ -352,14 +352,14 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 			plugin.Status = "stopped"
 			plugin.Error = ""
 		}
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(plugin)
 		if !shouldRestartPlugin(plugin, err) {
 			r.clearDriverCancel(plugin.ID)
 			return
 		}
 		plugin.Driver.RestartCount++
 		plugin.Status = "restarting"
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(plugin)
 		select {
 		case <-ctx.Done():
 			return
@@ -383,21 +383,17 @@ func (r *PluginRegistry) clearDriverCancel(id string) {
 	delete(r.driverCancel, id)
 }
 
-func (r *PluginRegistry) captureDriverLogs(ctx context.Context, index int, id string, stream string, reader io.Reader) {
+func (r *PluginRegistry) captureDriverLogs(ctx context.Context, id string, stream string, reader io.Reader) {
 	_ = worker.StreamReaderLines(ctx, stream, reader, func(line string) error {
-		r.appendDriverLogFor(index, id, stream+": "+line)
+		r.appendDriverLog(id, stream+": "+line)
 		return nil
 	}, nil)
 }
 
-func (r *PluginRegistry) appendDriverLog(index int, line string) {
-	r.appendDriverLogFor(index, "", line)
-}
-
-func (r *PluginRegistry) appendDriverLogFor(index int, id string, line string) {
+func (r *PluginRegistry) appendDriverLog(id string, line string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	index, ok := r.indexForLocked(index, id)
+	index, ok := r.indexForIDLocked(id)
 	if !ok {
 		return
 	}
@@ -408,20 +404,20 @@ func (r *PluginRegistry) appendDriverLogFor(index int, id string, line string) {
 	r.plugins[index].Driver.LogTail = tail
 }
 
-func (r *PluginRegistry) pluginAt(index int, id string) (core.Plugin, bool) {
+func (r *PluginRegistry) pluginByID(id string) (core.Plugin, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	index, ok := r.indexForLocked(index, id)
+	index, ok := r.indexForIDLocked(id)
 	if !ok {
 		return core.Plugin{}, false
 	}
 	return clonePlugin(r.plugins[index]), true
 }
 
-func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
+func (r *PluginRegistry) updatePlugin(plugin core.Plugin) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	index, ok := r.indexForLocked(index, plugin.ID)
+	index, ok := r.indexForIDLocked(plugin.ID)
 	if !ok {
 		return
 	}
@@ -429,13 +425,7 @@ func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
 	r.plugins[index] = clonePlugin(plugin)
 }
 
-func (r *PluginRegistry) indexForLocked(index int, id string) (int, bool) {
-	if id == "" {
-		return index, index >= 0 && index < len(r.plugins)
-	}
-	if index >= 0 && index < len(r.plugins) && r.plugins[index].ID == id {
-		return index, true
-	}
+func (r *PluginRegistry) indexForIDLocked(id string) (int, bool) {
 	for currentIndex, plugin := range r.plugins {
 		if plugin.ID == id {
 			return currentIndex, true

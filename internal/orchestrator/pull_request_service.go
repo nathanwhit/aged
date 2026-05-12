@@ -112,6 +112,10 @@ func (s *Service) pullRequestMonitoringDisabled(snapshot core.Snapshot, pr core.
 }
 
 func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req core.PublishPullRequestRequest) (core.PullRequest, error) {
+	return s.publishTaskPullRequest(ctx, taskID, req, nil)
+}
+
+func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req core.PublishPullRequestRequest, beforeRecordPullRequest func(core.PullRequest) error) (core.PullRequest, error) {
 	if s.prPublisher == nil {
 		return core.PullRequest{}, errors.New("pull request publisher is not configured")
 	}
@@ -197,6 +201,11 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		"branch":        pr.Branch,
 	}); err != nil {
 		return core.PullRequest{}, err
+	}
+	if beforeRecordPullRequest != nil {
+		if err := beforeRecordPullRequest(pr); err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	if err := s.recordPullRequestPublished(ctx, pr); err != nil {
 		return core.PullRequest{}, err
@@ -1066,7 +1075,17 @@ func (s *Service) retryWaitingPublishPullRequestAction(ctx context.Context, task
 	}
 	req := publishPullRequestRequestFromAction(action)
 	req.WorkerID = workerID
-	pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
+	_, err := s.publishTaskPullRequest(ctx, task.ID, req, func(pr core.PullRequest) error {
+		return s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          action.Kind,
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        action.Reason,
+			"inputs":        action.Inputs,
+			"workerId":      workerID,
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+		})
+	})
 	if err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
 			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -1082,17 +1101,6 @@ func (s *Service) retryWaitingPublishPullRequestAction(ctx context.Context, task
 		}
 		_ = s.failTask(ctx, task.ID, err)
 		return true
-	}
-	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
-		"kind":          action.Kind,
-		"when":          nonEmpty(action.When, "after_success"),
-		"reason":        action.Reason,
-		"inputs":        action.Inputs,
-		"workerId":      workerID,
-		"pullRequestId": pr.ID,
-		"url":           pr.URL,
-	}); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
 	}
 	return true
 }

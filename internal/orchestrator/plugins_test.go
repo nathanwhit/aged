@@ -134,6 +134,70 @@ func TestPluginRegistrySupervisesDriverLifecycle(t *testing.T) {
 	t.Fatalf("driver did not report lifecycle state: %+v", registry.Snapshot())
 }
 
+func TestPluginRegistryDriverLifecycleFollowsPluginIDAfterRegistryReorder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then echo driver-ready; sleep 0.1; echo driver-exiting; exit 7; fi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewPluginRegistry([]core.Plugin{{
+		ID:       "driver:z",
+		Name:     "Z Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry.StartDrivers(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		plugin, ok := pluginByID(registry.Snapshot(), "driver:z")
+		if ok && plugin.Driver.PID != 0 && plugin.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("driver did not start: %+v", registry.Snapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := registry.Register(core.Plugin{
+		ID:       "driver:a",
+		Name:     "A Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Protocol: "aged-plugin-v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		snapshot := registry.Snapshot()
+		plugin, ok := pluginByID(snapshot, "driver:z")
+		if ok && plugin.Status == "error" && plugin.Driver.PID == 0 && !plugin.Driver.LastExitAt.IsZero() {
+			if !strings.Contains(strings.Join(plugin.Driver.LogTail, "\n"), "driver-exiting") {
+				t.Fatalf("driver:z log tail = %+v", plugin.Driver.LogTail)
+			}
+			inserted, ok := pluginByID(snapshot, "driver:a")
+			if !ok {
+				t.Fatalf("inserted plugin missing: %+v", snapshot)
+			}
+			if inserted.Status == "error" || inserted.Driver.PID != 0 || len(inserted.Driver.LogTail) != 0 || !inserted.Driver.LastExitAt.IsZero() {
+				t.Fatalf("driver:a received lifecycle state from driver:z: %+v", inserted)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("driver did not exit with error state: %+v", snapshot)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestServiceDeletePluginRemovesRunningManagedDriverFromSnapshots(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "driver.sh")
@@ -339,13 +403,13 @@ func TestPluginRegistryLifecycleUpdatePreservesLargeDriverLogTail(t *testing.T) 
 	}})
 	stale := registry.Snapshot()[0]
 	largeLine := "stdout: " + strings.Repeat("l", 2*1024*1024)
-	registry.appendDriverLog(0, largeLine)
+	registry.appendDriverLog("driver:test", largeLine)
 
 	stale.Status = "running"
 	stale.Error = ""
 	stale.Driver.Managed = true
 	stale.Driver.PID = 1234
-	registry.updatePlugin(0, stale)
+	registry.updatePlugin(stale)
 
 	plugin := registry.Snapshot()[0]
 	if plugin.Status != "running" || !plugin.Driver.Managed || plugin.Driver.PID != 1234 {
