@@ -648,6 +648,86 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	}
 }
 
+func TestDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	for _, path := range []string{"/api/targets/missing", "/api/plugins/missing"} {
+		req, err := http.NewRequest(http.MethodDelete, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("DELETE %s status = %d, want %d", path, res.StatusCode, http.StatusNotFound)
+		}
+	}
+}
+
+func TestMCPDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	tests := []struct {
+		name    string
+		body    string
+		message string
+	}{
+		{
+			name: "target",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "tools/call",
+				"params": {"name": "aged_delete_target", "arguments": {"targetId": "definitely-not-a-target"}}
+			}`,
+			message: "target not found",
+		},
+		{
+			name: "plugin",
+			body: `{
+				"jsonrpc": "2.0",
+				"id": 2,
+				"method": "tools/call",
+				"params": {"name": "aged_delete_plugin", "arguments": {"pluginId": "definitely-not-a-plugin"}}
+			}`,
+			message: "plugin not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := postMCP(t, server.URL, tt.body)
+			rpcErr, ok := payload["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("payload error = %+v", payload)
+			}
+			if rpcErr["code"] != float64(-32004) || rpcErr["message"] != tt.message {
+				t.Fatalf("mcp error = %+v", rpcErr)
+			}
+		})
+	}
+}
+
 func TestMCPProjectTools(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

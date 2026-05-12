@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"aged/internal/core"
+	"aged/internal/eventstore"
 	"aged/internal/worker"
 )
 
@@ -66,6 +68,18 @@ func TestPluginRegistryRejectsBuiltinMutation(t *testing.T) {
 		if plugin.ID == "runner:codex" && (!plugin.BuiltIn || !plugin.Enabled || plugin.Name != "Codex CLI Worker") {
 			t.Fatalf("built-in plugin mutated: %+v", plugin)
 		}
+	}
+}
+
+func TestPluginRegistryDeleteMissingWrapsNotFound(t *testing.T) {
+	registry := NewPluginRegistry(builtinPlugins())
+
+	err := registry.Delete("integration:missing")
+	if !errors.Is(err, eventstore.ErrNotFound) {
+		t.Fatalf("delete missing err = %v, want ErrNotFound", err)
+	}
+	if err.Error() != "plugin not found" {
+		t.Fatalf("delete missing message = %q", err.Error())
 	}
 }
 

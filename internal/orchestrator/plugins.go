@@ -164,7 +164,7 @@ func (r *PluginRegistry) Delete(id string) error {
 		r.plugins = append(r.plugins[:index], r.plugins[index+1:]...)
 		return nil
 	}
-	return errors.New("plugin not found")
+	return notFoundError("plugin not found")
 }
 
 func (r *PluginRegistry) IsBuiltIn(id string) bool {
