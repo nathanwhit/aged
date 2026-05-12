@@ -2792,6 +2792,101 @@ func TestServiceLoadsProjectsFromSQLiteBeforeSeed(t *testing.T) {
 	}
 }
 
+func TestServiceDisablingRunnerPluginRemovesRuntimeRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if runner := service.runners["lint"]; runner == nil {
+		t.Fatalf("runner plugin was not registered: %+v", service.runners)
+	}
+
+	plugin.Enabled = false
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if runner, ok := service.runners["lint"]; ok {
+		t.Fatalf("disabled runner plugin left stale runner: %+v", runner)
+	}
+}
+
+func TestServiceClearingRunnerPluginCommandRemovesRuntimeRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.runners["lint"]; !ok {
+		t.Fatalf("runner plugin was not registered: %+v", service.runners)
+	}
+
+	plugin.Command = nil
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.runners["lint"]; ok {
+		t.Fatalf("runner plugin with cleared command left stale runner: %+v", service.runners)
+	}
+}
+
+func TestServiceRunnerPluginProtocolChangeRestoresStaticRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	static := buildOnlyRunner{kind: "lint", command: []string{"static-lint"}}
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{"lint": static}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(service.runners["lint"].BuildCommand(workerSpec("w1")), " "); got != "aged-lint run" {
+		t.Fatalf("registered runner command = %q", got)
+	}
+
+	plugin.Protocol = "aged-plugin-v1"
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	runner, ok := service.runners["lint"]
+	if !ok {
+		t.Fatalf("static runner was not restored after protocol change: %+v", service.runners)
+	}
+	if got := strings.Join(runner.BuildCommand(workerSpec("w1")), " "); got != "static-lint" {
+		t.Fatalf("static runner was not restored, command = %q", got)
+	}
+}
+
 func TestServiceMapsExternalRepoToProject(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -3719,6 +3814,62 @@ func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	}
 	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 2 {
 		t.Fatalf("worker.created count = %d, want 2", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+	}
+}
+
+func TestServiceRetryFailsWhenExplicitTaskProjectWasDeleted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	defaultProject := core.Project{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"}
+	deletedProject := core.Project{ID: "deleted", Name: "Deleted", LocalPath: t.TempDir(), DefaultBase: "main"}
+	if _, err := store.SaveProject(ctx, defaultProject, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProject(ctx, deletedProject, false); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := NewProjectRegistry([]core.Project{defaultProject, deletedProject}, defaultProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &flakyRunner{kind: "retryable"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "retryable",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"retryable": runner}, defaultProject.LocalPath, fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		ProjectID: deletedProject.ID,
+		Title:     "Do project work",
+		Prompt:    "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	if err := service.DeleteProject(ctx, deletedProject.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.RetryTask(ctx, task.ID)
+	if err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("retry err = %v, want missing explicit project", err)
+	}
+	if runner.callsValue() != 1 {
+		t.Fatalf("runner calls = %d, want retry to stop before rerun", runner.callsValue())
+	}
+	if _, err := service.projectForTaskID(ctx, task.ID); err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("projectForTaskID err = %v, want missing explicit project", err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 1 {
+		t.Fatalf("worker.created count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
 	}
 }
 
@@ -5129,6 +5280,144 @@ func TestRecoverRemoteWorkerCancelDoesNotCancelTaskWithOtherActiveWorker(t *test
 	}
 }
 
+func TestRecoverRemoteWorkersReservesTargetCapacityDuringRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-reserve-capacity"
+	workerID := "worker-reserve-capacity"
+	targets := NewTargetRegistry([]TargetConfig{
+		{
+			ID:       "vm-1",
+			Kind:     TargetKindSSH,
+			Host:     "vm",
+			WorkDir:  "/repo",
+			WorkRoot: "/runs",
+			Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+		},
+		defaultLocalTargetConfig(),
+	})
+	executor := &gatedPollExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "run remotely"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-remote",
+			"workerId":      workerID,
+			"workerKind":    "codex",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-worker",
+			"remoteRunDir":  "/runs/aged-worker",
+			"remoteWorkDir": "/repo",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "codex",
+			"metadata": map[string]any{"nodeID": "node-remote"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-worker"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForTargetRunning(t, targets, "vm-1", 1)
+	if err := targets.Delete("vm-1"); err == nil || !strings.Contains(err.Error(), "running workers") {
+		t.Fatalf("Delete during recovery err = %v, want \"running workers\"", err)
+	}
+
+	executor.complete()
+	waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	waitForTargetRunning(t, targets, "vm-1", 0)
+	if err := targets.Delete("vm-1"); err != nil {
+		t.Fatalf("Delete after recovery err = %v, want nil", err)
+	}
+}
+
+type gatedPollExecutor struct {
+	mu   sync.Mutex
+	done bool
+}
+
+func (e *gatedPollExecutor) complete() {
+	e.mu.Lock()
+	e.done = true
+	e.mu.Unlock()
+}
+
+func (e *gatedPollExecutor) isDone() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.done
+}
+
+func (e *gatedPollExecutor) Run(_ context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(joined, "status.json"):
+		if e.isDone() {
+			return `{"status":"succeeded","exit":0}`, nil
+		}
+		return `{"status":"running"}`, nil
+	case strings.Contains(joined, "vcs.txt"):
+		return "git\n", nil
+	case strings.Contains(joined, "root.txt"):
+		return "/repo\n", nil
+	default:
+		return "", nil
+	}
+}
+
 func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -5638,6 +5927,97 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if applyCalls != 1 {
 		t.Fatalf("second apply changed apply calls to %d, want 1", applyCalls)
+	}
+}
+
+func TestServiceRemoteApplyFailsWhenExplicitTaskProjectWasDeleted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	defaultProject := core.Project{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"}
+	deletedProject := core.Project{ID: "deleted", Name: "Deleted", LocalPath: t.TempDir(), DefaultBase: "main"}
+	if _, err := store.SaveProject(ctx, defaultProject, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProject(ctx, deletedProject, false); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := NewProjectRegistry([]core.Project{defaultProject, deletedProject}, defaultProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, defaultProject.LocalPath, fakeWorkspaceManager{})
+	service.SetProjects(projects)
+
+	taskID := "task-deleted-project"
+	workerID := "worker-remote"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"projectId": deletedProject.ID,
+			"title":     "Remote changes",
+			"prompt":    "Apply remote patch.",
+			"metadata":  map[string]any{"projectId": deletedProject.ID},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:       "/runs/remote",
+			CWD:        "/checkouts/deleted",
+			SourceRoot: "/checkouts/deleted",
+			Mode:       "remote",
+			VCSType:    "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerSucceeded,
+			"workspaceChanges": WorkspaceChanges{
+				Root:         "/runs/remote",
+				CWD:          "/checkouts/deleted",
+				Diff:         newFilePatch("remote.txt", "remote\n"),
+				ChangedFiles: []WorkspaceChangedFile{{Path: "remote.txt", Status: "added"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remoteApplyCalls := 0
+	service.remoteApply = func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error) {
+		remoteApplyCalls++
+		return WorkerApplyResult{}, nil
+	}
+	if err := service.DeleteProject(ctx, deletedProject.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.ApplyWorkerChanges(ctx, workerID)
+	if err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("apply err = %v, want missing explicit project", err)
+	}
+	if remoteApplyCalls != 0 {
+		t.Fatalf("remote apply calls = %d, want 0", remoteApplyCalls)
 	}
 }
 
@@ -7442,6 +7822,68 @@ func TestServiceRemoteClaudeWorkerUploadsPromptForPrintStdin(t *testing.T) {
 	}
 }
 
+func TestServiceRemotePluginWorkerUploadsRunnerSpecStdin(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 4},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind:      "review-plugin",
+		Prompt:          "review remotely",
+		ReasoningEffort: "high",
+	}}, map[string]worker.Runner{
+		"review-plugin": worker.NewPluginRunner("review-plugin", []string{"aged-review-plugin"}),
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Remote plugin", Prompt: "Run plugin on VM."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 1 || len(snapshot.ExecutionNodes) != 1 {
+		t.Fatalf("workers = %+v nodes = %+v", snapshot.Workers, snapshot.ExecutionNodes)
+	}
+	remoteWorker := snapshot.Workers[0]
+	node := snapshot.ExecutionNodes[0]
+	expected, err := worker.PluginRunnerStdin(worker.Spec{
+		ID:              remoteWorker.ID,
+		TaskID:          task.ID,
+		Kind:            "review-plugin",
+		Prompt:          remoteWorker.Prompt,
+		WorkDir:         node.RemoteWorkDir,
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.input != expected {
+		t.Fatalf("uploaded plugin stdin = %q, want %q", executor.input, expected)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(executor.input), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["prompt"] != remoteWorker.Prompt || !strings.Contains(remoteWorker.Prompt, "review remotely") {
+		t.Fatalf("plugin stdin prompt = %v, worker prompt = %q", payload["prompt"], remoteWorker.Prompt)
+	}
+	if payload["workDir"] != node.RemoteWorkDir {
+		t.Fatalf("plugin stdin workDir = %v, want %q", payload["workDir"], node.RemoteWorkDir)
+	}
+	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
+	if !strings.Contains(joinedCommands, "aged-review-plugin") || !strings.Contains(joinedCommands, "run") {
+		t.Fatalf("remote command did not start plugin runner: %+v", executor.commands)
+	}
+}
+
 func TestServiceRemoteWorkerUsesProjectCheckoutOverride(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7764,6 +8206,163 @@ func TestServiceRetryInheritsPreviousWorkerTargetWithoutRetryTargetID(t *testing
 	}
 	if target.ID != "vm-previous" {
 		t.Fatalf("target = %q, want vm-previous", target.ID)
+	}
+}
+
+func TestServiceRetryFallsBackWhenExplicitRetryTargetIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-good", Kind: TargetKindSSH, Host: "vm-good", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-bad",
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-good" {
+		t.Fatalf("target = %q, want vm-good", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-bad" {
+		t.Fatalf("fallback from = %v, want vm-bad", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "vm-good" {
+		t.Fatalf("fallback to = %v, want vm-good", plan.Metadata["retryTargetFallbackToID"])
+	}
+	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); reason == "" {
+		t.Fatalf("missing retryTargetFallbackReason")
+	}
+}
+
+func TestServiceRetryFallsBackWhenPreviousWorkerTargetIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	previousWorkerID := "previous-worker-fallback"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-retry-target-fallback",
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "mock",
+			"nodeId":     "node-previous",
+			"targetId":   "vm-bad",
+			"targetKind": "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-good", Kind: TargetKindSSH, Host: "vm-good", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryFromWorkerID": previousWorkerID,
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-good" {
+		t.Fatalf("target = %q, want vm-good", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-bad" {
+		t.Fatalf("fallback from = %v, want vm-bad", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "vm-good" {
+		t.Fatalf("fallback to = %v, want vm-good", plan.Metadata["retryTargetFallbackToID"])
+	}
+}
+
+func TestServiceRetryReturnsErrorWhenNoFallbackTargetEligible(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-only", Kind: TargetKindSSH, Host: "vm-only", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-only", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-only",
+		},
+	}
+	_, err := service.selectExecutionTarget(ctx, plan)
+	if err == nil {
+		t.Fatal("expected error when no fallback target is eligible")
+	}
+	if !strings.Contains(err.Error(), "vm-only") {
+		t.Fatalf("error should mention the original target; err = %v", err)
+	}
+	if _, fellBack := plan.Metadata["retryTargetFallbackToID"]; fellBack {
+		t.Fatalf("plan should not record fallback metadata when no eligible target exists: %+v", plan.Metadata)
+	}
+}
+
+func TestServiceRetryFallbackRespectsTargetLabels(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Labels: map[string]string{"role": "gpu"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-other", Kind: TargetKindSSH, Host: "vm-other", WorkDir: "/repo", Labels: map[string]string{"role": "cpu"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-other", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-bad",
+			"targetLabels":  map[string]string{"role": "gpu"},
+		},
+	}
+	_, err := service.selectExecutionTarget(ctx, plan)
+	if err == nil {
+		t.Fatal("expected error: no healthy target matches the required labels")
 	}
 }
 

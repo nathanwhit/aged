@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -311,6 +312,45 @@ func TestPromptStdinCommandRunnerWritesPromptWithoutDashArgument(t *testing.T) {
 	}
 }
 
+func TestPluginRunnerStdinSerializesRunnerSpec(t *testing.T) {
+	payload, err := PluginRunnerStdin(Spec{
+		ID:              "worker-1",
+		TaskID:          "task-1",
+		Kind:            "review-plugin",
+		Prompt:          "do the work",
+		WorkDir:         "/repo",
+		Command:         []string{"custom", "args"},
+		ResumeSessionID: "session-1",
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(payload, "\n") {
+		t.Fatalf("payload should use encoder newline: %q", payload)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"id":              "worker-1",
+		"taskId":          "task-1",
+		"kind":            "review-plugin",
+		"prompt":          "do the work",
+		"workDir":         "/repo",
+		"resumeSessionId": "session-1",
+		"reasoningEffort": "high",
+	} {
+		if got[key] != want {
+			t.Fatalf("%s = %v, want %q in %s", key, got[key], want, payload)
+		}
+	}
+	if command, ok := got["command"].([]any); !ok || len(command) != 2 || command[0] != "custom" || command[1] != "args" {
+		t.Fatalf("command = %#v", got["command"])
+	}
+}
+
 func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "max"})
@@ -518,6 +558,72 @@ higher_is_better: true
 	}
 	if !strings.Contains(sink.events[0].Text, "sample_count: 3") || !strings.Contains(sink.events[0].Text, "verdict: improved") {
 		t.Fatalf("report = %s", sink.events[0].Text)
+	}
+}
+
+func TestBenchmarkCompareRunnerParsesScientificNotationScalars(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+command: go test -bench=Parser
+baseline: 1e6
+candidate: 1.25e+06
+threshold_percent: 20
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
+		t.Fatalf("events = %+v", sink.events)
+	}
+	report := sink.events[0].Text
+	for _, want := range []string{
+		"baseline: 1e+06",
+		"candidate: 1.25e+06",
+		"delta_percent: 25",
+		"verdict: improved",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestBenchmarkCompareRunnerParsesScientificNotationSamples(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+baseline_command: go test -bench=Parser
+candidate_command: go test -bench=Parser
+baseline_samples: 9.5E-3, +1.0e-2, .0105e+0
+candidate_samples: 1.14e-2, 1.20E-02, +1.26e-2
+min_samples: 3
+threshold_percent: 15
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := sink.events[0].Text
+	for _, want := range []string{
+		"baseline: 0.01",
+		"candidate: 0.012",
+		"baseline_samples: 0.0095, 0.01, 0.0105",
+		"candidate_samples: 0.0114, 0.012, 0.0126",
+		"sample_count: 3",
+		"delta_percent: 20",
+		"verdict: improved",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestBenchmarkCompareNumberParserSupportsFloatNotation(t *testing.T) {
+	got := numbers("-1e6, +1.25e+06, 9.5E-3, .75e1, 10.")
+	want := []float64{-1e6, 1.25e6, 9.5e-3, 7.5, 10}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("numbers() = %#v, want %#v", got, want)
 	}
 }
 
