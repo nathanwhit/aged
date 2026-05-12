@@ -1367,7 +1367,14 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	if req.Message == "" {
 		return errors.New("message is required")
 	}
-	_, err := s.append(ctx, core.Event{
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := findTask(snapshot, taskID); !ok {
+		return eventstore.ErrNotFound
+	}
+	_, err = s.append(ctx, core.Event{
 		Type:   core.EventTaskSteered,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
