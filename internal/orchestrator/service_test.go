@@ -7767,6 +7767,83 @@ func TestServiceRetryInheritsPreviousWorkerTargetWithoutRetryTargetID(t *testing
 	}
 }
 
+func TestServiceRetryTargetIDRejectsTargetWithoutRequestedWorkerTool(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-pinned", Kind: TargetKindSSH, Host: "vm-pinned", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-pinned", core.TargetHealth{
+		Status:    "ok",
+		Reachable: true,
+		Tmux:      true,
+		Tools:     map[string]bool{"codex": false},
+	}, core.TargetResources{})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	_, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-pinned",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `execution target "vm-pinned" does not support worker kind "codex"`) {
+		t.Fatalf("selectExecutionTarget error = %v, want unsupported worker kind", err)
+	}
+}
+
+func TestServiceRetryTargetReuseRejectsTargetWithoutRequestedWorkerTool(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	previousWorkerID := "previous-worker"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-retry-target-tool",
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "codex",
+			"nodeId":     "node-previous",
+			"targetId":   "vm-previous",
+			"targetKind": "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-previous", Kind: TargetKindSSH, Host: "vm-previous", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-previous", core.TargetHealth{
+		Status:    "ok",
+		Reachable: true,
+		Tmux:      true,
+		Tools:     map[string]bool{"codex": false},
+	}, core.TargetResources{})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	_, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryFromWorkerID": previousWorkerID,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `execution target "vm-previous" does not support worker kind "codex"`) {
+		t.Fatalf("selectExecutionTarget error = %v, want unsupported worker kind", err)
+	}
+}
+
 func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

@@ -2826,17 +2826,17 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
-		return s.targets.SelectID(retryTargetID)
+		return s.targets.SelectID(retryTargetID, plan.WorkerKind)
 	}
 	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
-		if target, ok, err := s.executionTargetForWorker(ctx, retryFromWorkerID); err != nil || ok {
+		if target, ok, err := s.executionTargetForWorker(ctx, retryFromWorkerID, plan.WorkerKind); err != nil || ok {
 			return target, err
 		}
 	}
 	return s.targets.Select(plan)
 }
 
-func (s *Service) executionTargetForWorker(ctx context.Context, workerID string) (TargetConfig, bool, error) {
+func (s *Service) executionTargetForWorker(ctx context.Context, workerID string, workerKind string) (TargetConfig, bool, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
 		return TargetConfig{}, false, nil
@@ -2850,7 +2850,7 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string)
 		if node.WorkerID != workerID || strings.TrimSpace(node.TargetID) == "" {
 			continue
 		}
-		target, err := s.targets.SelectID(node.TargetID)
+		target, err := s.targets.SelectID(node.TargetID, workerKind)
 		if err != nil {
 			return TargetConfig{}, true, err
 		}
@@ -2867,7 +2867,7 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string)
 	if strings.TrimSpace(targetID) == "" {
 		return TargetConfig{}, false, nil
 	}
-	target, err := s.targets.SelectID(targetID)
+	target, err := s.targets.SelectID(targetID, workerKind)
 	return target, true, err
 }
 

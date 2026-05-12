@@ -80,6 +80,23 @@ func TestTargetRegistrySkipsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
 	}
 }
 
+func TestTargetRegistrySelectIDRejectsSSHWorkerWhenToolProbeIsMissing(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "vm", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	registry.UpdateHealth("vm", core.TargetHealth{
+		Status:    "ok",
+		Reachable: true,
+		Tmux:      true,
+		Tools:     map[string]bool{"codex": false},
+	}, core.TargetResources{})
+
+	_, err := registry.SelectID("vm", "codex")
+	if err == nil || !strings.Contains(err.Error(), `execution target "vm" does not support worker kind "codex"`) {
+		t.Fatalf("SelectID error = %v, want unsupported worker kind", err)
+	}
+}
+
 func TestTargetRegistrySkipsSSHWithoutRemoteCheckoutRoot(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
 		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},

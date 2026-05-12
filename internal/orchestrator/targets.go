@@ -263,7 +263,7 @@ func (r *TargetRegistry) supportsWorkerLocked(target TargetConfig, workerKind st
 	return !known || available
 }
 
-func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {
+func (r *TargetRegistry) SelectID(id string, workerKind string) (TargetConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	target, ok := r.targets[id]
@@ -272,6 +272,9 @@ func (r *TargetRegistry) SelectID(id string) (TargetConfig, error) {
 	}
 	if !r.isAvailableLocked(target) {
 		return TargetConfig{}, fmt.Errorf("execution target %q is not available", id)
+	}
+	if !r.supportsWorkerLocked(target, workerKind) {
+		return TargetConfig{}, fmt.Errorf("execution target %q does not support worker kind %q", id, workerKind)
 	}
 	return target, nil
 }
