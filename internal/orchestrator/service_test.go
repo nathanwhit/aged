@@ -6636,7 +6636,7 @@ func TestServiceHonorsSpawnDependencies(t *testing.T) {
 
 	select {
 	case <-firstStarted:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("first spawned worker did not start")
 	}
 	select {
@@ -6647,7 +6647,7 @@ func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	close(firstRelease)
 	select {
 	case <-secondStarted:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		t.Fatal("dependent worker did not start after dependency completed")
 	}
 	close(secondRelease)

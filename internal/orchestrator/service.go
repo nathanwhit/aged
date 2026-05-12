@@ -795,7 +795,12 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 			WorkerID: node.WorkerID,
 			Status:   "running",
 		}
-		go s.recoverRemoteWorker(context.Background(), node, run)
+		targetID := target.ID
+		s.targets.Begin(targetID)
+		go func() {
+			defer s.targets.Finish(targetID)
+			s.recoverRemoteWorker(context.Background(), node, run)
+		}()
 	}
 	return nil
 }
@@ -3132,15 +3137,10 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	})
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState}
-	stdin := ""
-	if provider, ok := runner.(worker.RunnerStdinProvider); ok {
-		stdin, err = provider.RunnerStdin(spec)
-		if err != nil {
-			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
-			return WorkerTurnResult{}, err
-		}
-	} else if capabilities.PromptStdin || worker.CommandUsesPromptStdin(command) {
-		stdin = spec.Prompt
+	stdin, err := sshWorkerStdin(runner, spec, command, capabilities)
+	if err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
@@ -3167,6 +3167,16 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	})
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
+}
+
+func sshWorkerStdin(runner worker.Runner, spec worker.Spec, command []string, capabilities worker.Capabilities) (string, error) {
+	if provider, ok := runner.(worker.RemoteStdinProvider); ok {
+		return provider.RemoteStdin(spec)
+	}
+	if capabilities.PromptStdin || worker.CommandUsesPromptStdin(command) {
+		return spec.Prompt, nil
+	}
+	return "", nil
 }
 
 func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun, callbacks []RemoteWorkerCallback) error {

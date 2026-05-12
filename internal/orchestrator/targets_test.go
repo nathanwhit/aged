@@ -557,6 +557,73 @@ func TestServiceFallsBackToLocalWhenRemoteCheckoutIsDirty(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkersReservesTargetUntilCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-recover-remote"
+	workerID := "worker-recover-remote"
+	targets := NewTargetRegistry([]TargetConfig{
+		{
+			ID:       "vm-1",
+			Kind:     TargetKindSSH,
+			Host:     "vm",
+			WorkDir:  "/repo",
+			WorkRoot: "/runs",
+			Labels:   map[string]string{"role": "remote"},
+			Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100},
+		},
+		{
+			ID:       "local",
+			Kind:     TargetKindLocal,
+			Labels:   map[string]string{"location": "local"},
+			Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+		},
+	})
+	executor := &gatedRemoteStatusExecutor{
+		release:       make(chan struct{}),
+		statusStarted: make(chan struct{}, 1),
+	}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+		Metadata: map[string]any{
+			"targetLabels": map[string]any{"role": "remote"},
+		},
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	appendRecoverableRemoteWorker(t, ctx, store, taskID, workerID)
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-executor.statusStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovered remote worker did not start polling")
+	}
+	if running := targetRunning(targets, "vm-1"); running != 1 {
+		t.Fatalf("running count while recovered worker active = %d, want 1", running)
+	}
+	if err := service.DeleteTarget(ctx, "vm-1"); err == nil || !strings.Contains(err.Error(), "running workers") {
+		t.Fatalf("DeleteTarget while recovered worker active error = %v, want running workers", err)
+	}
+	if _, err := targets.Select(Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+		Metadata:   map[string]any{"targetLabels": map[string]any{"role": "remote"}},
+	}); err == nil {
+		t.Fatal("Select chose a saturated recovered-worker target, want no available remote target")
+	}
+
+	close(executor.release)
+	waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	waitForTargetRunning(t, targets, "vm-1", 0)
+	if err := service.DeleteTarget(ctx, "vm-1"); err != nil {
+		t.Fatalf("DeleteTarget after recovered worker completed = %v", err)
+	}
+}
+
 func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingCheckoutRoot(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
