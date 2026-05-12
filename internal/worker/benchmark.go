@@ -127,7 +127,7 @@ func parseBenchmarkInput(prompt string) benchmarkInput {
 	return input
 }
 
-var numberPattern = regexp.MustCompile(`[-+]?\d+(?:\.\d+)?`)
+var numberPattern = regexp.MustCompile(`[-+]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][-+]?\d+)?`)
 
 func firstNumber(value string) float64 {
 	match := numberPattern.FindString(value)
