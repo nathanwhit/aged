@@ -205,6 +205,88 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	return pr, nil
 }
 
+func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr core.PullRequest, req core.PublishPullRequestRequest) (core.PullRequest, error) {
+	if s.prPublisher == nil {
+		return core.PullRequest{}, errors.New("pull request publisher is not configured")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return core.PullRequest{}, eventstore.ErrNotFound
+	}
+	if pr.ID == "" {
+		return core.PullRequest{}, errors.New("update pull request requires tracked pull request")
+	}
+	project := s.projectForTask(task)
+	sourceRoot := project.LocalPath
+	workerID, err := resolvePullRequestWorkerID(snapshot, task, req.WorkerID)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if workerID != "" {
+		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
+		if err != nil {
+			return core.PullRequest{}, err
+		}
+	}
+	metadata := map[string]any{}
+	if len(pr.Metadata) > 0 {
+		_ = json.Unmarshal(pr.Metadata, &metadata)
+	}
+	metadata["workerId"] = workerID
+	metadata["taskTitle"] = task.Title
+	metadata["workDir"] = sourceRoot
+	metadata["projectId"] = project.ID
+	metadata["updatedExistingPullRequest"] = true
+	metadata["pullRequestId"] = pr.ID
+	repo := nonEmpty(req.Repo, pr.Repo, pullRequestTargetRepo(req, project, task))
+	base := nonEmpty(req.Base, pr.Base, project.DefaultBase)
+	branch := nonEmpty(req.Branch, pr.Branch)
+	updated, err := s.prPublisher.Update(ctx, pr, PullRequestPublishSpec{
+		TaskID:        taskID,
+		WorkerID:      workerID,
+		WorkDir:       sourceRoot,
+		Repo:          repo,
+		Base:          base,
+		Branch:        branch,
+		HeadRepoOwner: pullRequestHeadRepoOwner(project),
+		PushRemote:    project.PushRemote,
+		BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
+		Title:         strings.TrimSpace(req.Title),
+		Body:          strings.TrimSpace(req.Body),
+		Draft:         req.Draft,
+		Metadata:      metadata,
+	})
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if updated.ID == "" {
+		updated.ID = pr.ID
+	}
+	updated.TaskID = taskID
+	updated = normalizePullRequestStatusFields(updated)
+	if err := s.recordTaskMilestone(ctx, taskID, "pr_updated", "pr_updated", "Pull request branch updated.", map[string]any{
+		"pullRequestId": updated.ID,
+		"url":           updated.URL,
+		"repo":          updated.Repo,
+		"number":        updated.Number,
+		"branch":        updated.Branch,
+		"workerId":      workerID,
+	}); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.recordPullRequestUpdated(ctx, updated); err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := s.recordPullRequestArtifact(ctx, updated); err != nil {
+		return core.PullRequest{}, err
+	}
+	return updated, nil
+}
+
 func (s *Service) workerCreatedPullRequest(ctx context.Context, snapshot core.Snapshot, task core.Task, workerID string, targetRepo string, metadata map[string]any) (core.PullRequest, bool, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -881,6 +963,31 @@ func (s *Service) recordPullRequestPublished(ctx context.Context, pr core.PullRe
 	return err
 }
 
+func (s *Service) recordPullRequestUpdated(ctx context.Context, pr core.PullRequest) error {
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventPRUpdated,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":               pr.ID,
+			"repo":             pr.Repo,
+			"number":           pr.Number,
+			"url":              pr.URL,
+			"branch":           pr.Branch,
+			"base":             pr.Base,
+			"title":            pr.Title,
+			"state":            pr.State,
+			"draft":            pr.Draft,
+			"checksStatus":     pr.ChecksStatus,
+			"checksConclusion": pr.ChecksConclusion,
+			"mergeStatus":      pr.MergeStatus,
+			"mergeable":        pr.Mergeable,
+			"reviewStatus":     pr.ReviewStatus,
+			"metadata":         pr.Metadata,
+		}),
+	})
+	return err
+}
+
 func (s *Service) findPullRequest(ctx context.Context, prID string) (core.PullRequest, bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -1078,7 +1185,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 
 func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	if len(plan.Spawns) == 0 {
-		return plan
+		return ensurePullRequestFollowUpUpdateAction(plan)
 	}
 	if !planReturnsToPullRequestWatch(plan) {
 		return plan
@@ -1089,7 +1196,7 @@ func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	plan.Metadata["suppressedSpawns"] = plan.Spawns
 	plan.Metadata["spawnsSuppressedReason"] = "pull_request_followup_returns_to_github_monitor"
 	plan.Spawns = nil
-	return plan
+	return ensurePullRequestFollowUpUpdateAction(plan)
 }
 
 func planReturnsToPullRequestWatch(plan Plan) bool {
@@ -1101,11 +1208,125 @@ func planReturnsToPullRequestWatch(plan Plan) bool {
 	return false
 }
 
+func ensurePullRequestFollowUpUpdateAction(plan Plan) Plan {
+	if !planReturnsToPullRequestWatch(plan) || planHasPullRequestMutation(plan) {
+		return plan
+	}
+	action := PlanAction{
+		Kind:   "update_pull_request",
+		When:   "after_success",
+		Reason: "Apply successful follow-up worker changes to the existing pull request before returning it to GitHub monitoring.",
+		Inputs: pullRequestUpdateInputsFromPlan(plan),
+	}
+	actions := make([]PlanAction, 0, len(plan.Actions)+1)
+	inserted := false
+	for _, existing := range plan.Actions {
+		if !inserted && strings.TrimSpace(existing.Kind) == "watch_pull_requests" && strings.TrimSpace(existing.When) != "immediate" {
+			actions = append(actions, action)
+			inserted = true
+		}
+		actions = append(actions, existing)
+	}
+	if !inserted {
+		actions = append(actions, action)
+	}
+	plan.Actions = actions
+	return plan
+}
+
+func planHasPullRequestMutation(plan Plan) bool {
+	for _, action := range plan.Actions {
+		switch strings.TrimSpace(action.Kind) {
+		case "publish_pull_request", "update_pull_request":
+			if strings.TrimSpace(action.When) != "immediate" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pullRequestUpdateInputsFromPlan(plan Plan) map[string]any {
+	inputs := map[string]any{}
+	if id := stringMetadata(plan.Metadata, "pullRequestID"); id != "" {
+		inputs["id"] = id
+	}
+	if repo := stringMetadata(plan.Metadata, "pullRequestRepo"); repo != "" {
+		inputs["repo"] = repo
+	}
+	if number := intMetadata(plan.Metadata, "pullRequestNumber"); number > 0 {
+		inputs["number"] = number
+	}
+	if branch := stringMetadata(plan.Metadata, "pullRequestBranch"); branch != "" {
+		inputs["branch"] = branch
+	}
+	if base := stringMetadata(plan.Metadata, "pullRequestBase"); base != "" {
+		inputs["base"] = base
+	}
+	if url := stringMetadata(plan.Metadata, "pullRequestURL"); url != "" {
+		inputs["url"] = url
+	}
+	return inputs
+}
+
 func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return core.PullRequest{}, false
 	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+			continue
+		}
+		return pr, true
+	}
+	return core.PullRequest{}, false
+}
+
+func (s *Service) pullRequestForUpdateAction(ctx context.Context, taskID string, action PlanAction) (core.PullRequest, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	inputs := action.Inputs
+	id := stringMetadata(inputs, "id")
+	repo := strings.ToLower(strings.TrimSpace(stringMetadata(inputs, "repo")))
+	number := intMetadata(inputs, "number")
+	url := strings.TrimSpace(stringMetadata(inputs, "url"))
+	branch := strings.TrimSpace(stringMetadata(inputs, "branch"))
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+			continue
+		}
+		if id != "" && pr.ID == id {
+			return pr, nil
+		}
+		if url != "" && strings.EqualFold(pr.URL, url) {
+			return pr, nil
+		}
+		if repo != "" && number > 0 && strings.EqualFold(pr.Repo, repo) && pr.Number == number {
+			return pr, nil
+		}
+		if branch != "" && pr.Branch == branch && (repo == "" || strings.EqualFold(pr.Repo, repo)) {
+			return pr, nil
+		}
+	}
+	if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
+		return pr, nil
+	}
+	if pr, ok := firstOpenPullRequest(snapshot, taskID); ok {
+		return pr, nil
+	}
+	return core.PullRequest{}, eventstore.ErrNotFound
+}
+
+func firstOpenPullRequest(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
 	for _, pr := range snapshot.PullRequests {
 		if pr.TaskID != taskID {
 			continue
@@ -1128,6 +1349,10 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 		Branch: stringMetadata(inputs, "branch"),
 		Draft:  boolMetadata(inputs, "draft"),
 	}
+}
+
+func updatePullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
+	return publishPullRequestRequestFromAction(action)
 }
 
 func watchPullRequestsRequestFromAction(action PlanAction) core.WatchPullRequestsRequest {
