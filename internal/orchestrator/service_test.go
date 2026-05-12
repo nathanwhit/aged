@@ -2021,6 +2021,77 @@ func TestServicePullRequestFollowUpUpdatesExistingPullRequestBeforeWatching(t *t
 	}
 }
 
+func TestServiceCompleteTaskWithOpenPullRequestDoesNotRepublishCompletionCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-open-pr-completion"
+	workerID := "worker-repair"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":    "Repair existing PR",
+			"prompt":   "Fix review feedback on the open pull request.",
+			"metadata": map[string]any{"completionMode": "github"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"title":  "Repair existing PR",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	err := service.completeTask(ctx, taskID, []WorkerTurnResult{{
+		WorkerID: workerID,
+		Status:   core.WorkerSucceeded,
+		Kind:     "codex",
+		Summary:  "repaired the pull request",
+		Changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{{
+				Path:   "internal/orchestrator/pull_request.go",
+				Status: "modified",
+			}},
+		},
+	}}, workerID, "ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want existing PR to remain external objective", publisher.publishCalls)
+	}
+	if publisher.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want updates to be driven by explicit plan actions", publisher.updateCalls)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskCandidate, taskID, `"workerId":"`+workerID+`"`) {
+		t.Fatalf("missing final candidate event")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskStatus, taskID, `"status":"failed"`) {
+		t.Fatalf("task failed while open PR existed")
+	}
+}
+
 func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

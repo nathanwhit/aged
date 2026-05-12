@@ -3180,11 +3180,6 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 	if err != nil {
 		return s.waitForFinalCandidateResolution(ctx, taskID, err)
 	}
-	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
-		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
-			return recoverErr
-		}
-	}
 	if candidateWorkerID != "" {
 		if strings.TrimSpace(reason) == "" {
 			reason = candidateReason
@@ -3206,7 +3201,16 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 			return err
 		}
 	}
+	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
+			return err
+		}
+		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+	}
 	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
+		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
+			return recoverErr
+		}
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
 			WorkerID: candidateWorkerID,
 			Body:     s.latestCompletionPullRequestBody(ctx, taskID),
@@ -3220,16 +3224,19 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		}
 		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
 	}
-	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok {
-		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
-			return err
-		}
-		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
-	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "satisfied", "Local task result is complete."); err != nil {
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+func (s *Service) retryingCompletionPullRequestPublication(ctx context.Context, taskID string) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	task, ok := findTask(snapshot, taskID)
+	return ok && taskCompletionModeFromTask(task) == "github" && task.ObjectivePhase == "retrying"
 }
 
 func (s *Service) latestCompletionPullRequestBody(ctx context.Context, taskID string) string {
