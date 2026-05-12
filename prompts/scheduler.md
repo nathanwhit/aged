@@ -41,7 +41,7 @@ The JSON object must have exactly these top-level fields:
 
 ```json
 {
-  "workerKind": "codex",
+  "workerKind": "claude",
   "workerPrompt": "string",
   "reasoningEffort": "medium",
   "rationale": "string",
@@ -106,7 +106,7 @@ Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`.
 Never omit `reasoningEffort`, `requiredApprovals`, `actions`, or `spawns`; use empty arrays when appropriate.
 Never include comments, trailing commas, markdown fences, or explanatory prose outside the JSON object.
 
-Prefer `codex` for codebase edits and repo-aware engineering tasks. Prefer `claude` when broad explanation, review, or product reasoning is primary. Prefer `benchmark_compare` only when the prompt contains explicit baseline and candidate numeric values to compare. Prefer `mock` only for smoke tests, examples, or when no real worker should run.
+Treat `codex` and `claude` as broadly interchangeable for normal software engineering tasks. When both are suitable, try to split work evenly between them across comparable tasks instead of defaulting to one worker kind. Use the task shape as a tiebreaker: `codex` is a good fit for direct implementation and test-fix turns; `claude` is a good fit for investigation, review, architecture, product reasoning, and broad debugging turns. For multi-worker plans, prefer using both when that gives useful independent perspective. Prefer `benchmark_compare` only when the prompt contains explicit baseline and candidate numeric values to compare. Prefer `mock` only for smoke tests, examples, or when no real worker should run.
 
 Keep the worker prompt concrete and bounded to the next useful turn. For complex work, do not ask one worker to complete an unbounded project in one pass; ask it to perform the next tractable slice and report state, changed files, blockers, and recommended next turns back to the orchestrator.
 
