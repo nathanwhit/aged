@@ -121,6 +121,19 @@ func (r *PluginRegistry) Register(plugin core.Plugin) (core.Plugin, error) {
 				return core.Plugin{}, errors.New("built-in plugin cannot be replaced")
 			}
 			normalized.Driver = existing.Driver
+			if existing.Enabled && !normalized.Enabled && existing.Kind == "driver" && existing.Driver.Managed {
+				if cancel := r.driverCancel[existing.ID]; cancel != nil {
+					cancel()
+					delete(r.driverCancel, existing.ID)
+				}
+				normalized.Driver.Managed = false
+				normalized.Driver.PID = 0
+				normalized.Driver.StartedAt = time.Time{}
+				normalized.Driver.RestartCount = 0
+				normalized.Driver.RestartPolicy = ""
+				normalized.Status = "disabled"
+				normalized.Error = ""
+			}
 			r.plugins[index] = normalized
 			replaced = true
 			break
@@ -318,7 +331,15 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 		plugin.Driver.PID = 0
 		plugin.Driver.LastExitAt = time.Now().UTC()
 		if ctx.Err() != nil {
-			plugin.Status = "stopped"
+			if plugin.Enabled {
+				plugin.Status = "stopped"
+			} else {
+				plugin.Status = "disabled"
+				plugin.Driver.Managed = false
+				plugin.Driver.StartedAt = time.Time{}
+				plugin.Driver.RestartCount = 0
+				plugin.Driver.RestartPolicy = ""
+			}
 			plugin.Error = ""
 			r.updatePlugin(index, plugin)
 			r.clearDriverCancel(plugin.ID)
