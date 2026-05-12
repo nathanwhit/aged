@@ -322,7 +322,7 @@ func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "continue", ResumeSessionID: "thread-1"})
-	want := []string{"codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "-"}
+	want := []string{"codex", "exec", "--cd", "/tmp/aged-work", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}
