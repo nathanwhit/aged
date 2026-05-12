@@ -128,11 +128,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	var publishWorkspace PreparedWorkspace
 	if workerID != "" {
-		publishWorkspace, err = s.workspaceForWorker(ctx, workerID)
-		if err != nil {
-			return core.PullRequest{}, err
-		}
-		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
+		sourceRoot, publishWorkspace, err = s.pullRequestPublishSourceRoot(ctx, snapshot, workerID, project)
 		if err != nil {
 			return core.PullRequest{}, err
 		}
@@ -151,6 +147,7 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 		"pullRequestPolicy": project.PullRequestPolicy,
 	}
 	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
+	publishPatch, patchFromBase := pullRequestPublishPatch(publishWorkspace, changes)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
 	title := defaultPullRequestTitle(req.Title, task, summary, changes)
 	body := strings.TrimSpace(req.Body)
@@ -172,7 +169,9 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 			Title:         title,
 			Body:          body,
 			Draft:         draft,
-			ResetWorkDir:  shouldResetPullRequestWorkDirAfterPublish(publishWorkspace),
+			Patch:         publishPatch,
+			PatchFromBase: patchFromBase,
+			ResetWorkDir:  !patchFromBase && shouldResetPullRequestWorkDirAfterPublish(publishWorkspace),
 			Metadata:      metadata,
 		})
 		if err != nil {
@@ -232,12 +231,15 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	if err != nil {
 		return core.PullRequest{}, err
 	}
+	var publishWorkspace PreparedWorkspace
 	if workerID != "" {
-		sourceRoot, err = s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
+		sourceRoot, publishWorkspace, err = s.pullRequestPublishSourceRoot(ctx, snapshot, workerID, project)
 		if err != nil {
 			return core.PullRequest{}, err
 		}
 	}
+	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
+	publishPatch, patchFromBase := pullRequestPublishPatch(publishWorkspace, changes)
 	metadata := map[string]any{}
 	if len(pr.Metadata) > 0 {
 		_ = json.Unmarshal(pr.Metadata, &metadata)
@@ -264,6 +266,9 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		Title:         strings.TrimSpace(req.Title),
 		Body:          strings.TrimSpace(req.Body),
 		Draft:         req.Draft,
+		Patch:         publishPatch,
+		PatchFromBase: patchFromBase,
+		ResetWorkDir:  !patchFromBase && shouldResetPullRequestWorkDirAfterPublish(publishWorkspace),
 		Metadata:      metadata,
 	})
 	if err != nil {
@@ -291,6 +296,28 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		return core.PullRequest{}, err
 	}
 	return updated, nil
+}
+
+func (s *Service) pullRequestPublishSourceRoot(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, PreparedWorkspace, error) {
+	workspace, err := s.workspaceForWorker(ctx, workerID)
+	if err != nil {
+		return "", PreparedWorkspace{}, err
+	}
+	if workspace.VCSType == "ssh" {
+		return project.LocalPath, workspace, nil
+	}
+	sourceRoot, err := s.pullRequestSourceRootForWorker(ctx, snapshot, workerID, project)
+	if err != nil {
+		return "", PreparedWorkspace{}, err
+	}
+	return sourceRoot, workspace, nil
+}
+
+func pullRequestPublishPatch(workspace PreparedWorkspace, changes WorkspaceChanges) (string, bool) {
+	if workspace.VCSType != "ssh" {
+		return "", false
+	}
+	return changes.Diff, true
 }
 
 func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {

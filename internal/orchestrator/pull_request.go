@@ -30,6 +30,8 @@ type PullRequestPublishSpec struct {
 	Title         string
 	Body          string
 	Draft         bool
+	Patch         string
+	PatchFromBase bool
 	ResetWorkDir  bool
 	Metadata      map[string]any
 }
@@ -289,6 +291,12 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 	dir := spec.WorkDir
 	remote := spec.PushRemote
 	remote = strings.TrimSpace(remote)
+	if spec.PatchFromBase {
+		if _, err := exec(ctx, dir, "git", "rev-parse", "--show-toplevel"); err == nil {
+			return p.pushGitPatchBranch(ctx, exec, dir, branch, base, remote, spec)
+		}
+		return errors.New("publish patch requires a git repository")
+	}
 	if _, err := exec(ctx, dir, "jj", "root"); err == nil {
 		if _, err := exec(ctx, dir, "jj", "bookmark", "create", branch, "--revision", "@"); err != nil {
 			if _, setErr := exec(ctx, dir, "jj", "bookmark", "set", branch, "--revision", "@"); setErr != nil {
@@ -328,6 +336,50 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		return nil
 	}
 	return errors.New("publish requires a jj or git repository")
+}
+
+func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec commandExecutor, dir string, branch string, base string, remote string, spec PullRequestPublishSpec) error {
+	baseRef := gitPublishBaseRef(ctx, exec, dir, base)
+	if baseRef == "" {
+		return fmt.Errorf("prepare git patch worktree: base %q is not available", nonEmpty(base, "main"))
+	}
+	worktree, err := os.MkdirTemp("", "aged-pr-worktree-*")
+	if err != nil {
+		return fmt.Errorf("create git patch worktree tempdir: %w", err)
+	}
+	if err := os.Remove(worktree); err != nil {
+		_ = os.RemoveAll(worktree)
+		return fmt.Errorf("prepare git patch worktree tempdir: %w", err)
+	}
+	cleanup := func() {
+		_, _ = exec(ctx, dir, "git", "worktree", "remove", "--force", worktree)
+		_ = os.RemoveAll(worktree)
+	}
+	defer cleanup()
+	if _, err := exec(ctx, dir, "git", "worktree", "add", "--detach", worktree, baseRef); err != nil {
+		return fmt.Errorf("create git patch worktree: %w", err)
+	}
+	if strings.TrimSpace(spec.Patch) != "" {
+		if err := applyGitPatchToWorkspace(ctx, worktree, spec.Patch); err != nil {
+			return fmt.Errorf("apply worker patch to git patch worktree: %w", err)
+		}
+	}
+	if err := materializeGitPullRequestChanges(ctx, exec, worktree, branch, spec); err != nil {
+		return err
+	}
+	if err := ensureGitPullRequestHasChanges(ctx, exec, worktree, base); err != nil {
+		return err
+	}
+	if _, err := exec(ctx, worktree, "git", "branch", "-f", branch, "HEAD"); err != nil {
+		return fmt.Errorf("create git branch: %w", err)
+	}
+	if remote == "" {
+		remote = "origin"
+	}
+	if _, err := exec(ctx, worktree, "git", "push", "-u", remote, branch); err != nil {
+		return fmt.Errorf("push git branch: %w", err)
+	}
+	return nil
 }
 
 func resetGitPullRequestWorkDir(ctx context.Context, exec commandExecutor, dir string, base string) error {
