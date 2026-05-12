@@ -243,13 +243,13 @@ func TestDefaultCodexRunnerDoesNotAdvertiseStdinSteering(t *testing.T) {
 
 func TestDefaultRunnerCapabilities(t *testing.T) {
 	runners := DefaultRunners()
-	if got := RunnerCapabilities(runners["codex"]); !got.ResumeSession || got.LiveSteering {
+	if got := RunnerCapabilities(runners["codex"]); !got.ResumeSession || !got.PromptStdin || got.LiveSteering {
 		t.Fatalf("codex capabilities = %+v, want resume without live steering", got)
 	}
-	if got := RunnerCapabilities(runners["claude"]); !got.ResumeSession || got.LiveSteering {
+	if got := RunnerCapabilities(runners["claude"]); !got.ResumeSession || !got.PromptStdin || got.LiveSteering {
 		t.Fatalf("claude capabilities = %+v, want resume without live steering", got)
 	}
-	if got := RunnerCapabilities(runners["shell"]); got.ResumeSession || got.LiveSteering {
+	if got := RunnerCapabilities(runners["shell"]); got.ResumeSession || got.PromptStdin || got.LiveSteering {
 		t.Fatalf("shell capabilities = %+v, want no lifecycle extras", got)
 	}
 }

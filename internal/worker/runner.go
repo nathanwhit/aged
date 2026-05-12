@@ -67,6 +67,7 @@ type Runner interface {
 
 type Capabilities struct {
 	LiveSteering  bool
+	PromptStdin   bool
 	ResumeSession bool
 }
 
@@ -129,6 +130,7 @@ func NewCommandRunnerWithCapabilities(kind string, capabilities Capabilities, co
 }
 
 func NewPromptStdinCommandRunnerWithCapabilities(kind string, capabilities Capabilities, command func(Spec) []string) CommandRunner {
+	capabilities.PromptStdin = true
 	return CommandRunner{kind: kind, command: command, capabilities: capabilities, promptOnStdin: true}
 }
 
