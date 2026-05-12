@@ -1007,10 +1007,10 @@ func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) err
 		}
 		return nil
 	}
-	if err := apply("apply", "--whitespace=nowarn"); err == nil {
+	if err := apply("apply", "--allow-empty", "--whitespace=nowarn"); err == nil {
 		return nil
 	}
-	return apply("apply", "--3way", "--whitespace=nowarn")
+	return apply("apply", "--3way", "--allow-empty", "--whitespace=nowarn")
 }
 
 func normalizePatchText(patch string) string {

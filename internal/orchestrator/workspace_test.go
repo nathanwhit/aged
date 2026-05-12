@@ -577,6 +577,15 @@ func TestApplyGitPatchTreatsEmptyPatchAsNoOp(t *testing.T) {
 	}
 }
 
+func TestApplyGitPatchTreatsPatchLikeNoOpAsNoOp(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	patch := "diff --git a/file.txt b/file.txt\n"
+	if err := applyGitPatchToWorkspace(ctx, repo, patch); err != nil {
+		t.Fatalf("patch-like no-op should be a no-op, got %v", err)
+	}
+}
+
 func TestApplyGitPatchRejectsNonPatchInput(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
