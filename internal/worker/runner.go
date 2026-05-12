@@ -480,7 +480,11 @@ func DefaultRunners() map[string]Runner {
 		BenchmarkCompareRunner{},
 		NewPromptStdinCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
-				args := []string{"codex", "exec", "resume", codexYoloFlag, "--json"}
+				args := []string{"codex", "exec"}
+				if strings.TrimSpace(spec.WorkDir) != "" {
+					args = append(args, "--cd", spec.WorkDir)
+				}
+				args = append(args, "resume", codexYoloFlag, "--json")
 				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
 					args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
 				}
