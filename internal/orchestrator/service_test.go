@@ -1202,6 +1202,70 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 }
 
+func TestServicePlanActionPublishWithoutCandidateWaitsForUser(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "inspect",
+		Prompt:     "inspect the workspace",
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish a fix if the worker changed code",
+			Inputs: map[string]any{
+				"repo":  "denoland/deno",
+				"base":  "main",
+				"title": "fix(dx): preserve skill dotfiles",
+				"body":  "Fixes denoland/deno#33922.",
+			},
+		}},
+	}}, map[string]worker.Runner{
+		"inspect": eventRunner{kind: "inspect", events: []worker.Event{{Kind: worker.EventResult, Text: "The execution workspace is nathanwhit/aged, not denoland/deno. No Deno sources are present."}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Fix Deno Issue 33922",
+		Prompt: "reproduce and fix denoland/deno#33922",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+			"projectId":      "default",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.ObjectiveStatus != core.ObjectiveWaitingUser || task.ObjectivePhase != "approval_needed" {
+		t.Fatalf("objective = %q/%q, want waiting user approval", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want none without candidate", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "waiting") {
+		t.Fatalf("missing waiting publish_pull_request action")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventApprovalNeeded, task.ID, "missing_publish_candidate") {
+		t.Fatalf("missing actionable approval-needed event")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventApprovalNeeded, task.ID, "not denoland/deno") {
+		t.Fatalf("approval-needed event did not include worker blocker summary")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskStatus, task.ID, `"status":"failed"`) {
+		t.Fatalf("task failed instead of waiting for user action")
+	}
+}
+
 func TestServicePlanActionAdoptsWorkerCreatedPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
