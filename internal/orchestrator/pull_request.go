@@ -30,6 +30,7 @@ type PullRequestPublishSpec struct {
 	Title         string
 	Body          string
 	Draft         bool
+	ResetWorkDir  bool
 	Metadata      map[string]any
 }
 
@@ -319,9 +320,25 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		if _, err := exec(ctx, dir, "git", "push", "-u", remote, branch); err != nil {
 			return fmt.Errorf("push git branch: %w", err)
 		}
+		if spec.ResetWorkDir {
+			if err := resetGitPullRequestWorkDir(ctx, exec, dir, base); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	return errors.New("publish requires a jj or git repository")
+}
+
+func resetGitPullRequestWorkDir(ctx context.Context, exec commandExecutor, dir string, base string) error {
+	baseRef := gitPublishBaseRef(ctx, exec, dir, base)
+	if baseRef == "" {
+		return nil
+	}
+	if _, err := exec(ctx, dir, "git", "reset", "--hard", baseRef); err != nil {
+		return fmt.Errorf("reset git publish workdir to base: %w", err)
+	}
+	return nil
 }
 
 func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor, dir string, branch string, spec PullRequestPublishSpec) error {
