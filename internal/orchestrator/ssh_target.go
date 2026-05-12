@@ -739,10 +739,27 @@ echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(sp
 func remoteApplyPatchScript(workDir string, patchPath string) string {
 	return fmt.Sprintf(`set -eu
 cd %[1]s
-if git apply --check --whitespace=nowarn %[2]s; then
-  git apply --whitespace=nowarn %[2]s
+patch_path=%[2]s
+if git apply --check --whitespace=nowarn "$patch_path"; then
+  git apply --whitespace=nowarn "$patch_path"
 else
-  git apply --3way --whitespace=nowarn %[2]s
+  probe_root=$(mktemp -d "${TMPDIR:-/tmp}/aged-apply-probe.XXXXXX")
+  probe_dir="$probe_root/worktree"
+  cleanup_probe() {
+    git worktree remove --force "$probe_dir" >/dev/null 2>&1 || true
+    rm -rf "$probe_root"
+  }
+  trap cleanup_probe EXIT
+  git worktree add --detach "$probe_dir" HEAD >/dev/null
+  if ! git -C "$probe_dir" apply --3way --whitespace=nowarn "$patch_path"; then
+    exit 1
+  fi
+  cleanup_probe
+  trap - EXIT
+  if ! git apply --3way --whitespace=nowarn "$patch_path"; then
+    git reset --hard HEAD >/dev/null 2>&1 || true
+    exit 1
+  fi
 fi`, shellQuote(workDir), shellQuote(patchPath))
 }
 
