@@ -485,7 +485,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status = http.StatusForbidden
 	} else if strings.Contains(err.Error(), "oauth") || strings.Contains(err.Error(), "id token") || strings.Contains(err.Error(), "email is not verified") {
 		status = http.StatusUnauthorized
-	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "unknown projectId") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") || strings.Contains(err.Error(), "failed task") || strings.Contains(err.Error(), "failed tasks") {
+	} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "unknown field") || strings.Contains(err.Error(), "unknown projectId") || strings.Contains(err.Error(), "id mismatch") || strings.Contains(err.Error(), "terminal") || strings.Contains(err.Error(), "multiple unapplied") || strings.Contains(err.Error(), "failed task") || strings.Contains(err.Error(), "failed tasks") {
 		status = http.StatusBadRequest
 	}
 	writeJSON(w, status, map[string]string{"error": err.Error()})
