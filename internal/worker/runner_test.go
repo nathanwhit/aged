@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -311,6 +312,45 @@ func TestPromptStdinCommandRunnerWritesPromptWithoutDashArgument(t *testing.T) {
 	}
 }
 
+func TestPluginRunnerStdinSerializesRunnerSpec(t *testing.T) {
+	payload, err := PluginRunnerStdin(Spec{
+		ID:              "worker-1",
+		TaskID:          "task-1",
+		Kind:            "review-plugin",
+		Prompt:          "do the work",
+		WorkDir:         "/repo",
+		Command:         []string{"custom", "args"},
+		ResumeSessionID: "session-1",
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(payload, "\n") {
+		t.Fatalf("payload should use encoder newline: %q", payload)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"id":              "worker-1",
+		"taskId":          "task-1",
+		"kind":            "review-plugin",
+		"prompt":          "do the work",
+		"workDir":         "/repo",
+		"resumeSessionId": "session-1",
+		"reasoningEffort": "high",
+	} {
+		if got[key] != want {
+			t.Fatalf("%s = %v, want %q in %s", key, got[key], want, payload)
+		}
+	}
+	if command, ok := got["command"].([]any); !ok || len(command) != 2 || command[0] != "custom" || command[1] != "args" {
+		t.Fatalf("command = %#v", got["command"])
+	}
+}
+
 func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "do the work", ReasoningEffort: "max"})
@@ -322,7 +362,7 @@ func TestDefaultCodexRunnerMapsMaxReasoningEffort(t *testing.T) {
 func TestDefaultCodexRunnerResumesSession(t *testing.T) {
 	runner := DefaultRunners()["codex"]
 	got := runner.BuildCommand(Spec{WorkDir: "/tmp/aged-work", Prompt: "continue", ResumeSessionID: "thread-1"})
-	want := []string{"codex", "exec", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "-"}
+	want := []string{"codex", "exec", "--cd", "/tmp/aged-work", "resume", "--dangerously-bypass-approvals-and-sandbox", "--json", "thread-1", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("command = %#v, want %#v", got, want)
 	}

@@ -120,6 +120,80 @@ func TestPluginRegistrySupervisesDriverLifecycle(t *testing.T) {
 	t.Fatalf("driver did not report lifecycle state: %+v", registry.Snapshot())
 }
 
+func TestServiceDeletePluginRemovesRunningManagedDriverFromSnapshots(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '{"id":"driver:delete-test","name":"Delete Test Driver","kind":"driver","protocol":"aged-plugin-v1"}\n'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  echo driver-ready
+  sleep 30
+fi
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t)
+	defer store.Close()
+	service := NewService(store, StaticBrain{}, map[string]worker.Runner{}, t.TempDir())
+	t.Cleanup(func() {
+		_ = service.DeletePlugin(context.Background(), "driver:delete-test")
+	})
+
+	if _, err := service.RegisterPlugin(ctx, core.Plugin{
+		ID:       "driver:delete-test",
+		Name:     "Delete Test Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, err := service.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plugin, ok := pluginByID(snapshot.Plugins, "driver:delete-test")
+		if ok && plugin.Driver.Managed && plugin.Driver.PID != 0 && plugin.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("driver did not start: %+v", snapshot.Plugins)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := service.DeletePlugin(ctx, "driver:delete-test"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pluginByID(snapshot.Plugins, "driver:delete-test"); ok {
+		t.Fatalf("deleted plugin still present immediately after delete: %+v", snapshot.Plugins)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	snapshot, err = service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pluginByID(snapshot.Plugins, "driver:delete-test"); ok {
+		t.Fatalf("deleted plugin was restored after supervisor exit: %+v", snapshot.Plugins)
+	}
+	if runner, ok := pluginByID(snapshot.Plugins, "runner:benchmark_compare"); ok && runner.Status != "ready" {
+		t.Fatalf("unrelated plugin was mutated after delete: %+v", runner)
+	}
+}
+
 func TestPluginRegistryCapturesLargeDriverLogLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "driver.sh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then printf '%02000000d\\n' 0; exit 0; fi\n"), 0o755); err != nil {

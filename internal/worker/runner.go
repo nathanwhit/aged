@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,6 +64,10 @@ type Runner interface {
 	Kind() string
 	BuildCommand(spec Spec) []string
 	Run(ctx context.Context, spec Spec, sink Sink) error
+}
+
+type RemoteStdinProvider interface {
+	RemoteStdin(spec Spec) (string, error)
 }
 
 type Capabilities struct {
@@ -260,6 +265,39 @@ func (r PluginRunner) BuildCommand(Spec) []string {
 	return append(append([]string{}, r.command...), "run")
 }
 
+type pluginRunnerPayload struct {
+	ID              string   `json:"id"`
+	TaskID          string   `json:"taskId"`
+	Kind            string   `json:"kind"`
+	Prompt          string   `json:"prompt"`
+	WorkDir         string   `json:"workDir,omitempty"`
+	Command         []string `json:"command,omitempty"`
+	ResumeSessionID string   `json:"resumeSessionId,omitempty"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+}
+
+func PluginRunnerStdin(spec Spec) (string, error) {
+	payload := pluginRunnerPayload{
+		ID:              spec.ID,
+		TaskID:          spec.TaskID,
+		Kind:            spec.Kind,
+		Prompt:          spec.Prompt,
+		WorkDir:         spec.WorkDir,
+		Command:         spec.Command,
+		ResumeSessionID: spec.ResumeSessionID,
+		ReasoningEffort: spec.ReasoningEffort,
+	}
+	var out bytes.Buffer
+	if err := json.NewEncoder(&out).Encode(payload); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+func (r PluginRunner) RemoteStdin(spec Spec) (string, error) {
+	return PluginRunnerStdin(spec)
+}
+
 func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	argv := r.BuildCommand(spec)
 	if len(argv) == 0 {
@@ -282,26 +320,12 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return err
 	}
 	defer killOnCancel(ctx, cmd)()
-	payload := struct {
-		ID              string   `json:"id"`
-		TaskID          string   `json:"taskId"`
-		Kind            string   `json:"kind"`
-		Prompt          string   `json:"prompt"`
-		WorkDir         string   `json:"workDir,omitempty"`
-		Command         []string `json:"command,omitempty"`
-		ResumeSessionID string   `json:"resumeSessionId,omitempty"`
-		ReasoningEffort string   `json:"reasoningEffort,omitempty"`
-	}{
-		ID:              spec.ID,
-		TaskID:          spec.TaskID,
-		Kind:            spec.Kind,
-		Prompt:          spec.Prompt,
-		WorkDir:         spec.WorkDir,
-		Command:         spec.Command,
-		ResumeSessionID: spec.ResumeSessionID,
-		ReasoningEffort: spec.ReasoningEffort,
+	payload, err := r.RemoteStdin(spec)
+	if err != nil {
+		_ = stdin.Close()
+		return err
 	}
-	if err := json.NewEncoder(stdin).Encode(payload); err != nil {
+	if _, err := io.WriteString(stdin, payload); err != nil {
 		_ = stdin.Close()
 		return err
 	}
@@ -480,7 +504,11 @@ func DefaultRunners() map[string]Runner {
 		BenchmarkCompareRunner{},
 		NewPromptStdinCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
-				args := []string{"codex", "exec", "resume", codexYoloFlag, "--json"}
+				args := []string{"codex", "exec"}
+				if strings.TrimSpace(spec.WorkDir) != "" {
+					args = append(args, "--cd", spec.WorkDir)
+				}
+				args = append(args, "resume", codexYoloFlag, "--json")
 				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
 					args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
 				}

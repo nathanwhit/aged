@@ -92,9 +92,9 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 		args = []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-c", "model_reasoning_effort=\"" + effort + "\"", "-"}
 	}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
-		args = []string{"exec", "resume", "--json", req.ProviderSessionID, "-"}
+		args = []string{"exec", "resume", "--sandbox", "read-only", "--json", "--cd", workDir, req.ProviderSessionID, "-"}
 		if effort := worker.CodexReasoningEffort(a.reasoningEffort); effort != "" {
-			args = []string{"exec", "resume", "--json", "-c", "model_reasoning_effort=\"" + effort + "\"", req.ProviderSessionID, "-"}
+			args = []string{"exec", "resume", "--sandbox", "read-only", "--json", "--cd", workDir, "-c", "model_reasoning_effort=\"" + effort + "\"", req.ProviderSessionID, "-"}
 		}
 	}
 	cmd := exec.CommandContext(ctx, a.codexPath, args...)
