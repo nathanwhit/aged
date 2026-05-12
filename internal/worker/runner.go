@@ -15,6 +15,7 @@ import (
 )
 
 const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+const claudeSkipPermissionsFlag = "--dangerously-skip-permissions"
 const outputLineReadBufferBytes = 64 * 1024
 const maxStructuredOutputLineBytes = 16 * 1024 * 1024
 
@@ -491,6 +492,7 @@ func DefaultRunners() map[string]Runner {
 		}),
 		NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			args := []string{"claude", "--print", "--output-format", "stream-json", "--verbose"}
+			args = appendArgIfMissing(args, claudeSkipPermissionsFlag)
 			if strings.TrimSpace(spec.ResumeSessionID) != "" {
 				args = append(args, "--resume", strings.TrimSpace(spec.ResumeSessionID))
 			}
@@ -509,6 +511,15 @@ func DefaultRunners() map[string]Runner {
 		out[runner.Kind()] = runner
 	}
 	return out
+}
+
+func appendArgIfMissing(args []string, arg string) []string {
+	for _, existing := range args {
+		if existing == arg {
+			return args
+		}
+	}
+	return append(args, arg)
 }
 
 func ReasoningEffort(value string) string {
