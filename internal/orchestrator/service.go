@@ -3703,7 +3703,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			workerID = latestCandidateWorkerID(results)
 		}
 		if workerID == "" {
-			return false, errors.New("publish_pull_request action requires a candidate worker")
+			return false, s.waitForMissingPublishCandidate(ctx, task, action, results)
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
@@ -3892,6 +3892,50 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 	default:
 		return true, nil
 	}
+}
+
+func (s *Service) waitForMissingPublishCandidate(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) error {
+	reason := "publish_pull_request action has no successful worker with candidate changes"
+	metadata := map[string]any{
+		"actionKind": action.Kind,
+		"actionWhen": nonEmpty(action.When, "after_success"),
+		"inputs":     action.Inputs,
+	}
+	question := "The plan tried to publish a pull request, but no successful worker produced publishable changes. Steer the task with the correct project or workspace, select another worker result, or retry after fixing the setup."
+	workerID := ""
+	if result, ok := latestSuccessfulWorkerResult(results); ok {
+		workerID = result.WorkerID
+		metadata["workerId"] = result.WorkerID
+		metadata["workerKind"] = result.Kind
+		if summary := strings.TrimSpace(result.Summary); summary != "" {
+			truncated := truncateStringForPrompt(summary, 2000)
+			metadata["workerSummary"] = truncated
+			question = "The worker completed without publishable changes, so the planned pull request cannot be opened.\n\nLatest worker summary:\n" + truncated + "\n\nSteer the task with the correct project or workspace, select another worker result, or retry after fixing the setup."
+		}
+		if result.Error != "" {
+			metadata["workerError"] = result.Error
+		}
+	}
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":   action.Kind,
+		"when":   nonEmpty(action.When, "after_success"),
+		"reason": action.Reason,
+		"inputs": action.Inputs,
+		"status": "waiting",
+		"error":  reason,
+	}); err != nil {
+		return err
+	}
+	return s.waitForUserAction(ctx, task.ID, workerID, "missing_publish_candidate", question, metadata)
+}
+
+func latestSuccessfulWorkerResult(results []WorkerTurnResult) (WorkerTurnResult, bool) {
+	for i := len(results) - 1; i >= 0; i-- {
+		if results[i].Status == core.WorkerSucceeded {
+			return results[i], true
+		}
+	}
+	return WorkerTurnResult{}, false
 }
 
 func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
