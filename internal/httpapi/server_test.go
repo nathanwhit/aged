@@ -1277,6 +1277,37 @@ func TestRetryTaskEndpointRetriesFailedTask(t *testing.T) {
 	}
 }
 
+func TestRecommendApplyPolicyEndpointReturnsNotFoundForMissingTask(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "missing"}, map[string]worker.Runner{}, t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Post(server.URL+"/api/tasks/missing-task/apply-policy", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusNotFound)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventApplyPolicy && event.TaskID == "missing-task" {
+			t.Fatalf("recorded apply-policy event for missing task")
+		}
+	}
+}
+
 func TestProjectsEndpointReturnsConfiguredProjects(t *testing.T) {
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
