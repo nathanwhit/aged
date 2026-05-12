@@ -243,11 +243,11 @@ export async function watchTaskPullRequests(taskId: string, input: WatchPullRequ
 }
 
 export async function refreshPullRequest(id: string): Promise<PullRequestState> {
-  return requestJSON(`/api/pull-requests/${id}/refresh`, { method: "POST" });
+  return requestJSON(`/api/pull-requests/${encodeURIComponent(id)}/refresh`, { method: "POST" });
 }
 
 export async function babysitPullRequest(id: string) {
-  return requestJSON(`/api/pull-requests/${id}/babysit`, { method: "POST" });
+  return requestJSON(`/api/pull-requests/${encodeURIComponent(id)}/babysit`, { method: "POST" });
 }
 
 async function errorMessage(response: Response): Promise<string> {
