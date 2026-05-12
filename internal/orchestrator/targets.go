@@ -107,8 +107,12 @@ func normalizeTargetConfig(config TargetConfig) (TargetConfig, error) {
 	if config.ID == "" {
 		return TargetConfig{}, errors.New("target id is required")
 	}
+	config.Kind = TargetKind(strings.TrimSpace(string(config.Kind)))
 	if config.Kind == "" {
 		config.Kind = TargetKindLocal
+	}
+	if config.Kind != TargetKindLocal && config.Kind != TargetKindSSH {
+		return TargetConfig{}, fmt.Errorf("target kind %q is not supported; must be %q or %q", config.Kind, TargetKindLocal, TargetKindSSH)
 	}
 	config.Host = strings.TrimSpace(config.Host)
 	config.User = strings.TrimSpace(config.User)
