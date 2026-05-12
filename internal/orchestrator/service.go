@@ -1550,6 +1550,9 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled && !(task.Status == core.TaskSucceeded && taskExecutionMode(task) == executionModeLoop) {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
 	}
+	if _, err := s.projectForTask(task); err != nil {
+		return core.Task{}, err
+	}
 	if taskExecutionMode(task) == executionModeLoop {
 		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 			return core.Task{}, err
@@ -2537,7 +2540,10 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		return WorkerTurnResult{}, fmt.Errorf("unknown worker kind %q", plan.WorkerKind)
 	}
 	normalizePlanReasoning(&plan)
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return WorkerTurnResult{}, err
+	}
 	plan.Metadata["projectId"] = project.ID
 	if requested := targetLabels(plan.Metadata); len(requested) > 0 {
 		plan.Metadata["ignoredTargetLabels"] = requested
@@ -2890,7 +2896,10 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		planID = uuid.NewString()
 		plan.Metadata["planID"] = planID
 	}
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return WorkerTurnResult{}, err
+	}
 	remoteWorkDir, err := resolveRemoteCheckout(project, target)
 	if err != nil {
 		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w", err)
@@ -4944,31 +4953,44 @@ func taskStatus(snapshot core.Snapshot, taskID string) core.TaskStatus {
 	return task.Status
 }
 
-func (s *Service) projectForTask(task core.Task) core.Project {
+func (s *Service) projectForTask(task core.Task) (core.Project, error) {
 	if s.projects == nil {
-		return core.Project{ID: "default", Name: "default", LocalPath: s.workDir, VCS: "auto", DefaultBase: "main"}
-	}
-	if task.ProjectID != "" {
-		if project, ok := s.projects.Get(task.ProjectID); ok {
-			return project
+		if projectID := explicitProjectIDForTask(task); projectID != "" {
+			return core.Project{}, fmt.Errorf("unknown projectId %q", projectID)
 		}
+		return core.Project{ID: "default", Name: "default", LocalPath: s.workDir, VCS: "auto", DefaultBase: "main"}, nil
+	}
+	if projectID := explicitProjectIDForTask(task); projectID != "" {
+		if project, ok := s.projects.Get(projectID); ok {
+			return project, nil
+		}
+		return core.Project{}, fmt.Errorf("unknown projectId %q", projectID)
 	}
 	if len(task.Metadata) > 0 {
 		var metadata map[string]any
 		if err := json.Unmarshal(task.Metadata, &metadata); err == nil {
-			if projectID := stringMetadataValue(metadata["projectId"]); projectID != "" {
-				if project, ok := s.projects.Get(projectID); ok {
-					return project
-				}
-			}
 			if repo := stringMetadataValue(metadata["repo"]); repo != "" {
 				if project, ok := s.projects.findByMetadataRepo(metadata, repo); ok {
-					return project
+					return project, nil
 				}
 			}
 		}
 	}
-	return s.projects.Default()
+	return s.projects.Default(), nil
+}
+
+func explicitProjectIDForTask(task core.Task) string {
+	if projectID := strings.TrimSpace(task.ProjectID); projectID != "" {
+		return projectID
+	}
+	if len(task.Metadata) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(stringMetadataValue(metadata["projectId"]))
 }
 
 func projectCloneURL(project core.Project) string {
@@ -5908,7 +5930,7 @@ func (s *Service) projectForTaskID(ctx context.Context, taskID string) (core.Pro
 	if !ok {
 		return core.Project{}, eventstore.ErrNotFound
 	}
-	return s.projectForTask(task), nil
+	return s.projectForTask(task)
 }
 
 func applyRemotePatch(ctx context.Context, project core.Project, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
