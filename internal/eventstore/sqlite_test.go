@@ -235,6 +235,20 @@ func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 	if len(snapshot.ExecutionNodes) != 1 || !snapshot.ExecutionNodes[0].UpdatedAt.Equal(outputAt) {
 		t.Fatalf("node updatedAt = %+v, want %s", snapshot.ExecutionNodes, outputAt)
 	}
+
+	summary, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Events) != 0 {
+		t.Fatalf("summary events = %d, want 0", len(summary.Events))
+	}
+	if len(summary.Workers) != 1 || !summary.Workers[0].UpdatedAt.Equal(snapshot.Workers[0].UpdatedAt) {
+		t.Fatalf("summary worker updatedAt = %+v, want %s", summary.Workers, snapshot.Workers[0].UpdatedAt)
+	}
+	if len(summary.ExecutionNodes) != 1 || !summary.ExecutionNodes[0].UpdatedAt.Equal(snapshot.ExecutionNodes[0].UpdatedAt) {
+		t.Fatalf("summary node updatedAt = %+v, want %s", summary.ExecutionNodes, snapshot.ExecutionNodes[0].UpdatedAt)
+	}
 }
 
 func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) {
