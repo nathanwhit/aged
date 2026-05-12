@@ -5869,7 +5869,7 @@ func TestServiceAppliesRemoteWorkerPatchArtifact(t *testing.T) {
 	}
 }
 
-func TestServicePublishesRemoteWorkerPullRequestAfterApplyingPatch(t *testing.T) {
+func TestServicePublishesRemoteWorkerPullRequestFromWorkerPatch(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -5938,19 +5938,9 @@ func TestServicePublishesRemoteWorkerPullRequestAfterApplyingPatch(t *testing.T)
 	publisher := &fakePullRequestPublisher{}
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, sourceRoot, fakeWorkspaceManager{})
 	service.SetPullRequestPublisher(publisher)
-	applied := 0
 	service.SetRemotePatchApplier(func(_ context.Context, project core.Project, workspace PreparedWorkspace, changes WorkspaceChanges) (WorkerApplyResult, error) {
-		applied++
-		if project.LocalPath != sourceRoot {
-			t.Fatalf("project local path = %q, want %q", project.LocalPath, sourceRoot)
-		}
-		if workspace.VCSType != "ssh" || workspace.CWD != "/repo" || changes.Diff == "" {
-			t.Fatalf("workspace=%+v changes=%+v", workspace, changes)
-		}
-		result := baseWorkerApplyResult(workspace, "remote_patch_apply")
-		result.SourceRoot = project.LocalPath
-		result.AppliedFiles = changes.ChangedFiles
-		return result, nil
+		t.Fatalf("remote patch applier should not run while publishing an SSH worker PR: project=%+v workspace=%+v changes=%+v", project, workspace, changes)
+		return WorkerApplyResult{}, nil
 	})
 
 	if _, err := service.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
@@ -5960,18 +5950,21 @@ func TestServicePublishesRemoteWorkerPullRequestAfterApplyingPatch(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 1 {
-		t.Fatalf("applied calls = %d, want 1", applied)
-	}
 	if publisher.published.WorkDir != sourceRoot {
 		t.Fatalf("published workDir = %q, want local source root %q", publisher.published.WorkDir, sourceRoot)
+	}
+	if !publisher.published.PatchFromBase {
+		t.Fatal("published spec did not request patch-from-base publication")
+	}
+	if publisher.published.Patch != "diff --git a/main.go b/main.go\n" {
+		t.Fatalf("published patch = %q", publisher.published.Patch)
 	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasEvent(snapshot.Events, core.EventWorkerApplied, taskID, workerID) {
-		t.Fatal("missing worker.changes_applied event")
+	if hasEvent(snapshot.Events, core.EventWorkerApplied, taskID, workerID) {
+		t.Fatal("unexpected worker.changes_applied event")
 	}
 	if !hasEvent(snapshot.Events, core.EventPRPublished, taskID, "") {
 		t.Fatal("missing pr.published event")

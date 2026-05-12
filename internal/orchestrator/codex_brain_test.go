@@ -294,6 +294,31 @@ func TestDecodeReplanDecisionIgnoresTrailingJunk(t *testing.T) {
 	}
 }
 
+func TestCodexBrainReviewPromptsRejectTestsOnlyFixCandidates(t *testing.T) {
+	brain := &CodexBrain{template: "schedule the work"}
+	task := core.Task{
+		ID:     "task-1",
+		Title:  "Fix stale PR publication",
+		Prompt: "Fix the issue where worker PRs include unrelated dirty checkout changes.",
+	}
+	candidate := WorkerTurnResult{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/pull_request_test.go", Status: "modified"}},
+		},
+	}
+
+	completionPrompt := brain.completionReviewPrompt(task, candidate, "done")
+	if !strings.Contains(completionPrompt, "only adds or changes tests") {
+		t.Fatalf("completion prompt missing tests-only rejection:\n%s", completionPrompt)
+	}
+	publicationPrompt := brain.publicationReviewPrompt(task, candidate, PlanAction{Kind: "publish_pull_request"})
+	if !strings.Contains(publicationPrompt, "pull request would only add or change tests") {
+		t.Fatalf("publication prompt missing tests-only rejection:\n%s", publicationPrompt)
+	}
+}
+
 func TestDecodeCodexPlanExtractsObjectFromProse(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`Here is the plan:
 	{

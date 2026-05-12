@@ -222,6 +222,73 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 
+func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	patch := newFilePatch("tests/unit_node/fs_test.ts", "worker change\n")
+
+	runTestGit(t, repo, "checkout", "-b", "manual-investigation")
+	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("manual committed work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "unrelated.txt")
+	runTestGit(t, repo, "commit", "-m", "manual investigation")
+	if err := os.WriteFile(filepath.Join(repo, "manual-dirty.txt"), []byte("manual dirty work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			call := append([]string{name}, args...)
+			calls = append(calls, call)
+			switch {
+			case name == "git" && len(args) > 0 && args[0] == "push":
+				return "", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/owner/repo/pull/11", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":11,"url":"https://github.com/owner/repo/pull/11","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+
+	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkDir:       repo,
+		Repo:          "owner/repo",
+		Base:          "main",
+		Branch:        "feature",
+		Title:         "CI",
+		Body:          "Body",
+		Patch:         patch,
+		PatchFromBase: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents := runTestGit(t, repo, "show", "feature:tests/unit_node/fs_test.ts"); contents != "worker change\n" {
+		t.Fatalf("published branch missing worker change: %q", contents)
+	}
+	if _, err := runCommand(ctx, repo, "git", "cat-file", "-e", "feature:unrelated.txt"); err == nil {
+		t.Fatal("published branch included unrelated committed source checkout work")
+	}
+	if _, err := runCommand(ctx, repo, "git", "cat-file", "-e", "feature:manual-dirty.txt"); err == nil {
+		t.Fatal("published branch included dirty source checkout work")
+	}
+	if branch := strings.TrimSpace(runTestGit(t, repo, "branch", "--show-current")); branch != "manual-investigation" {
+		t.Fatalf("source checkout branch = %q, want manual-investigation", branch)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "manual-dirty.txt")); err != nil {
+		t.Fatalf("dirty source checkout file was not preserved: %v", err)
+	}
+	assertCommandContains(t, calls, []string{"git", "worktree", "add", "--detach"})
+	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+}
+
 func TestInspectPullRequestPopulatesStatusAliasesFromGitHubPayload(t *testing.T) {
 	var jsonFields string
 	publisher := LocalPullRequestPublisher{
