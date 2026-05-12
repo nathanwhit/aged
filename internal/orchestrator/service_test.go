@@ -7767,6 +7767,163 @@ func TestServiceRetryInheritsPreviousWorkerTargetWithoutRetryTargetID(t *testing
 	}
 }
 
+func TestServiceRetryFallsBackWhenExplicitRetryTargetIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-good", Kind: TargetKindSSH, Host: "vm-good", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-bad",
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-good" {
+		t.Fatalf("target = %q, want vm-good", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-bad" {
+		t.Fatalf("fallback from = %v, want vm-bad", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "vm-good" {
+		t.Fatalf("fallback to = %v, want vm-good", plan.Metadata["retryTargetFallbackToID"])
+	}
+	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); reason == "" {
+		t.Fatalf("missing retryTargetFallbackReason")
+	}
+}
+
+func TestServiceRetryFallsBackWhenPreviousWorkerTargetIsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	previousWorkerID := "previous-worker-fallback"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-retry-target-fallback",
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "mock",
+			"nodeId":     "node-previous",
+			"targetId":   "vm-bad",
+			"targetKind": "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-good", Kind: TargetKindSSH, Host: "vm-good", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-good", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryFromWorkerID": previousWorkerID,
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-good" {
+		t.Fatalf("target = %q, want vm-good", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-bad" {
+		t.Fatalf("fallback from = %v, want vm-bad", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "vm-good" {
+		t.Fatalf("fallback to = %v, want vm-good", plan.Metadata["retryTargetFallbackToID"])
+	}
+}
+
+func TestServiceRetryReturnsErrorWhenNoFallbackTargetEligible(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-only", Kind: TargetKindSSH, Host: "vm-only", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-only", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-only",
+		},
+	}
+	_, err := service.selectExecutionTarget(ctx, plan)
+	if err == nil {
+		t.Fatal("expected error when no fallback target is eligible")
+	}
+	if !strings.Contains(err.Error(), "vm-only") {
+		t.Fatalf("error should mention the original target; err = %v", err)
+	}
+	if _, fellBack := plan.Metadata["retryTargetFallbackToID"]; fellBack {
+		t.Fatalf("plan should not record fallback metadata when no eligible target exists: %+v", plan.Metadata)
+	}
+}
+
+func TestServiceRetryFallbackRespectsTargetLabels(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-bad", Kind: TargetKindSSH, Host: "vm-bad", WorkDir: "/repo", Labels: map[string]string{"role": "gpu"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-other", Kind: TargetKindSSH, Host: "vm-other", WorkDir: "/repo", Labels: map[string]string{"role": "cpu"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-bad", core.TargetHealth{Status: "unhealthy"}, core.TargetResources{})
+	targets.UpdateHealth("vm-other", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{CPUCount: 4, Load1: 0.1, MemoryAvailableMB: 8192})
+
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-bad",
+			"targetLabels":  map[string]string{"role": "gpu"},
+		},
+	}
+	_, err := service.selectExecutionTarget(ctx, plan)
+	if err == nil {
+		t.Fatal("expected error: no healthy target matches the required labels")
+	}
+}
+
 func TestServiceRegisterTargetProbesImmediately(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

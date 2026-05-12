@@ -2826,49 +2826,96 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
-		return s.targets.SelectID(retryTargetID)
+		target, err := s.targets.SelectID(retryTargetID)
+		if err == nil {
+			return target, nil
+		}
+		fallback, fallbackErr := s.targets.Select(plan)
+		if fallbackErr != nil {
+			return TargetConfig{}, err
+		}
+		recordRetryTargetFallback(plan, retryTargetID, fallback.ID, err)
+		return fallback, nil
 	}
 	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
-		if target, ok, err := s.executionTargetForWorker(ctx, retryFromWorkerID); err != nil || ok {
-			return target, err
+		lookup, lookupErr := s.executionTargetForWorker(ctx, retryFromWorkerID)
+		if lookupErr != nil {
+			return TargetConfig{}, lookupErr
+		}
+		if lookup.targetID != "" && lookup.selectErr == nil {
+			return lookup.target, nil
+		}
+		if lookup.targetID != "" && lookup.selectErr != nil {
+			fallback, fallbackErr := s.targets.Select(plan)
+			if fallbackErr != nil {
+				return TargetConfig{}, lookup.selectErr
+			}
+			recordRetryTargetFallback(plan, lookup.targetID, fallback.ID, lookup.selectErr)
+			return fallback, nil
 		}
 	}
 	return s.targets.Select(plan)
 }
 
-func (s *Service) executionTargetForWorker(ctx context.Context, workerID string) (TargetConfig, bool, error) {
+type previousTargetLookup struct {
+	target    TargetConfig
+	targetID  string
+	selectErr error
+}
+
+func (s *Service) executionTargetForWorker(ctx context.Context, workerID string) (previousTargetLookup, error) {
+	var result previousTargetLookup
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
-		return TargetConfig{}, false, nil
+		return result, nil
 	}
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
-		return TargetConfig{}, false, err
+		return result, err
 	}
 	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
 		node := snapshot.ExecutionNodes[i]
 		if node.WorkerID != workerID || strings.TrimSpace(node.TargetID) == "" {
 			continue
 		}
-		target, err := s.targets.SelectID(node.TargetID)
-		if err != nil {
-			return TargetConfig{}, true, err
-		}
-		return target, true, nil
+		target, selectErr := s.targets.SelectID(node.TargetID)
+		result.target = target
+		result.targetID = node.TargetID
+		result.selectErr = selectErr
+		return result, nil
 	}
 	info := workerExecutionInfo(snapshot, workerID)
 	if info == nil {
-		return TargetConfig{}, false, nil
+		return result, nil
 	}
 	targetID, _ := info["targetId"].(string)
 	if strings.TrimSpace(targetID) == "" {
 		targetID, _ = info["targetID"].(string)
 	}
-	if strings.TrimSpace(targetID) == "" {
-		return TargetConfig{}, false, nil
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		return result, nil
 	}
-	target, err := s.targets.SelectID(targetID)
-	return target, true, err
+	target, selectErr := s.targets.SelectID(targetID)
+	result.target = target
+	result.targetID = targetID
+	result.selectErr = selectErr
+	return result, nil
+}
+
+func recordRetryTargetFallback(plan Plan, fromTargetID, toTargetID string, cause error) {
+	if plan.Metadata == nil {
+		return
+	}
+	if fromTargetID != "" {
+		plan.Metadata["retryTargetFallbackFromID"] = fromTargetID
+	}
+	if toTargetID != "" {
+		plan.Metadata["retryTargetFallbackToID"] = toTargetID
+	}
+	if cause != nil {
+		plan.Metadata["retryTargetFallbackReason"] = cause.Error()
+	}
 }
 
 func isRemotePreStartFallbackError(err error) bool {
