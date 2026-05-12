@@ -1461,7 +1461,13 @@ func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
 
 func (s *SQLiteStore) projectionEvents(ctx context.Context) ([]core.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, at, type, task_id, worker_id, payload
+SELECT
+	id,
+	at,
+	type,
+	task_id,
+	worker_id,
+	CASE type WHEN 'worker.output' THEN '{}' ELSE payload END AS payload
 FROM events
 WHERE type IN (
 	'task.created',
@@ -1477,6 +1483,7 @@ WHERE type IN (
 	'worker.workspace_prepared',
 	'worker.created',
 	'worker.started',
+	'worker.output',
 	'worker.completed',
 	'worker.changes_applied',
 	'pull_request.published',
