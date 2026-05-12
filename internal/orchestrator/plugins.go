@@ -154,13 +154,6 @@ func (r *PluginRegistry) Delete(id string) error {
 			cancel()
 			delete(r.driverCancel, id)
 		}
-		if plugin.Driver.Managed && plugin.Driver.PID != 0 {
-			plugin.Enabled = false
-			plugin.Status = "disabled"
-			plugin.Driver.PID = 0
-			r.plugins[index] = plugin
-			return nil
-		}
 		r.plugins = append(r.plugins[:index], r.plugins[index+1:]...)
 		return nil
 	}
@@ -284,13 +277,13 @@ func (r *PluginRegistry) StartDrivers(ctx context.Context) {
 		r.updatePlugin(index, plugin)
 		driverCtx, cancel := context.WithCancel(ctx)
 		r.setDriverCancel(plugin.ID, cancel)
-		go r.superviseDriver(driverCtx, index)
+		go r.superviseDriver(driverCtx, index, plugin.ID)
 	}
 }
 
-func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
+func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id string) {
 	for {
-		plugin, ok := r.pluginAt(index)
+		plugin, ok := r.pluginAt(index, id)
 		if !ok || !plugin.Enabled {
 			return
 		}
@@ -315,10 +308,10 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int) {
 		plugin.Driver.PID = cmd.Process.Pid
 		plugin.Driver.StartedAt = time.Now().UTC()
 		r.updatePlugin(index, plugin)
-		go r.captureDriverLogs(ctx, index, "stdout", stdout)
-		go r.captureDriverLogs(ctx, index, "stderr", stderr)
+		go r.captureDriverLogs(ctx, index, plugin.ID, "stdout", stdout)
+		go r.captureDriverLogs(ctx, index, plugin.ID, "stderr", stderr)
 		err := cmd.Wait()
-		plugin, ok = r.pluginAt(index)
+		plugin, ok = r.pluginAt(index, id)
 		if !ok {
 			return
 		}
@@ -369,17 +362,22 @@ func (r *PluginRegistry) clearDriverCancel(id string) {
 	delete(r.driverCancel, id)
 }
 
-func (r *PluginRegistry) captureDriverLogs(ctx context.Context, index int, stream string, reader io.Reader) {
+func (r *PluginRegistry) captureDriverLogs(ctx context.Context, index int, id string, stream string, reader io.Reader) {
 	_ = worker.StreamReaderLines(ctx, stream, reader, func(line string) error {
-		r.appendDriverLog(index, stream+": "+line)
+		r.appendDriverLogFor(index, id, stream+": "+line)
 		return nil
 	}, nil)
 }
 
 func (r *PluginRegistry) appendDriverLog(index int, line string) {
+	r.appendDriverLogFor(index, "", line)
+}
+
+func (r *PluginRegistry) appendDriverLogFor(index int, id string, line string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if index < 0 || index >= len(r.plugins) {
+	index, ok := r.indexForLocked(index, id)
+	if !ok {
 		return
 	}
 	tail := append(slices.Clone(r.plugins[index].Driver.LogTail), line)
@@ -389,10 +387,11 @@ func (r *PluginRegistry) appendDriverLog(index int, line string) {
 	r.plugins[index].Driver.LogTail = tail
 }
 
-func (r *PluginRegistry) pluginAt(index int) (core.Plugin, bool) {
+func (r *PluginRegistry) pluginAt(index int, id string) (core.Plugin, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if index < 0 || index >= len(r.plugins) {
+	index, ok := r.indexForLocked(index, id)
+	if !ok {
 		return core.Plugin{}, false
 	}
 	return clonePlugin(r.plugins[index]), true
@@ -401,11 +400,27 @@ func (r *PluginRegistry) pluginAt(index int) (core.Plugin, bool) {
 func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if index < 0 || index >= len(r.plugins) {
+	index, ok := r.indexForLocked(index, plugin.ID)
+	if !ok {
 		return
 	}
 	plugin.Driver.LogTail = slices.Clone(r.plugins[index].Driver.LogTail)
 	r.plugins[index] = clonePlugin(plugin)
+}
+
+func (r *PluginRegistry) indexForLocked(index int, id string) (int, bool) {
+	if id == "" {
+		return index, index >= 0 && index < len(r.plugins)
+	}
+	if index >= 0 && index < len(r.plugins) && r.plugins[index].ID == id {
+		return index, true
+	}
+	for currentIndex, plugin := range r.plugins {
+		if plugin.ID == id {
+			return currentIndex, true
+		}
+	}
+	return 0, false
 }
 
 func clonePlugin(plugin core.Plugin) core.Plugin {

@@ -141,7 +141,8 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := assistant.Ask(context.Background(), core.AssistantRequest{ConversationID: "c1", ProviderSessionID: "thread-1", Message: "again"})
+	projectDir := t.TempDir()
+	response, err := assistant.Ask(context.Background(), core.AssistantRequest{ConversationID: "c1", ProviderSessionID: "thread-1", Message: "again", WorkDir: projectDir})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +155,9 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"msg","type":"agent_message
 	}
 	if !strings.Contains(string(args), "exec resume") || !strings.Contains(string(args), "thread-1") {
 		t.Fatalf("args = %s", args)
+	}
+	if !strings.Contains(string(args), "--sandbox read-only") || !strings.Contains(string(args), "--cd "+projectDir) {
+		t.Fatalf("args missing safety/workdir flags: %s", args)
 	}
 	if !strings.Contains(string(args), `model_reasoning_effort="medium"`) {
 		t.Fatalf("args missing medium reasoning effort: %s", args)
