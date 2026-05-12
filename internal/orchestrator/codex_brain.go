@@ -650,6 +650,7 @@ Readiness rules:
 - Set "ready": false when the task describes an ongoing, multi-turn, keep-working, babysitting, monitoring, or open-ended objective and the candidate is only an intermediate artifact.
 - Set "ready": false when the candidate or completion reason says more implementation, validation, review response, benchmarking, or follow-up work is still needed.
 - Set "ready": false when the candidate does not address the actual task objective, even if it produced useful setup, test, benchmark, documentation, or diagnostic artifacts.
+- Set "ready": false when the user asked to fix, implement, repair, or address a product/code issue but the candidate only adds or changes tests, snapshots, fixtures, benchmarks, or diagnostics. Such a candidate is ready only when the user explicitly asked for tests-only coverage or the issue itself is in the test infrastructure.
 - Set "ready": true for bounded one-shot tasks when the candidate appears to satisfy that bounded request, including tasks where tests, documentation, or diagnostic artifacts are the requested output.
 - Do not require perfection. This is a task-contract review, not a general code review.
 
@@ -691,6 +692,7 @@ Publication readiness rules:
 - A candidate may be publishable even when the broader task should continue, but only if this PR would contain a coherent useful unit of work on its own.
 - Set "ready": false when the candidate summary says the requested work is not done, the work should continue before review, validation is missing for the claimed change, or the candidate is only diagnostic setup for a broader implementation task.
 - Set "ready": false when the changed files do not address the user's actual task objective, even if they are useful for another task.
+- Set "ready": false when the user asked to fix, implement, repair, or address a product/code issue but the pull request would only add or change tests, snapshots, fixtures, benchmarks, or diagnostics. Publish that only when the user explicitly asked for tests-only coverage or the issue itself is in the test infrastructure.
 - Set "ready": false when the action would publish a branch without the worker's requested changes.
 - Do not perform a general code review. Decide only whether opening a PR now matches the task, candidate, and planned publication action.
 
