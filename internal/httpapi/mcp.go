@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"aged/internal/core"
@@ -668,7 +669,7 @@ func (s *Server) mcpResources(r *http.Request) (any, error) {
 	}
 	for _, pr := range snapshot.PullRequests {
 		resources = append(resources, mcpResource{
-			URI:         "aged://pull-requests/" + pr.ID,
+			URI:         "aged://pull-requests/" + url.PathEscape(pr.ID),
 			Name:        "pull-request-" + pr.ID,
 			Title:       pr.Title,
 			Description: fmt.Sprintf("%s#%d %s", pr.Repo, pr.Number, pr.State),
@@ -725,7 +726,10 @@ func findMCPResource(snapshot core.Snapshot, uri string) (any, bool) {
 			}
 		}
 	case strings.HasPrefix(uri, "aged://pull-requests/"):
-		id := strings.TrimPrefix(uri, "aged://pull-requests/")
+		id, err := url.PathUnescape(strings.TrimPrefix(uri, "aged://pull-requests/"))
+		if err != nil {
+			return nil, false
+		}
 		for _, pr := range snapshot.PullRequests {
 			if pr.ID == id {
 				return pr, true
