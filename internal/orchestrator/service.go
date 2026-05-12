@@ -5892,6 +5892,12 @@ func (s *Service) workspaceForWorker(ctx context.Context, workerID string) (Prep
 		if err := json.Unmarshal(event.Payload, &workspace); err != nil {
 			return PreparedWorkspace{}, fmt.Errorf("decode worker workspace: %w", err)
 		}
+		if strings.TrimSpace(workspace.TaskID) == "" {
+			workspace.TaskID = event.TaskID
+		}
+		if strings.TrimSpace(workspace.WorkerID) == "" {
+			workspace.WorkerID = event.WorkerID
+		}
 		return workspace, nil
 	}
 	return PreparedWorkspace{}, eventstore.ErrNotFound

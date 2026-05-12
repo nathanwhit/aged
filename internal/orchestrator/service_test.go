@@ -5741,8 +5741,6 @@ func TestServiceRemoteApplyFailsWhenExplicitTaskProjectWasDeleted(t *testing.T) 
 			SourceRoot: "/checkouts/deleted",
 			Mode:       "remote",
 			VCSType:    "ssh",
-			TaskID:     taskID,
-			WorkerID:   workerID,
 		}),
 	}); err != nil {
 		t.Fatal(err)
