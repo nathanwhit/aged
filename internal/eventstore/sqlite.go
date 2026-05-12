@@ -984,7 +984,7 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				task.UpdatedAt = event.At
 				tasks[event.TaskID] = task
 			}
-		case core.EventPRPublished:
+		case core.EventPRPublished, core.EventPRUpdated:
 			var payload struct {
 				ID               string          `json:"id"`
 				Repo             string          `json:"repo"`
@@ -1003,7 +1003,7 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				Metadata         json.RawMessage `json:"metadata,omitempty"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode pull_request.published: %w", err)
+				return core.Snapshot{}, fmt.Errorf("decode %s: %w", event.Type, err)
 			}
 			id := payload.ID
 			if id == "" {
@@ -1467,6 +1467,7 @@ WHERE type IN (
 	'worker.completed',
 	'worker.changes_applied',
 	'pull_request.published',
+	'pull_request.updated',
 	'pull_request.status_checked',
 	'pull_request.babysitter_started'
 )

@@ -3969,30 +3969,32 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
     return task ? { ...snapshot, tasks: upsertById(snapshot.tasks, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at }) } : snapshot;
   }
-  if (event.type === "pull_request.published" && event.taskId) {
+  if ((event.type === "pull_request.published" || event.type === "pull_request.updated") && event.taskId) {
     const id = String(payload.id ?? "") || `${String(payload.repo ?? "")}#${String(payload.number ?? "")}`;
     if (!id) return snapshot;
+    const existing = snapshot.pullRequests.find((candidate) => candidate.id === id);
     return {
       ...snapshot,
       pullRequests: upsertById(snapshot.pullRequests, {
+        ...existing,
         id,
         taskId: event.taskId,
-        repo: String(payload.repo ?? ""),
-        number: typeof payload.number === "number" ? payload.number : undefined,
-        url: String(payload.url ?? ""),
-        branch: String(payload.branch ?? ""),
-        base: String(payload.base ?? ""),
-        title: String(payload.title ?? ""),
-        state: String(payload.state ?? "") || undefined,
+        repo: String(payload.repo ?? "") || existing?.repo || "",
+        number: typeof payload.number === "number" ? payload.number : existing?.number,
+        url: String(payload.url ?? "") || existing?.url || "",
+        branch: String(payload.branch ?? "") || existing?.branch || "",
+        base: String(payload.base ?? "") || existing?.base || "",
+        title: String(payload.title ?? "") || existing?.title || "",
+        state: String(payload.state ?? "") || existing?.state,
         draft: Boolean(payload.draft),
-        checksStatus: String(payload.checksStatus ?? "") || undefined,
-        checksConclusion: String(payload.checksConclusion ?? "") || undefined,
-        mergeStatus: String(payload.mergeStatus ?? "") || undefined,
-        mergeable: String(payload.mergeable ?? "") || undefined,
-        reviewStatus: String(payload.reviewStatus ?? "") || undefined,
-        createdAt: event.at,
+        checksStatus: String(payload.checksStatus ?? "") || existing?.checksStatus,
+        checksConclusion: String(payload.checksConclusion ?? "") || existing?.checksConclusion,
+        mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
+        mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
+        reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
+        createdAt: existing?.createdAt || event.at,
         updatedAt: event.at,
-        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+        metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
       }),
     };
   }
@@ -4147,28 +4149,30 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
         tasks.set(event.taskId, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at });
       }
     }
-    if (event.type === "pull_request.published" && event.taskId) {
+    if ((event.type === "pull_request.published" || event.type === "pull_request.updated") && event.taskId) {
       const prId = String(payload.id ?? "");
       if (prId) {
+        const existing = pullRequests.get(prId);
         pullRequests.set(prId, {
+          ...existing,
           id: prId,
           taskId: event.taskId,
-          repo: String(payload.repo ?? ""),
-          number: typeof payload.number === "number" ? payload.number : undefined,
-          url: String(payload.url ?? ""),
-          branch: String(payload.branch ?? ""),
-          base: String(payload.base ?? ""),
-          title: String(payload.title ?? ""),
-          state: String(payload.state ?? "") || undefined,
+          repo: String(payload.repo ?? "") || existing?.repo || "",
+          number: typeof payload.number === "number" ? payload.number : existing?.number,
+          url: String(payload.url ?? "") || existing?.url || "",
+          branch: String(payload.branch ?? "") || existing?.branch || "",
+          base: String(payload.base ?? "") || existing?.base || "",
+          title: String(payload.title ?? "") || existing?.title || "",
+          state: String(payload.state ?? "") || existing?.state,
           draft: Boolean(payload.draft),
-          checksStatus: String(payload.checksStatus ?? "") || undefined,
-          checksConclusion: String(payload.checksConclusion ?? "") || undefined,
-          mergeStatus: String(payload.mergeStatus ?? "") || undefined,
-          mergeable: String(payload.mergeable ?? "") || undefined,
-          reviewStatus: String(payload.reviewStatus ?? "") || undefined,
-          createdAt: event.at,
+          checksStatus: String(payload.checksStatus ?? "") || existing?.checksStatus,
+          checksConclusion: String(payload.checksConclusion ?? "") || existing?.checksConclusion,
+          mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
+          mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
+          reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
+          createdAt: existing?.createdAt || event.at,
           updatedAt: event.at,
-          metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+          metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
         });
       }
     }

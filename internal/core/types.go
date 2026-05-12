@@ -68,6 +68,7 @@ const (
 	EventAssistantAsked    EventType = "assistant.asked"
 	EventAssistantAnswered EventType = "assistant.answered"
 	EventPRPublished       EventType = "pull_request.published"
+	EventPRUpdated         EventType = "pull_request.updated"
 	EventPRStatusChecked   EventType = "pull_request.status_checked"
 	EventPRBabysitter      EventType = "pull_request.babysitter_started"
 	EventPRFollowUp        EventType = "pull_request.followup_started"

@@ -1912,6 +1912,105 @@ func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing
 	}
 }
 
+func TestServicePullRequestFollowUpUpdatesExistingPullRequestBeforeWatching(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-followup-update"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair PR",
+			"prompt": "Fix the pull request and keep watching it.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"title":  "Repair PR",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := WorkspaceChangedFile{Path: "internal/orchestrator/pull_request.go", Status: "modified"}
+	workspace := &recordingWorkspaceManager{changes: WorkspaceChanges{
+		Dirty:        true,
+		ChangedFiles: []WorkspaceChangedFile{changed},
+	}}
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "repair dirty PR branch",
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return repaired PR to monitor",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "repaired"}}},
+	}, t.TempDir(), workspace)
+	service.SetPullRequestPublisher(publisher)
+
+	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if publisher.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", publisher.updateCalls)
+	}
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want existing PR update only", publisher.publishCalls)
+	}
+	if publisher.updatedPR.ID != "pr-1" || publisher.updated.Branch != "codex/aged-test" || publisher.updated.Base != "main" {
+		t.Fatalf("updated PR=%+v spec=%+v", publisher.updatedPR, publisher.updated)
+	}
+	if publisher.updated.WorkerID == "" {
+		t.Fatalf("update worker id was empty")
+	}
+	if !hasEvent(snapshot.Events, core.EventPRUpdated, taskID, "") {
+		t.Fatalf("missing pull_request.updated event")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"kind":"update_pull_request"`) {
+		t.Fatalf("missing deterministic update_pull_request action")
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
+		t.Fatalf("watch list spec = %+v", publisher.listSpec)
+	}
+}
+
 func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7526,6 +7625,9 @@ type fakePullRequestPublisher struct {
 	publishedSpecs   []PullRequestPublishSpec
 	publishedWorkers []string
 	publishCalls     int
+	updated          PullRequestPublishSpec
+	updatedPR        core.PullRequest
+	updateCalls      int
 	errOnce          error
 	errCount         int
 	status           core.PullRequest
@@ -7574,6 +7676,38 @@ func (p *fakePullRequestPublisher) Publish(_ context.Context, spec PullRequestPu
 		ReviewStatus: "REVIEW_REQUIRED",
 		Metadata:     core.MustJSON(spec.Metadata),
 	}, nil
+}
+
+func (p *fakePullRequestPublisher) Update(_ context.Context, pr core.PullRequest, spec PullRequestPublishSpec) (core.PullRequest, error) {
+	p.updated = spec
+	p.updatedPR = pr
+	p.updateCalls++
+	if p.errCount > 0 && p.updateCalls <= p.errCount {
+		return core.PullRequest{}, errors.New("remote patch has conflicts or no longer applies cleanly; patch does not apply")
+	}
+	updated := pr
+	if spec.Repo != "" {
+		updated.Repo = spec.Repo
+	}
+	if spec.Branch != "" {
+		updated.Branch = spec.Branch
+	}
+	if spec.Base != "" {
+		updated.Base = spec.Base
+	}
+	if spec.Title != "" {
+		updated.Title = spec.Title
+	}
+	if len(spec.Metadata) > 0 {
+		updated.Metadata = core.MustJSON(spec.Metadata)
+	}
+	if updated.State == "" {
+		updated.State = "OPEN"
+	}
+	if updated.ChecksStatus == "" {
+		updated.ChecksStatus = "pending"
+	}
+	return updated, nil
 }
 
 func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullRequest) (core.PullRequest, error) {

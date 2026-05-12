@@ -35,6 +35,7 @@ type PullRequestPublishSpec struct {
 
 type PullRequestPublisher interface {
 	Publish(ctx context.Context, spec PullRequestPublishSpec) (core.PullRequest, error)
+	Update(ctx context.Context, pr core.PullRequest, spec PullRequestPublishSpec) (core.PullRequest, error)
 	Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error)
 }
 
@@ -159,6 +160,82 @@ func (p LocalPullRequestPublisher) Publish(ctx context.Context, spec PullRequest
 	inspected.TaskID = spec.TaskID
 	if len(inspected.Metadata) == 0 {
 		inspected.Metadata = pr.Metadata
+	}
+	return inspected, nil
+}
+
+func (p LocalPullRequestPublisher) Update(ctx context.Context, pr core.PullRequest, spec PullRequestPublishSpec) (core.PullRequest, error) {
+	if strings.TrimSpace(spec.WorkDir) == "" {
+		return core.PullRequest{}, errors.New("update pull request requires a workdir")
+	}
+	exec := p.exec
+	if exec == nil {
+		exec = runCommand
+	}
+	repo := nonEmpty(spec.Repo, pr.Repo)
+	if repo == "" {
+		resolved, err := exec(ctx, spec.WorkDir, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+		if err != nil {
+			return core.PullRequest{}, wrapGitHubCommandError("resolve GitHub repo", err)
+		}
+		repo = strings.TrimSpace(resolved)
+	}
+	if repo == "" {
+		return core.PullRequest{}, errors.New("update pull request requires repo")
+	}
+	base := nonEmpty(spec.Base, pr.Base, "main")
+	branch := nonEmpty(spec.Branch, pr.Branch)
+	if branch == "" {
+		return core.PullRequest{}, errors.New("update pull request requires branch")
+	}
+	spec.Repo = repo
+	spec.Base = base
+	spec.Branch = branch
+	if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
+		return core.PullRequest{}, err
+	}
+	if strings.TrimSpace(spec.Title) != "" || strings.TrimSpace(spec.Body) != "" {
+		ref := pr.URL
+		if ref == "" && pr.Number > 0 {
+			ref = strconv.Itoa(pr.Number)
+		}
+		if ref == "" {
+			return core.PullRequest{}, errors.New("update pull request metadata requires pull request url or number")
+		}
+		args := []string{"pr", "edit", ref, "--repo", repo}
+		if title := strings.TrimSpace(spec.Title); title != "" {
+			args = append(args, "--title", title)
+		}
+		var bodyFile string
+		if body := strings.TrimSpace(spec.Body); body != "" {
+			var err error
+			bodyFile, err = writePullRequestBodyFile(body)
+			if err != nil {
+				return core.PullRequest{}, err
+			}
+			defer os.Remove(bodyFile)
+			args = append(args, "--body-file", bodyFile)
+		}
+		if _, err := exec(ctx, spec.WorkDir, "gh", args...); err != nil {
+			return core.PullRequest{}, wrapGitHubCommandError("edit GitHub pull request", err)
+		}
+	}
+	updated := pr
+	updated.Repo = repo
+	updated.Branch = branch
+	updated.Base = base
+	if strings.TrimSpace(spec.Title) != "" {
+		updated.Title = strings.TrimSpace(spec.Title)
+	}
+	inspected, err := p.Inspect(ctx, updated)
+	if err != nil {
+		updated.Metadata = core.MustJSON(spec.Metadata)
+		return updated, nil
+	}
+	inspected.ID = pr.ID
+	inspected.TaskID = pr.TaskID
+	if len(inspected.Metadata) == 0 {
+		inspected.Metadata = core.MustJSON(spec.Metadata)
 	}
 	return inspected, nil
 }

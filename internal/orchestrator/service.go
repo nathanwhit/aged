@@ -3749,6 +3749,70 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			return true, nil
 		}
 		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+	case "update_pull_request":
+		workerID := strings.TrimSpace(action.WorkerID)
+		if workerID == "" {
+			workerID = latestCandidateWorkerID(results)
+		}
+		if workerID == "" {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   action.Kind,
+				"when":   nonEmpty(action.When, "after_success"),
+				"reason": action.Reason,
+				"inputs": action.Inputs,
+				"status": "skipped",
+				"error":  "no successful changed candidate worker to update pull request",
+			}); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
+		if err != nil {
+			return false, err
+		}
+		req := updatePullRequestRequestFromAction(action)
+		req.WorkerID = workerID
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          action.Kind,
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        action.Reason,
+			"inputs":        action.Inputs,
+			"workerId":      workerID,
+			"pullRequestId": pr.ID,
+			"status":        "started",
+		}); err != nil {
+			return false, err
+		}
+		updated, err := s.UpdateTaskPullRequest(ctx, task.ID, pr, req)
+		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
+				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":          action.Kind,
+					"when":          nonEmpty(action.When, "after_success"),
+					"reason":        action.Reason,
+					"inputs":        action.Inputs,
+					"workerId":      workerID,
+					"pullRequestId": pr.ID,
+					"status":        "waiting",
+					"error":         err.Error(),
+				})
+				return false, nil
+			}
+			return false, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          action.Kind,
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        action.Reason,
+			"inputs":        action.Inputs,
+			"workerId":      workerID,
+			"pullRequestId": updated.ID,
+			"url":           updated.URL,
+		}); err != nil {
+			return false, err
+		}
+		return true, nil
 	case "watch_pull_requests":
 		req := watchPullRequestsRequestFromAction(action)
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
