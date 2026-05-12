@@ -561,6 +561,72 @@ higher_is_better: true
 	}
 }
 
+func TestBenchmarkCompareRunnerParsesScientificNotationScalars(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+command: go test -bench=Parser
+baseline: 1e6
+candidate: 1.25e+06
+threshold_percent: 20
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
+		t.Fatalf("events = %+v", sink.events)
+	}
+	report := sink.events[0].Text
+	for _, want := range []string{
+		"baseline: 1e+06",
+		"candidate: 1.25e+06",
+		"delta_percent: 25",
+		"verdict: improved",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestBenchmarkCompareRunnerParsesScientificNotationSamples(t *testing.T) {
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+baseline_command: go test -bench=Parser
+candidate_command: go test -bench=Parser
+baseline_samples: 9.5E-3, +1.0e-2, .0105e+0
+candidate_samples: 1.14e-2, 1.20E-02, +1.26e-2
+min_samples: 3
+threshold_percent: 15
+higher_is_better: true
+`}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := sink.events[0].Text
+	for _, want := range []string{
+		"baseline: 0.01",
+		"candidate: 0.012",
+		"baseline_samples: 0.0095, 0.01, 0.0105",
+		"candidate_samples: 0.0114, 0.012, 0.0126",
+		"sample_count: 3",
+		"delta_percent: 20",
+		"verdict: improved",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
+func TestBenchmarkCompareNumberParserSupportsFloatNotation(t *testing.T) {
+	got := numbers("-1e6, +1.25e+06, 9.5E-3, .75e1, 10.")
+	want := []float64{-1e6, 1.25e6, 9.5e-3, 7.5, 10}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("numbers() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBenchmarkCompareRunnerRejectsCommandMismatch(t *testing.T) {
 	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
 baseline_command: go test -bench=Parser
