@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -322,6 +323,42 @@ func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
 	}
 	if !strings.HasSuffix(executor.input, "\n") {
 		t.Fatalf("uploaded patch should end with newline: %q", executor.input)
+	}
+}
+
+func TestRemoteApplyPatchScriptConflictDoesNotDirtyCheckout(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := runTestGit(t, repo, "diff", "--binary", "HEAD", "--", "file.txt")
+	runTestGit(t, repo, "checkout", "--", "file.txt")
+	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "commit", "-m", "source")
+
+	patchPath := filepath.Join(t.TempDir(), "base.patch")
+	if err := os.WriteFile(patchPath, []byte(patch), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCommand(ctx, "", "sh", "-lc", remoteApplyPatchScript(repo, patchPath)); err == nil {
+		t.Fatal("remote apply script succeeded; want conflict")
+	}
+	if status := strings.TrimSpace(runTestGit(t, repo, "status", "--porcelain=v1")); status != "" {
+		t.Fatalf("source status = %q, want clean after failed remote apply", status)
+	}
+	if unmerged := strings.TrimSpace(runTestGit(t, repo, "ls-files", "-u")); unmerged != "" {
+		t.Fatalf("unmerged index entries = %q, want none", unmerged)
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "source\n" {
+		t.Fatalf("source file contents = %q, want committed source contents", contents)
 	}
 }
 
