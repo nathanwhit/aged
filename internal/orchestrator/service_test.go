@@ -7209,6 +7209,25 @@ func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceRecommendApplyPolicyMissingTaskDoesNotRecordEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	_, err := service.RecommendApplyPolicy(ctx, "missing-task")
+	if !errors.Is(err, eventstore.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasEvent(snapshot.Events, core.EventApplyPolicy, "missing-task", "") {
+		t.Fatalf("recorded apply-policy event for missing task")
+	}
+}
+
 func TestServiceWaitsOnAmbiguousCompetingCandidatesWithoutFinalSelection(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

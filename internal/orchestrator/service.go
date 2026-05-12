@@ -2005,6 +2005,10 @@ func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (Appl
 	if err != nil {
 		return ApplyPolicyRecommendation{}, err
 	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return ApplyPolicyRecommendation{}, eventstore.ErrNotFound
+	}
 	candidates := applyCandidates(snapshot, taskID)
 	recommendation := ApplyPolicyRecommendation{
 		TaskID:     taskID,
@@ -2012,7 +2016,7 @@ func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (Appl
 		Reason:     "no unapplied successful workers with source changes",
 		Candidates: candidates,
 	}
-	if task, ok := findTask(snapshot, taskID); ok && task.FinalCandidateWorkerID != "" {
+	if task.FinalCandidateWorkerID != "" {
 		for _, candidate := range candidates {
 			if candidate.WorkerID == task.FinalCandidateWorkerID {
 				if candidate.Applied {
