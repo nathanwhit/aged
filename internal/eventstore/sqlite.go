@@ -133,18 +133,18 @@ CREATE TABLE IF NOT EXISTS targets (
 		{"remote_checkouts", "TEXT NOT NULL DEFAULT '{}'"},
 		{"pull_request_policy", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
-		if err := s.ensureProjectColumn(ctx, column.name, column.definition); err != nil {
+		if err := s.ensureColumn(ctx, "projects", column.name, column.definition); err != nil {
 			return err
 		}
 	}
-	if err := s.ensureTargetColumn(ctx, "checkout_root", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "targets", "checkout_root", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *SQLiteStore) ensureProjectColumn(ctx context.Context, name string, definition string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(projects)`)
+func (s *SQLiteStore) ensureColumn(ctx context.Context, table string, name string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return err
 	}
@@ -165,33 +165,7 @@ func (s *SQLiteStore) ensureProjectColumn(ctx context.Context, name string, defi
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE projects ADD COLUMN %s %s", name, definition))
-	return err
-}
-
-func (s *SQLiteStore) ensureTargetColumn(ctx context.Context, name string, definition string) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(targets)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var columnName, columnType string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return err
-		}
-		if columnName == name {
-			return rows.Err()
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE targets ADD COLUMN %s %s", name, definition))
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, definition))
 	return err
 }
 
