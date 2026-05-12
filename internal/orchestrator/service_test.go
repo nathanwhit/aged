@@ -5129,6 +5129,165 @@ func TestRecoverRemoteWorkerCancelDoesNotCancelTaskWithOtherActiveWorker(t *test
 	}
 }
 
+func TestRecoverRemoteWorkersReservesTargetCapacityDuringRecovery(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-reserve-capacity"
+	workerID := "worker-reserve-capacity"
+	targets := NewTargetRegistry([]TargetConfig{
+		{
+			ID:       "vm-1",
+			Kind:     TargetKindSSH,
+			Host:     "vm",
+			WorkDir:  "/repo",
+			WorkRoot: "/runs",
+			Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+		},
+		defaultLocalTargetConfig(),
+	})
+	executor := &gatedPollExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "run remotely"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-remote",
+			"workerId":      workerID,
+			"workerKind":    "codex",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-worker",
+			"remoteRunDir":  "/runs/aged-worker",
+			"remoteWorkDir": "/repo",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "codex",
+			"metadata": map[string]any{"nodeID": "node-remote"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{"targetId": "vm-1", "session": "aged-worker"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForTargetRunning(t, targets, "vm-1", 1)
+	if err := targets.Delete("vm-1"); err == nil || !strings.Contains(err.Error(), "running workers") {
+		t.Fatalf("Delete during recovery err = %v, want \"running workers\"", err)
+	}
+
+	executor.complete()
+	waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	waitForTargetRunning(t, targets, "vm-1", 0)
+	if err := targets.Delete("vm-1"); err != nil {
+		t.Fatalf("Delete after recovery err = %v, want nil", err)
+	}
+}
+
+func waitForTargetRunning(t *testing.T, targets *TargetRegistry, id string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := -1
+		for _, state := range targets.Snapshot() {
+			if state.ID == id {
+				got = state.Running
+				break
+			}
+		}
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target %s running count = %d, want %d", id, got, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+type gatedPollExecutor struct {
+	mu   sync.Mutex
+	done bool
+}
+
+func (e *gatedPollExecutor) complete() {
+	e.mu.Lock()
+	e.done = true
+	e.mu.Unlock()
+}
+
+func (e *gatedPollExecutor) isDone() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.done
+}
+
+func (e *gatedPollExecutor) Run(_ context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	switch {
+	case strings.Contains(joined, "status.json"):
+		if e.isDone() {
+			return `{"status":"succeeded","exit":0}`, nil
+		}
+		return `{"status":"running"}`, nil
+	case strings.Contains(joined, "vcs.txt"):
+		return "git\n", nil
+	case strings.Contains(joined, "root.txt"):
+		return "/repo\n", nil
+	default:
+		return "", nil
+	}
+}
+
 func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

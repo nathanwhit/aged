@@ -752,7 +752,11 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 			WorkerID: node.WorkerID,
 			Status:   "running",
 		}
-		go s.recoverRemoteWorker(context.Background(), node, run)
+		s.targets.Begin(target.ID)
+		go func(node core.ExecutionNode, run remoteRun) {
+			defer s.targets.Finish(run.Target.ID)
+			s.recoverRemoteWorker(context.Background(), node, run)
+		}(node, run)
 	}
 	return nil
 }
