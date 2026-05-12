@@ -46,6 +46,62 @@ func TestCommandEnvSanitizesGitHubNetworkCommands(t *testing.T) {
 	}
 }
 
+func TestParsePullRequestURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		wantRepo   string
+		wantNumber int
+	}{
+		{
+			name:       "github URL",
+			value:      "https://github.com/owner/repo/pull/7",
+			wantRepo:   "owner/repo",
+			wantNumber: 7,
+		},
+		{
+			name:       "github URL with trailing path",
+			value:      "https://github.com/owner/repo/pull/7/files",
+			wantRepo:   "owner/repo",
+			wantNumber: 7,
+		},
+		{
+			name:       "relative reference",
+			value:      "owner/repo/pull/7",
+			wantRepo:   "owner/repo",
+			wantNumber: 7,
+		},
+		{
+			name:  "non github host",
+			value: "https://example.com/owner/repo/pull/7",
+		},
+		{
+			name:  "www github host",
+			value: "https://www.github.com/owner/repo/pull/7",
+		},
+		{
+			name:  "scheme without host",
+			value: "https:owner/repo/pull/7",
+		},
+		{
+			name:  "non numeric pull number",
+			value: "https://github.com/owner/repo/pull/not-a-number",
+		},
+		{
+			name:  "missing pull number",
+			value: "https://github.com/owner/repo/pull",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotRepo, gotNumber := parsePullRequestURL(test.value)
+			if gotRepo != test.wantRepo || gotNumber != test.wantNumber {
+				t.Fatalf("parsePullRequestURL(%q) = %q, %d; want %q, %d", test.value, gotRepo, gotNumber, test.wantRepo, test.wantNumber)
+			}
+		})
+	}
+}
+
 func TestFindExistingPullRequestUsesSearchForForkHead(t *testing.T) {
 	var gotArgs []string
 	publisher := LocalPullRequestPublisher{
