@@ -414,7 +414,7 @@ func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
 	subID, events := s.service.Subscribe()
 	defer s.service.Unsubscribe(subID)
 
-	afterID := parseInt64(r.URL.Query().Get("after"))
+	afterID := streamAfterID(r)
 	initial, err := s.service.Events(r.Context(), afterID, 1000)
 	if err != nil {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
@@ -496,8 +496,18 @@ func writeSSE(w http.ResponseWriter, eventName string, value any) {
 	if err != nil {
 		data = []byte(fmt.Sprintf(`{"error":%q}`, err.Error()))
 	}
+	if event, ok := value.(core.Event); ok && event.ID > 0 {
+		_, _ = fmt.Fprintf(w, "id: %d\n", event.ID)
+	}
 	_, _ = fmt.Fprintf(w, "event: %s\n", eventName)
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+func streamAfterID(r *http.Request) int64 {
+	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
+		return parseInt64(lastEventID)
+	}
+	return parseInt64(r.URL.Query().Get("after"))
 }
 
 func parseInt64(value string) int64 {
