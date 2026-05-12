@@ -3133,7 +3133,13 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState}
 	stdin := ""
-	if capabilities.PromptStdin || worker.CommandUsesPromptStdin(command) {
+	if provider, ok := runner.(worker.RunnerStdinProvider); ok {
+		stdin, err = provider.RunnerStdin(spec)
+		if err != nil {
+			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+			return WorkerTurnResult{}, err
+		}
+	} else if capabilities.PromptStdin || worker.CommandUsesPromptStdin(command) {
 		stdin = spec.Prompt
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {

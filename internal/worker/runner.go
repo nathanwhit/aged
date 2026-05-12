@@ -65,6 +65,10 @@ type Runner interface {
 	Run(ctx context.Context, spec Spec, sink Sink) error
 }
 
+type RunnerStdinProvider interface {
+	RunnerStdin(spec Spec) (string, error)
+}
+
 type Capabilities struct {
 	LiveSteering  bool
 	PromptStdin   bool
@@ -260,6 +264,37 @@ func (r PluginRunner) BuildCommand(Spec) []string {
 	return append(append([]string{}, r.command...), "run")
 }
 
+func (r PluginRunner) RunnerStdin(spec Spec) (string, error) {
+	return PluginRunnerStdin(spec)
+}
+
+func PluginRunnerStdin(spec Spec) (string, error) {
+	payload := struct {
+		ID              string   `json:"id"`
+		TaskID          string   `json:"taskId"`
+		Kind            string   `json:"kind"`
+		Prompt          string   `json:"prompt"`
+		WorkDir         string   `json:"workDir,omitempty"`
+		Command         []string `json:"command,omitempty"`
+		ResumeSessionID string   `json:"resumeSessionId,omitempty"`
+		ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	}{
+		ID:              spec.ID,
+		TaskID:          spec.TaskID,
+		Kind:            spec.Kind,
+		Prompt:          spec.Prompt,
+		WorkDir:         spec.WorkDir,
+		Command:         spec.Command,
+		ResumeSessionID: spec.ResumeSessionID,
+		ReasoningEffort: spec.ReasoningEffort,
+	}
+	var out strings.Builder
+	if err := json.NewEncoder(&out).Encode(payload); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
 func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	argv := r.BuildCommand(spec)
 	if len(argv) == 0 {
@@ -282,26 +317,12 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return err
 	}
 	defer killOnCancel(ctx, cmd)()
-	payload := struct {
-		ID              string   `json:"id"`
-		TaskID          string   `json:"taskId"`
-		Kind            string   `json:"kind"`
-		Prompt          string   `json:"prompt"`
-		WorkDir         string   `json:"workDir,omitempty"`
-		Command         []string `json:"command,omitempty"`
-		ResumeSessionID string   `json:"resumeSessionId,omitempty"`
-		ReasoningEffort string   `json:"reasoningEffort,omitempty"`
-	}{
-		ID:              spec.ID,
-		TaskID:          spec.TaskID,
-		Kind:            spec.Kind,
-		Prompt:          spec.Prompt,
-		WorkDir:         spec.WorkDir,
-		Command:         spec.Command,
-		ResumeSessionID: spec.ResumeSessionID,
-		ReasoningEffort: spec.ReasoningEffort,
+	payload, err := r.RunnerStdin(spec)
+	if err != nil {
+		_ = stdin.Close()
+		return err
 	}
-	if err := json.NewEncoder(stdin).Encode(payload); err != nil {
+	if _, err := io.WriteString(stdin, payload); err != nil {
 		_ = stdin.Close()
 		return err
 	}
