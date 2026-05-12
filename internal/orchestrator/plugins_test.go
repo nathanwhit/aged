@@ -208,6 +208,95 @@ fi
 	}
 }
 
+func TestServiceDisablePluginCancelsRunningManagedDriver(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	if err := os.WriteFile(path, []byte(`#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '{"id":"driver:disable-test","name":"Disable Test Driver","kind":"driver","protocol":"aged-plugin-v1"}\n'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+  echo driver-ready
+  sleep 30
+fi
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t)
+	defer store.Close()
+	service := NewService(store, StaticBrain{}, map[string]worker.Runner{}, t.TempDir())
+	t.Cleanup(func() {
+		_ = service.DeletePlugin(context.Background(), "driver:disable-test")
+	})
+
+	if _, err := service.RegisterPlugin(ctx, core.Plugin{
+		ID:       "driver:disable-test",
+		Name:     "Disable Test Driver",
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		snapshot, err := service.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plugin, ok := pluginByID(snapshot.Plugins, "driver:disable-test")
+		if ok && plugin.Driver.Managed && plugin.Driver.PID != 0 && plugin.Status == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("driver did not start: %+v", snapshot.Plugins)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	disabled, err := service.RegisterPlugin(ctx, core.Plugin{
+		ID:       "driver:disable-test",
+		Name:     "Disable Test Driver",
+		Kind:     "driver",
+		Enabled:  false,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabled.Status != "disabled" || disabled.Driver.Managed || disabled.Driver.PID != 0 || !disabled.Driver.StartedAt.IsZero() || disabled.Driver.RestartPolicy != "" {
+		t.Fatalf("disabled plugin kept running lifecycle state: %+v", disabled)
+	}
+	service.plugins.mu.Lock()
+	cancel := service.plugins.driverCancel["driver:disable-test"]
+	service.plugins.mu.Unlock()
+	if cancel != nil {
+		t.Fatalf("disabled plugin kept driver cancel")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		snapshot, err := service.Snapshot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plugin, ok := pluginByID(snapshot.Plugins, "driver:disable-test")
+		if ok && plugin.Status == "disabled" && !plugin.Driver.Managed && plugin.Driver.PID == 0 && plugin.Driver.RestartPolicy == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("disabled plugin lifecycle was not cleared after supervisor exit: %+v", snapshot.Plugins)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestPluginRegistryCapturesLargeDriverLogLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "driver.sh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then printf '%02000000d\\n' 0; exit 0; fi\n"), 0o755); err != nil {
