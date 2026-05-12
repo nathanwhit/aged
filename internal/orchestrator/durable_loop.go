@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -107,7 +108,18 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 	}
 
 	var previousWorkerID string
-	for iteration := 1; ; iteration++ {
+	nextIteration := 1
+	waitBeforeNext := false
+	if snapshot, err := s.store.Snapshot(ctx); err == nil {
+		nextIteration, previousWorkerID, waitBeforeNext = durableLoopResumeState(snapshot, task.ID)
+	}
+	if waitBeforeNext {
+		if err := s.waitDurableLoopInterval(ctx, task.ID, config.Interval); err != nil {
+			return
+		}
+		config = s.latestDurableLoopConfig(ctx, task, config)
+	}
+	for iteration := nextIteration; ; iteration++ {
 		if err := ctx.Err(); err != nil {
 			return
 		}
@@ -155,6 +167,46 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 			return
 		}
 	}
+}
+
+func durableLoopResumeState(snapshot core.Snapshot, taskID string) (int, string, bool) {
+	latestIteration := 0
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventTaskPlanned {
+			continue
+		}
+		var payload struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if taskMetadataExecutionMode(payload.Metadata) != executionModeLoop {
+			continue
+		}
+		if iteration := intMetadata(payload.Metadata, "loopIteration"); iteration > latestIteration {
+			latestIteration = iteration
+		}
+	}
+	if latestIteration == 0 {
+		return 1, "", false
+	}
+	previousWorkerID := ""
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID == taskID && isTerminalWorkerStatus(worker.Status) && worker.UpdatedAt.After(latestDurableLoopWorkerTime(snapshot, previousWorkerID)) {
+			previousWorkerID = worker.ID
+		}
+	}
+	return latestIteration + 1, previousWorkerID, previousWorkerID != ""
+}
+
+func latestDurableLoopWorkerTime(snapshot core.Snapshot, workerID string) time.Time {
+	for _, worker := range snapshot.Workers {
+		if worker.ID == workerID {
+			return worker.UpdatedAt
+		}
+	}
+	return time.Time{}
 }
 
 func (s *Service) latestDurableLoopConfig(ctx context.Context, task core.Task, fallback durableLoopConfig) durableLoopConfig {

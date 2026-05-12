@@ -340,6 +340,15 @@ func TestPullRequestNeedsBabysitterForNewConversationComment(t *testing.T) {
 	if !pullRequestNeedsBabysitter(core.PullRequest{State: "OPEN", ReviewStatus: "COMMENTED"}) {
 		t.Fatal("COMMENTED PR should need babysitter follow-up")
 	}
+	if !pullRequestNeedsBabysitter(core.PullRequest{
+		State: "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+			"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+		}),
+	}) {
+		t.Fatal("PR with untriggered feedback should need babysitter follow-up")
+	}
 }
 
 func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) {

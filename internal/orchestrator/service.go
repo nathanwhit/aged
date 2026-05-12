@@ -1520,8 +1520,21 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	if !ok {
 		return core.Task{}, eventstore.ErrNotFound
 	}
-	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled {
+	if task.Status != core.TaskFailed && task.Status != core.TaskCanceled && !(task.Status == core.TaskSucceeded && taskExecutionMode(task) == executionModeLoop) {
 		return core.Task{}, errors.New("can only retry failed or canceled tasks")
+	}
+	if taskExecutionMode(task) == executionModeLoop {
+		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+			return core.Task{}, err
+		}
+		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
+		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			s.runDurableLoopTask(taskCtx, task)
+		})
+		return task, nil
 	}
 	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
 		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
@@ -1601,6 +1614,10 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 	}
 	task, ok := findTask(snapshot, taskID)
 	if !ok || isTerminalTaskStatus(task.Status) || taskHasActiveWorkers(snapshot, taskID) {
+		return
+	}
+	if taskExecutionMode(task) == executionModeLoop {
+		s.runDurableLoopTask(ctx, task)
 		return
 	}
 	initial, results, err := retryGraphStateForTask(snapshot, taskID)
@@ -5960,6 +5977,10 @@ func planMetadata(plan Plan) map[string]any {
 		"spawnRole",
 		"turn",
 		"dynamicReplanTurn",
+		"executionMode",
+		"loopIteration",
+		"loopRole",
+		"loopWorkerKind",
 		"reasoningEffort",
 		"retryFromWorkerID",
 		"retryTargetID",

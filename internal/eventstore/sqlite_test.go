@@ -71,6 +71,93 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	}
 }
 
+func TestSnapshotMergesDuplicatePullRequestIDsByTaskAndGitHubIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-1"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-generated",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"projectId": "project-1",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":               "pr-generated",
+			"checksStatus":     "passing",
+			"checksConclusion": "success",
+			"mergeStatus":      "CLEAN",
+			"mergeable":        "MERGEABLE",
+			"reviewStatus":     "APPROVED",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "github:owner/repo#7",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
+				"watch":                              true,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	pr := snapshot.PullRequests[0]
+	if pr.ID != "pr-generated" || pr.ChecksStatus != "passing" || pr.ChecksConclusion != "success" || pr.MergeStatus != "CLEAN" || pr.Mergeable != "MERGEABLE" || pr.ReviewStatus != "APPROVED" {
+		t.Fatalf("merged pr = %+v", pr)
+	}
+	metadata := string(pr.Metadata)
+	if !strings.Contains(metadata, `"projectId":"project-1"`) || !strings.Contains(metadata, `"watch":true`) {
+		t.Fatalf("metadata = %s", metadata)
+	}
+}
+
 func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))

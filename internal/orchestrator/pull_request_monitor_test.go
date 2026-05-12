@@ -39,6 +39,10 @@ func TestServiceDefaultPullRequestMonitorContinuesTasksForPRsNeedingAttention(t 
 		{name: "failing checks", status: monitoredPullRequestStatus("failing", "CLEAN", "APPROVED")},
 		{name: "dirty branch", status: monitoredPullRequestStatus("success", "DIRTY", "APPROVED")},
 		{name: "new comment", status: monitoredPullRequestStatus("success", "CLEAN", "COMMENTED")},
+		{name: "untriggered feedback metadata", status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "", core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+			"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+		}))},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,6 +88,90 @@ func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	}
 	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
 		t.Fatalf("clean pull request steered task")
+	}
+}
+
+func TestServiceDefaultPullRequestMonitorKeepsFeedbackPendingWhileTaskRunning(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	metadata := core.MustJSON(map[string]any{
+		"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+		"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+	})
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "", metadata)}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+	if hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
+		t.Fatalf("running task started follow-up")
+	}
+	if !pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
+		t.Fatalf("running task feedback was marked handled")
+	}
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = waitForEvent(t, store, core.EventPRFollowUp, "task-1")
+	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("missing task steering event")
+	}
+	if pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
+		t.Fatalf("follow-up feedback was not marked handled")
+	}
+}
+
+func TestServiceWatchPullRequestsReusesExistingPublishedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{list: []core.PullRequest{{
+		ID:           "listed-pr",
+		Repo:         "owner/repo",
+		Number:       7,
+		URL:          "https://github.com/owner/repo/pull/7",
+		Branch:       "codex/aged-test",
+		Base:         "main",
+		Title:        "Task",
+		State:        "OPEN",
+		ChecksStatus: "passing",
+		MergeStatus:  "CLEAN",
+	}}}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	prs, err := service.WatchPullRequests(ctx, "task-1", core.WatchPullRequestsRequest{
+		Repo:   "owner/repo",
+		Number: 7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 || prs[0].ID != "pr-1" {
+		t.Fatalf("watched prs = %+v, want existing pr-1", prs)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 || snapshot.PullRequests[0].ID != "pr-1" {
+		t.Fatalf("snapshot pull requests = %+v", snapshot.PullRequests)
 	}
 }
 
@@ -180,6 +268,10 @@ func appendTrackedPullRequest(t *testing.T, ctx context.Context, store *eventsto
 }
 
 func monitoredPullRequestStatus(checks string, merge string, review string) core.PullRequest {
+	return monitoredPullRequestStatusWithMetadata(checks, merge, review, nil)
+}
+
+func monitoredPullRequestStatusWithMetadata(checks string, merge string, review string, metadata []byte) core.PullRequest {
 	return core.PullRequest{
 		ID:           "pr-1",
 		Repo:         "owner/repo",
@@ -192,5 +284,6 @@ func monitoredPullRequestStatus(checks string, merge string, review string) core
 		ChecksStatus: checks,
 		MergeStatus:  merge,
 		ReviewStatus: review,
+		Metadata:     metadata,
 	}
 }
