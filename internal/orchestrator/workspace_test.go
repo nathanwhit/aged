@@ -520,6 +520,42 @@ func TestGitWorkspaceManagerApplyUsesChangedFilesCommitMessage(t *testing.T) {
 	}
 }
 
+func TestGitWorkspaceManagerApplyDisablesSigningForWorkerCommit(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	manager := NewGitWorkspaceManager(WorkspaceModeIsolated, t.TempDir(), WorkspaceCleanupRetain)
+
+	workspace, err := manager.Prepare(ctx, WorkspaceSpec{
+		TaskID:   "task",
+		WorkerID: "worker-signing",
+		WorkDir:  repo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, workspace.Root, "config", "extensions.worktreeConfig", "true")
+	runTestGit(t, workspace.Root, "config", "--worktree", "commit.gpgsign", "true")
+	runTestGit(t, workspace.Root, "config", "--worktree", "gpg.program", "false")
+	if err := os.WriteFile(filepath.Join(workspace.CWD, "file.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := manager.DescribeChanges(ctx, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.ApplyChanges(ctx, workspace, changes); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "worker\n" {
+		t.Fatalf("source file contents = %q, want worker changes applied", contents)
+	}
+}
+
 func TestGitWorkspaceManagerApplyConflictAbortsSourceMerge(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)

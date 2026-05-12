@@ -807,7 +807,7 @@ func (m GitWorkspaceManager) ApplyChanges(ctx context.Context, workspace Prepare
 		Fallback:     "Apply worker " + shortID(workspace.WorkerID),
 		ChangedFiles: changedFiles,
 	})
-	if _, err := runGit(ctx, workspace.Root, "commit", "-m", message); err != nil {
+	if _, err := runGit(ctx, workspace.Root, "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return result, fmt.Errorf("commit git worker changes: %w", err)
 	}
 	commit, err := runGit(ctx, workspace.Root, "rev-parse", "HEAD")
