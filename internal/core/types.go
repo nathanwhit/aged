@@ -243,7 +243,15 @@ type Project struct {
 	WorkspaceRoot     string            `json:"workspaceRoot,omitempty"`
 	TargetLabels      map[string]string `json:"targetLabels,omitempty"`
 	RemoteCheckouts   map[string]string `json:"remoteCheckouts,omitempty"`
+	GitHubIssues      GitHubIssuePolicy `json:"githubIssues,omitempty"`
 	PullRequestPolicy PullRequestPolicy `json:"pullRequestPolicy,omitempty"`
+}
+
+type GitHubIssuePolicy struct {
+	Enabled     bool     `json:"enabled,omitempty"`
+	Labels      []string `json:"labels,omitempty"`
+	IssueLimit  int      `json:"issueLimit,omitempty"`
+	AutoPublish *bool    `json:"autoPublish,omitempty"`
 }
 
 type PullRequestPolicy struct {

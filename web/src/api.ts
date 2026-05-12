@@ -1,4 +1,4 @@
-import type { EventRecord, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function requestJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -64,6 +64,12 @@ export async function createProject(input: {
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
   remoteCheckouts?: Record<string, string>;
+  githubIssues?: {
+    enabled?: boolean;
+    labels?: string[];
+    issueLimit?: number;
+    autoPublish?: boolean;
+  };
   pullRequestPolicy?: {
     branchPrefix?: string;
     draft?: boolean;
@@ -88,6 +94,12 @@ export async function updateProject(id: string, input: {
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
   remoteCheckouts?: Record<string, string>;
+  githubIssues?: {
+    enabled?: boolean;
+    labels?: string[];
+    issueLimit?: number;
+    autoPublish?: boolean;
+  };
   pullRequestPolicy?: {
     branchPrefix?: string;
     draft?: boolean;
@@ -113,6 +125,22 @@ export async function updatePlugin(id: string, input: Plugin): Promise<Plugin> {
 
 export async function deletePlugin(id: string): Promise<void> {
   return requestVoid(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function getGitHubDriver(): Promise<GitHubDriverState> {
+  return requestJSON("/api/drivers/github");
+}
+
+export async function updateGitHubDriver(input: GitHubDriverConfig): Promise<GitHubDriverState> {
+  return requestJSON("/api/drivers/github", jsonInit("PUT", input));
+}
+
+export async function getDiscordDriver(): Promise<DiscordDriverState> {
+  return requestJSON("/api/drivers/discord");
+}
+
+export async function updateDiscordDriver(input: DiscordDriverConfig): Promise<DiscordDriverState> {
+  return requestJSON("/api/drivers/discord", jsonInit("PUT", input));
 }
 
 export type TargetInput = {

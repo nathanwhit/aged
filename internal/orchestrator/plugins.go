@@ -464,5 +464,6 @@ func builtinPlugins() []core.Plugin {
 		{ID: "runner:benchmark_compare", Name: "Benchmark Comparator", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"benchmark", "compare"}},
 		{ID: "driver:http", Name: "HTTP Task Driver", Kind: "driver", Enabled: true, BuiltIn: true, Capabilities: []string{"create-task", "dedupe-external-id"}},
 		{ID: "driver:github", Name: "GitHub Issue Polling Driver", Kind: "driver", Enabled: false, BuiltIn: true, Capabilities: []string{"issues", "auto-publish"}},
+		{ID: "driver:discord", Name: "Discord Chat Driver", Kind: "driver", Enabled: false, BuiltIn: true, Capabilities: []string{"chat", "create-task", "manage-aged"}},
 	}
 }

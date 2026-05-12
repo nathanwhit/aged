@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, GitHubIssuePolicy, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -986,8 +986,8 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
-  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
@@ -1003,6 +1003,10 @@ function ProjectPanel({
   const [defaultBase, setDefaultBase] = useState("main");
   const [branchPrefix, setBranchPrefix] = useState("codex/aged-");
   const [remoteCheckoutEntries, setRemoteCheckoutEntries] = useState<PluginConfigEntry[]>([]);
+  const [pollGitHubIssues, setPollGitHubIssues] = useState(false);
+  const [issueLabels, setIssueLabels] = useState("aged");
+  const [issueLimit, setIssueLimit] = useState("20");
+  const [issueAutoPublish, setIssueAutoPublish] = useState(true);
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
@@ -1024,6 +1028,10 @@ function ProjectPanel({
     setDefaultBase(project.defaultBase ?? "main");
     setBranchPrefix(project.pullRequestPolicy?.branchPrefix ?? "codex/aged-");
     setRemoteCheckoutEntries(configEntriesFromRecord(project.remoteCheckouts));
+    setPollGitHubIssues(Boolean(project.githubIssues?.enabled));
+    setIssueLabels((project.githubIssues?.labels ?? []).join(", "));
+    setIssueLimit(project.githubIssues?.issueLimit ? String(project.githubIssues.issueLimit) : "20");
+    setIssueAutoPublish(project.githubIssues?.autoPublish ?? true);
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
@@ -1043,6 +1051,10 @@ function ProjectPanel({
     setDefaultBase("main");
     setBranchPrefix("codex/aged-");
     setRemoteCheckoutEntries([]);
+    setPollGitHubIssues(false);
+    setIssueLabels("aged");
+    setIssueLimit("20");
+    setIssueAutoPublish(true);
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
@@ -1055,6 +1067,7 @@ function ProjectPanel({
     setBusy(true);
     try {
       const parsedRemoteCheckouts = remoteCheckoutRecordFromEntries(remoteCheckoutEntries);
+      const parsedIssueLimit = Math.max(0, Number.parseInt(issueLimit, 10) || 0);
       const input = {
         id,
         name: name || undefined,
@@ -1066,6 +1079,12 @@ function ProjectPanel({
         vcs: "auto",
         defaultBase: defaultBase || undefined,
         remoteCheckouts: Object.keys(parsedRemoteCheckouts).length ? parsedRemoteCheckouts : undefined,
+        githubIssues: {
+          enabled: pollGitHubIssues,
+          labels: splitCommaList(issueLabels),
+          issueLimit: parsedIssueLimit || undefined,
+          autoPublish: issueAutoPublish,
+        },
         pullRequestPolicy: {
           branchPrefix: branchPrefix || undefined,
           draft: draftPRs,
@@ -1174,6 +1193,26 @@ function ProjectPanel({
             <legend>Remote checkouts</legend>
             <KeyValueRows entries={remoteCheckoutEntries} setEntries={setRemoteCheckoutEntries} emptyText="No checkout overrides" keyPlaceholder="perf-1" valuePlaceholder="/srv/aged/checkouts/node" removeTitle="Remove checkout override" addLabel="Add checkout" />
           </fieldset>
+          <label className="checkbox-label">
+            <input type="checkbox" checked={pollGitHubIssues} onChange={(event) => setPollGitHubIssues(event.target.checked)} />
+            Poll GitHub issues
+          </label>
+          {pollGitHubIssues && (
+            <div className="loop-config">
+              <label>
+                Issue labels
+                <input value={issueLabels} onChange={(event) => setIssueLabels(event.target.value)} placeholder="aged, help wanted" />
+              </label>
+              <label>
+                Issue limit
+                <input type="number" min="1" step="1" value={issueLimit} onChange={(event) => setIssueLimit(event.target.value)} />
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={issueAutoPublish} onChange={(event) => setIssueAutoPublish(event.target.checked)} />
+                Publish PRs
+              </label>
+            </div>
+          )}
           <label className="checkbox-label">
             <input type="checkbox" checked={draftPRs} onChange={(event) => setDraftPRs(event.target.checked)} />
             Draft PRs by default
@@ -2603,6 +2642,7 @@ const SYSTEM_PLUGIN_IDS = new Set([
   "runner:benchmark_compare",
   "driver:http",
   "driver:github",
+  "driver:discord",
 ]);
 
 type PluginConfigEntry = {
@@ -2681,6 +2721,10 @@ function remoteCheckoutRecordFromEntries(entries: PluginConfigEntry[]): Record<s
     missingValue: (targetID) => `remote checkout ${targetID} needs a path`,
     duplicateKey: (targetID) => `duplicate remote checkout target ${targetID}`,
   });
+}
+
+function splitCommaList(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function isSystemPlugin(plugin: Plugin): boolean {

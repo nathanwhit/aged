@@ -72,6 +72,7 @@ type Service struct {
 	projects    *ProjectRegistry
 	plugins     *PluginRegistry
 	pluginCtx   context.Context
+	drivers     *DriverRegistry
 	workspaces  WorkspaceManager
 	targets     *TargetRegistry
 	sshRunner   SSHRunner
@@ -212,7 +213,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 			DefaultBase: "main",
 		}}, "default")
 	}
-	return &Service{
+	service := &Service{
 		store:       store,
 		broker:      NewBroker(),
 		brain:       brain,
@@ -233,6 +234,8 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		remoteRuns:  map[string]remoteRun{},
 		workerCaps:  map[string]worker.Capabilities{},
 	}
+	service.drivers = NewDriverRegistry(service)
+	return service
 }
 
 func (s *Service) SetAssistant(assistant AssistantProvider) {
@@ -250,6 +253,20 @@ func (s *Service) SetProjects(projects *ProjectRegistry) {
 	if projects != nil {
 		s.projects = projects
 		s.workDir = projects.Default().LocalPath
+		s.RefreshDrivers()
+	}
+}
+
+func (s *Service) Drivers() *DriverRegistry {
+	if s == nil {
+		return nil
+	}
+	return s.drivers
+}
+
+func (s *Service) RefreshDrivers() {
+	if s != nil && s.drivers != nil {
+		_, _ = s.drivers.Refresh()
 	}
 }
 
@@ -301,11 +318,13 @@ func (s *Service) CreateProject(ctx context.Context, project core.Project) (core
 			return core.Project{}, err
 		}
 		s.SetProjects(registry)
+		s.RefreshDrivers()
 		return saved, nil
 	}
 	if _, err := s.projects.Add(saved); err != nil {
 		return core.Project{}, err
 	}
+	s.RefreshDrivers()
 	return saved, nil
 }
 
@@ -332,6 +351,7 @@ func (s *Service) UpdateProject(ctx context.Context, id string, project core.Pro
 	if _, err := s.projects.Update(saved); err != nil {
 		return core.Project{}, err
 	}
+	s.RefreshDrivers()
 	return saved, nil
 }
 
@@ -358,7 +378,11 @@ func (s *Service) DeleteProject(ctx context.Context, id string) error {
 	if err := s.store.DeleteProject(ctx, id); err != nil {
 		return err
 	}
-	return s.projects.Delete(id)
+	if err := s.projects.Delete(id); err != nil {
+		return err
+	}
+	s.RefreshDrivers()
+	return nil
 }
 
 func (s *Service) ProjectHealth(ctx context.Context, id string) (core.ProjectHealth, error) {
@@ -662,6 +686,9 @@ func (s *Service) decorateSnapshot(snapshot core.Snapshot) core.Snapshot {
 	}
 	if s.plugins != nil {
 		snapshot.Plugins = s.plugins.Snapshot()
+		if s.drivers != nil {
+			snapshot.Plugins = s.drivers.DecoratePlugins(snapshot.Plugins)
+		}
 	}
 	return snapshot
 }

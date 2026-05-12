@@ -24,10 +24,12 @@ type GitHubDriverConfig struct {
 }
 
 type GitHubIssueSourceConfig struct {
-	Repo      string   `json:"repo"`
-	Labels    []string `json:"labels,omitempty"`
-	ProjectID string   `json:"projectId,omitempty"`
-	Enabled   *bool    `json:"enabled,omitempty"`
+	Repo        string   `json:"repo"`
+	Labels      []string `json:"labels,omitempty"`
+	ProjectID   string   `json:"projectId,omitempty"`
+	Enabled     *bool    `json:"enabled,omitempty"`
+	IssueLimit  int      `json:"issueLimit,omitempty"`
+	AutoPublish *bool    `json:"autoPublish,omitempty"`
 }
 
 type GitHubPullRequestDriverConfig struct {
@@ -154,7 +156,11 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 		if repo == "" {
 			continue
 		}
-		issues, err := d.client.ListIssues(ctx, repo, source.Labels, d.config.IssueLimit)
+		limit := source.IssueLimit
+		if limit <= 0 {
+			limit = d.config.IssueLimit
+		}
+		issues, err := d.client.ListIssues(ctx, repo, source.Labels, limit)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s issues: %v", repo, err))
 			continue
@@ -163,7 +169,8 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 			if issue.Repo == "" {
 				issue.Repo = repo
 			}
-			if _, err := d.service.CreateTask(ctx, githubIssueTaskRequest(issue, source.ProjectID, boolDefault(d.config.PullRequests.AutoPublish, true))); err != nil {
+			autoPublish := boolDefault(source.AutoPublish, boolDefault(d.config.PullRequests.AutoPublish, true))
+			if _, err := d.service.CreateTask(ctx, githubIssueTaskRequest(issue, source.ProjectID, autoPublish)); err != nil {
 				errs = append(errs, fmt.Sprintf("%s#%d task: %v", issue.Repo, issue.Number, err))
 			}
 		}
