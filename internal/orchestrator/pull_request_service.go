@@ -994,6 +994,88 @@ func resumingPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
 	return latestFollowUp > 0 && latestFollowUp > latestWaitingStatus
 }
 
+func latestPullRequestFollowUp(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
+	latestFollowUp := int64(0)
+	latestPullRequestID := ""
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
+			continue
+		}
+		if event.ID >= latestFollowUp {
+			latestFollowUp = event.ID
+			latestPullRequestID = strings.TrimSpace(payload.ID)
+		}
+	}
+	if latestPullRequestID == "" {
+		return core.PullRequest{}, false
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == latestPullRequestID {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
+}
+
+func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Prompt = appendPullRequestFollowUpWorkerInstruction(plan.Prompt, pr)
+	plan.Metadata["pullRequestID"] = pr.ID
+	plan.Metadata["pullRequestRepo"] = pr.Repo
+	if pr.Number > 0 {
+		plan.Metadata["pullRequestNumber"] = pr.Number
+	}
+	if strings.TrimSpace(pr.Branch) != "" {
+		plan.Metadata["pullRequestBranch"] = pr.Branch
+		if stringMetadata(plan.Metadata, "workspaceBaseRef") == "" {
+			plan.Metadata["workspaceBaseRef"] = pr.Branch
+			plan.Metadata["workspaceBaseRefKind"] = "pull_request_head"
+		}
+	}
+	if strings.TrimSpace(pr.Base) != "" {
+		plan.Metadata["pullRequestBase"] = pr.Base
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		plan.Metadata["pullRequestURL"] = pr.URL
+	}
+	return plan
+}
+
+func appendPullRequestFollowUpWorkerInstruction(prompt string, pr core.PullRequest) string {
+	instruction := pullRequestFollowUpWorkerInstruction(pr)
+	if strings.Contains(prompt, instruction) {
+		return prompt
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return instruction
+	}
+	return prompt + "\n\n" + instruction
+}
+
+func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
+	var b strings.Builder
+	b.WriteString("This worker is repairing or inspecting an existing GitHub pull request")
+	if strings.TrimSpace(pr.Repo) != "" && pr.Number > 0 {
+		b.WriteString(fmt.Sprintf(" %s#%d", pr.Repo, pr.Number))
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		b.WriteString(" (")
+		b.WriteString(strings.TrimSpace(pr.URL))
+		b.WriteString(")")
+	}
+	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
+	return b.String()
+}
+
 func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	if len(plan.Spawns) == 0 {
 		return plan

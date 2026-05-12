@@ -174,7 +174,7 @@ Pull request URL: %s
 Branch: %s
 Base: %s
 
-Repeatedly inspect CI status, review comments, and mergeability. If checks fail or review comments request changes, diagnose the issue, make the required code changes in the repo, and report what changed. If the PR is green and no action is needed, report that it is ready. Do not merge unless the user explicitly asks for merge.
+Repeatedly inspect CI status, review comments, and mergeability. If checks fail or review comments request changes, diagnose the issue, make the required code changes in the repo, and report what changed. Decide whether a GitHub PR comment is warranted; if so, leave a concise comment on the pull request and include the comment outcome in the report. If the PR is green and no action is needed, report that it is ready. Do not merge unless the user explicitly asks for merge.
 `, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base)
 }
 
@@ -194,7 +194,7 @@ Merge status: %s
 Review status: %s
 %s
 
-Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. Keep this as the same long-running task objective; do not start a separate babysitter task.
+Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should decide whether a GitHub PR comment is warranted, such as answering reviewer feedback, explaining that no code change is needed, or summarizing a completed fix; if so, it should leave a concise comment on the pull request and report what it posted. Keep this as the same long-running task objective; do not start a separate babysitter task.
 `, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment)
 }
 
