@@ -23,6 +23,17 @@ func isTerminalWorkerStatus(status core.WorkerStatus) bool {
 	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
 }
 
+func jsonString(value any, nullDefault string) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	if string(data) == "null" && nullDefault != "" {
+		return nullDefault, nil
+	}
+	return string(data), nil
+}
+
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -206,26 +217,17 @@ ORDER BY kind ASC, id ASC`)
 
 func (s *SQLiteStore) SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	command, err := json.Marshal(plugin.Command)
+	command, err := jsonString(plugin.Command, "[]")
 	if err != nil {
 		return core.Plugin{}, err
 	}
-	capabilities, err := json.Marshal(plugin.Capabilities)
+	capabilities, err := jsonString(plugin.Capabilities, "[]")
 	if err != nil {
 		return core.Plugin{}, err
 	}
-	config, err := json.Marshal(plugin.Config)
+	config, err := jsonString(plugin.Config, "{}")
 	if err != nil {
 		return core.Plugin{}, err
-	}
-	if string(command) == "null" {
-		command = []byte("[]")
-	}
-	if string(capabilities) == "null" {
-		capabilities = []byte("[]")
-	}
-	if string(config) == "null" {
-		config = []byte("{}")
 	}
 	_, err = s.db.ExecContext(ctx, `
 INSERT INTO plugins (id, name, kind, protocol, enabled, status, error, command, endpoint, capabilities, config, created_at, updated_at)
@@ -249,10 +251,10 @@ ON CONFLICT(id) DO UPDATE SET
 		boolInt(plugin.Enabled),
 		plugin.Status,
 		plugin.Error,
-		string(command),
+		command,
 		plugin.Endpoint,
-		string(capabilities),
-		string(config),
+		capabilities,
+		config,
 		now,
 		now,
 	)
@@ -303,19 +305,13 @@ ORDER BY id ASC`)
 
 func (s *SQLiteStore) SaveTarget(ctx context.Context, target core.TargetConfig) (core.TargetConfig, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	labels, err := json.Marshal(target.Labels)
+	labels, err := jsonString(target.Labels, "{}")
 	if err != nil {
 		return core.TargetConfig{}, err
 	}
-	capacity, err := json.Marshal(target.Capacity)
+	capacity, err := jsonString(target.Capacity, "{}")
 	if err != nil {
 		return core.TargetConfig{}, err
-	}
-	if string(labels) == "null" {
-		labels = []byte("{}")
-	}
-	if string(capacity) == "null" {
-		capacity = []byte("{}")
 	}
 	checkoutRoot := strings.TrimSpace(target.CheckoutRoot)
 	if checkoutRoot == "" {
@@ -347,8 +343,8 @@ ON CONFLICT(id) DO UPDATE SET
 		checkoutRoot,
 		target.WorkDir,
 		target.WorkRoot,
-		string(labels),
-		string(capacity),
+		labels,
+		capacity,
 		now,
 		now,
 	)
@@ -518,21 +514,15 @@ ORDER BY id ASC`)
 
 func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (core.Project, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	labels, err := json.Marshal(project.TargetLabels)
+	labels, err := jsonString(project.TargetLabels, "{}")
 	if err != nil {
 		return core.Project{}, err
 	}
-	if string(labels) == "null" {
-		labels = []byte("{}")
-	}
-	remoteCheckouts, err := json.Marshal(project.RemoteCheckouts)
+	remoteCheckouts, err := jsonString(project.RemoteCheckouts, "{}")
 	if err != nil {
 		return core.Project{}, err
 	}
-	if string(remoteCheckouts) == "null" {
-		remoteCheckouts = []byte("{}")
-	}
-	policy, err := json.Marshal(project.PullRequestPolicy)
+	policy, err := jsonString(project.PullRequestPolicy, "")
 	if err != nil {
 		return core.Project{}, err
 	}
@@ -559,9 +549,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		project.VCS,
 		project.DefaultBase,
 		project.WorkspaceRoot,
-		string(labels),
-		string(remoteCheckouts),
-		string(policy),
+		labels,
+		remoteCheckouts,
+		policy,
 		now,
 		now,
 	); err != nil {
@@ -582,21 +572,15 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, project.ID); err != nil 
 
 func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, makeDefault bool) (core.Project, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	labels, err := json.Marshal(project.TargetLabels)
+	labels, err := jsonString(project.TargetLabels, "{}")
 	if err != nil {
 		return core.Project{}, err
 	}
-	if string(labels) == "null" {
-		labels = []byte("{}")
-	}
-	remoteCheckouts, err := json.Marshal(project.RemoteCheckouts)
+	remoteCheckouts, err := jsonString(project.RemoteCheckouts, "{}")
 	if err != nil {
 		return core.Project{}, err
 	}
-	if string(remoteCheckouts) == "null" {
-		remoteCheckouts = []byte("{}")
-	}
-	policy, err := json.Marshal(project.PullRequestPolicy)
+	policy, err := jsonString(project.PullRequestPolicy, "")
 	if err != nil {
 		return core.Project{}, err
 	}
@@ -633,9 +617,9 @@ ON CONFLICT(id) DO UPDATE SET
 		project.VCS,
 		project.DefaultBase,
 		project.WorkspaceRoot,
-		string(labels),
-		string(remoteCheckouts),
-		string(policy),
+		labels,
+		remoteCheckouts,
+		policy,
 		now,
 		now,
 	); err != nil {
