@@ -3874,7 +3874,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}); err != nil {
 			return false, err
 		}
-		pr, err := s.PublishTaskPullRequest(ctx, task.ID, req)
+		recordCompletedAction := func(published core.PullRequest) error {
+			return s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":          action.Kind,
+				"when":          nonEmpty(action.When, "after_success"),
+				"reason":        action.Reason,
+				"inputs":        action.Inputs,
+				"workerId":      workerID,
+				"pullRequestId": published.ID,
+				"url":           published.URL,
+			})
+		}
+		_, err := s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
 		if err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -3888,17 +3899,6 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				})
 				return false, nil
 			}
-			return false, err
-		}
-		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
-			"kind":          action.Kind,
-			"when":          nonEmpty(action.When, "after_success"),
-			"reason":        action.Reason,
-			"inputs":        action.Inputs,
-			"workerId":      workerID,
-			"pullRequestId": pr.ID,
-			"url":           pr.URL,
-		}); err != nil {
 			return false, err
 		}
 		if boolMetadata(action.Inputs, "continueAfterPublish") {
