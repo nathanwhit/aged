@@ -300,6 +300,34 @@ func TestSSHRunnerDescribeChangesTimesOutHungArtifactRead(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerDescribeChangesReportsSSHTransportFailure(t *testing.T) {
+	executor := &sshTransportFailureExecutor{
+		errMessage: "exedev@uncle-storm.exe.xyz: Permission denied (publickey,keyboard-interactive).",
+	}
+	runner := SSHRunner{Executor: executor}
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+
+	changes := runner.DescribeChanges(context.Background(), run)
+	if changes.Error == "" {
+		t.Fatalf("ssh transport failure should populate Error: %+v", changes)
+	}
+	if !strings.Contains(changes.Error, "Permission denied") {
+		t.Fatalf("Error should preserve underlying ssh error, got %q", changes.Error)
+	}
+	if changes.Diff != "" {
+		t.Fatalf("Diff should be empty when ssh transport fails, got %q", changes.Diff)
+	}
+	if len(changes.ChangedFiles) != 0 {
+		t.Fatalf("ChangedFiles should be empty when ssh transport fails, got %+v", changes.ChangedFiles)
+	}
+	if changes.Dirty {
+		t.Fatalf("Dirty should be false when ssh transport fails: %+v", changes)
+	}
+	if changes.Status != "" || changes.DiffStat != "" {
+		t.Fatalf("Status/DiffStat should be empty when ssh transport fails: %+v", changes)
+	}
+}
+
 func TestSSHRunnerApplyPatchNormalizesMissingTrailingNewline(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -726,6 +754,18 @@ func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input st
 		e.input = input
 	}
 	return "", nil
+}
+
+type sshTransportFailureExecutor struct {
+	errMessage string
+}
+
+func (e *sshTransportFailureExecutor) Run(_ context.Context, _ []string) (string, error) {
+	return e.errMessage + "\n", errors.New("exit status 255")
+}
+
+func (e *sshTransportFailureExecutor) RunInput(_ context.Context, _ []string, _ string) (string, error) {
+	return e.errMessage + "\n", errors.New("exit status 255")
 }
 
 type recordingWorkerSink struct {

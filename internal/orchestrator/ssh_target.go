@@ -395,12 +395,33 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
 	}
+	var firstReadErr error
+	tryRead := func(name string) (string, bool) {
+		out, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
+		if err != nil {
+			if firstReadErr == nil {
+				if detail := strings.TrimSpace(out); detail != "" {
+					firstReadErr = fmt.Errorf("read remote %s: %w: %s", name, err, detail)
+				} else {
+					firstReadErr = fmt.Errorf("read remote %s: %w", name, err)
+				}
+			}
+			return "", false
+		}
+		return out, true
+	}
 	read := func(name string) string {
-		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
+		out, ok := tryRead(name)
+		if !ok {
+			return ""
+		}
 		return strings.TrimSpace(out)
 	}
 	readRaw := func(name string) string {
-		out, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
+		out, ok := tryRead(name)
+		if !ok {
+			return ""
+		}
 		return strings.TrimRight(out, "\r\n")
 	}
 	vcs := read("vcs.txt")
@@ -427,6 +448,9 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		changes.ChangedFiles = parseJJDiffSummary(status)
 	case "git":
 		changes.ChangedFiles = parseGitPorcelain(status)
+	}
+	if firstReadErr != nil {
+		changes.Error = firstReadErr.Error()
 	}
 	return changes
 }
