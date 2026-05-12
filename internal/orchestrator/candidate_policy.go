@@ -84,7 +84,11 @@ func applyCandidates(snapshot core.Snapshot, taskID string) []ApplyCandidate {
 		if len(changedFiles) == 0 {
 			changedFiles = payload.WorkspaceChanges.ChangedFiles
 		}
-		if payload.Status != core.WorkerSucceeded || len(changedFiles) == 0 {
+		changes := payload.WorkspaceChanges
+		if len(changes.ChangedFiles) == 0 {
+			changes.ChangedFiles = changedFiles
+		}
+		if payload.Status != core.WorkerSucceeded || !resultHasCandidateChanges(WorkerTurnResult{Changes: changes}) {
 			continue
 		}
 		candidates = append(candidates, ApplyCandidate{
