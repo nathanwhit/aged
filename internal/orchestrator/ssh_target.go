@@ -291,11 +291,28 @@ func (r SSHRunner) DirectoryExists(ctx context.Context, target TargetConfig, dir
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
 	}
-	_, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", "test -d "+shellQuote(dir)))
+	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", "test -d "+shellQuote(dir)))
 	if err != nil {
-		return false, nil
+		if commandExitCode(err) == 1 {
+			return false, nil
+		}
+		detail := strings.TrimSpace(out)
+		if detail != "" {
+			return false, fmt.Errorf("%w: %s", err, detail)
+		}
+		return false, err
 	}
 	return true, nil
+}
+
+func commandExitCode(err error) int {
+	var exitErr interface {
+		ExitCode() int
+	}
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func (r SSHRunner) PrepareCheckout(ctx context.Context, target TargetConfig, spec RemoteCheckoutSpec) (string, error) {
