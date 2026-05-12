@@ -404,6 +404,38 @@ func TestSSHRunnerProbeAllowsMissingRepoForPreparation(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerDirectoryExistsReturnsFalseForMissingDirectory(t *testing.T) {
+	executor := &fakeRemoteExecutor{directoryErr: exitCodeError{code: 1}}
+	runner := SSHRunner{Executor: executor}
+
+	ok, err := runner.DirectoryExists(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, "/missing")
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if ok {
+		t.Fatal("ok = true, want false")
+	}
+}
+
+func TestSSHRunnerDirectoryExistsPreservesInfrastructureFailure(t *testing.T) {
+	executor := &fakeRemoteExecutor{
+		directoryOutput: "ssh: connect to host vm port 22: Connection refused\n",
+		directoryErr:    exitCodeError{code: 255},
+	}
+	runner := SSHRunner{Executor: executor}
+
+	ok, err := runner.DirectoryExists(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, "/repo")
+	if err == nil {
+		t.Fatal("err = nil, want infrastructure error")
+	}
+	if ok {
+		t.Fatal("ok = true, want false")
+	}
+	if !strings.Contains(err.Error(), "exit status 255") || !strings.Contains(err.Error(), "Connection refused") {
+		t.Fatalf("err = %v, want exit status and SSH detail", err)
+	}
+}
+
 func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -665,12 +697,14 @@ func TestServiceRemoteWorkerFailsBeforePrepareWhenSSHTargetMissingCheckoutRoot(t
 }
 
 type fakeRemoteExecutor struct {
-	commands       [][]string
-	probeOutput    string
-	prepareOutput  string
-	prepareErr     error
-	callbackOutput string
-	input          string
+	commands        [][]string
+	probeOutput     string
+	prepareOutput   string
+	prepareErr      error
+	directoryOutput string
+	directoryErr    error
+	callbackOutput  string
+	input           string
 }
 
 type gatedRemoteStatusExecutor struct {
@@ -691,6 +725,8 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 			return e.probeOutput, nil
 		}
 		return "checkoutRootOK=true\ntmux=true\nrepoPresent=true\ncpuCount=4\nload1=0.1\n", nil
+	case strings.Contains(joined, "test -d"):
+		return e.directoryOutput, e.directoryErr
 	case strings.Contains(joined, "stdout.log"):
 		return "remote output\n", nil
 	case strings.Contains(joined, "stderr.log"):
@@ -710,6 +746,18 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	default:
 		return "", nil
 	}
+}
+
+type exitCodeError struct {
+	code int
+}
+
+func (e exitCodeError) Error() string {
+	return "exit status " + strconv.Itoa(e.code)
+}
+
+func (e exitCodeError) ExitCode() int {
+	return e.code
 }
 
 func (e *gatedRemoteStatusExecutor) Run(_ context.Context, argv []string) (string, error) {
