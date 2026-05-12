@@ -2792,6 +2792,101 @@ func TestServiceLoadsProjectsFromSQLiteBeforeSeed(t *testing.T) {
 	}
 }
 
+func TestServiceDisablingRunnerPluginRemovesRuntimeRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if runner := service.runners["lint"]; runner == nil {
+		t.Fatalf("runner plugin was not registered: %+v", service.runners)
+	}
+
+	plugin.Enabled = false
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if runner, ok := service.runners["lint"]; ok {
+		t.Fatalf("disabled runner plugin left stale runner: %+v", runner)
+	}
+}
+
+func TestServiceClearingRunnerPluginCommandRemovesRuntimeRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.runners["lint"]; !ok {
+		t.Fatalf("runner plugin was not registered: %+v", service.runners)
+	}
+
+	plugin.Command = nil
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.runners["lint"]; ok {
+		t.Fatalf("runner plugin with cleared command left stale runner: %+v", service.runners)
+	}
+}
+
+func TestServiceRunnerPluginProtocolChangeRestoresStaticRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	static := buildOnlyRunner{kind: "lint", command: []string{"static-lint"}}
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, map[string]worker.Runner{"lint": static}, t.TempDir())
+	plugin := core.Plugin{
+		ID:       "runner:lint",
+		Name:     "Lint",
+		Kind:     "runner",
+		Enabled:  true,
+		Protocol: "aged-runner-v1",
+		Command:  []string{"aged-lint"},
+	}
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(service.runners["lint"].BuildCommand(workerSpec("w1")), " "); got != "aged-lint run" {
+		t.Fatalf("registered runner command = %q", got)
+	}
+
+	plugin.Protocol = "aged-plugin-v1"
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	runner, ok := service.runners["lint"]
+	if !ok {
+		t.Fatalf("static runner was not restored after protocol change: %+v", service.runners)
+	}
+	if got := strings.Join(runner.BuildCommand(workerSpec("w1")), " "); got != "static-lint" {
+		t.Fatalf("static runner was not restored, command = %q", got)
+	}
+}
+
 func TestServiceMapsExternalRepoToProject(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7439,6 +7534,68 @@ func TestServiceRemoteClaudeWorkerUploadsPromptForPrintStdin(t *testing.T) {
 	}
 	if !strings.Contains(executor.input, "review remotely") {
 		t.Fatalf("uploaded prompt missing plan prompt: %q", executor.input)
+	}
+}
+
+func TestServiceRemotePluginWorkerUploadsRunnerSpecStdin(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 4},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind:      "review-plugin",
+		Prompt:          "review remotely",
+		ReasoningEffort: "high",
+	}}, map[string]worker.Runner{
+		"review-plugin": worker.NewPluginRunner("review-plugin", []string{"aged-review-plugin"}),
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Remote plugin", Prompt: "Run plugin on VM."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 1 || len(snapshot.ExecutionNodes) != 1 {
+		t.Fatalf("workers = %+v nodes = %+v", snapshot.Workers, snapshot.ExecutionNodes)
+	}
+	remoteWorker := snapshot.Workers[0]
+	node := snapshot.ExecutionNodes[0]
+	expected, err := worker.PluginRunnerStdin(worker.Spec{
+		ID:              remoteWorker.ID,
+		TaskID:          task.ID,
+		Kind:            "review-plugin",
+		Prompt:          remoteWorker.Prompt,
+		WorkDir:         node.RemoteWorkDir,
+		ReasoningEffort: "high",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.input != expected {
+		t.Fatalf("uploaded plugin stdin = %q, want %q", executor.input, expected)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(executor.input), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["prompt"] != remoteWorker.Prompt || !strings.Contains(remoteWorker.Prompt, "review remotely") {
+		t.Fatalf("plugin stdin prompt = %v, worker prompt = %q", payload["prompt"], remoteWorker.Prompt)
+	}
+	if payload["workDir"] != node.RemoteWorkDir {
+		t.Fatalf("plugin stdin workDir = %v, want %q", payload["workDir"], node.RemoteWorkDir)
+	}
+	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
+	if !strings.Contains(joinedCommands, "aged-review-plugin") || !strings.Contains(joinedCommands, "run") {
+		t.Fatalf("remote command did not start plugin runner: %+v", executor.commands)
 	}
 }
 
