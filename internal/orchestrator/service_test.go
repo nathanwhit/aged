@@ -7405,6 +7405,43 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	}
 }
 
+func TestServiceRemoteClaudeWorkerUploadsPromptForPrintStdin(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 4},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "claude",
+		Prompt:     "review remotely",
+	}}, map[string]worker.Runner{
+		"claude": worker.DefaultRunners()["claude"],
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Remote Claude", Prompt: "Run Claude on VM."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 1 {
+		t.Fatalf("workers = %+v", snapshot.Workers)
+	}
+	if got, want := executor.input, snapshot.Workers[0].Prompt; got != want {
+		t.Fatalf("uploaded prompt = %q, want worker prompt %q", got, want)
+	}
+	if !strings.Contains(executor.input, "review remotely") {
+		t.Fatalf("uploaded prompt missing plan prompt: %q", executor.input)
+	}
+}
+
 func TestServiceRemoteWorkerUsesProjectCheckoutOverride(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

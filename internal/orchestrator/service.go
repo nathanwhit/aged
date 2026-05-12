@@ -3090,7 +3090,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState}
 	stdin := ""
-	if worker.CommandUsesPromptStdin(command) {
+	if capabilities.PromptStdin || worker.CommandUsesPromptStdin(command) {
 		stdin = spec.Prompt
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {
