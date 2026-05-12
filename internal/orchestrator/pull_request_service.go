@@ -104,7 +104,10 @@ func (s *Service) pullRequestMonitoringDisabled(snapshot core.Snapshot, pr core.
 	if !ok {
 		return false
 	}
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return false
+	}
 	return project.PullRequestPolicy.MonitorPullRequests != nil && !*project.PullRequestPolicy.MonitorPullRequests
 }
 
@@ -120,7 +123,10 @@ func (s *Service) PublishTaskPullRequest(ctx context.Context, taskID string, req
 	if !ok {
 		return core.PullRequest{}, eventstore.ErrNotFound
 	}
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
 	sourceRoot := project.LocalPath
 	workerID, err := resolvePullRequestWorkerID(snapshot, task, req.WorkerID)
 	if err != nil {
@@ -225,7 +231,10 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	if pr.ID == "" {
 		return core.PullRequest{}, errors.New("update pull request requires tracked pull request")
 	}
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
 	sourceRoot := project.LocalPath
 	workerID, err := resolvePullRequestWorkerID(snapshot, task, req.WorkerID)
 	if err != nil {
@@ -460,7 +469,10 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	if !ok {
 		return nil, eventstore.ErrNotFound
 	}
-	project := s.projectForTask(task)
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return nil, err
+	}
 	repo := strings.TrimSpace(req.Repo)
 	if repo == "" {
 		repo = project.UpstreamRepo

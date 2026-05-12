@@ -3817,6 +3817,62 @@ func TestServiceRetriesFailedTaskFromPersistedPlan(t *testing.T) {
 	}
 }
 
+func TestServiceRetryFailsWhenExplicitTaskProjectWasDeleted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	defaultProject := core.Project{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"}
+	deletedProject := core.Project{ID: "deleted", Name: "Deleted", LocalPath: t.TempDir(), DefaultBase: "main"}
+	if _, err := store.SaveProject(ctx, defaultProject, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProject(ctx, deletedProject, false); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := NewProjectRegistry([]core.Project{defaultProject, deletedProject}, defaultProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &flakyRunner{kind: "retryable"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "retryable",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"retryable": runner}, defaultProject.LocalPath, fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		ProjectID: deletedProject.ID,
+		Title:     "Do project work",
+		Prompt:    "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	if err := service.DeleteProject(ctx, deletedProject.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.RetryTask(ctx, task.ID)
+	if err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("retry err = %v, want missing explicit project", err)
+	}
+	if runner.callsValue() != 1 {
+		t.Fatalf("runner calls = %d, want retry to stop before rerun", runner.callsValue())
+	}
+	if _, err := service.projectForTaskID(ctx, task.ID); err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("projectForTaskID err = %v, want missing explicit project", err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 1 {
+		t.Fatalf("worker.created count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+	}
+}
+
 func TestServiceRetriesCanceledTaskFromPersistedPlan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -5733,6 +5789,97 @@ func TestServiceAppliesRetainedWorkerChanges(t *testing.T) {
 	}
 	if applyCalls != 1 {
 		t.Fatalf("second apply changed apply calls to %d, want 1", applyCalls)
+	}
+}
+
+func TestServiceRemoteApplyFailsWhenExplicitTaskProjectWasDeleted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	defaultProject := core.Project{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"}
+	deletedProject := core.Project{ID: "deleted", Name: "Deleted", LocalPath: t.TempDir(), DefaultBase: "main"}
+	if _, err := store.SaveProject(ctx, defaultProject, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProject(ctx, deletedProject, false); err != nil {
+		t.Fatal(err)
+	}
+	projects, err := NewProjectRegistry([]core.Project{defaultProject, deletedProject}, defaultProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, defaultProject.LocalPath, fakeWorkspaceManager{})
+	service.SetProjects(projects)
+
+	taskID := "task-deleted-project"
+	workerID := "worker-remote"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"projectId": deletedProject.ID,
+			"title":     "Remote changes",
+			"prompt":    "Apply remote patch.",
+			"metadata":  map[string]any{"projectId": deletedProject.ID},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:       "/runs/remote",
+			CWD:        "/checkouts/deleted",
+			SourceRoot: "/checkouts/deleted",
+			Mode:       "remote",
+			VCSType:    "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerSucceeded,
+			"workspaceChanges": WorkspaceChanges{
+				Root:         "/runs/remote",
+				CWD:          "/checkouts/deleted",
+				Diff:         newFilePatch("remote.txt", "remote\n"),
+				ChangedFiles: []WorkspaceChangedFile{{Path: "remote.txt", Status: "added"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remoteApplyCalls := 0
+	service.remoteApply = func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error) {
+		remoteApplyCalls++
+		return WorkerApplyResult{}, nil
+	}
+	if err := service.DeleteProject(ctx, deletedProject.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.ApplyWorkerChanges(ctx, workerID)
+	if err == nil || !strings.Contains(err.Error(), `unknown projectId "deleted"`) {
+		t.Fatalf("apply err = %v, want missing explicit project", err)
+	}
+	if remoteApplyCalls != 0 {
+		t.Fatalf("remote apply calls = %d, want 0", remoteApplyCalls)
 	}
 }
 
