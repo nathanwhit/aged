@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -64,6 +65,43 @@ func TestDiscordDriverSkipsHistoryThenCreatesTaskFromPrefix(t *testing.T) {
 	}
 	if !strings.Contains(client.sent[len(client.sent)-1], "Created aged task") {
 		t.Fatalf("sent messages = %+v", client.sent)
+	}
+}
+
+func TestDiscordDriverDoesNotAdvanceLastSeenWhenHandlingFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	client := &fakeDiscordClient{
+		me:      DiscordUser{ID: "bot", Bot: true},
+		sendErr: errors.New("discord unavailable"),
+		messages: map[string][]DiscordMessage{
+			"chan": {{ID: "1", ChannelID: "chan", Content: "do it", Author: DiscordUser{ID: "user"}}},
+		},
+	}
+	driver := NewDiscordDriver(service, DiscordDriverConfig{
+		Enabled:        true,
+		ProcessHistory: true,
+		Channels:       []DiscordChannelConfig{{ID: "chan"}},
+	}, client)
+
+	if err := driver.RunOnce(ctx); err == nil {
+		t.Fatal("expected handling error")
+	}
+	if got := driver.lastSeen["chan"]; got != "" {
+		t.Fatalf("lastSeen = %q, want empty after handling failure", got)
+	}
+
+	client.sendErr = nil
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := driver.lastSeen["chan"]; got != "1" {
+		t.Fatalf("lastSeen = %q, want 1 after successful retry", got)
 	}
 }
 
@@ -1584,6 +1622,7 @@ type fakeDiscordClient struct {
 	me       DiscordUser
 	messages map[string][]DiscordMessage
 	sent     []string
+	sendErr  error
 }
 
 func targetByID(targets []core.TargetState, id string) (core.TargetState, bool) {
@@ -1623,6 +1662,9 @@ func (c *fakeDiscordClient) ListMessages(_ context.Context, channelID string, af
 }
 
 func (c *fakeDiscordClient) SendMessage(_ context.Context, _ string, content string) error {
+	if c.sendErr != nil {
+		return c.sendErr
+	}
 	c.sent = append(c.sent, content)
 	return nil
 }

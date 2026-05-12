@@ -3882,16 +3882,18 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     if (!task) return snapshot;
     const status = String(payload.status) as Task["status"];
     const objective = taskObjectiveForStatus(task.objectiveStatus, task.objectivePhase, status);
+    const tasks = upsertById(snapshot.tasks, {
+      ...task,
+      status,
+      error: payloadValue(payload.error) || undefined,
+      objectiveStatus: objective.status,
+      objectivePhase: objective.phase,
+      updatedAt: event.at,
+    });
     return {
       ...snapshot,
-      tasks: upsertById(snapshot.tasks, {
-        ...task,
-        status,
-        error: payloadValue(payload.error) || undefined,
-        objectiveStatus: objective.status,
-        objectivePhase: objective.phase,
-        updatedAt: event.at,
-      }),
+      tasks,
+      orchestrationGraphs: deriveOrchestrationGraphs(tasks, snapshot.executionNodes),
     };
   }
   if (event.type === "task.final_candidate_selected" && event.taskId) {
