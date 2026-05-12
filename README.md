@@ -1,143 +1,52 @@
-# aged - agent daemon like a fine wine
+# aged
 
-`aged` is an agent orchestrator for autonomous development work.
+`aged` is a durable, local-first orchestrator for autonomous development work. It runs bounded agent turns under long-lived task objectives, stores state in SQLite, and can keep tasks moving through local workspaces, SSH targets, GitHub PR feedback, and user steering.
 
-The current implementation is an initial vertical slice:
+## Current State
 
-- Go daemon with SQLite event persistence
-- Prompt-driven, Codex-backed, and API-backed orchestrator brain providers
-- Codex, Claude, and shell worker runner adapters selected by the orchestrator
-- Normalized worker events for logs, results, errors, and worker requests for input
-- VCS-pluggable workspace preflight before workers start
-- HTTP API and SSE event stream
-- React/Vite dashboard for task creation, assistant Q&A, PR publishing, steering, cancellation, and live state
+- SQLite-backed daemon with HTTP API, SSE, MCP, and a React/Vite dashboard
+- Prompt, Codex, API, and static scheduler brains
+- Codex, Claude, shell, mock, benchmark, and plugin-backed workers
+- `jj` and Git workspace support, with isolated workspaces by default
+- Local and SSH/tmux execution targets
+- Durable task objectives with milestones, artifacts, final candidates, PR state, retries, and orchestration graphs
+- Built-in GitHub and Discord drivers
+- Dynamic project, target, and plugin registries persisted in SQLite
 
-## Run the daemon
+## Run
 
 ```sh
 go run ./cmd/aged
 ```
 
-The daemon listens on `http://127.0.0.1:8787` by default and writes state to `aged.db`.
+Defaults:
 
-Useful flags:
+- address: `http://127.0.0.1:8787`
+- database: `aged.db`
+- worker: `mock`
+- workspace mode: `isolated`
+- auth: `none`
+
+Common local command:
 
 ```sh
-go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker mock -workdir .
+go run ./cmd/aged -addr 127.0.0.1:8787 -db aged.db -worker codex -workdir . -auth none
 ```
 
-The interactive Ask panel is separate from the scheduler brain. Configure it with `-assistant` / `AGED_ASSISTANT`:
+Useful scheduler/assistant settings:
 
-- `auto`: use `codex` or `claude` when the default worker is one of those CLIs.
-- `codex`: run `codex exec --json` for direct answers.
-- `claude`: run `claude --print --output-format stream-json` for direct answers.
-- `brain`: fall back to the configured brain provider if it implements Q&A.
-- `none`: no CLI assistant.
-
-The dev-control server defaults to `-assistant auto`, so a `-worker codex` dev daemon uses Codex for Ask even when scheduling still uses `-brain prompt`.
-
-Task titles are optional. When `title` is omitted or blank, aged asks the configured assistant for a short 1-8 word title and falls back to a local prompt-derived title if the assistant is unavailable.
-
-Remote execution targets can be registered dynamically through `POST /api/targets` / `PUT /api/targets/{id}` or through the dashboard Targets pane. They are persisted in SQLite and become available to the live scheduler without restarting the daemon. The dashboard exposes the SSH `checkoutRoot` on targets and per-target project checkout overrides as `target id` / `path` rows on projects.
-
-`-targets` / `AGED_TARGETS` still accept startup seed JSON:
-
-```json
-{
-  "targets": [
-    {
-      "id": "perf-1",
-      "kind": "ssh",
-      "host": "perf-1.internal",
-      "user": "aged",
-      "identityFile": "/Users/me/.ssh/id_ed25519",
-      "insecureIgnoreHostKey": false,
-      "checkoutRoot": "/srv/aged/checkouts",
-      "workRoot": "/srv/aged/runs",
-      "labels": { "role": "benchmark" },
-      "capacity": { "maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32 }
-    }
-  ]
-}
+```sh
+AGED_BRAIN=codex go run ./cmd/aged
+AGED_BRAIN=api AGED_BRAIN_MODEL=<model> AGED_BRAIN_API_KEY=<key> go run ./cmd/aged
+AGED_ASSISTANT=codex go run ./cmd/aged
+AGED_ASSISTANT=claude go run ./cmd/aged
 ```
 
-`identityFile` is optional. Leave it unset to use normal OpenSSH behavior, including `ssh-agent` and `~/.ssh/config`.
+The Ask panel is configured separately from the scheduler with `-assistant` / `AGED_ASSISTANT`: `auto`, `codex`, `claude`, `brain`, or `none`.
 
-SSH targets expect `ssh` and `tmux` to be available. The daemon starts a detached tmux session per worker, writes logs/status under `workRoot`, polls those files back into the normal event stream, and can resume polling after a daemon restart from execution node metadata.
-Before starting a fresh remote worker, aged resolves a project-scoped checkout path for the selected target. A project `remoteCheckouts` entry for the target id wins; otherwise aged derives `checkoutRoot/<project-id>` from the target-level `checkoutRoot`. Existing target-level `workDir` configs remain accepted as a compatibility alias for `checkoutRoot`, but they are treated as a root for derived per-project checkouts rather than a single shared checkout. If the resolved checkout is missing, aged clones the configured project repo; if it is a Git checkout, aged fetches origin and checks out the project `defaultBase` from `origin`. Retry/follow-up workers reuse the previous remote workdir so partial work is preserved.
-Remote workers also write VCS change summaries and `diff.patch` into the run directory. When the remote workdir is a `jj` or Git checkout, aged reads those artifacts back into the normal `worker.completed.workspaceChanges` projection.
-Remote worker patches can be reviewed and applied through the normal worker apply endpoint. The current remote apply path applies `diff.patch` to the task project's local checkout with `git apply`, then records `worker.changes_applied`.
+## Projects
 
-Plugins and external integration descriptors are configured with `-plugins` / `AGED_PLUGINS` using JSON. Enabled plugins with `protocol: "aged-plugin-v1"` and a `command` are probed at daemon startup by running `command... describe`; the command must print a JSON plugin descriptor. This gives external drivers/runners a narrow process lifecycle without loading code into the daemon.
-
-```json
-{
-  "plugins": [
-    {
-      "id": "driver:github-issues",
-      "name": "GitHub Issue Driver",
-      "kind": "driver",
-      "protocol": "aged-plugin-v1",
-      "enabled": true,
-      "command": ["aged-github-driver"],
-      "capabilities": ["issues", "pull-requests"]
-    }
-  ]
-}
-```
-
-The built-in GitHub driver is enabled separately with `-github-driver` / `AGED_GITHUB_DRIVER`, which accepts either a JSON file path or inline JSON. It uses the local `gh` identity, so a VM bot setup should authenticate `gh` as that bot user before starting aged.
-
-```json
-{
-  "enabled": true,
-  "intervalSeconds": 60,
-  "issueLimit": 20,
-  "issues": [
-    {
-      "repo": "nathanwhit/aged",
-      "labels": ["aged"],
-      "projectId": "aged"
-    }
-  ],
-  "pullRequests": {
-    "enabled": true,
-    "repos": ["nathanwhit/aged"],
-    "autoPublish": true,
-    "autoBabysit": true,
-    "draft": false
-  }
-}
-```
-
-On each poll, the driver creates idempotent tasks for matching GitHub issues, publishes PRs for succeeded GitHub issue tasks that do not already have a PR, refreshes known PR status, and steers the original PR task when checks fail, reviews request changes, or mergeability is blocked/dirty. It does not merge PRs automatically.
-
-The built-in Discord driver is enabled with `-discord-driver` / `AGED_DISCORD_DRIVER`, which accepts a JSON file path or inline JSON. It polls configured channels with a Discord bot token, answers normal messages through the configured aged assistant, and can either answer, propose a task for later confirmation, or directly create a task when the conversation clearly asks aged to start work. `task: <prompt>` and a later `do it` reply remain supported shortcuts. If the assistant is not configured for useful conversational answers, the driver still lets `do it` create a task from the prior Discord message.
-
-```json
-{
-  "enabled": true,
-  "token": "optional; defaults to DISCORD_BOT_TOKEN",
-  "intervalSeconds": 5,
-  "messageLimit": 20,
-  "processHistory": false,
-  "channels": [
-    {
-      "id": "123456789012345678",
-      "defaultProjectId": "aged",
-      "allowedUserIds": ["234567890123456789"],
-      "requireMention": true,
-      "taskPrefix": "task:"
-    }
-  ]
-}
-```
-
-The Discord assistant is prompted to return a structured decision: `answer`, `list_projects`, `create_project`, `propose_task`, or `create_task`. Proposed/created tasks include `projectId`, `title`, and `prompt`; the project id must match a configured project, with `defaultProjectId` used as the channel fallback. Project creation uses the same persisted registry as `POST /api/projects`, so Discord can add local checkouts when the user provides an id/name and absolute path. Chat turns run with the selected project's checkout as the assistant working directory and instruct the assistant to inspect code read-only; code changes should be scheduled as tasks. If the daemon restarts after a proposal, a later confirmation can recover the pending task from persisted assistant events.
-
-This is a daemon-hosted Discord transport, not a replacement for a full interactive Codex/Claude agent. The configured aged assistant persists Codex/Claude provider session ids and resumes headless sessions on follow-up messages, so Discord can support continuous conversation when `-assistant codex` or `-assistant claude` is configured. MCP remains the cleaner path when an external agent runtime is available.
-
-Projects are persisted in SQLite. On first startup with an empty database, aged seeds projects from `-projects` / `AGED_PROJECTS`; if omitted, it creates a single default project from `-workdir`.
+Projects are persisted in SQLite. On an empty database, `-projects` / `AGED_PROJECTS` seeds them; otherwise aged creates one default project from `-workdir`.
 
 ```json
 {
@@ -148,95 +57,181 @@ Projects are persisted in SQLite. On first startup with an empty database, aged 
       "name": "aged",
       "localPath": "/Users/me/Documents/Code/aged",
       "repo": "owner/aged",
-      "defaultBase": "main",
-      "targetLabels": { "role": "default" },
-      "remoteCheckouts": { "perf-1": "/srv/aged/custom/aged" }
-    },
-    {
-      "id": "aged-fork",
-      "name": "aged fork",
-      "localPath": "/Users/me/Documents/Code/aged-fork",
-      "repo": "fork-owner/aged",
       "upstreamRepo": "owner/aged",
       "headRepoOwner": "fork-owner",
       "pushRemote": "fork",
-      "defaultBase": "main"
+      "defaultBase": "main",
+      "workspaceRoot": "/tmp/aged-workspaces",
+      "targetLabels": { "role": "default" },
+      "remoteCheckouts": { "perf-1": "/srv/aged/custom/aged" },
+      "pullRequestPolicy": {
+        "branchPrefix": "codex/aged-",
+        "draft": false,
+        "allowMerge": false,
+        "autoMerge": false,
+        "monitorPullRequests": true
+      }
     }
   ]
 }
 ```
 
-Tasks may include `projectId`. External drivers can also include metadata such as `"repo": "owner/repo"`; if that repo matches a configured project, the task is routed there. For fork workflows, `repo` is the local checkout/fork repository, `upstreamRepo` is the issue and PR target repository, `headRepoOwner` qualifies fork PR heads, and `pushRemote` selects the remote for pushed bookmarks or branches. Worker workspaces, worker cwd, apply, and PR publishing all resolve through the task's project.
+Tasks can set `projectId`. External tasks can also include `metadata.repo`; if it matches a configured project, aged routes the task there.
 
-New projects can also be added while the daemon is running:
+For fork workflows:
 
-```sh
-curl -X POST http://127.0.0.1:8787/api/projects \
-  -H 'content-type: application/json' \
-  -d '{
-    "id": "node",
-    "name": "Node.js",
-    "localPath": "/Users/me/Documents/Code/node",
-    "repo": "nodejs/node",
-    "vcs": "auto",
-    "defaultBase": "main"
-  }'
+- `repo`: local checkout/fork repository
+- `upstreamRepo`: issue and PR target repository
+- `headRepoOwner`: fork owner for PR heads
+- `pushRemote`: remote used for pushed branches/bookmarks
+
+Runtime project management is available through `/api/projects`, `/api/projects/{id}`, `/api/projects/{id}/health`, MCP, Discord project creation, and the dashboard.
+
+## Workspaces And Targets
+
+Workspace flags:
+
+- `-workspace-vcs auto|jj|git`
+- `-workspace-mode isolated|shared`
+- `-workspace-root <dir>`
+- `-workspace-cleanup retain|delete_on_success|delete_on_terminal`
+
+If `-workspace-root` is empty, isolated workspaces default to `~/.aged/workspaces`. Relative roots are resolved inside the source checkout.
+
+Retained workspace artifact cleanup runs on startup by default:
+
+- `-workspace-artifact-cleanup`
+- `-workspace-artifact-cleanup-dry-run`
+- `-workspace-artifact-cleanup-min-age 24h`
+
+The current artifact allowlist removes stale terminal worker `target/` directories from retained local `jj` and Git workspaces when they are safe to clean.
+
+SSH targets are configured with `-targets` / `AGED_TARGETS` or through `/api/targets`:
+
+```json
+{
+  "targets": [
+    {
+      "id": "perf-1",
+      "kind": "ssh",
+      "host": "perf-1.internal",
+      "user": "aged",
+      "checkoutRoot": "/srv/aged/checkouts",
+      "workRoot": "/srv/aged/runs",
+      "labels": { "role": "benchmark" },
+      "capacity": { "maxWorkers": 2, "cpuWeight": 8, "memoryGB": 32 }
+    }
+  ]
+}
 ```
 
-The daemon also exposes a streamable HTTP MCP endpoint at `POST /mcp`. It is protected by the same Google auth middleware when auth is enabled. MCP clients can use aged as a durable orchestration backend while natural-language interaction stays in Codex, Claude, or another agent runtime. Exposed tools include `aged_snapshot`, `aged_create_task`, `aged_list_projects`, `aged_create_project`, `aged_publish_pr`, `aged_refresh_pr`, `aged_babysit_pr`, `aged_retry_task`, `aged_steer_task`, and `aged_cancel_task`. MCP resources include `aged://snapshot`, `aged://tasks/{id}`, `aged://workers/{id}`, and `aged://pull-requests/{id}`. The HTTP assistant endpoint and Discord driver also persist provider session ids for resumable Codex/Claude headless conversations.
+SSH targets need `ssh` and `tmux`. `identityFile` is optional; leave it unset to use normal OpenSSH behavior. Remote workers run in detached tmux sessions, publish logs/status back into the event stream, and write VCS summaries plus `diff.patch` for review/apply.
 
-Scheduler behavior:
+## Task Model
 
-- `-worker mock` sets the orchestrator's fallback runner when the prompt brain does not choose a different runner.
-- Users do not choose workers per task; task creation only supplies the work request.
-- Users or external drivers may choose a project per task with `projectId`; worker selection still belongs to the orchestrator.
-- Available runner adapters include `mock`, `codex`, `claude`, `shell`, and `benchmark_compare`.
-- Each task records a `task.planned` event with the orchestrator's selected `workerKind`, `workerPrompt`, `reasoningEffort`, rationale, steps, approvals, and future spawn hints. Codex workers receive `reasoningEffort` through `model_reasoning_effort`; Claude workers receive it through `--effort`.
-- Worker execution is also represented as first-class `execution.node_planned` state in snapshots, including node id, worker id, worker kind, spawn id, dependencies, role, and status.
-- Snapshots include a derived per-task orchestration graph with node summaries and parent/dependency edges, so clients do not need to reconstruct the work graph from raw events.
-- The service chooses an execution target for each worker. Target labels come from task metadata or project policy, not from the scheduler brain; scheduler-provided `metadata.targetLabels` are ignored and recorded as such. The target registry scores matching VMs by capacity, current running workers, worker size, and target labels.
-- Tasks can opt into `metadata.executionMode: "loop"` for a durable single-agent loop instead of scheduler planning. Loop mode runs one configured role worker repeatedly with retained workspace/session context, records each iteration, accepts normal steering/cancelation, and continues until the worker asks for input or the task is canceled. Loop settings include `loopWorkerKind`, `loopRole`, `loopPrompt`, `loopIntervalSeconds`, `loopFreshWorkspace`, and `reasoningEffort`.
-- The durable loop PR producer eval in `evals/durable-loop-pr-producer.md` is the quick target for checking whether loop mode keeps producing useful bounded PRs instead of stopping after one turn.
-- The scheduler is expected to support long-lived work by planning bounded worker turns, then using later turns for review, validation, feedback incorporation, or follow-up implementation.
-- `spawns` from initial and dynamically replanned plans are executed as a dependency graph after the plan's primary worker succeeds. Independent spawns run in parallel; spawns with `dependsOn` wait for their prerequisite spawn ids. Follow-up prompts include the original request plus prior worker summaries, errors, and changed files.
-- Brains that implement dynamic replanning can inspect completed worker turns after follow-ups and return `continue`, `complete`, `wait`, or `fail`. `continue` schedules another worker turn, runs that plan's follow-up graph, and records `task.replanned`. There is no fixed replan turn cap, so durable objectives can keep taking bounded worker turns until they wait, complete, fail, or are canceled.
-- `publish_pull_request` actions wait on the opened PR by default. Long-running research tasks that are expected to produce multiple PRs can set `inputs.continueAfterPublish: true`; aged records the PR artifact and keeps the same task active for later optimization turns.
-- Dynamic continuation workers inherit the latest changed candidate by default. Plans can set `metadata.baseWorkerID: "source"` when the next PR should start from the project source checkout instead of stacking on the prior candidate.
-- Scheduler and replanner plans can use `ask_user` actions when user setup, credentials, VM changes, profiling permissions, or another human-provided answer is needed. Recoverable environment failures such as missing commands, profiler/kernel permission errors, SSH setup problems, and missing repo setup are also converted into waiting-user approval events.
-- Before a worker is created, the orchestrator resolves the task project and records `worker.workspace_prepared` with the prepared cwd, source root, current change, dirty status, VCS type, and workspace mode.
-- Worker prompts are wrapped with the prepared execution workspace before dispatch. In isolated mode workers are told to edit only that workspace and not the source checkout, even if the scheduler prompt mentions another local path.
-- Workspace backends are selected with `-workspace-vcs auto|jj|git`; `auto` prefers `jj` when `.jj` is present and otherwise supports Git repos. If `-workspace-root` is empty, isolated workspaces default to `~/.aged/workspaces`; relative workspace roots are resolved inside the source checkout.
-- Isolated mode is the default. Jujutsu repos use `jj workspace add -r @`; Git repos use `git worktree add --detach HEAD` and require a clean source working tree, ignoring aged's own untracked `.aged/` state. Dependent Git workers receive the prior candidate as a committed base revision, including untracked files.
-- Workspace cleanup is selected with `-workspace-cleanup retain|delete_on_success|delete_on_terminal`. Cleanup emits `worker.workspace_cleaned` and does not hide the worker's terminal status.
-- Worker subprocess output is normalized into `worker.output` events. Plain output becomes log/error events; Codex and Claude JSONL output preserves raw payloads and is classified as `log`, `result`, `error`, or `needs_input`. Running workers and execution nodes update `updatedAt` on output, so stale `updatedAt` timestamps identify workers that may be stuck.
-- `worker.completed` includes derived run semantics: `summary`, `error`, `needsInput`, `logCount`, and `workspaceChanges` when available. Workspace changes include dirty status, diffstat, and changed files. Workers that emit `needs_input` move the task to `waiting` and retain the workspace.
-- Retained isolated workspace changes can be reviewed with `GET /api/workers/{id}/changes` and applied back to the source checkout with `POST /api/workers/{id}/apply`. Jujutsu apply creates a new merge revision with source `@` and the worker workspace revision as parents; Git apply commits the worker worktree and merges that commit. Apply records `worker.changes_applied`.
-- Apply policy recommendations can be requested with `POST /api/tasks/{id}/apply-policy`; the service reports whether there are no candidates, exactly one candidate, or multiple competing candidates requiring manual selection or review.
-- Applied task changes can be published as GitHub pull requests with `POST /api/tasks/{id}/pull-request`. Publishing requires a successful worker with candidate changes. If exactly one successful worker has unapplied changes, the service applies it first, creates/pushes a branch from the source checkout, opens the PR with `gh`, and records `pull_request.published`. Generated PR bodies include the repo PR template when one exists, changed files, worker summary, and aged task metadata.
-- Pull request state is first-class snapshot data. Published PRs are automatically attached to their source task for babysitting. `POST /api/pull-requests/{id}/refresh` re-inspects CI/review/merge state, and `POST /api/pull-requests/{id}/babysit` can re-mark an imported or existing PR task for monitoring so later checks or review comments steer that same task.
-- Running workers receive task steering through `worker.Spec.Steering` when a runner supports it. For non-live-steerable workers such as the built-in Codex and Claude exec adapters, steering cancels the active worker, waits for its terminal event, and retries from the retained workspace with the provider session id and steering message injected into the resumed turn.
-- Failed or canceled tasks can be retried with `POST /api/tasks/{id}/retry`; retry reuses the persisted plan on the same task id and runs the normal follow-up/replan flow again. This is intended to recover tasks that were marked canceled after a daemon restart.
-- `benchmark_compare` compares explicit `baseline`, `candidate`, `threshold_percent`, and `higher_is_better` prompt fields and emits a benchmark comparison report.
+A task is not just a worker run. It has execution status plus objective state.
 
-API-backed scheduling can be enabled with:
+- `task.planned` records scheduler plans, worker kind, reasoning effort, steps, spawns, and actions.
+- `execution.node_planned` records the durable worker graph.
+- `task.objective_updated`, `task.milestone_reached`, and `task.artifact_recorded` track long-lived workflow state.
+- `task.final_candidate_selected` records the worker whose changes satisfy the task.
+- `worker.completed` records summary, error, needs-input state, log count, and workspace changes.
+
+Scheduler plans can:
+
+- run a primary worker plus dependency-aware `spawns`
+- dynamically replan with `continue`, `complete`, `wait`, or `fail`
+- publish intermediate PRs with `publish_pull_request`
+- watch existing PRs with `watch_pull_requests`
+- wait on external state with `wait_external`
+- ask the user with `ask_user`
+
+Dynamic replanning has no fixed turn cap. Durable objectives keep taking bounded turns until they wait, complete, fail, or are canceled.
+
+### Durable Loop Mode
+
+Set `metadata.executionMode: "loop"` to bypass scheduler planning and run one role worker repeatedly.
+
+Loop metadata:
+
+- `loopWorkerKind`
+- `loopRole`
+- `loopPrompt`
+- `loopIntervalSeconds`
+- `loopFreshWorkspace`
+- `reasoningEffort`
+
+`PUT /api/tasks/{id}/loop-config` updates the interval or prompt while the loop is waiting between turns. Retry can restart a succeeded loop task on the same task id.
+
+### Completion Modes
+
+Task metadata can set `completionMode`:
+
+- `local`: select/apply the final candidate through aged
+- `github`: publish the final candidate as a PR and treat merge as task satisfaction
+
+If omitted, aged infers GitHub completion for issue/PR-shaped tasks and local completion otherwise.
+
+## Pull Requests
+
+PRs are first-class snapshot state.
+
+- `POST /api/tasks/{id}/pull-request` publishes a selected or unambiguous candidate.
+- `POST /api/tasks/{id}/watch-pull-requests` imports existing PRs into a task.
+- `POST /api/pull-requests/{id}/refresh` refreshes checks, reviews, merge state, and unresolved feedback.
+- `POST /api/pull-requests/{id}/babysit` marks the same task as waiting on the PR.
+
+The GitHub monitor steers the original task when checks fail, reviews request changes, mergeability blocks, or new external PR feedback appears. Merged PRs satisfy related tasks; closed unmerged PRs abandon/cancel them. Aged does not merge PRs automatically today.
+
+## Drivers And Plugins
+
+GitHub driver:
 
 ```sh
-AGED_BRAIN=api AGED_BRAIN_MODEL=<model> AGED_BRAIN_API_KEY=<key> go run ./cmd/aged
+go run ./cmd/aged -github-driver github-driver.json
 ```
 
-The API brain uses an OpenAI-compatible chat completions endpoint. Override it with `AGED_BRAIN_ENDPOINT` or `-brain-endpoint`. If the API brain is not configured or returns invalid structured output, the daemon falls back to the local prompt brain.
+It uses local `gh` auth, creates idempotent issue tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work.
 
-Codex-backed scheduling can be enabled with:
+Discord driver:
 
 ```sh
-AGED_BRAIN=codex go run ./cmd/aged
+go run ./cmd/aged -discord-driver discord-driver.json
 ```
 
-The Codex brain runs `codex exec --dangerously-bypass-approvals-and-sandbox --json` against `prompts/scheduler.md`, extracts the final agent message as the scheduler plan JSON, validates it, and falls back to the local prompt brain on command or validation failures. Override the binary with `AGED_CODEX_PATH` or `-codex-path`.
+It polls configured bot channels, answers through the assistant, can propose or create tasks, supports `task: <prompt>` and `do it`, and can create projects from chat.
 
-## Google authentication
+Plugins use `-plugins` / `AGED_PLUGINS`. Enabled `aged-plugin-v1` command plugins are probed with `command... describe`; driver plugins may be supervised with `command... serve`, and runner plugins become worker kinds.
 
-Local development is unauthenticated by default. To expose the daemon on the web, enable Google OAuth and allowlist the Google account that should have access:
+## Dashboard And Dev Server
+
+Run the dashboard in dev mode:
+
+```sh
+cd web
+npm install
+npm run dev
+```
+
+Vite proxies `/api` to the daemon. Open `http://127.0.0.1:5173`.
+
+For self-iteration:
+
+```sh
+go run ./cmd/aged-dev
+```
+
+The dev server listens on `http://127.0.0.1:8790` and manages a daemon on `http://127.0.0.1:8787`.
+
+- `GET /health`: control server health
+- `GET /status`: last rebuild/restart result
+- `GET /rebuild` or `POST /rebuild`: rebuild daemon/UI and restart the managed daemon
+
+The rebuilt binary and logs live under `.aged/dev/`.
+
+## Auth
+
+Local development is unauthenticated by default. For web exposure:
 
 ```sh
 AGED_AUTH=google \
@@ -248,96 +243,29 @@ AGED_AUTH_REDIRECT_URL=https://aged.example.com/auth/callback \
 go run ./cmd/aged -addr 0.0.0.0:8787
 ```
 
-Create the OAuth client in Google Cloud Console as a web application and add the same callback URL as an authorized redirect URI:
-
-```text
-https://aged.example.com/auth/callback
-```
-
-Useful flags and env vars:
+Auth flags:
 
 - `-auth` / `AGED_AUTH`: `none` or `google`
 - `-google-client-id` / `AGED_GOOGLE_CLIENT_ID`
 - `-google-client-secret` / `AGED_GOOGLE_CLIENT_SECRET`
-- `-auth-allowed-emails` / `AGED_AUTH_ALLOWED_EMAILS`: comma-separated allowlist
-- `-auth-session-key` / `AGED_AUTH_SESSION_KEY`: stable random key, at least 32 bytes
-- `-auth-redirect-url` / `AGED_AUTH_REDIRECT_URL`: public callback URL when running behind a tunnel or reverse proxy
-- `-assistant` / `AGED_ASSISTANT`: interactive assistant provider, `auto`, `brain`, `none`, `codex`, or `claude`
-- `-codex-path` / `AGED_CODEX_PATH`
-- `-claude-path` / `AGED_CLAUDE_PATH`
+- `-auth-allowed-emails` / `AGED_AUTH_ALLOWED_EMAILS`
+- `-auth-session-key` / `AGED_AUTH_SESSION_KEY`
+- `-auth-redirect-url` / `AGED_AUTH_REDIRECT_URL`
 
-When auth is enabled, `/api/health`, `/auth/login`, `/auth/callback`, `/auth/logout`, and `/api/auth/me` remain public enough to complete login/logout. Dashboard pages and operational APIs require a signed session cookie. If `AGED_AUTH_SESSION_KEY` is omitted, the daemon generates an ephemeral key and existing sessions are invalidated on restart.
+When auth is enabled, login/logout routes and `/api/health` remain public enough to complete auth. Dashboard pages and operational APIs require a signed session cookie.
 
-## Run the dashboard
+## API Sketch
 
-```sh
-cd web
-npm install
-npm run dev
-```
+Main routes:
 
-Vite proxies `/api` requests to the daemon. Open `http://127.0.0.1:5173`.
+- State/events: `GET /api/snapshot`, `GET /api/snapshot?events=none`, `GET /api/events`, `GET /api/events/stream`
+- Registries: `/api/projects`, `/api/targets`, `/api/plugins`
+- Tasks: `POST /api/tasks`, `POST /api/tasks/{id}/steer`, `retry`, `cancel`, `apply`, `apply-policy`, `clear`, `pull-request`, `watch-pull-requests`
+- Workers: `GET /api/workers/{id}/changes`, `POST /api/workers/{id}/apply`, `POST /api/workers/{id}/cancel`
+- PRs: `POST /api/pull-requests/{id}/refresh`, `POST /api/pull-requests/{id}/babysit`
+- MCP: `POST /mcp`, with snapshot/task/project/target/plugin/PR tools and `aged://...` resources
 
-## Build
-
-```sh
-go test ./...
-cd web && npm run build
-```
-
-After `web/dist` exists, the Go daemon serves it from the same origin.
-
-## Dev control server
-
-For self-iteration, run the local dev control server:
-
-```sh
-go run ./cmd/aged-dev
-```
-
-It listens on `http://127.0.0.1:8790` by default and manages the daemon at `http://127.0.0.1:8787`.
-
-To view the dashboard from a phone or another device on the same network, bind both listeners to all interfaces:
-
-```sh
-go run ./cmd/aged-dev -addr 0.0.0.0:8790 -daemon-addr 0.0.0.0:8787
-```
-
-Then open `http://<your-lan-ip>:8787` from the device.
-
-- `GET /health` checks the control server.
-- `GET /status` returns the last rebuild/restart result.
-- `GET /rebuild` or `POST /rebuild` stops the previously managed daemon, kills any process listening on the daemon port, rebuilds `./cmd/aged`, runs `npm run build` in `web`, and starts the rebuilt daemon.
-
-The rebuilt daemon binary and logs live under `.aged/dev/`.
-
-## API sketch
-
-- `GET /api/health`
-- `GET /api/auth/me`
-- `GET /api/snapshot`
-- `GET /api/projects`
-- `POST /api/projects`
-- `GET /api/plugins`
-- `GET /api/events?after=<id>`
-- `GET /api/events/stream?after=<id>`
-- `POST /api/assistant`
-- `GET /api/tasks/lookup?source=<source>&externalId=<id>`
-- `POST /api/tasks`
-- `POST /api/tasks/clear-terminal`
-- `POST /api/tasks/{id}/clear`
-- `POST /api/tasks/{id}/steer`
-- `POST /api/tasks/{id}/cancel`
-- `POST /api/tasks/{id}/pull-request`
-- `POST /api/pull-requests/{id}/refresh`
-- `POST /api/pull-requests/{id}/babysit`
-- `GET /api/workers/{id}/changes`
-- `POST /api/workers/{id}/apply`
-- `POST /api/workers/{id}/cancel`
-
-Durable loop evals can be launched with `go run ./cmd/aged-loop-eval`. The runner creates the eval task from `evals/durable-loop-pr-producer.md`, watches aged for a finite external horizon, cancels the still-running loop, and writes a JSON scorecard. With `-repeat` and `-feedback-on-fail`, it can run as a local feedback loop that creates a follow-up aged task whenever a scorecard fails.
-
-External drivers can create tasks through the same endpoint as the UI. Include `source` and `externalId` to make creation idempotent across poller restarts. The built-in GitHub driver uses `source: "github-issue"` and `externalId: "owner/repo#123"`:
+External drivers should use `source` plus `externalId` for idempotency:
 
 ```sh
 curl -X POST http://127.0.0.1:8787/api/tasks \
@@ -346,7 +274,7 @@ curl -X POST http://127.0.0.1:8787/api/tasks \
     "projectId": "aged",
     "title": "GitHub issue owner/repo#123",
     "prompt": "Fix the issue described at owner/repo#123...",
-    "source": "github",
+    "source": "github-issue",
     "externalId": "owner/repo#123",
     "metadata": {
       "repo": "owner/repo",
@@ -356,4 +284,19 @@ curl -X POST http://127.0.0.1:8787/api/tasks \
   }'
 ```
 
-Posting the same `source` and `externalId` again returns the existing visible task instead of scheduling duplicate work.
+## Durable Loop Evals
+
+```sh
+go run ./cmd/aged-loop-eval
+```
+
+The eval runner creates a loop task from `evals/durable-loop-pr-producer.md`, watches it for a finite `-horizon`, optionally cancels it, and writes a JSON scorecard. `-repeat` and `-feedback-on-fail` turn it into a local feedback loop that creates follow-up aged tasks on failed checks.
+
+## Build
+
+```sh
+go test ./...
+cd web && npm run build
+```
+
+After `web/dist` exists, the Go daemon serves it from the same origin.
