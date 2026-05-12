@@ -276,7 +276,8 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.updateMCPTarget(r.Context(), req)
 		}
 	case "aged_delete_target":
-		req, err := decodeMCPArg[mcpTargetIDRequest](params.Arguments)
+		var req mcpTargetIDRequest
+		req, err = decodeMCPArg[mcpTargetIDRequest](params.Arguments)
 		if err == nil {
 			result, err = mcpOK(s.service.DeleteTarget(r.Context(), req.TargetID))
 		}
@@ -298,7 +299,8 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 			result, err = s.updateMCPPlugin(r.Context(), req)
 		}
 	case "aged_delete_plugin":
-		req, err := decodeMCPArg[mcpPluginIDRequest](params.Arguments)
+		var req mcpPluginIDRequest
+		req, err = decodeMCPArg[mcpPluginIDRequest](params.Arguments)
 		if err == nil {
 			result, err = mcpOK(s.service.DeletePlugin(r.Context(), req.PluginID))
 		}

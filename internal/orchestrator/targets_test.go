@@ -35,6 +35,18 @@ func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 	}
 }
 
+func TestTargetRegistryDeleteMissingWrapsNotFound(t *testing.T) {
+	registry := NewLocalTargetRegistry()
+
+	err := registry.Delete("missing")
+	if !errors.Is(err, eventstore.ErrNotFound) {
+		t.Fatalf("delete missing err = %v, want ErrNotFound", err)
+	}
+	if err.Error() != "target not found" {
+		t.Fatalf("delete missing message = %q", err.Error())
+	}
+}
+
 func TestTargetRegistryAvoidsUnhealthySSHTargets(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
 		{ID: "bad", Kind: TargetKindSSH, Host: "bad", WorkDir: "/repo-bad", Labels: map[string]string{"role": "benchmark"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 20, MemoryGB: 128}},

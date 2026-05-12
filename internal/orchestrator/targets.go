@@ -211,7 +211,7 @@ func (r *TargetRegistry) Delete(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.targets[id]; !ok {
-		return errors.New("target not found")
+		return notFoundError("target not found")
 	}
 	if r.running[id] > 0 {
 		return errors.New("target has running workers")
