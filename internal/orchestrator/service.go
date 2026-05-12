@@ -1830,6 +1830,14 @@ func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (c
 }
 
 func (s *Service) CancelTask(ctx context.Context, taskID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := findTask(snapshot, taskID); !ok {
+		return eventstore.ErrNotFound
+	}
+
 	canceledWorkers := map[string]bool{}
 	var workerIDs []string
 	s.mu.Lock()
@@ -1846,16 +1854,14 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	for _, workerID := range workerIDs {
 		_ = s.CancelWorker(ctx, workerID)
 	}
-	if snapshot, err := s.store.Snapshot(ctx); err == nil {
-		for _, activeWorker := range snapshot.Workers {
-			if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) || canceledWorkers[activeWorker.ID] {
-				continue
-			}
-			_ = s.CancelWorker(ctx, activeWorker.ID)
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) || canceledWorkers[activeWorker.ID] {
+			continue
 		}
+		_ = s.CancelWorker(ctx, activeWorker.ID)
 	}
 
-	_, err := s.append(ctx, core.Event{
+	_, err = s.append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{

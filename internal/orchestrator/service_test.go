@@ -4931,6 +4931,42 @@ func TestCancelTaskCancelsPersistedActiveWorkers(t *testing.T) {
 	}
 }
 
+func TestCancelTaskUnknownTaskReturnsNotFoundWithoutCanceling(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	taskCanceled := false
+	workerCanceled := false
+	service.taskCancels["missing-task"] = func() {
+		taskCanceled = true
+	}
+	service.cancels["worker-orphan"] = func() {
+		workerCanceled = true
+	}
+	service.tasks["worker-orphan"] = "missing-task"
+
+	err := service.CancelTask(ctx, "missing-task")
+	if !errors.Is(err, eventstore.ErrNotFound) {
+		t.Fatalf("CancelTask error = %v, want ErrNotFound", err)
+	}
+	if taskCanceled {
+		t.Fatalf("task cancel func was called for missing task")
+	}
+	if workerCanceled {
+		t.Fatalf("worker cancel func was called for missing task")
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventTaskStatus, "missing-task") != 0 {
+		t.Fatalf("missing task has %d task status events, want 0", countEvents(snapshot.Events, core.EventTaskStatus, "missing-task"))
+	}
+}
+
 func TestCancelWorkerFallsBackToPersistedRemoteRun(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
