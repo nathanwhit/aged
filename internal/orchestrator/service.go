@@ -2343,6 +2343,9 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		return
 	}
 	if resumingPullRequestFollowUp(snapshot, taskID) {
+		if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
+			plan = annotatePullRequestFollowUpPlan(plan, pr)
+		}
 		plan = normalizePullRequestFollowUpPlan(plan)
 	}
 	if plan.Metadata == nil {
@@ -2579,7 +2582,11 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		TaskTitle: task.Title,
 	}
 	if !reusedWorkspace {
+		workspaceBaseRef := stringMetadata(plan.Metadata, "workspaceBaseRef")
 		baseRevision, err := syncedProjectWorkspaceBaseRevision(ctx, project)
+		if workspaceBaseRef != "" {
+			baseRevision, err = syncedProjectWorkspaceRefRevision(ctx, project, workspaceBaseRef)
+		}
 		if err != nil {
 			_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 			return WorkerTurnResult{}, err
@@ -2892,11 +2899,24 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, TaskID: task.ID, WorkDir: remoteWorkDir})
 	if !reusedWorkspace {
+		checkoutBase := project.DefaultBase
+		checkoutBaseRef := projectWorkspaceBaseCommit(ctx, project)
+		if workspaceBaseRef := stringMetadata(plan.Metadata, "workspaceBaseRef"); workspaceBaseRef != "" {
+			checkoutBase = pullRequestWorkspaceBranch(workspaceBaseRef)
+			synced, err := syncedProjectWorkspaceRefRevision(ctx, project, workspaceBaseRef)
+			if err != nil {
+				return WorkerTurnResult{}, err
+			}
+			if synced != "" {
+				plan.Metadata["workspaceBaseRevision"] = synced
+				checkoutBaseRef = projectWorkspaceRefCommit(ctx, project, synced)
+			}
+		}
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
 			RepoURL:     projectCloneURL(project),
 			WorkDir:     remoteWorkDir,
-			DefaultBase: project.DefaultBase,
-			BaseRef:     projectWorkspaceBaseCommit(ctx, project),
+			DefaultBase: checkoutBase,
+			BaseRef:     checkoutBaseRef,
 		})
 		if err != nil {
 			return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w: %s", err, checkoutLog)
@@ -4844,6 +4864,36 @@ func projectWorkspaceBaseRevision(ctx context.Context, project core.Project) str
 	return ""
 }
 
+func projectWorkspaceRefRevision(ctx context.Context, project core.Project, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.TrimSpace(project.LocalPath) == "" {
+		return ""
+	}
+	if strings.HasPrefix(ref, "refs/") {
+		if gitCommitRefExists(ctx, project.LocalPath, ref) {
+			return ref
+		}
+		return ""
+	}
+	branch := pullRequestWorkspaceBranch(ref)
+	for _, remote := range projectFetchRemotes(project) {
+		remoteRef := "refs/remotes/" + remote + "/" + branch
+		if gitCommitRefExists(ctx, project.LocalPath, remoteRef) {
+			return remoteRef
+		}
+	}
+	for _, candidate := range []string{
+		"refs/heads/" + branch,
+		branch,
+		ref,
+	} {
+		if gitCommitRefExists(ctx, project.LocalPath, candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func syncedProjectWorkspaceBaseRevision(ctx context.Context, project core.Project) (string, error) {
 	base := strings.TrimSpace(project.DefaultBase)
 	if base == "" || strings.TrimSpace(project.LocalPath) == "" {
@@ -4860,6 +4910,44 @@ func syncedProjectWorkspaceBaseRevision(ctx context.Context, project core.Projec
 		return "", err
 	}
 	return ref, nil
+}
+
+func syncedProjectWorkspaceRefRevision(ctx context.Context, project core.Project, ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" || strings.TrimSpace(project.LocalPath) == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(ref, "refs/") || looksLikeHexObjectID(ref) {
+		if gitCommitRefExists(ctx, project.LocalPath, ref) {
+			return ref, nil
+		}
+	}
+	if _, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--show-toplevel"); err != nil {
+		return projectWorkspaceRefRevision(ctx, project, ref), nil
+	}
+	branch := pullRequestWorkspaceBranch(ref)
+	if branch == "" {
+		return "", nil
+	}
+	var lastErr error
+	for _, remote := range projectFetchRemotes(project) {
+		remoteRef := "refs/remotes/" + remote + "/" + branch
+		refspec := "+refs/heads/" + branch + ":" + remoteRef
+		if _, err := runCommand(ctx, project.LocalPath, "git", "fetch", "--prune", remote, refspec); err != nil {
+			lastErr = err
+			continue
+		}
+		if gitCommitRefExists(ctx, project.LocalPath, remoteRef) {
+			return remoteRef, nil
+		}
+	}
+	if existing := projectWorkspaceRefRevision(ctx, project, ref); existing != "" {
+		return existing, nil
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("sync git branch %q: %w", branch, lastErr)
+	}
+	return "", fmt.Errorf("sync git branch %q: no configured remote contains branch", branch)
 }
 
 func syncGitProjectBaseBranch(ctx context.Context, dir string, base string) (string, error) {
@@ -4934,6 +5022,14 @@ func projectWorkspaceBaseCommit(ctx context.Context, project core.Project) strin
 	if ref == "" {
 		return ""
 	}
+	return projectWorkspaceRefCommit(ctx, project, ref)
+}
+
+func projectWorkspaceRefCommit(ctx context.Context, project core.Project, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
 	out, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--verify", ref+"^{commit}")
 	if err != nil {
 		return ""
@@ -4965,6 +5061,36 @@ func looksLikeHexObjectID(ref string) bool {
 		return false
 	}
 	return true
+}
+
+func pullRequestWorkspaceBranch(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if _, branch, ok := strings.Cut(ref, ":"); ok {
+		ref = branch
+	}
+	return strings.TrimSpace(strings.TrimPrefix(ref, "refs/heads/"))
+}
+
+func projectFetchRemotes(project core.Project) []string {
+	return uniqueNonEmptyStrings([]string{
+		project.PushRemote,
+		"origin",
+		"upstream",
+	})
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
@@ -5958,6 +6084,15 @@ func planMetadata(plan Plan) map[string]any {
 		"baseHandoff",
 		"basePatchApplied",
 		"baseChangedFiles",
+		"workspaceBaseRef",
+		"workspaceBaseRefKind",
+		"workspaceBaseRevision",
+		"pullRequestID",
+		"pullRequestRepo",
+		"pullRequestNumber",
+		"pullRequestBranch",
+		"pullRequestBase",
+		"pullRequestURL",
 		"nodeID",
 		"parentNodeID",
 		"planID",

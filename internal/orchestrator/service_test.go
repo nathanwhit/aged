@@ -1802,6 +1802,116 @@ func TestServicePullRequestFollowUpSuppressesPlanSpawnsWhenReturningToWatch(t *t
 	}
 }
 
+func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "origin", remote)
+	runTestGit(t, repo, "push", "-u", "origin", "main")
+	runTestGit(t, repo, "checkout", "-b", "codex/aged-test")
+	if err := os.WriteFile(filepath.Join(repo, "fix.txt"), []byte("pr head\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "fix.txt")
+	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "pr head")
+	runTestGit(t, repo, "push", "-u", "origin", "codex/aged-test")
+	runTestGit(t, repo, "checkout", "main")
+
+	taskID := "task-pr-head-followup"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair PR",
+			"prompt": "Fix the pull request and keep watching it.",
+			"metadata": map[string]any{
+				"projectId": "repo",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:          "repo",
+		Name:        "Repo",
+		LocalPath:   repo,
+		Repo:        "owner/repo",
+		DefaultBase: "main",
+	}}, "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := &recordingWorkspaceManager{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "change",
+		Prompt:     "repair dirty PR branch",
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return repaired PR to monitor",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "repaired"}}},
+	}, repo, workspace)
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(&fakePullRequestPublisher{})
+
+	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if workspace.baseRevision != "refs/remotes/origin/codex/aged-test" {
+		t.Fatalf("workspace base revision = %q, want PR head", workspace.baseRevision)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"workspaceBaseRef":"codex/aged-test"`) {
+		t.Fatalf("missing PR head workspace metadata")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, "Decide whether a GitHub PR comment is warranted") {
+		t.Fatalf("missing PR comment instruction")
+	}
+}
+
 func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
