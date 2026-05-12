@@ -175,6 +175,64 @@ func TestServiceWatchPullRequestsReusesExistingPublishedPullRequest(t *testing.T
 	}
 }
 
+func TestServiceWatchPullRequestsReturnsPersistedNormalizedPullRequests(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{list: []core.PullRequest{{
+		ID:           "listed-pr",
+		Repo:         "owner/repo",
+		Number:       12,
+		URL:          "https://github.com/owner/repo/pull/12",
+		Branch:       "feature",
+		Base:         "main",
+		Title:        "Watch me",
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+	}}}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Task",
+			"prompt": "Prompt",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prs, err := service.WatchPullRequests(ctx, "task-1", core.WatchPullRequestsRequest{
+		Repo:   "owner/repo",
+		Number: 12,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("watched prs = %+v", prs)
+	}
+	wantID := "github:owner/repo#12"
+	if prs[0].ID != wantID || prs[0].TaskID != "task-1" {
+		t.Fatalf("returned pr = %+v, want id %q and task task-1", prs[0], wantID)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("snapshot pull requests = %+v", snapshot.PullRequests)
+	}
+	persisted := snapshot.PullRequests[0]
+	if persisted.ID != prs[0].ID || persisted.TaskID != prs[0].TaskID {
+		t.Fatalf("persisted pr = %+v, returned pr = %+v", persisted, prs[0])
+	}
+}
+
 func TestServicePullRequestMonitorRespectsProjectOptOut(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
