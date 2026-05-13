@@ -97,32 +97,16 @@ func (a *CLIAssistant) askCodex(ctx context.Context, req core.AssistantRequest, 
 			args = []string{"exec", "resume", "--sandbox", "read-only", "--json", "--cd", workDir, "-c", "model_reasoning_effort=\"" + effort + "\"", req.ProviderSessionID, "-"}
 		}
 	}
-	cmd := exec.CommandContext(ctx, a.codexPath, args...)
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return core.AssistantResponse{}, fmt.Errorf("codex assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+	stdout, err := runPromptCommand(ctx, a.codexPath, args, "", prompt, "codex assistant command failed")
+	if err != nil {
+		return core.AssistantResponse{}, err
 	}
-	content, sessionID, err := extractCodexAssistantOutput(stdout.Bytes())
+	content, sessionID, err := extractCodexAssistantOutput(stdout)
 	if err != nil {
 		return core.AssistantResponse{}, err
 	}
 	sessionID = nonEmpty(sessionID, req.ProviderSessionID)
-	return core.AssistantResponse{
-		ConversationID:    req.ConversationID,
-		Message:           strings.TrimSpace(content),
-		Provider:          "codex",
-		ProviderSessionID: sessionID,
-		Metadata: core.MustJSON(map[string]any{
-			"assistant":         "codex",
-			"providerSessionId": sessionID,
-			"reasoningEffort":   a.reasoningEffort,
-			"resumed":           req.ProviderSessionID != "",
-		}),
-	}, nil
+	return a.assistantResponse(req, "codex", strings.TrimSpace(content), sessionID), nil
 }
 
 func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest, prompt string) (core.AssistantResponse, error) {
@@ -137,34 +121,46 @@ func (a *CLIAssistant) askClaude(ctx context.Context, req core.AssistantRequest,
 			args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose", "--effort", effort}
 		}
 	}
-	cmd := exec.CommandContext(ctx, a.claudePath, args...)
-	cmd.Dir = workDir
+	stdout, err := runPromptCommand(ctx, a.claudePath, args, workDir, prompt, "claude assistant command failed")
+	if err != nil {
+		return core.AssistantResponse{}, err
+	}
+	output := string(stdout)
+	message := extractLastParsedResult("claude", output)
+	if message == "" {
+		message = strings.TrimSpace(output)
+	}
+	sessionID := nonEmpty(extractClaudeSessionID(output), req.ProviderSessionID)
+	return a.assistantResponse(req, "claude", message, sessionID), nil
+}
+
+func runPromptCommand(ctx context.Context, path string, args []string, dir string, prompt string, failurePrefix string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return core.AssistantResponse{}, fmt.Errorf("claude assistant command failed: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("%s: %w: %s", failurePrefix, err, strings.TrimSpace(stderr.String()))
 	}
-	output := stdout.String()
-	message := extractLastParsedResult("claude", output)
-	if message == "" {
-		message = strings.TrimSpace(output)
-	}
-	sessionID := nonEmpty(extractClaudeSessionID(output), req.ProviderSessionID)
+	return stdout.Bytes(), nil
+}
+
+func (a *CLIAssistant) assistantResponse(req core.AssistantRequest, provider string, message string, sessionID string) core.AssistantResponse {
 	return core.AssistantResponse{
 		ConversationID:    req.ConversationID,
-		Message:           message,
-		Provider:          "claude",
+		Message:           strings.TrimSpace(message),
+		Provider:          provider,
 		ProviderSessionID: sessionID,
 		Metadata: core.MustJSON(map[string]any{
-			"assistant":         "claude",
+			"assistant":         provider,
 			"providerSessionId": sessionID,
 			"reasoningEffort":   a.reasoningEffort,
 			"resumed":           req.ProviderSessionID != "",
 		}),
-	}, nil
+	}
 }
 
 func interactiveAssistantPrompt(req core.AssistantRequest) string {
