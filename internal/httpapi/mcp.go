@@ -868,53 +868,13 @@ func mcpTools() []mcpTool {
 			Name:        "aged_create_project",
 			Title:       "Create aged project",
 			Description: "Add a project/repository to the daemon.",
-			InputSchema: objectSchema(map[string]any{
-				"id":              stringSchema("Project id."),
-				"name":            stringSchema("Display name."),
-				"localPath":       stringSchema("Absolute path to local checkout on the daemon host."),
-				"repo":            stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
-				"upstreamRepo":    stringSchema("Optional upstream GitHub repo used as PR and issue target."),
-				"headRepoOwner":   stringSchema("Optional GitHub owner for fork PR heads."),
-				"pushRemote":      stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
-				"vcs":             stringSchema("VCS kind: auto, jj, or git."),
-				"defaultBase":     stringSchema("Default PR base branch."),
-				"workspaceRoot":   stringSchema("Optional workspace root override."),
-				"targetLabels":    objectUntypedSchema("Optional target label policy."),
-				"remoteCheckouts": objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
-				"pullRequestPolicy": objectSchema(map[string]any{
-					"branchPrefix":        stringSchema("Optional PR branch prefix."),
-					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
-					"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
-					"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
-					"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
-				}, nil),
-			}, []string{"id", "name", "localPath"}),
+			InputSchema: objectSchema(projectMCPProperties("Project id."), []string{"id", "name", "localPath"}),
 		},
 		{
 			Name:        "aged_update_project",
 			Title:       "Update aged project",
 			Description: "Patch an existing project/repository. Omitted fields are preserved; pass empty strings, empty maps, or false only when intentionally setting or clearing that value. Project normalization restores defaults for fields such as name, vcs, defaultBase, and pullRequestPolicy.branchPrefix when left empty.",
-			InputSchema: objectSchema(map[string]any{
-				"id":              stringSchema("Project id to update."),
-				"name":            stringSchema("Display name."),
-				"localPath":       stringSchema("Absolute path to local checkout on the daemon host."),
-				"repo":            stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
-				"upstreamRepo":    stringSchema("Optional upstream GitHub repo used as PR and issue target."),
-				"headRepoOwner":   stringSchema("Optional GitHub owner for fork PR heads."),
-				"pushRemote":      stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
-				"vcs":             stringSchema("VCS kind: auto, jj, or git."),
-				"defaultBase":     stringSchema("Default PR base branch."),
-				"workspaceRoot":   stringSchema("Optional workspace root override."),
-				"targetLabels":    objectUntypedSchema("Optional target label policy."),
-				"remoteCheckouts": objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
-				"pullRequestPolicy": objectSchema(map[string]any{
-					"branchPrefix":        stringSchema("Optional PR branch prefix."),
-					"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
-					"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
-					"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
-					"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
-				}, nil),
-			}, []string{"id"}),
+			InputSchema: objectSchema(projectMCPProperties("Project id to update."), []string{"id"}),
 		},
 		{
 			Name:        "aged_delete_project",
@@ -1086,6 +1046,34 @@ func pluginMCPProperties() map[string]any {
 		"capabilities": map[string]any{"type": "array", "description": "Plugin capabilities.", "items": map[string]any{"type": "string"}},
 		"config":       map[string]any{"type": "object", "description": "Plugin config key/value pairs.", "additionalProperties": map[string]any{"type": "string"}},
 	}
+}
+
+func projectMCPProperties(idDescription string) map[string]any {
+	return map[string]any{
+		"id":                stringSchema(idDescription),
+		"name":              stringSchema("Display name."),
+		"localPath":         stringSchema("Absolute path to local checkout on the daemon host."),
+		"repo":              stringSchema("GitHub repo for the local checkout, such as fork-owner/name."),
+		"upstreamRepo":      stringSchema("Optional upstream GitHub repo used as PR and issue target."),
+		"headRepoOwner":     stringSchema("Optional GitHub owner for fork PR heads."),
+		"pushRemote":        stringSchema("Optional VCS remote to push PR branches/bookmarks to."),
+		"vcs":               stringSchema("VCS kind: auto, jj, or git."),
+		"defaultBase":       stringSchema("Default PR base branch."),
+		"workspaceRoot":     stringSchema("Optional workspace root override."),
+		"targetLabels":      objectUntypedSchema("Optional target label policy."),
+		"remoteCheckouts":   objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
+		"pullRequestPolicy": pullRequestPolicyMCPSchema(),
+	}
+}
+
+func pullRequestPolicyMCPSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"branchPrefix":        stringSchema("Optional PR branch prefix."),
+		"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
+		"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
+		"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+		"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
+	}, nil)
 }
 
 type mcpRPCError struct {
