@@ -189,13 +189,7 @@ func (b *PromptBrain) Plan(_ context.Context, task core.Task, steering []string)
 }
 
 func (b *PromptBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
-	return core.AssistantResponse{
-		ConversationID: req.ConversationID,
-		Message:        "No interactive assistant brain is configured. Start a task when you want the orchestrator to schedule worker execution.",
-		Metadata: core.MustJSON(map[string]any{
-			"brain": "prompt",
-		}),
-	}, nil
+	return noInteractiveAssistantResponse(req.ConversationID, "prompt"), nil
 }
 
 type StaticBrain struct {
@@ -227,11 +221,15 @@ func (b StaticBrain) Plan(_ context.Context, task core.Task, steering []string) 
 }
 
 func (b StaticBrain) Ask(_ context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
+	return noInteractiveAssistantResponse(req.ConversationID, "static"), nil
+}
+
+func noInteractiveAssistantResponse(conversationID string, brain string) core.AssistantResponse {
 	return core.AssistantResponse{
-		ConversationID: req.ConversationID,
+		ConversationID: conversationID,
 		Message:        "No interactive assistant brain is configured. Start a task when you want the orchestrator to schedule worker execution.",
 		Metadata: core.MustJSON(map[string]any{
-			"brain": "static",
+			"brain": brain,
 		}),
-	}, nil
+	}
 }
