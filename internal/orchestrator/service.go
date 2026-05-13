@@ -92,6 +92,8 @@ type Service struct {
 	steering    map[string]chan string
 	remoteRuns  map[string]remoteRun
 	workerCaps  map[string]worker.Capabilities
+
+	steeringRestarts map[string]struct{}
 }
 
 const (
@@ -330,28 +332,29 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		}}, "default")
 	}
 	service := &Service{
-		store:         store,
-		broker:        NewBroker(),
-		brain:         brain,
-		runners:       runners,
-		baseRunners:   maps.Clone(runners),
-		pluginRunners: map[string]struct{}{},
-		workDir:       workDir,
-		projects:      projects,
-		plugins:       NewPluginRegistry(builtinPlugins()),
-		promptSets:    NewPromptSetRegistry(nil, ""),
-		workspaces:    workspaces,
-		targets:       targets,
-		sshRunner:     sshRunner,
-		prPublisher:   NewLocalPullRequestPublisher(),
-		remoteApply:   applyRemotePatch,
-		cancels:       map[string]context.CancelFunc{},
-		taskCancels:   map[string]context.CancelFunc{},
-		taskRuns:      map[string]string{},
-		tasks:         map[string]string{},
-		steering:      map[string]chan string{},
-		remoteRuns:    map[string]remoteRun{},
-		workerCaps:    map[string]worker.Capabilities{},
+		store:            store,
+		broker:           NewBroker(),
+		brain:            brain,
+		runners:          runners,
+		baseRunners:      maps.Clone(runners),
+		pluginRunners:    map[string]struct{}{},
+		workDir:          workDir,
+		projects:         projects,
+		plugins:          NewPluginRegistry(builtinPlugins()),
+		promptSets:       NewPromptSetRegistry(nil, ""),
+		workspaces:       workspaces,
+		targets:          targets,
+		sshRunner:        sshRunner,
+		prPublisher:      NewLocalPullRequestPublisher(),
+		remoteApply:      applyRemotePatch,
+		cancels:          map[string]context.CancelFunc{},
+		taskCancels:      map[string]context.CancelFunc{},
+		taskRuns:         map[string]string{},
+		tasks:            map[string]string{},
+		steering:         map[string]chan string{},
+		remoteRuns:       map[string]remoteRun{},
+		workerCaps:       map[string]worker.Capabilities{},
+		steeringRestarts: map[string]struct{}{},
 	}
 	service.drivers = NewDriverRegistry(service)
 	return service
@@ -1308,6 +1311,22 @@ func (s *Service) startTaskRoutine(taskID string, fn func(context.Context)) {
 	}()
 }
 
+func (s *Service) beginSteeringRestart(taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.steeringRestarts[taskID]; ok {
+		return false
+	}
+	s.steeringRestarts[taskID] = struct{}{}
+	return true
+}
+
+func (s *Service) finishSteeringRestart(taskID string) {
+	s.mu.Lock()
+	delete(s.steeringRestarts, taskID)
+	s.mu.Unlock()
+}
+
 func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (core.Task, error) {
 	if req.Prompt == "" {
 		return core.Task{}, errors.New("prompt is required")
@@ -1639,6 +1658,16 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
 		})
 	} else if snapshotErr == nil && len(restartWorkerIDs) > 0 {
+		if !s.beginSteeringRestart(taskID) {
+			_ = s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":      "steering_restart",
+				"status":    "skipped",
+				"reason":    "steering restart already in progress",
+				"message":   req.Message,
+				"workerIds": restartWorkerIDs,
+			})
+			return nil
+		}
 		for _, active := range restartWorkers {
 			if active.Cancel != nil {
 				active.Cancel()
@@ -1651,6 +1680,7 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 }
 
 func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID string, message string, workerIDs []string) {
+	defer s.finishSteeringRestart(taskID)
 	_ = s.recordTaskAction(ctx, taskID, map[string]any{
 		"kind":      "steering_restart",
 		"status":    "started",
@@ -2421,6 +2451,29 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 		return false
 	}
 	if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failure.Error, failure.Summary)); ok {
+		if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, initial, failure, blocker) {
+			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     "worker_failure_recovery",
+				"when":     "after_worker_failure",
+				"reason":   "Worker failed due to a target-local setup issue; asking the orchestrator to retry on another eligible target.",
+				"workerId": failure.WorkerID,
+				"status":   "started",
+				"error":    failure.Error,
+			})
+			ok, selectedWorkerID, reason, results := s.replanLoop(ctx, task, initial, results)
+			if !ok {
+				return true
+			}
+			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     "worker_failure_recovery",
+				"when":     "after_worker_failure",
+				"reason":   nonEmpty(reason, "Orchestrator selected a recovery result."),
+				"workerId": selectedWorkerID,
+				"status":   "completed",
+			})
+			_ = s.completeTask(ctx, task.ID, results, selectedWorkerID, reason)
+			return true
+		}
 		_ = s.waitForUserAction(ctx, task.ID, failure.WorkerID, blocker.Reason, blocker.Question, map[string]any{
 			"summary":    blocker.Summary,
 			"workerKind": failure.Kind,
@@ -3099,7 +3152,17 @@ func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetC
 			return fallback, nil
 		}
 	}
-	return s.targets.Select(plan)
+	target, err := s.targets.Select(plan)
+	if err == nil {
+		return target, nil
+	}
+	if len(targetLabels(plan.Metadata)) == 0 {
+		if fallback, fallbackErr := s.targets.SelectLocalFallback(); fallbackErr == nil {
+			recordRetryTargetFallback(plan, "", fallback.ID, err)
+			return fallback, nil
+		}
+	}
+	return TargetConfig{}, err
 }
 
 type previousTargetLookup struct {
@@ -4596,6 +4659,52 @@ func (s *Service) waitForRecoverableError(ctx context.Context, taskID string, wo
 	return true
 }
 
+func (s *Service) recoverableWorkerFailureCanRetryOnAlternateTarget(ctx context.Context, task core.Task, plan Plan, result WorkerTurnResult, blocker userRecoverableBlocker) bool {
+	targetID := s.workerTargetID(ctx, result.WorkerID)
+	if targetID == "" {
+		return false
+	}
+	if !s.targets.MarkWorkerKindUnavailable(targetID, result.Kind, nonEmpty(result.Error, result.Summary, blocker.Summary)) {
+		return false
+	}
+	probe := plan
+	probe.Metadata = maps.Clone(plan.Metadata)
+	delete(probe.Metadata, "targetID")
+	delete(probe.Metadata, "targetKind")
+	if _, err := s.selectExecutionTarget(ctx, probe); err != nil {
+		return false
+	}
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":       "worker_target_fallback",
+		"when":       "after_worker_failure",
+		"reason":     blocker.Summary,
+		"workerId":   result.WorkerID,
+		"workerKind": result.Kind,
+		"targetId":   targetID,
+		"status":     "continued",
+		"error":      result.Error,
+	})
+	return true
+}
+
+func (s *Service) workerTargetID(ctx context.Context, workerID string) string {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return ""
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return ""
+	}
+	for i := len(snapshot.ExecutionNodes) - 1; i >= 0; i-- {
+		node := snapshot.ExecutionNodes[i]
+		if node.WorkerID == workerID {
+			return strings.TrimSpace(node.TargetID)
+		}
+	}
+	return ""
+}
+
 type userRecoverableBlocker struct {
 	Reason   string
 	Summary  string
@@ -4622,6 +4731,16 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 			reason:  "permission_denied",
 			summary: "The worker is blocked by operating-system or sandbox permissions.",
 			any:     []string{"permission denied", "operation not permitted", "not permitted", "requires root", "must be root", "sudo:"},
+		},
+		{
+			reason:  "worker_auth_required",
+			summary: "The worker cannot authenticate to its model provider.",
+			any:     []string{"missing bearer or basic authentication", "unexpected status 401 unauthorized", "401 unauthorized, url: wss://api.openai.com/v1/responses", "401 unauthorized, url: https://api.openai.com/v1/responses"},
+		},
+		{
+			reason:  "worker_privilege_mismatch",
+			summary: "The worker command cannot run with the target user's current privileges.",
+			any:     []string{"--dangerously-skip-permissions cannot be used with root/sudo privileges"},
 		},
 		{
 			reason:  "profiler_setup_required",
@@ -4925,6 +5044,19 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			results = append(results, result)
 			if result.Status == core.WorkerFailed {
+				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
+					if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, next, result, blocker) {
+						stalledTurns++
+						continue
+					}
+					_ = s.waitForUserAction(ctx, task.ID, result.WorkerID, blocker.Reason, blocker.Question, map[string]any{
+						"summary":    blocker.Summary,
+						"workerKind": result.Kind,
+						"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
+						"error":      result.Error,
+					})
+					return false, "", "", results
+				}
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":     "worker_failure_recovery",
 					"when":     "during_dynamic_replan",
@@ -5013,7 +5145,7 @@ type replanFallbackConfig struct {
 
 func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, string, []WorkerTurnResult) {
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
-	if candidateErr == nil {
+	if candidateErr == nil && candidateWorkerID != "" {
 		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
 			candidateErr = fmt.Errorf("fallback final candidate %s is blocked: %s", candidateWorkerID, reason)
 		} else {

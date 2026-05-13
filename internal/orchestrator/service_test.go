@@ -5968,6 +5968,56 @@ func TestServiceTreatsRecoverableWorkerFailureAsUserAction(t *testing.T) {
 	}
 }
 
+func TestServiceTreatsRecoverableDynamicReplanWorkerFailureAsUserAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "produce initial candidate",
+		},
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 10,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial candidate"}}},
+		"follow": failingRunner{
+			kind: "follow",
+			err:  errors.New("unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses"),
+		},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Recover dynamic auth", Prompt: "Keep improving."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 {
+		t.Fatalf("replan states = %d, want 1", len(brain.states))
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "worker_auth_required" {
+		t.Fatalf("reason = %v", payload["reason"])
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "worker_failure_recovery", "continued") {
+		t.Fatalf("unexpected continued worker failure recovery")
+	}
+}
+
 func TestServiceTreatsWorkflowScopePushRejectionAsRecoverable(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7484,6 +7534,47 @@ func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *tes
 	}
 }
 
+func TestServiceWaitsWhenDynamicReplanningStallsWithoutCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "attempt initial implementation",
+		},
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 10,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  failingRunner{kind: "codex", err: errors.New("missing API token")},
+		"follow": failingRunner{kind: "follow", err: errors.New("cannot run worker as root")},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Stalled no candidate", Prompt: "Keep trying until fixed."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID != "" {
+		t.Fatalf("final candidate = %q, want empty", snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("missing fallback replanned event")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing approval-needed event")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"action":"complete"`) {
+		t.Fatalf("unexpected fallback completion")
+	}
+}
+
 func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7740,6 +7831,76 @@ func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	}
 	if !hasTaskAction(snapshot.Events, task.ID, "steering_restart", "resumed") {
 		t.Fatalf("missing resumed steering restart action")
+	}
+}
+
+func TestServiceDeduplicatesConcurrentNonSteerableSteeringRestarts(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	retryStarted := make(chan struct{}, 2)
+	retryRelease := make(chan struct{})
+	runner := &restartOnSteeringRunner{
+		started:      started,
+		retryStarted: retryStarted,
+		retryRelease: retryRelease,
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "continue the investigation",
+	}}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Duplicate steer restart", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "continue"})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case <-retryStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("retry worker did not start")
+	}
+	select {
+	case <-retryStarted:
+		t.Fatal("duplicate steering restart launched a second retry worker")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(retryRelease)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if calls := runner.callsValue(); calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+	if created := countEvents(snapshot.Events, core.EventWorkerCreated, task.ID); created != 2 {
+		t.Fatalf("worker.created count = %d, want 2", created)
+	}
+	if countTaskActions(snapshot.Events, task.ID, "steering_restart", "started") != 1 {
+		t.Fatalf("steering restart started actions = %d, want 1", countTaskActions(snapshot.Events, task.ID, "steering_restart", "started"))
+	}
+	if countTaskActions(snapshot.Events, task.ID, "steering_restart", "skipped") != 1 {
+		t.Fatalf("steering restart skipped actions = %d, want 1", countTaskActions(snapshot.Events, task.ID, "steering_restart", "skipped"))
 	}
 }
 
@@ -8613,6 +8774,66 @@ func TestServiceRetryTargetIDFallsBackWhenTargetLacksRequestedWorkerTool(t *test
 	}
 }
 
+func TestServiceSelectsAnotherTargetAfterWorkerKindMarkedUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-new", Kind: TargetKindSSH, Host: "vm-new", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 10}},
+		{ID: "vm-old", Kind: TargetKindSSH, Host: "vm-old", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	if !targets.MarkWorkerKindUnavailable("vm-new", "codex", "missing auth") {
+		t.Fatalf("failed to mark target worker kind unavailable")
+	}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	target, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry elsewhere",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-old" {
+		t.Fatalf("target = %q, want vm-old", target.ID)
+	}
+}
+
+func TestServiceSelectsLocalAfterAllRemoteWorkerKindsMarkedUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-a", Kind: TargetKindSSH, Host: "vm-a", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 10}},
+		{ID: "vm-b", Kind: TargetKindSSH, Host: "vm-b", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.MarkWorkerKindUnavailable("vm-a", "codex", "missing auth")
+	targets.MarkWorkerKindUnavailable("vm-b", "codex", "missing auth")
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry locally",
+		Metadata:   map[string]any{},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" || target.Kind != TargetKindLocal {
+		t.Fatalf("target = %+v, want local", target)
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "local" {
+		t.Fatalf("fallback to = %v, want local", plan.Metadata["retryTargetFallbackToID"])
+	}
+}
+
 func TestServiceRetryFallsBackWhenPreviousWorkerTargetIsUnhealthy(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9382,6 +9603,8 @@ type blockingEventRunner struct {
 type restartOnSteeringRunner struct {
 	mu              sync.Mutex
 	started         chan<- struct{}
+	retryStarted    chan<- struct{}
+	retryRelease    <-chan struct{}
 	calls           int
 	prompt          string
 	resumeSessionID string
@@ -9592,6 +9815,16 @@ func (r *restartOnSteeringRunner) Run(ctx context.Context, spec worker.Spec, sin
 		close(r.started)
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if r.retryStarted != nil {
+		r.retryStarted <- struct{}{}
+	}
+	if r.retryRelease != nil {
+		select {
+		case <-r.retryRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: "resumed with steering"})
 }
