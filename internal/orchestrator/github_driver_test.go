@@ -6,91 +6,36 @@ import (
 	"testing"
 
 	"aged/internal/core"
-	"aged/internal/eventstore"
 	"aged/internal/worker"
 )
 
-type githubDriverTestFixture struct {
-	ctx       context.Context
-	store     *eventstore.SQLiteStore
-	service   *Service
-	driver    *GitHubDriver
-	publisher *fakePullRequestPublisher
-}
-
-type githubDriverTestOptions struct {
-	config      GitHubDriverConfig
-	client      fakeGitHubClient
-	planPrompt  string
-	runnerText  string
-	projectRoot string
-	workspace   fakeWorkspaceManager
-	publisher   *fakePullRequestPublisher
-}
-
-func newGitHubDriverTestFixture(t *testing.T, opts githubDriverTestOptions) githubDriverTestFixture {
-	t.Helper()
-
+func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	t.Cleanup(func() { store.Close() })
+	defer store.Close()
 
-	planPrompt := opts.planPrompt
-	if planPrompt == "" {
-		planPrompt = "do it"
-	}
-	runnerText := opts.runnerText
-	if runnerText == "" {
-		runnerText = "done"
-	}
-	projectRoot := opts.projectRoot
-	if projectRoot == "" {
-		projectRoot = t.TempDir()
-	}
-	workspace := opts.workspace
-	if workspace.cwd == "" {
-		workspace.cwd = t.TempDir()
-	}
-
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: planPrompt}}, map[string]worker.Runner{
-		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: runnerText}}},
-	}, projectRoot, workspace)
-	if opts.publisher != nil {
-		service.SetPullRequestPublisher(opts.publisher)
-	}
-
-	return githubDriverTestFixture{
-		ctx:       ctx,
-		store:     store,
-		service:   service,
-		driver:    NewGitHubDriver(service, opts.config, opts.client),
-		publisher: opts.publisher,
-	}
-}
-
-func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
-			PullRequests: GitHubPullRequestDriverConfig{
-				AutoPublish: boolPtr(false),
-			},
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
+		PullRequests: GitHubPullRequestDriverConfig{
+			AutoPublish: boolPtr(false),
 		},
-		client: fakeGitHubClient{issues: []GitHubIssue{{
-			Repo:   "owner/repo",
-			Number: 12,
-			Title:  "Add feature",
-			Body:   "Please add the feature.",
-			URL:    "https://github.com/owner/repo/issues/12",
-			Labels: []string{"aged"},
-		}}},
-	})
+	}, fakeGitHubClient{issues: []GitHubIssue{{
+		Repo:   "owner/repo",
+		Number: 12,
+		Title:  "Add feature",
+		Body:   "Please add the feature.",
+		URL:    "https://github.com/owner/repo/issues/12",
+		Labels: []string{"aged"},
+	}}})
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-issue", "owner/repo#12")
+	task, ok, err := service.FindTaskByExternalID(ctx, "github-issue", "owner/repo#12")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +49,11 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	if metadata["completionMode"] != "local" {
 		t.Fatalf("metadata = %+v", metadata)
 	}
-	_ = waitForTaskStatus(t, fixture.store, task.ID, core.TaskSucceeded)
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,42 +63,46 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 }
 
 func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *testing.T) {
-	publisher := &fakePullRequestPublisher{}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		workspace: fakeWorkspaceManager{
-			sourceRoot: t.TempDir(),
-			changes: WorkspaceChanges{
-				Dirty:        true,
-				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
-			},
-		},
-		publisher: publisher,
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
-		},
-		client: fakeGitHubClient{issues: []GitHubIssue{{
-			Repo:   "owner/repo",
-			Number: 12,
-			Title:  "Add feature",
-			Body:   "Please add the feature.",
-			URL:    "https://github.com/owner/repo/issues/12",
-			Labels: []string{"aged"},
-		}}},
-	})
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
+	}, fakeGitHubClient{issues: []GitHubIssue{{
+		Repo:   "owner/repo",
+		Number: 12,
+		Title:  "Add feature",
+		Body:   "Please add the feature.",
+		URL:    "https://github.com/owner/repo/issues/12",
+		Labels: []string{"aged"},
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-issue", "owner/repo#12")
+	task, ok, err := service.FindTaskByExternalID(ctx, "github-issue", "owner/repo#12")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ok {
 		t.Fatal("missing github issue task")
 	}
-	waitForPullRequests(t, fixture.store, task.ID, 1)
-	snapshot := waitForTaskStatus(t, fixture.store, task.ID, core.TaskWaiting)
+	waitForPullRequests(t, store, task.ID, 1)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	task, ok = findTask(snapshot, task.ID)
 	if !ok {
 		t.Fatal("missing task")
@@ -167,21 +116,18 @@ func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *test
 }
 
 func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
 	publisher := &fakePullRequestPublisher{}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		publisher: publisher,
-		config: GitHubDriverConfig{
-			Enabled: true,
-			PullRequests: GitHubPullRequestDriverConfig{
-				Repos:       []string{"owner/repo"},
-				AutoBabysit: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{},
-	})
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
 
 	taskID := "task-gh-12"
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -198,7 +144,7 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -208,13 +154,20 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		PullRequests: GitHubPullRequestDriverConfig{
+			Repos:       []string{"owner/repo"},
+			AutoBabysit: boolPtr(false),
+		},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if publisher.published.Repo != "owner/repo" {
 		t.Fatalf("published repo = %q, want owner/repo", publisher.published.Repo)
 	}
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +177,10 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 }
 
 func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
 	projectRoot := t.TempDir()
 	projects, err := NewProjectRegistry([]core.Project{{
 		ID:            "fork",
@@ -239,22 +196,14 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 		t.Fatal(err)
 	}
 	publisher := &fakePullRequestPublisher{}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		projectRoot: projectRoot,
-		publisher:   publisher,
-		config: GitHubDriverConfig{
-			Enabled: true,
-			PullRequests: GitHubPullRequestDriverConfig{
-				Repos:       []string{"owner/repo"},
-				AutoBabysit: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{},
-	})
-	fixture.service.SetProjects(projects)
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, projectRoot, fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetProjects(projects)
+	service.SetPullRequestPublisher(publisher)
 
 	taskID := "task-gh-fork-12"
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -272,7 +221,7 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -282,7 +231,14 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		PullRequests: GitHubPullRequestDriverConfig{
+			Repos:       []string{"owner/repo"},
+			AutoBabysit: boolPtr(false),
+		},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if publisher.published.Repo != "owner/repo" {
@@ -300,6 +256,10 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 }
 
 func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
 	publisher := &fakePullRequestPublisher{status: core.PullRequest{
 		ID:           "pr-1",
 		Repo:         "owner/repo",
@@ -313,17 +273,11 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 		MergeStatus:  "BLOCKED",
 		ReviewStatus: "CHANGES_REQUESTED",
 	}}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		planPrompt: "babysit",
-		runnerText: "ready",
-		publisher:  publisher,
-		config: GitHubDriverConfig{
-			Enabled:      true,
-			PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
-		},
-		client: fakeGitHubClient{},
-	})
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "babysit"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -333,7 +287,7 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -342,7 +296,7 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRPublished,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -359,11 +313,15 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled:      true,
+		PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	snapshot := waitForEvent(t, fixture.store, core.EventPRFollowUp, "task-1")
+	snapshot := waitForEvent(t, store, core.EventPRFollowUp, "task-1")
 	if len(snapshot.Tasks) != 1 {
 		t.Fatalf("tasks = %+v", snapshot.Tasks)
 	}
@@ -394,6 +352,10 @@ func TestPullRequestNeedsBabysitterForNewConversationComment(t *testing.T) {
 }
 
 func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
 	publisher := &fakePullRequestPublisher{status: core.PullRequest{
 		ID:           "pr-1",
 		Repo:         "owner/repo",
@@ -407,20 +369,11 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 		MergeStatus:  "CLEAN",
 		ReviewStatus: "APPROVED",
 	}}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		planPrompt: "babysit",
-		runnerText: "ready",
-		publisher:  publisher,
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo"}},
-			PullRequests: GitHubPullRequestDriverConfig{
-				AutoBabysit: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{},
-	})
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "babysit"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -430,7 +383,7 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRPublished,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -447,11 +400,18 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo"}},
+		PullRequests: GitHubPullRequestDriverConfig{
+			AutoBabysit: boolPtr(false),
+		},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +421,10 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 }
 
 func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
 	publisher := &fakePullRequestPublisher{status: core.PullRequest{
 		ID:           "pr-1",
 		Repo:         "owner/repo",
@@ -474,17 +438,11 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 		MergeStatus:  "CLEAN",
 		ReviewStatus: "APPROVED",
 	}}
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		planPrompt: "babysit",
-		runnerText: "ready",
-		publisher:  publisher,
-		config: GitHubDriverConfig{
-			Enabled:      true,
-			PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
-		},
-		client: fakeGitHubClient{},
-	})
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "babysit"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -494,7 +452,7 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -503,7 +461,7 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRPublished,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -520,11 +478,15 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled:      true,
+		PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
+	}, fakeGitHubClient{})
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	snapshot := waitForTaskStatus(t, fixture.store, "task-1", core.TaskSucceeded)
+	snapshot := waitForTaskStatus(t, store, "task-1", core.TaskSucceeded)
 	task, ok := findTask(snapshot, "task-1")
 	if !ok {
 		t.Fatal("missing task")
@@ -535,30 +497,16 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 }
 
 func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t *testing.T) {
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo"}},
-			PullRequests: GitHubPullRequestDriverConfig{
-				Enabled:     boolPtr(false),
-				AutoPublish: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{issues: []GitHubIssue{{
-			Repo:   "owner/repo",
-			Number: 12,
-			Title:  "Add feature",
-			URL:    "https://github.com/owner/repo/issues/12",
-		}, {
-			Repo:   "owner/repo",
-			Number: 13,
-			Title:  "Different bug",
-			URL:    "https://github.com/owner/repo/issues/13",
-		}}},
-	})
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 
 	taskID := "task-issue-12"
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -575,7 +523,7 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskMilestone,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -586,22 +534,41 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.store.Append(fixture.ctx, core.Event{
+	if _, err := store.Append(ctx, core.Event{
 		Type:    core.EventTaskStatus,
 		TaskID:  taskID,
 		Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded}),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.ClearTask(fixture.ctx, taskID); err != nil {
+	if err := service.ClearTask(ctx, taskID); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo"}},
+		PullRequests: GitHubPullRequestDriverConfig{
+			Enabled:     boolPtr(false),
+			AutoPublish: boolPtr(false),
+		},
+	}, fakeGitHubClient{issues: []GitHubIssue{{
+		Repo:   "owner/repo",
+		Number: 12,
+		Title:  "Add feature",
+		URL:    "https://github.com/owner/repo/issues/12",
+	}, {
+		Repo:   "owner/repo",
+		Number: 13,
+		Title:  "Different bug",
+		URL:    "https://github.com/owner/repo/issues/13",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,37 +600,39 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 }
 
 func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		planPrompt: "review it",
-		runnerText: "commented",
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Mentions: GitHubMentionDriverConfig{
-				Enabled: boolPtr(true),
-				Repos:   []string{"owner/repo"},
-			},
-			PullRequests: GitHubPullRequestDriverConfig{
-				AutoPublish: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{mentions: []GitHubMention{{
-			ID:          "thread-1",
-			Repo:        "owner/repo",
-			SubjectType: "PullRequest",
-			Number:      12,
-			Title:       "Add feature",
-			URL:         "https://github.com/owner/repo/pull/12",
-			Reason:      "review_requested",
-			Body:        "@aged can you review this?",
-			Author:      "octocat",
-			CommentURL:  "https://github.com/owner/repo/pull/12#issuecomment-1",
-		}}},
-	})
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			AutoPublish: boolPtr(false),
+		},
+	}, fakeGitHubClient{mentions: []GitHubMention{{
+		ID:          "thread-1",
+		Repo:        "owner/repo",
+		SubjectType: "PullRequest",
+		Number:      12,
+		Title:       "Add feature",
+		URL:         "https://github.com/owner/repo/pull/12",
+		Reason:      "review_requested",
+		Body:        "@aged can you review this?",
+		Author:      "octocat",
+		CommentURL:  "https://github.com/owner/repo/pull/12#issuecomment-1",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-mention", "thread-1")
+	task, ok, err := service.FindTaskByExternalID(ctx, "github-mention", "thread-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,11 +649,11 @@ func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
 	if metadata["reason"] != "review_requested" || metadata["subjectType"] != "PullRequest" {
 		t.Fatalf("metadata = %+v", metadata)
 	}
-	_ = waitForTaskStatus(t, fixture.store, task.ID, core.TaskSucceeded)
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,37 +666,39 @@ func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
 }
 
 func TestGitHubDriverSkipsMentionReasonsAndReposOutsideConfig(t *testing.T) {
-	fixture := newGitHubDriverTestFixture(t, githubDriverTestOptions{
-		planPrompt: "review it",
-		runnerText: "commented",
-		config: GitHubDriverConfig{
-			Enabled: true,
-			Mentions: GitHubMentionDriverConfig{
-				Enabled: boolPtr(true),
-				Repos:   []string{"owner/repo"},
-				Reasons: []string{"mention"},
-			},
-			PullRequests: GitHubPullRequestDriverConfig{
-				Enabled: boolPtr(false),
-			},
-		},
-		client: fakeGitHubClient{mentions: []GitHubMention{{
-			ID:     "thread-1",
-			Repo:   "owner/repo",
-			Number: 12,
-			Reason: "review_requested",
-		}, {
-			ID:     "thread-2",
-			Repo:   "other/repo",
-			Number: 13,
-			Reason: "mention",
-		}}},
-	})
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
 
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+			Reasons: []string{"mention"},
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			Enabled: boolPtr(false),
+		},
+	}, fakeGitHubClient{mentions: []GitHubMention{{
+		ID:     "thread-1",
+		Repo:   "owner/repo",
+		Number: 12,
+		Reason: "review_requested",
+	}, {
+		ID:     "thread-2",
+		Repo:   "other/repo",
+		Number: 13,
+		Reason: "mention",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
+	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
