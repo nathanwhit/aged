@@ -21,6 +21,7 @@ const (
 
 	PromptTemplateSystem            = "system"
 	PromptTemplatePlan              = "plan"
+	PromptTemplateGitHubReview      = "github_review_request"
 	PromptTemplateReplan            = "replan"
 	PromptTemplateCompletionReview  = "completion_review"
 	PromptTemplatePublicationReview = "publication_review"
@@ -29,6 +30,7 @@ const (
 var promptTemplateFiles = map[string]string{
 	PromptTemplateSystem:            "system.md",
 	PromptTemplatePlan:              "plan.md",
+	PromptTemplateGitHubReview:      "github_review_request.md",
 	PromptTemplateReplan:            "replan.md",
 	PromptTemplateCompletionReview:  "completion_review.md",
 	PromptTemplatePublicationReview: "publication_review.md",

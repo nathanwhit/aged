@@ -31,16 +31,16 @@ func main() {
 		workerKind        = flag.String("worker", envutil.String("AGED_DEFAULT_WORKER", "mock"), "orchestrator fallback worker kind")
 		assistantMode     = flag.String("assistant", envutil.String("AGED_ASSISTANT", ""), "interactive assistant provider: auto, brain, none, codex, or claude")
 		assistantReason   = flag.String("assistant-reasoning", envutil.String("AGED_ASSISTANT_REASONING", "medium"), "interactive assistant reasoning effort: default, low, medium, high, xhigh, or max")
-		brainMode         = flag.String("brain", envutil.String("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
+		brainMode         = flag.String("brain", envutil.String("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, claude, api, or static")
 		promptPath        = flag.String("prompt", envutil.String("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
 		schedulerPrompt   = flag.String("scheduler-prompt", envutil.String("AGED_SCHEDULER_PROMPT", "prompts/default/system.md"), "API scheduler prompt template")
-		promptDir         = flag.String("prompt-dir", envutil.String("AGED_PROMPT_DIR", "prompts/default"), "directory containing built-in Codex prompt set templates")
-		promptSetID       = flag.String("prompt-set", envutil.String("AGED_PROMPT_SET", ""), "default Codex prompt set id")
+		promptDir         = flag.String("prompt-dir", envutil.String("AGED_PROMPT_DIR", "prompts/default"), "directory containing built-in scheduler prompt set templates")
+		promptSetID       = flag.String("prompt-set", envutil.String("AGED_PROMPT_SET", ""), "default scheduler prompt set id")
 		brainEndpoint     = flag.String("brain-endpoint", envutil.String("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
 		brainAPIKey       = flag.String("brain-api-key", envutil.First("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
 		brainModel        = flag.String("brain-model", envutil.String("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
-		codexPath         = flag.String("codex-path", envutil.String("AGED_CODEX_PATH", "codex"), "Codex CLI path for the codex brain")
-		claudePath        = flag.String("claude-path", envutil.String("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for the assistant")
+		codexPath         = flag.String("codex-path", envutil.String("AGED_CODEX_PATH", "codex"), "Codex CLI path for Codex-backed brain, assistant, and worker defaults")
+		claudePath        = flag.String("claude-path", envutil.String("AGED_CLAUDE_PATH", "claude"), "Claude CLI path for Claude-backed brain, assistant, and worker defaults")
 		workspaceVCS      = flag.String("workspace-vcs", envutil.String("AGED_WORKSPACE_VCS", "auto"), "worker workspace VCS: auto, jj, or git")
 		workspaceMode     = flag.String("workspace-mode", envutil.String("AGED_WORKSPACE_MODE", "isolated"), "worker workspace mode: isolated or shared")
 		workspaceRoot     = flag.String("workspace-root", envutil.String("AGED_WORKSPACE_ROOT", ""), "directory for isolated worker workspaces; empty defaults to ~/.aged/workspaces")
@@ -117,6 +117,19 @@ func main() {
 			slog.Warn("using fallback brain because Codex brain could not be configured", "error", err)
 		} else {
 			brain = codexBrain
+		}
+	case "claude":
+		claudeBrain, err := orchestrator.NewClaudeBrain(orchestrator.ClaudeBrainConfig{
+			ClaudePath:   *claudePath,
+			TemplatePath: *schedulerPrompt,
+			PromptSets:   promptSets,
+			WorkDir:      absWorkDir,
+			Fallback:     fallbackBrain,
+		})
+		if err != nil {
+			slog.Warn("using fallback brain because Claude brain could not be configured", "error", err)
+		} else {
+			brain = claudeBrain
 		}
 	case "api":
 		apiBrain, err := orchestrator.NewAPIBrain(orchestrator.APIBrainConfig{
@@ -271,7 +284,7 @@ func configureAssistant(mode string, workerKind string, brainMode string, config
 		case "codex-cli":
 			mode = "codex"
 		default:
-			if brainMode == "codex" || brainMode == "api" {
+			if brainMode == "codex" || brainMode == "claude" || brainMode == "api" {
 				return nil, nil
 			}
 			mode = "none"

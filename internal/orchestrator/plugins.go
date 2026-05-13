@@ -522,6 +522,7 @@ func builtinPlugins() []core.Plugin {
 	return []core.Plugin{
 		{ID: "brain:prompt", Name: "Prompt Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan"}},
 		{ID: "brain:codex", Name: "Codex Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan", "replan"}},
+		{ID: "brain:claude", Name: "Claude Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan", "replan"}},
 		{ID: "brain:api", Name: "OpenAI-Compatible Scheduler", Kind: "brain", Enabled: true, BuiltIn: true, Capabilities: []string{"plan", "replan"}},
 		{ID: "runner:codex", Name: "Codex CLI Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"code", "shell", "json-events"}},
 		{ID: "runner:claude", Name: "Claude CLI Worker", Kind: "runner", Enabled: true, BuiltIn: true, Capabilities: []string{"code", "review", "stream-events"}},

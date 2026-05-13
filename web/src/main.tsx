@@ -2833,6 +2833,7 @@ function healthFlag(value?: boolean): string {
 const SYSTEM_PLUGIN_IDS = new Set([
   "brain:prompt",
   "brain:codex",
+  "brain:claude",
   "brain:api",
   "runner:codex",
   "runner:claude",
@@ -2843,7 +2844,7 @@ const SYSTEM_PLUGIN_IDS = new Set([
   "driver:discord",
 ]);
 
-const PROMPT_TEMPLATE_KEYS = ["system", "plan", "replan", "completion_review", "publication_review"];
+const PROMPT_TEMPLATE_KEYS = ["system", "plan", "github_review_request", "replan", "completion_review", "publication_review"];
 
 function PromptSetPanel({
   promptSets,
