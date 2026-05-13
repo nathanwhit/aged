@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -415,6 +416,77 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	text := contents[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "MCP task") {
 		t.Fatalf("resource text = %s", text)
+	}
+}
+
+func TestMCPPullRequestResourceURIEscapesID(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	prID := "github:owner/repo#7"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "task-pr", Payload: core.MustJSON(map[string]any{"title": "PR task", "prompt": "Track PR"})},
+		{Type: core.EventPRPublished, TaskID: "task-pr", Payload: core.MustJSON(map[string]any{
+			"id":     prID,
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "aged/task-pr",
+			"base":   "main",
+			"title":  "Fix URI escaping",
+			"state":  "open",
+		})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	resources := postMCP(t, server.URL, `{"jsonrpc":"2.0","id":1,"method":"resources/list"}`)
+	list := resources["result"].(map[string]any)["resources"].([]any)
+	var prURI string
+	for _, item := range list {
+		resource := item.(map[string]any)
+		if resource["name"] == "pull-request-"+prID {
+			prURI = resource["uri"].(string)
+		}
+	}
+	if prURI == "" {
+		t.Fatalf("pull request resource missing: %+v", list)
+	}
+
+	parsed, err := url.Parse(prURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Fragment != "" {
+		t.Fatalf("uri fragment = %q, want empty for %q", parsed.Fragment, prURI)
+	}
+	if parsed.String() != prURI {
+		t.Fatalf("uri round trip = %q, want %q", parsed.String(), prURI)
+	}
+
+	read := postMCP(t, server.URL, fmt.Sprintf(`{
+		"jsonrpc": "2.0",
+		"id": 2,
+		"method": "resources/read",
+		"params": {"uri": %q}
+	}`, prURI))
+	contents := read["result"].(map[string]any)["contents"].([]any)
+	text := contents[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, prID) {
+		t.Fatalf("resource text = %s", text)
+	}
+	if value, ok := findMCPResource(core.Snapshot{PullRequests: []core.PullRequest{{ID: "bad%zz"}}}, "aged://pull-requests/bad%zz"); ok {
+		t.Fatalf("malformed escaped pull request URI matched %+v", value)
 	}
 }
 
