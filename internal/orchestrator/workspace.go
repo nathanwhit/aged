@@ -968,16 +968,8 @@ func copyGitTrackedChanges(ctx context.Context, source string, destination strin
 			copied = true
 			continue
 		}
-		sourcePath, err := safeWorkspacePath(source, path)
-		if err != nil {
-			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
-		}
-		destinationPath, err := safeWorkspacePath(destination, path)
-		if err != nil {
-			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
-		}
-		if err := copyWorkspaceFile(sourcePath, destinationPath); err != nil {
-			return false, fmt.Errorf("copy git base workspace tracked file %q: %w", path, err)
+		if err := copyWorkspaceRelativeFile(source, destination, path, "copy git base workspace tracked file"); err != nil {
+			return false, err
 		}
 		copied = true
 	}
@@ -1059,20 +1051,27 @@ func copyGitUntrackedFiles(ctx context.Context, source string, destination strin
 		if path == "" {
 			continue
 		}
-		sourcePath, err := safeWorkspacePath(source, path)
-		if err != nil {
-			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
-		}
-		destinationPath, err := safeWorkspacePath(destination, path)
-		if err != nil {
-			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
-		}
-		if err := copyWorkspaceFile(sourcePath, destinationPath); err != nil {
-			return false, fmt.Errorf("copy git base workspace untracked file %q: %w", path, err)
+		if err := copyWorkspaceRelativeFile(source, destination, path, "copy git base workspace untracked file"); err != nil {
+			return false, err
 		}
 		copied = true
 	}
 	return copied, nil
+}
+
+func copyWorkspaceRelativeFile(sourceRoot string, destinationRoot string, path string, context string) error {
+	sourcePath, err := safeWorkspacePath(sourceRoot, path)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", context, path, err)
+	}
+	destinationPath, err := safeWorkspacePath(destinationRoot, path)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", context, path, err)
+	}
+	if err := copyWorkspaceFile(sourcePath, destinationPath); err != nil {
+		return fmt.Errorf("%s %q: %w", context, path, err)
+	}
+	return nil
 }
 
 func safeWorkspacePath(root string, relativePath string) (string, error) {
