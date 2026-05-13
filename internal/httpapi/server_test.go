@@ -51,16 +51,32 @@ func (fakeMCPRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	return "", nil
 }
 
-func TestCreateTaskRejectsUserWorkerSelection(t *testing.T) {
+type httpAPITestHarness struct {
+	store   eventstore.Store
+	service *orchestrator.Service
+	server  *httptest.Server
+}
+
+func newHTTPAPITestHarness(t *testing.T) httpAPITestHarness {
+	t.Helper()
 	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
 	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
 	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	t.Cleanup(server.Close)
+	return httpAPITestHarness{store: store, service: service, server: server}
+}
+
+func TestCreateTaskRejectsUserWorkerSelection(t *testing.T) {
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
 		"title": "Do work",
@@ -105,15 +121,8 @@ func hasAvailableAction(actions []orchestrator.AvailableAction, name string) boo
 }
 
 func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
 		"title": "Do work",
@@ -130,15 +139,8 @@ func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 }
 
 func TestCreateTaskAllowsGeneratedTitle(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
 		"prompt": "Implement parser retry path"
@@ -317,15 +319,8 @@ func TestTaskEventsEndpointLimitsWorkerOutput(t *testing.T) {
 }
 
 func TestMCPEndpointInitializesAndListsTools(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	init := postMCP(t, server.URL, `{
 		"jsonrpc": "2.0",
@@ -357,16 +352,8 @@ func TestMCPEndpointInitializesAndListsTools(t *testing.T) {
 }
 
 func TestMCPCreateTaskAndReadResources(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	created := postMCP(t, server.URL, `{
 		"jsonrpc": "2.0",
@@ -492,15 +479,9 @@ func TestMCPPullRequestResourceURIEscapesID(t *testing.T) {
 
 func TestMCPTaskDetailIncludesWorkersEventsAndActions(t *testing.T) {
 	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	store := h.store
+	server := h.server
 
 	taskID := "task-detail"
 	workerID := "worker-detail"
@@ -548,15 +529,10 @@ func TestMCPTaskDetailIncludesWorkersEventsAndActions(t *testing.T) {
 
 func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
 	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	store := h.store
+	service := h.service
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/plugins", "application/json", strings.NewReader(`{
 		"id": "runner:lint",
@@ -598,15 +574,8 @@ func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
 }
 
 func TestUpdatePluginRejectsIDMismatchAsBadRequest(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/plugins/runner:lint", strings.NewReader(`{
 		"id": "runner:fmt",
@@ -776,15 +745,10 @@ func (fakeHTTPDiscordClient) SendMessage(context.Context, string, string) error 
 
 func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	store := h.store
+	service := h.service
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/targets", "application/json", strings.NewReader(`{
 		"id": "local-ci",
@@ -832,15 +796,8 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 }
 
 func TestUpdateTargetRejectsIDMismatchAsBadRequest(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/targets/local-ci", strings.NewReader(`{
 		"id": "remote-ci",
@@ -869,16 +826,8 @@ func TestUpdateTargetRejectsIDMismatchAsBadRequest(t *testing.T) {
 }
 
 func TestDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	for _, path := range []string{"/api/targets/missing", "/api/plugins/missing"} {
 		req, err := http.NewRequest(http.MethodDelete, server.URL+path, nil)
@@ -897,16 +846,8 @@ func TestDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
 }
 
 func TestMCPDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	tests := []struct {
 		name    string
@@ -949,16 +890,8 @@ func TestMCPDeleteMissingTargetAndPluginReturnsNotFound(t *testing.T) {
 }
 
 func TestMCPProjectTools(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	projectDir := t.TempDir()
 	created := postMCP(t, server.URL, fmt.Sprintf(`{
@@ -1120,16 +1053,8 @@ func TestMCPProjectTools(t *testing.T) {
 }
 
 func TestMCPTargetAndPluginTools(t *testing.T) {
-	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	createdTarget := postMCP(t, server.URL, `{
 		"jsonrpc": "2.0",
@@ -1561,15 +1486,9 @@ func TestProjectsEndpointReturnsConfiguredProjects(t *testing.T) {
 
 func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	ctx := context.Background()
-	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	store := h.store
+	server := h.server
 
 	projectDir := t.TempDir()
 	body := fmt.Sprintf(`{
@@ -1691,15 +1610,8 @@ func TestProjectUpdateDeleteAndHealthEndpoints(t *testing.T) {
 }
 
 func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
-	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	server := httptest.NewServer(New(service, nil).Routes())
-	defer server.Close()
+	h := newHTTPAPITestHarness(t)
+	server := h.server
 
 	res, err := http.Post(server.URL+"/api/tasks", "application/json", strings.NewReader(`{
 		"title": "GitHub issue",
