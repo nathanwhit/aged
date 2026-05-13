@@ -244,15 +244,15 @@ func planResponseFormat() map[string]any {
 			"schema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"workerKind", "workerPrompt", "reasoningEffort", "rationale", "steps", "requiredApprovals", "actions", "spawns"},
+				"required":             []string{"reasoningEffort", "rationale", "steps", "requiredApprovals", "actions", "workers", "spawns"},
 				"properties": map[string]any{
 					"workerKind": map[string]any{
 						"type":        "string",
-						"description": "Configured worker kind, such as codex, claude, mock, benchmark_compare, or an enabled aged-runner-v1 plugin kind.",
+						"description": "Legacy fallback worker kind. Prefer workers[].workerKind for new plans.",
 					},
 					"workerPrompt": map[string]any{
-						"type":      "string",
-						"minLength": 1,
+						"type":        "string",
+						"description": "Legacy fallback worker prompt. Prefer workers[].workerPrompt for new plans.",
 					},
 					"reasoningEffort": map[string]any{
 						"type": "string",
@@ -306,6 +306,26 @@ func planResponseFormat() map[string]any {
 					"metadata": map[string]any{
 						"type":                 "object",
 						"additionalProperties": true,
+					},
+					"workers": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"required":             []string{"id", "role", "reason", "workerKind", "workerPrompt", "reasoningEffort", "dependsOn"},
+							"properties": map[string]any{
+								"id":              map[string]any{"type": "string"},
+								"role":            map[string]any{"type": "string"},
+								"reason":          map[string]any{"type": "string"},
+								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
+								"workerPrompt":    map[string]any{"type": "string", "minLength": 1},
+								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
+								"dependsOn": map[string]any{
+									"type":  "array",
+									"items": map[string]any{"type": "string"},
+								},
+							},
+						},
 					},
 					"spawns": map[string]any{
 						"type": "array",

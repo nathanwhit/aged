@@ -38,6 +38,7 @@ type Plan struct {
 	Steps             []PlanStep        `json:"steps,omitempty"`
 	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
 	Actions           []PlanAction      `json:"actions,omitempty"`
+	Workers           []WorkerRequest   `json:"workers,omitempty"`
 	Spawns            []SpawnRequest    `json:"spawns,omitempty"`
 	Metadata          map[string]any    `json:"metadata,omitempty"`
 }
@@ -58,6 +59,16 @@ type PlanAction struct {
 	Reason   string         `json:"reason"`
 	WorkerID string         `json:"workerId,omitempty"`
 	Inputs   map[string]any `json:"inputs,omitempty"`
+}
+
+type WorkerRequest struct {
+	ID              string   `json:"id,omitempty"`
+	Role            string   `json:"role,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	WorkerKind      string   `json:"workerKind"`
+	Prompt          string   `json:"workerPrompt"`
+	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
+	DependsOn       []string `json:"dependsOn,omitempty"`
 }
 
 type SpawnRequest struct {
@@ -100,11 +111,15 @@ type PublicationReview struct {
 }
 
 func (p Plan) Validate() error {
-	if strings.TrimSpace(p.WorkerKind) == "" {
-		return errors.New("plan workerKind is required")
-	}
-	if strings.TrimSpace(p.Prompt) == "" {
-		return errors.New("plan workerPrompt is required")
+	if len(p.Workers) == 0 {
+		if strings.TrimSpace(p.WorkerKind) == "" {
+			return errors.New("plan workerKind is required")
+		}
+		if strings.TrimSpace(p.Prompt) == "" {
+			return errors.New("plan workerPrompt is required")
+		}
+	} else if err := validateWorkerRequests(p.Workers); err != nil {
+		return err
 	}
 	for index, action := range p.Actions {
 		if err := action.Validate(); err != nil {
@@ -112,6 +127,46 @@ func (p Plan) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateWorkerRequests(workers []WorkerRequest) error {
+	ids := map[string]bool{}
+	for index, worker := range workers {
+		id := workerRequestID(worker, index)
+		if ids[id] {
+			return fmt.Errorf("plan workers[%d]: duplicate worker id %q", index, id)
+		}
+		ids[id] = true
+		if strings.TrimSpace(worker.WorkerKind) == "" {
+			return fmt.Errorf("plan workers[%d]: workerKind is required", index)
+		}
+		if strings.TrimSpace(worker.Prompt) == "" {
+			return fmt.Errorf("plan workers[%d]: workerPrompt is required", index)
+		}
+	}
+	for index, worker := range workers {
+		id := workerRequestID(worker, index)
+		for _, dep := range worker.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
+			if dep == id {
+				return fmt.Errorf("plan workers[%d]: worker %q depends on itself", index, id)
+			}
+			if !ids[dep] {
+				return fmt.Errorf("plan workers[%d]: worker %q depends on unknown worker %q", index, id, dep)
+			}
+		}
+	}
+	return nil
+}
+
+func workerRequestID(worker WorkerRequest, index int) string {
+	if strings.TrimSpace(worker.ID) != "" {
+		return strings.TrimSpace(worker.ID)
+	}
+	return fmt.Sprintf("worker-%d", index+1)
 }
 
 func (a PlanAction) Validate() error {
