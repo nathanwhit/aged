@@ -356,26 +356,7 @@ func (d *GitHubDriverRuntime) stateLocked() GitHubDriverRuntimeState {
 func (d *GitHubDriverRuntime) DecoratePlugin(plugins []core.Plugin) []core.Plugin {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for index := range plugins {
-		if plugins[index].ID != "driver:github" {
-			continue
-		}
-		plugins[index].Enabled = d.config.Enabled
-		plugins[index].Error = d.lastError
-		plugins[index].Driver.Managed = true
-		plugins[index].Driver.StartedAt = d.startedAt
-		plugins[index].Driver.RestartPolicy = "runtime-config"
-		switch {
-		case d.running:
-			plugins[index].Status = "running"
-		case d.config.Enabled:
-			plugins[index].Status = "stopped"
-		default:
-			plugins[index].Status = "disabled"
-		}
-		return plugins
-	}
-	return plugins
+	return decorateRuntimeDriverPlugin(plugins, "driver:github", d.config.Enabled, d.running, d.startedAt, d.lastError)
 }
 
 func (d *DiscordDriverRuntime) SetRuntimeContext(ctx context.Context) {
@@ -522,19 +503,23 @@ func (d *DiscordDriverRuntime) stateLocked() DiscordDriverRuntimeState {
 func (d *DiscordDriverRuntime) DecoratePlugin(plugins []core.Plugin) []core.Plugin {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return decorateRuntimeDriverPlugin(plugins, "driver:discord", d.config.Enabled, d.running, d.startedAt, d.lastError)
+}
+
+func decorateRuntimeDriverPlugin(plugins []core.Plugin, id string, enabled bool, running bool, startedAt time.Time, lastError string) []core.Plugin {
 	for index := range plugins {
-		if plugins[index].ID != "driver:discord" {
+		if plugins[index].ID != id {
 			continue
 		}
-		plugins[index].Enabled = d.config.Enabled
-		plugins[index].Error = d.lastError
+		plugins[index].Enabled = enabled
+		plugins[index].Error = lastError
 		plugins[index].Driver.Managed = true
-		plugins[index].Driver.StartedAt = d.startedAt
+		plugins[index].Driver.StartedAt = startedAt
 		plugins[index].Driver.RestartPolicy = "runtime-config"
 		switch {
-		case d.running:
+		case running:
 			plugins[index].Status = "running"
-		case d.config.Enabled:
+		case enabled:
 			plugins[index].Status = "stopped"
 		default:
 			plugins[index].Status = "disabled"
