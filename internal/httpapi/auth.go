@@ -241,13 +241,8 @@ func (a *GoogleAuth) exchangeAndVerify(ctx context.Context, r *http.Request, cod
 	if err != nil {
 		return AuthUser{}, fmt.Errorf("exchange oauth code: %w", err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return AuthUser{}, fmt.Errorf("exchange oauth code: status %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
-	}
 	var token tokenResponse
-	if err := json.NewDecoder(res.Body).Decode(&token); err != nil {
+	if err := decodeGoogleAuthResponse(res, "exchange oauth code", &token); err != nil {
 		return AuthUser{}, err
 	}
 	if token.IDToken == "" {
@@ -272,13 +267,8 @@ func (a *GoogleAuth) verifyIDToken(ctx context.Context, idToken string) (AuthUse
 	if err != nil {
 		return AuthUser{}, fmt.Errorf("verify google id token: %w", err)
 	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return AuthUser{}, fmt.Errorf("verify google id token: status %d: %s", res.StatusCode, strings.TrimSpace(string(body)))
-	}
 	var info tokenInfoResponse
-	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+	if err := decodeGoogleAuthResponse(res, "verify google id token", &info); err != nil {
 		return AuthUser{}, err
 	}
 	if info.Audience != a.clientID {
@@ -408,6 +398,15 @@ func parseClaimUnix(value any) (int64, error) {
 	default:
 		return 0, errors.New("invalid unix claim")
 	}
+}
+
+func decodeGoogleAuthResponse(res *http.Response, operation string, value any) error {
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return fmt.Errorf("%s: status %d: %s", operation, res.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(res.Body).Decode(value)
 }
 
 func minInt64(a int64, b int64) int64 {
