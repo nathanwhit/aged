@@ -101,6 +101,9 @@ func LoadGitHubDriverConfig(value string) (GitHubDriverConfig, error) {
 	if value == "" {
 		return GitHubDriverConfig{}, nil
 	}
+	if enabled, ok := parseGitHubDriverEnabled(value); ok {
+		return normalizeGitHubDriverConfig(GitHubDriverConfig{Enabled: enabled}), nil
+	}
 	var data []byte
 	if strings.HasPrefix(value, "{") {
 		data = []byte(value)
@@ -116,6 +119,21 @@ func LoadGitHubDriverConfig(value string) (GitHubDriverConfig, error) {
 		return GitHubDriverConfig{}, err
 	}
 	return normalizeGitHubDriverConfig(config), nil
+}
+
+func parseGitHubDriverEnabled(value string) (bool, bool) {
+	enabled, err := strconv.ParseBool(value)
+	if err == nil {
+		return enabled, true
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "on":
+		return true, true
+	case "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func normalizeGitHubDriverConfig(config GitHubDriverConfig) GitHubDriverConfig {

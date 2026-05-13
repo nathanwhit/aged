@@ -4,6 +4,8 @@ import (
 	"flag"
 	"testing"
 	"time"
+
+	"aged/internal/flagutil"
 )
 
 func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
@@ -32,11 +34,11 @@ func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
 	flags := flag.NewFlagSet("aged", flag.ContinueOnError)
 	var artifactCleanup bool
 	var artifactDryRun bool
-	var githubDriver string
+	githubDriver := flagutil.NewOptionalValue("")
 	var discordDriver string
 	var web string
-	registerDaemonTestFlags(flags, &artifactCleanup, &artifactDryRun, &githubDriver, &discordDriver, &web)
-	if err := flags.Parse(args); err != nil {
+	registerDaemonTestFlags(flags, &artifactCleanup, &artifactDryRun, githubDriver, &discordDriver, &web)
+	if err := flags.Parse(flagutil.NormalizeOptionalValueArgs(args, "github-driver")); err != nil {
 		t.Fatal(err)
 	}
 	if flags.NArg() != 0 {
@@ -45,8 +47,8 @@ func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
 	if !artifactCleanup || artifactDryRun {
 		t.Fatalf("artifact cleanup = %v dryRun = %v", artifactCleanup, artifactDryRun)
 	}
-	if githubDriver != ".config/gh.json" {
-		t.Fatalf("github driver = %q, want .config/gh.json", githubDriver)
+	if githubDriver.String() != ".config/gh.json" {
+		t.Fatalf("github driver = %q, want .config/gh.json", githubDriver.String())
 	}
 	if discordDriver != ".config/discord.json" {
 		t.Fatalf("discord driver = %q, want .config/discord.json", discordDriver)
@@ -56,7 +58,7 @@ func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
 	}
 }
 
-func registerDaemonTestFlags(flags *flag.FlagSet, artifactCleanup *bool, artifactDryRun *bool, githubDriver *string, discordDriver *string, web *string) {
+func registerDaemonTestFlags(flags *flag.FlagSet, artifactCleanup *bool, artifactDryRun *bool, githubDriver *flagutil.OptionalValue, discordDriver *string, web *string) {
 	flags.String("addr", "", "")
 	flags.String("db", "", "")
 	flags.String("worker", "", "")
@@ -73,7 +75,7 @@ func registerDaemonTestFlags(flags *flag.FlagSet, artifactCleanup *bool, artifac
 	flags.BoolVar(artifactCleanup, "workspace-artifact-cleanup", false, "")
 	flags.BoolVar(artifactDryRun, "workspace-artifact-cleanup-dry-run", false, "")
 	flags.Duration("workspace-artifact-cleanup-min-age", 0, "")
-	flags.StringVar(githubDriver, "github-driver", "", "")
+	flags.Var(githubDriver, "github-driver", "")
 	flags.StringVar(discordDriver, "discord-driver", "", "")
 	flags.StringVar(web, "web", "", "")
 }

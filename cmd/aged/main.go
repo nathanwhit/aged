@@ -15,6 +15,7 @@ import (
 
 	"aged/internal/envutil"
 	"aged/internal/eventstore"
+	"aged/internal/flagutil"
 	"aged/internal/httpapi"
 	"aged/internal/orchestrator"
 	"aged/internal/worker"
@@ -46,7 +47,7 @@ func main() {
 		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "report stale retained worker artifact cleanup without deleting directories")
 		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "minimum terminal worker age before retained workspace artifact cleanup")
 		targetsPath       = flag.String("targets", envutil.String("AGED_TARGETS", ""), "JSON execution target pool config")
-		githubDriverPath  = flag.String("github-driver", envutil.String("AGED_GITHUB_DRIVER", ""), "GitHub driver config JSON path or inline JSON")
+		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
 		prMonitor         = flag.Bool("pull-request-monitor", envutil.Bool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
 		prMonitorInterval = flag.Duration("pull-request-monitor-interval", envutil.Duration("AGED_PULL_REQUEST_MONITOR_INTERVAL", time.Minute), "tracked pull request refresh interval")
 		discordDriverPath = flag.String("discord-driver", envutil.String("AGED_DISCORD_DRIVER", ""), "Discord driver config JSON path or inline JSON")
@@ -58,7 +59,8 @@ func main() {
 		authSessionKey    = flag.String("auth-session-key", envutil.String("AGED_AUTH_SESSION_KEY", ""), "session signing key; use at least 32 random bytes")
 		authRedirectURL   = flag.String("auth-redirect-url", envutil.String("AGED_AUTH_REDIRECT_URL", ""), "public OAuth callback URL, for example https://aged.example.com/auth/callback")
 	)
-	flag.Parse()
+	flag.Var(githubDriverPath, "github-driver", "enable GitHub driver; optionally accepts config JSON path or inline JSON")
+	flag.CommandLine.Parse(flagutil.NormalizeOptionalValueArgs(os.Args[1:], "github-driver"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -185,7 +187,7 @@ func main() {
 		service.StartPullRequestMonitor(ctx, *prMonitorInterval)
 		slog.Info("pull request monitor enabled", "interval", prMonitorInterval.String())
 	}
-	githubDriverConfig, err := orchestrator.LoadGitHubDriverConfig(*githubDriverPath)
+	githubDriverConfig, err := orchestrator.LoadGitHubDriverConfig(githubDriverPath.String())
 	if err != nil {
 		fatal("load github driver", err)
 	}
