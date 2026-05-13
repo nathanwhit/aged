@@ -60,9 +60,10 @@ type RemoteCheckoutSpec struct {
 }
 
 type remoteStatus struct {
-	Status string `json:"status"`
-	Exit   int    `json:"exit,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Status             string `json:"status"`
+	Exit               int    `json:"exit,omitempty"`
+	Error              string `json:"error,omitempty"`
+	InferredFromOutput bool   `json:"-"`
 }
 
 var errSSHPollCommandTimeout = errors.New("ssh poll command timed out")
@@ -182,6 +183,9 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 		}
 		consecutivePollTimeouts = 0
 		if status.Status == "succeeded" || status.Status == "failed" || status.Status == "canceled" {
+			if status.InferredFromOutput {
+				_ = r.Cancel(ctx, run)
+			}
 			if err := filter.Flush(ctx, sink); err != nil {
 				return status, err
 			}
@@ -233,6 +237,9 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 		status.Status = "running"
 	}
 	if status.Status == "running" {
+		if terminal, ok := terminalRemoteStatusFromResultLog(stdout); ok {
+			return terminal, nil
+		}
 		active, activeErr := r.remoteSessionActive(ctx, run)
 		if activeErr == nil && !active {
 			return inferTerminalRemoteStatus(parser, stdout, stderr), nil
@@ -253,9 +260,13 @@ func (r SSHRunner) remoteSessionActive(ctx context.Context, run remoteRun) (bool
 }
 
 func inferTerminalRemoteStatus(parser worker.Parser, stdout string, stderr string) remoteStatus {
+	if status, ok := terminalRemoteStatusFromResultLog(stdout); ok {
+		return status
+	}
 	status := remoteStatus{
-		Status: "failed",
-		Error:  "remote worker session ended before writing terminal status",
+		Status:             "failed",
+		Error:              "remote worker session ended before writing terminal status",
+		InferredFromOutput: true,
 	}
 	for _, line := range strings.Split(stdout, "\n") {
 		line = strings.TrimSpace(line)
@@ -281,6 +292,51 @@ func inferTerminalRemoteStatus(parser worker.Parser, stdout string, stderr strin
 		}
 	}
 	return status
+}
+
+func terminalRemoteStatusFromResultLog(stdout string) (remoteStatus, bool) {
+	var status remoteStatus
+	found := false
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			continue
+		}
+		if remoteStringField(payload, "type") != "result" {
+			continue
+		}
+		found = true
+		if remoteBoolField(payload, "is_error") || !strings.EqualFold(remoteStringField(payload, "subtype"), "success") {
+			status = remoteStatus{
+				Status:             "failed",
+				Error:              nonEmpty(remoteStringField(payload, "error"), remoteStringField(payload, "result"), "remote worker emitted terminal error result"),
+				InferredFromOutput: true,
+			}
+			continue
+		}
+		status = remoteStatus{Status: "succeeded", Exit: 0, InferredFromOutput: true}
+	}
+	return status, found
+}
+
+func remoteStringField(payload map[string]any, key string) string {
+	switch value := payload[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func remoteBoolField(payload map[string]any, key string) bool {
+	value, _ := payload[key].(bool)
+	return value
 }
 
 func (r SSHRunner) drainRemoteCallbacks(ctx context.Context, run remoteRun, sink worker.Sink) error {
@@ -471,6 +527,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}
 	}
+	_ = r.ensureRemoteChangeFiles(ctx, run)
 	var firstReadErr error
 	tryRead := func(name string) (string, bool) {
 		out, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, name))+" 2>/dev/null || true")
@@ -529,6 +586,17 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		changes.Error = firstReadErr.Error()
 	}
 	return changes
+}
+
+func (r SSHRunner) ensureRemoteChangeFiles(ctx context.Context, run remoteRun) error {
+	runDir := shellQuote(run.RunDir)
+	script := fmt.Sprintf(`if [ ! -f %[1]s/vcs.txt ] || [ ! -f %[1]s/root.txt ] || [ ! -f %[1]s/changes.txt ] || [ ! -f %[1]s/diff.patch ]; then cd %[2]s && %[3]s; fi`,
+		runDir,
+		shellQuote(run.WorkDir),
+		remoteChangeScript(run),
+	)
+	_, err := r.runPollCommand(ctx, run.Target, script)
+	return err
 }
 
 func remoteLogArtifacts(run remoteRun, stdout string, stderr string) []WorkspaceArtifact {
