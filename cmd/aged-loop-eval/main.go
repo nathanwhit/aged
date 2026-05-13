@@ -495,20 +495,21 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 	firstPRAt := (*time.Time)(nil)
 	nextWorkerAfterSteering := (*time.Time)(nil)
 	for _, event := range events {
+		payload := decodePayload(event.Payload)
 		switch event.Type {
 		case core.EventTaskPlanned:
-			if payloadNestedString(event.Payload, "metadata", "executionMode") == "loop" {
+			if payloadNestedString(payload, "metadata", "executionMode") == "loop" {
 				metrics.LoopPlans++
 			}
 		case core.EventTaskStatus:
-			if payloadString(event.Payload, "status") == string(core.TaskWaiting) {
+			if payloadString(payload, "status") == string(core.TaskWaiting) {
 				metrics.TaskWaitingTransitions++
 			}
 		case core.EventTaskAction:
-			if payloadString(event.Payload, "kind") != "durable_loop" {
+			if payloadString(payload, "kind") != "durable_loop" {
 				continue
 			}
-			switch payloadString(event.Payload, "status") {
+			switch payloadString(payload, "status") {
 			case "iteration_completed":
 				metrics.IterationsCompleted++
 			case "iteration_failed":
@@ -523,7 +524,7 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 				nextWorkerAfterSteering = &at
 			}
 		case core.EventWorkerCompleted:
-			switch core.WorkerStatus(payloadString(event.Payload, "status")) {
+			switch core.WorkerStatus(payloadString(payload, "status")) {
 			case core.WorkerSucceeded:
 				metrics.WorkersSucceeded++
 			case core.WorkerFailed:
@@ -534,7 +535,7 @@ func collectMetrics(taskID string, snapshot core.Snapshot, events []core.Event, 
 				metrics.WorkerNeedsInput++
 			}
 		case core.EventWorkerOutput:
-			text := strings.ToLower(payloadString(event.Payload, "text"))
+			text := strings.ToLower(payloadString(payload, "text"))
 			if looksLikeRepositoryInspection(text) {
 				metrics.RepositoryInspectionEventCount++
 			}
@@ -779,23 +780,20 @@ func terminalTaskStatus(status core.TaskStatus) bool {
 	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
 }
 
-func payloadString(payload json.RawMessage, key string) string {
-	var decoded map[string]any
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return ""
-	}
-	value, _ := decoded[key].(string)
+func payloadNestedString(payload map[string]any, parent string, key string) string {
+	child, _ := payload[parent].(map[string]any)
+	return payloadString(child, key)
+}
+
+func payloadString(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
 	return value
 }
 
-func payloadNestedString(payload json.RawMessage, parent string, key string) string {
+func decodePayload(payload json.RawMessage) map[string]any {
 	var decoded map[string]any
-	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return ""
-	}
-	child, _ := decoded[parent].(map[string]any)
-	value, _ := child[key].(string)
-	return value
+	_ = json.Unmarshal(payload, &decoded)
+	return decoded
 }
 
 func firstEventTime(events []core.Event) time.Time {
@@ -857,8 +855,9 @@ func sampleEvents(events []core.Event, limit int) []eventSample {
 }
 
 func eventSummary(event core.Event) string {
+	payload := decodePayload(event.Payload)
 	for _, key := range []string{"status", "kind", "summary", "text", "error"} {
-		if value := payloadString(event.Payload, key); value != "" {
+		if value, _ := payload[key].(string); value != "" {
 			return truncate(value, 240)
 		}
 	}
