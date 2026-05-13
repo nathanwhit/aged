@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -220,7 +221,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		broker:        NewBroker(),
 		brain:         brain,
 		runners:       runners,
-		baseRunners:   cloneRunnerMap(runners),
+		baseRunners:   maps.Clone(runners),
 		pluginRunners: map[string]struct{}{},
 		workDir:       workDir,
 		projects:      projects,
@@ -565,14 +566,6 @@ func (s *Service) DeletePlugin(ctx context.Context, id string) error {
 	}
 	s.syncPluginRunners()
 	return nil
-}
-
-func cloneRunnerMap(in map[string]worker.Runner) map[string]worker.Runner {
-	out := make(map[string]worker.Runner, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }
 
 // syncPluginRunners reconciles s.runners with the current set of enabled
@@ -3546,7 +3539,10 @@ func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID st
 	if err != nil {
 		return false, err
 	}
-	blockedFinalCandidates := copyStringMap(recoveryState.BlockedFinalCandidates)
+	blockedFinalCandidates := maps.Clone(recoveryState.BlockedFinalCandidates)
+	if blockedFinalCandidates == nil {
+		blockedFinalCandidates = map[string]string{}
+	}
 	blockedFinalCandidates[candidateWorkerID] = publishErr.Error()
 	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed", blockedFinalCandidates)
 	if !recovery.Handled {
@@ -3597,7 +3593,10 @@ func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID st
 	}); err != nil {
 		return finalCandidateRecoveryResult{Handled: true, Err: err}
 	}
-	blockedFinalCandidates = copyStringMap(blockedFinalCandidates)
+	blockedFinalCandidates = maps.Clone(blockedFinalCandidates)
+	if blockedFinalCandidates == nil {
+		blockedFinalCandidates = map[string]string{}
+	}
 	blockedFinalCandidates[candidateWorkerID] = failureErr.Error()
 	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
 		BlockedFinalCandidates:         blockedFinalCandidates,
@@ -4326,22 +4325,6 @@ func sortedMapKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func copyStringMap(values map[string]string) map[string]string {
-	out := map[string]string{}
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
-}
-
-func copyAnyMap(values map[string]any) map[string]any {
-	out := map[string]any{}
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
 }
 
 func (s *Service) completionReadinessBlockReason(ctx context.Context, task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
