@@ -496,6 +496,109 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 	}
 }
 
+func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	taskID := "task-issue-12"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "GitHub issue owner/repo#12: Add feature",
+			"prompt": "Fix it.",
+			"metadata": map[string]any{
+				"source":         "github-issue",
+				"externalId":     "owner/repo#12",
+				"repo":           "owner/repo",
+				"number":         12,
+				"completionMode": "github",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskMilestone,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"name":    "pr_merged",
+			"phase":   "merged",
+			"summary": "Pull request merged.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskStatus,
+		TaskID:  taskID,
+		Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ClearTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo"}},
+		PullRequests: GitHubPullRequestDriverConfig{
+			Enabled:     boolPtr(false),
+			AutoPublish: boolPtr(false),
+		},
+	}, fakeGitHubClient{issues: []GitHubIssue{{
+		Repo:   "owner/repo",
+		Number: 12,
+		Title:  "Add feature",
+		URL:    "https://github.com/owner/repo/issues/12",
+	}, {
+		Repo:   "owner/repo",
+		Number: 13,
+		Title:  "Different bug",
+		URL:    "https://github.com/owner/repo/issues/13",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdForResolved := 0
+	createdForFollowUp := 0
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventTaskCreated {
+			continue
+		}
+		var payload struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		switch stringMetadataValue(payload.Metadata["externalId"]) {
+		case "owner/repo#12":
+			createdForResolved++
+		case "owner/repo#13":
+			createdForFollowUp++
+		}
+	}
+	if createdForResolved != 1 {
+		t.Fatalf("task.created events for owner/repo#12 = %d, want 1 (no duplicate after PR merge + clear)", createdForResolved)
+	}
+	if createdForFollowUp != 1 {
+		t.Fatalf("task.created events for owner/repo#13 = %d, want 1 (still-open unrelated issue must spawn a task)", createdForFollowUp)
+	}
+}
+
 type fakeGitHubClient struct {
 	issues []GitHubIssue
 }
