@@ -12,12 +12,9 @@ import (
 func TestServiceGitHubDriverConfigHotToggles(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store := openTestStore(t)
-	defer store.Close()
-
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
-		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
-	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	fixture := newGitHubDriverTestFixture(t, GitHubDriverConfig{}, &fakeGitHubClient{})
+	store := fixture.store
+	service := fixture.service
 	projects, err := NewProjectRegistry([]core.Project{{
 		ID:           "fork",
 		Name:         "Fork",
