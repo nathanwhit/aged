@@ -2552,6 +2552,9 @@ function isWorkerProgressEvent(event: EventRecord): boolean {
   }
   const payload = asRecord(event.payload);
   const raw = asRecord(payload.raw ?? payload.rawResult);
+  if (isClaudeRaw(raw)) {
+    return isClaudeProgressRaw(raw);
+  }
   const item = asRecord(raw.item);
   if (raw.type === "thread.started" || raw.type === "turn.started" || raw.type === "turn.completed") {
     return false;
@@ -2561,9 +2564,11 @@ function isWorkerProgressEvent(event: EventRecord): boolean {
 
 function workerEventLabel(event: EventRecord): string {
   if (event.type === "worker.output") {
-    const payload = event.payload as { kind?: string; stream?: string; raw?: unknown };
-    const raw = asRecord(payload.raw);
+    const payload = event.payload as { kind?: string; stream?: string; raw?: unknown; rawResult?: unknown };
+    const raw = asRecord(payload.raw ?? payload.rawResult);
     const item = asRecord(raw.item);
+    const claudeLabel = isClaudeRaw(raw) ? claudeWorkerEventLabel(raw, payload.kind) : "";
+    if (claudeLabel) return claudeLabel;
     if (item.type === "command_execution") return `command:${payload.kind ?? "log"}`;
     if (item.type === "agent_message") return `message:${payload.kind ?? "result"}`;
     if (item.type === "file_change") return `file:${String(item.status ?? payload.kind ?? "log")}`;
@@ -3604,6 +3609,10 @@ function structuredWorkerEvent(event: EventRecord): React.ReactNode {
   if (event.type !== "worker.output") {
     return null;
   }
+  const claudeEvent = isClaudeRaw(raw) ? structuredClaudeWorkerEvent(payload, raw) : null;
+  if (claudeEvent) {
+    return claudeEvent;
+  }
   if (item.type === "command_execution") {
     return <CommandExecutionCard payload={payload} item={item} raw={raw} />;
   }
@@ -3620,6 +3629,191 @@ function structuredWorkerEvent(event: EventRecord): React.ReactNode {
     return <LifecycleCard raw={raw} />;
   }
   return null;
+}
+
+function structuredClaudeWorkerEvent(payload: Record<string, unknown>, raw: Record<string, unknown>): React.ReactNode {
+  switch (payloadValue(raw.type)) {
+    case "assistant":
+      return <ClaudeAssistantCard payload={payload} raw={raw} />;
+    case "user":
+      return <ClaudeToolResultCard payload={payload} raw={raw} />;
+    case "system":
+      return <ClaudeSystemCard payload={payload} raw={raw} />;
+    case "rate_limit_event":
+      return <ClaudeRateLimitCard raw={raw} />;
+    case "result":
+      return <ClaudeResultCard payload={payload} raw={raw} />;
+    default:
+      return null;
+  }
+}
+
+function ClaudeAssistantCard({ payload, raw }: { payload: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const parts = claudeMessageContent(raw);
+  const toolUse = parts.find((part) => payloadValue(part.type) === "tool_use");
+  const textPart = parts.find((part) => payloadValue(part.type) === "text");
+  const thinkingPart = parts.find((part) => payloadValue(part.type) === "thinking");
+  const model = payloadValue(asRecord(raw.message).model);
+
+  if (toolUse) {
+    const input = asRecord(toolUse.input);
+    const toolName = payloadValue(toolUse.name) || "Tool";
+    const description = payloadValue(input.description);
+    const command = payloadValue(input.command);
+    const todos = Array.isArray(input.todos) ? input.todos.map(asRecord) : [];
+    return (
+      <div className="tool-card">
+        <div className="tool-card-header">
+          <strong>{toolName}</strong>
+          <span className="tool-status neutral">tool use</span>
+          {model && <span className="tool-status neutral">{model}</span>}
+        </div>
+        {description && <p>{description}</p>}
+        {command && <CodeBlock label="command" value={command} className="shell-script" />}
+        {todos.length > 0 && <ClaudeTodoList todos={todos} />}
+        <RawPayloadDetails value={raw} />
+      </div>
+    );
+  }
+
+  if (textPart) {
+    return (
+      <div className="agent-message-card">
+        <div className="tool-card-header">
+          <strong>Claude Message</strong>
+          <span className="tool-status">{payloadValue(payload.kind) || "message"}</span>
+          {model && <span className="tool-status neutral">{model}</span>}
+        </div>
+        <ReadableBlock label="Message" value={payloadValue(textPart.text) || payloadValue(payload.text)} className="agent-message-body" limit={1600} />
+        <RawPayloadDetails value={raw} />
+      </div>
+    );
+  }
+
+  if (thinkingPart) {
+    return (
+      <div className="lifecycle-card compact-card">
+        <div className="tool-card-header">
+          <strong>Claude Thinking</strong>
+          <span className="tool-status neutral">collapsed</span>
+          {model && <span className="tool-status neutral">{model}</span>}
+        </div>
+        <p>Thinking block recorded.</p>
+        <RawPayloadDetails value={raw} />
+      </div>
+    );
+  }
+
+  return <LifecycleCard raw={raw} />;
+}
+
+function ClaudeToolResultCard({ payload, raw }: { payload: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const content = claudeMessageContent(raw).find((part) => payloadValue(part.type) === "tool_result") ?? {};
+  const result = asRecord(raw.tool_use_result);
+  const failed = content.is_error === true || result.is_error === true;
+  const stdout = payloadValue(result.stdout);
+  const stderr = payloadValue(result.stderr);
+  const contentText = payloadValue(content.content);
+  const backgroundTaskId = payloadValue(result.backgroundTaskId);
+  const interrupted = result.interrupted === true;
+  return (
+    <div className={failed ? "tool-card failed" : "tool-card"}>
+      <div className="tool-card-header">
+        <strong>Tool Result</strong>
+        <span className={failed ? "tool-status failed" : "tool-status"}>{failed ? "failed" : "ok"}</span>
+        {backgroundTaskId && <span className="tool-status neutral">background {backgroundTaskId}</span>}
+        {interrupted && <span className="tool-status warning">interrupted</span>}
+      </div>
+      {stdout && <ReadableBlock label="Stdout" value={stdout} className="tool-output" />}
+      {stderr && <ReadableBlock label="Stderr" value={stderr} className={failed ? "tool-output failed" : "tool-output"} />}
+      {!stdout && !stderr && contentText && <ReadableBlock label="Result" value={contentText} className={failed ? "tool-output failed" : "tool-output"} />}
+      {!stdout && !stderr && !contentText && <p>{payloadValue(payload.text) || "Tool completed."}</p>}
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function ClaudeSystemCard({ payload, raw }: { payload: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const subtype = payloadValue(raw.subtype) || "system";
+  const tools = Array.isArray(raw.tools) ? raw.tools.length : 0;
+  const fields = [
+    { label: "CWD", value: payloadValue(raw.cwd) },
+    { label: "Model", value: payloadValue(raw.model) },
+    { label: "Version", value: payloadValue(raw.claude_code_version) },
+    { label: "Permission", value: payloadValue(raw.permissionMode) },
+    { label: "Task", value: payloadValue(raw.task_id) },
+    { label: "Description", value: payloadValue(raw.description) || payloadValue(payload.text) },
+    { label: "Tools", value: tools ? String(tools) : "" },
+  ].filter((field) => field.value);
+  return (
+    <div className="lifecycle-card">
+      <div className="tool-card-header">
+        <strong>Claude {humanizeKey(subtype)}</strong>
+        <span className="tool-status neutral">system</span>
+      </div>
+      {fields.length > 0 && (
+        <dl className="event-fields">
+          {fields.map((field) => (
+            <div key={field.label}>
+              <dt>{field.label}</dt>
+              <dd>{field.value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function ClaudeRateLimitCard({ raw }: { raw: Record<string, unknown> }) {
+  const info = asRecord(raw.rate_limit_info);
+  const resetsAt = Number(info.resetsAt);
+  const resetText = Number.isFinite(resetsAt) ? new Date(resetsAt * 1000).toLocaleTimeString() : "";
+  return (
+    <div className="lifecycle-card compact-card">
+      <div className="tool-card-header">
+        <strong>Rate Limit</strong>
+        {payloadValue(info.status) && <span className="tool-status">{payloadValue(info.status)}</span>}
+        {payloadValue(info.rateLimitType) && <span className="tool-status neutral">{payloadValue(info.rateLimitType)}</span>}
+        {resetText && <span className="tool-status neutral">resets {resetText}</span>}
+      </div>
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function ClaudeResultCard({ payload, raw }: { payload: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const failed = raw.is_error === true || payloadValue(raw.subtype) !== "success";
+  return (
+    <div className={failed ? "completion-card failed" : "completion-card"}>
+      <div className="tool-card-header">
+        <strong>Claude Result</strong>
+        <span className={failed ? "tool-status failed" : "tool-status"}>{payloadValue(raw.subtype) || payloadValue(payload.kind) || "result"}</span>
+        {payloadValue(raw.total_cost_usd) && <span className="tool-status neutral">${payloadValue(raw.total_cost_usd)}</span>}
+      </div>
+      <ReadableBlock label="Result" value={payloadValue(raw.result) || payloadValue(payload.text)} className={failed ? "tool-output failed" : "agent-message-body"} limit={1600} />
+      <RawPayloadDetails value={raw} />
+    </div>
+  );
+}
+
+function ClaudeTodoList({ todos }: { todos: Record<string, unknown>[] }) {
+  return (
+    <ul className="claude-todo-list">
+      {todos.slice(0, 8).map((todo, index) => (
+        <li key={index}>
+          <code>{payloadValue(todo.status) || "todo"}</code>
+          <span>{payloadValue(todo.content || todo.activeForm)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function claudeMessageContent(raw: Record<string, unknown>): Record<string, unknown>[] {
+  const message = asRecord(raw.message);
+  return Array.isArray(message.content) ? message.content.map(asRecord) : [];
 }
 
 function WorkerCreatedCard({ payload }: { payload: Record<string, unknown> }) {
@@ -3822,6 +4016,19 @@ function CodeBlock({ label, value, className }: { label: string; value: string; 
   );
 }
 
+function ReadableBlock({ label, value, className, limit = 2400 }: { label: string; value: string; className?: string; limit?: number }) {
+  const json = parseJSONPayload(value);
+  if (json !== undefined) {
+    return (
+      <details className="event-raw compact json-blob">
+        <summary>{label} JSON blob</summary>
+        <pre className={className}>{prettyPayload(json)}</pre>
+      </details>
+    );
+  }
+  return <TruncatedBlock label={label} value={value} className={className} limit={limit} />;
+}
+
 function TruncatedBlock({ label, value, className, limit = 2400 }: { label: string; value: string; className?: string; limit?: number }) {
   const truncated = value.length > limit;
   const visible = truncated ? `${value.slice(0, limit).trimEnd()}\n... truncated ${value.length - limit} chars` : value;
@@ -3847,6 +4054,18 @@ function RawPayloadDetails({ value }: { value: unknown }) {
       <pre>{prettyPayload(value)}</pre>
     </details>
   );
+}
+
+function parseJSONPayload(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
 }
 
 function shellScriptFromCommand(command: string): string {
@@ -3973,6 +4192,8 @@ function compactEventDisplay(event: EventRecord): string {
   }
   if (event.type === "worker.output") {
     const raw = asRecord(payload.raw ?? payload.rawResult);
+    const claudeText = isClaudeRaw(raw) ? claudeEventDisplayText(payload, raw) : "";
+    if (claudeText) return claudeText;
     const item = asRecord(raw.item);
     if (item.type === "command_execution") {
       return `Shell ${payloadValue(item.status || payload.kind) || "event"}`;
@@ -3988,6 +4209,97 @@ function compactEventDisplay(event: EventRecord): string {
     if (raw.type === "turn.completed") return "Turn completed";
   }
   return "";
+}
+
+function isClaudeProgressRaw(raw: Record<string, unknown>): boolean {
+  switch (payloadValue(raw.type)) {
+    case "assistant": {
+      const type = payloadValue(claudeMessageContent(raw)[0]?.type);
+      return type === "tool_use" || type === "text";
+    }
+    case "user":
+      return payloadValue(claudeMessageContent(raw)[0]?.type) === "tool_result";
+    case "result":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function isClaudeRaw(raw: Record<string, unknown>): boolean {
+  switch (payloadValue(raw.type)) {
+    case "assistant":
+    case "user":
+    case "system":
+    case "rate_limit_event":
+      return true;
+    case "result":
+      return raw.subtype !== undefined || raw.total_cost_usd !== undefined || raw.is_error !== undefined;
+    default:
+      return false;
+  }
+}
+
+function claudeWorkerEventLabel(raw: Record<string, unknown>, kind: string | undefined): string {
+  switch (payloadValue(raw.type)) {
+    case "assistant": {
+      const part = claudeMessageContent(raw)[0] ?? {};
+      const partType = payloadValue(part.type);
+      if (partType === "tool_use") return `tool:${payloadValue(part.name) || kind || "use"}`;
+      if (partType === "text") return `message:${kind ?? "log"}`;
+      if (partType === "thinking") return "thinking";
+      return "assistant";
+    }
+    case "user":
+      return "tool:result";
+    case "system":
+      return `system:${payloadValue(raw.subtype) || "event"}`;
+    case "rate_limit_event":
+      return "rate-limit";
+    case "result":
+      return "result";
+    default:
+      return "";
+  }
+}
+
+function claudeEventDisplayText(payload: Record<string, unknown>, raw: Record<string, unknown>): string {
+  switch (payloadValue(raw.type)) {
+    case "assistant": {
+      const part = claudeMessageContent(raw)[0] ?? {};
+      const partType = payloadValue(part.type);
+      if (partType === "tool_use") {
+        const input = asRecord(part.input);
+        const name = payloadValue(part.name) || "Tool";
+        const description = payloadValue(input.description);
+        const command = payloadValue(input.command);
+        return description ? `${name}: ${description}` : command ? `${name}: ${command}` : `${name} tool use`;
+      }
+      if (partType === "text") return payloadValue(part.text) || payloadValue(payload.text);
+      if (partType === "thinking") return "Claude thinking block";
+      return payloadValue(payload.text);
+    }
+    case "user": {
+      const result = asRecord(raw.tool_use_result);
+      const backgroundTaskId = payloadValue(result.backgroundTaskId);
+      if (backgroundTaskId) return `Background task ${backgroundTaskId}`;
+      const stdout = payloadValue(result.stdout).trim();
+      const stderr = payloadValue(result.stderr).trim();
+      if (stderr) return stderr;
+      if (stdout) return stdout;
+      return payloadValue(claudeMessageContent(raw)[0]?.content) || payloadValue(payload.text);
+    }
+    case "system":
+      return payloadValue(raw.description) || payloadValue(payload.text) || `Claude ${payloadValue(raw.subtype) || "system event"}`;
+    case "rate_limit_event": {
+      const info = asRecord(raw.rate_limit_info);
+      return [`Rate limit`, payloadValue(info.status), payloadValue(info.rateLimitType)].filter(Boolean).join(" ");
+    }
+    case "result":
+      return payloadValue(raw.result) || payloadValue(payload.text);
+    default:
+      return "";
+  }
 }
 
 function eventDetailFields(payload: Record<string, unknown>): DetailField[] {

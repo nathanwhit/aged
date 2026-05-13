@@ -209,6 +209,29 @@ func TestCommandRunnerNormalizesClaudeJSONLines(t *testing.T) {
 	}
 }
 
+func TestCommandRunnerSummarizesClaudeToolEvents(t *testing.T) {
+	runner := NewCommandRunner("claude", func(spec Spec) []string {
+		return spec.Command
+	})
+	sink := &recordingSink{}
+
+	err := runner.Run(context.Background(), Spec{
+		Command: []string{"/bin/sh", "-c", "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"go test ./...\",\"description\":\"Run tests\"}}]}}' '{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\",\"is_error\":false}]},\"tool_use_result\":{\"stdout\":\"ok\",\"stderr\":\"\",\"is_error\":false}}' '{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"bad\",\"is_error\":true}]},\"tool_use_result\":{\"stdout\":\"\",\"stderr\":\"bad\",\"is_error\":true}}'"},
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sink.has(EventLog, "stdout", "Bash: Run tests") {
+		t.Fatalf("missing summarized claude tool use event: %+v", sink.events)
+	}
+	if !sink.has(EventLog, "stdout", "ok") {
+		t.Fatalf("missing summarized claude tool result event: %+v", sink.events)
+	}
+	if !sink.has(EventError, "stdout", "bad") {
+		t.Fatalf("missing failed claude tool result event: %+v", sink.events)
+	}
+}
+
 func TestSteerableCommandRunnerForwardsSteeringToStdin(t *testing.T) {
 	runner := NewSteerableCommandRunner("codex", func(spec Spec) []string {
 		return spec.Command

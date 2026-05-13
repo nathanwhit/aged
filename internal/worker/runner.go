@@ -673,7 +673,7 @@ func ParserForKind(kind string) Parser {
 	case "codex":
 		return codexWorkerParser{}
 	case "claude":
-		return parserFunc(parseJSONWorkerLine)
+		return parserFunc(parseClaudeWorkerLine)
 	default:
 		return parserFunc(func(stream string, line string) Event {
 			return LogEvent(stream, line)
@@ -685,6 +685,21 @@ func parseCodexWorkerLine(stream string, line string) Event {
 	event := parseJSONWorkerLine(stream, line)
 	if _, ok := knownCodexInfrastructureWarning(stream, line); ok {
 		event.Kind = EventLog
+	}
+	return event
+}
+
+func parseClaudeWorkerLine(stream string, line string) Event {
+	event := parseJSONWorkerLine(stream, line)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		return event
+	}
+	if text := extractClaudeText(payload); text != "" {
+		event.Text = text
+	}
+	if kind, ok := classifyClaudePayload(stream, payload); ok {
+		event.Kind = kind
 	}
 	return event
 }
@@ -762,6 +777,31 @@ func classifyPayload(stream string, payload map[string]any) EventKind {
 	}
 }
 
+func classifyClaudePayload(stream string, payload map[string]any) (EventKind, bool) {
+	if stream == "stderr" {
+		return EventError, true
+	}
+	switch stringField(payload, "type") {
+	case "result":
+		if boolField(payload, "is_error") || !strings.EqualFold(stringField(payload, "subtype"), "success") {
+			return EventError, true
+		}
+		return EventResult, true
+	case "user":
+		if result := claudeToolUseResult(payload); result != nil && boolField(result, "is_error") {
+			return EventError, true
+		}
+		if content := firstClaudeMessageContent(payload); content != nil && boolField(content, "is_error") {
+			return EventError, true
+		}
+		return EventLog, true
+	case "assistant", "system", "rate_limit_event":
+		return EventLog, true
+	default:
+		return "", false
+	}
+}
+
 func extractText(payload map[string]any) string {
 	for _, key := range []string{"text", "message", "content", "delta", "summary", "result", "error"} {
 		if text := stringField(payload, key); text != "" {
@@ -800,6 +840,69 @@ func extractText(payload map[string]any) string {
 	return ""
 }
 
+func extractClaudeText(payload map[string]any) string {
+	switch stringField(payload, "type") {
+	case "assistant":
+		content := firstClaudeMessageContent(payload)
+		switch stringField(content, "type") {
+		case "text":
+			return stringField(content, "text")
+		case "tool_use":
+			name := stringField(content, "name")
+			input, _ := content["input"].(map[string]any)
+			description := stringField(input, "description")
+			command := stringField(input, "command")
+			switch {
+			case description != "":
+				return strings.TrimSpace(name + ": " + description)
+			case command != "":
+				return strings.TrimSpace(name + ": " + command)
+			case name != "":
+				return name + " tool use"
+			}
+		case "thinking":
+			return "thinking"
+		}
+	case "user":
+		content := firstClaudeMessageContent(payload)
+		if stringField(content, "type") == "tool_result" {
+			if result := claudeToolUseResult(payload); result != nil {
+				if backgroundID := stringField(result, "backgroundTaskId"); backgroundID != "" {
+					return "background task " + backgroundID
+				}
+				stdout := strings.TrimSpace(stringField(result, "stdout"))
+				stderr := strings.TrimSpace(stringField(result, "stderr"))
+				switch {
+				case stdout != "":
+					return stdout
+				case stderr != "":
+					return stderr
+				}
+			}
+			return stringField(content, "content")
+		}
+	case "system":
+		subtype := stringField(payload, "subtype")
+		if description := stringField(payload, "description"); description != "" {
+			return description
+		}
+		if subtype != "" {
+			return "Claude " + subtype
+		}
+	case "rate_limit_event":
+		if info, ok := payload["rate_limit_info"].(map[string]any); ok {
+			status := stringField(info, "status")
+			limitType := stringField(info, "rateLimitType")
+			if status != "" || limitType != "" {
+				return strings.TrimSpace("rate limit " + status + " " + limitType)
+			}
+		}
+	case "result":
+		return stringField(payload, "result")
+	}
+	return ""
+}
+
 func stringField(payload map[string]any, key string) string {
 	value, ok := payload[key]
 	if !ok || value == nil {
@@ -813,4 +916,28 @@ func stringField(payload map[string]any, key string) string {
 	default:
 		return ""
 	}
+}
+
+func boolField(payload map[string]any, key string) bool {
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return false
+	}
+	typed, ok := value.(bool)
+	return ok && typed
+}
+
+func firstClaudeMessageContent(payload map[string]any) map[string]any {
+	message, _ := payload["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	if len(content) == 0 {
+		return nil
+	}
+	first, _ := content[0].(map[string]any)
+	return first
+}
+
+func claudeToolUseResult(payload map[string]any) map[string]any {
+	result, _ := payload["tool_use_result"].(map[string]any)
+	return result
 }

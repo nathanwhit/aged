@@ -1587,6 +1587,10 @@ small {
   border-color: #e4aaa4;
 }
 
+.completion-card.failed {
+  border-color: #e4aaa4;
+}
+
 .tool-card-header {
   align-items: center;
   display: flex;
@@ -1757,6 +1761,36 @@ small {
   overflow-wrap: anywhere;
 }
 
+.claude-todo-list {
+  display: grid;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.claude-todo-list li {
+  align-items: start;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.claude-todo-list code {
+  background: #eef2f7;
+  border-radius: 999px;
+  color: #536070;
+  font-size: 11px;
+  padding: 5px 7px;
+  text-align: center;
+}
+
+.claude-todo-list span {
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .event-raw pre {
   background: #202124;
   border-radius: 6px;
@@ -1772,6 +1806,10 @@ small {
 
 .event-raw.compact pre {
   max-height: 180px;
+}
+
+.event-raw.json-blob summary {
+  font-weight: 600;
 }
 
 .worker-detail-panel {
