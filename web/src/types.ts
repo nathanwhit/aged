@@ -86,6 +86,24 @@ export type Project = {
   pullRequestPolicy?: PullRequestPolicy;
 };
 
+export type ProjectInput = {
+  id: string;
+  name?: string;
+  localPath: string;
+  repo?: string;
+  upstreamRepo?: string;
+  headRepoOwner?: string;
+  pushRemote?: string;
+  vcs?: string;
+  defaultBase?: string;
+  workspaceRoot?: string;
+  targetLabels?: Record<string, string>;
+  remoteCheckouts?: Record<string, string>;
+  githubIssues?: GitHubIssuePolicy;
+  githubMentions?: GitHubMentionPolicy;
+  pullRequestPolicy?: PullRequestPolicy;
+};
+
 export type GitHubIssuePolicy = {
   enabled?: boolean;
   labels?: string[];

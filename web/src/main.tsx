@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, GitHubIssuePolicy, GitHubMentionPolicy, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -1098,8 +1098,8 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; githubMentions?: GitHubMentionPolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
-  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; githubMentions?: GitHubMentionPolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onCreate: (input: ProjectInput) => Promise<void>;
+  onUpdate: (id: string, input: ProjectInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;

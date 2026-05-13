@@ -1,4 +1,4 @@
-import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function requestJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -51,73 +51,11 @@ export async function updateTaskLoopConfig(taskId: string, input: {
   return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, jsonInit("PUT", input));
 }
 
-export async function createProject(input: {
-  id: string;
-  name?: string;
-  localPath: string;
-  repo?: string;
-  upstreamRepo?: string;
-  headRepoOwner?: string;
-  pushRemote?: string;
-  vcs?: string;
-  defaultBase?: string;
-  workspaceRoot?: string;
-  targetLabels?: Record<string, string>;
-  remoteCheckouts?: Record<string, string>;
-  githubIssues?: {
-    enabled?: boolean;
-    labels?: string[];
-    issueLimit?: number;
-    autoPublish?: boolean;
-  };
-  githubMentions?: {
-    enabled?: boolean;
-    reasons?: string[];
-    limit?: number;
-  };
-  pullRequestPolicy?: {
-    branchPrefix?: string;
-    draft?: boolean;
-    allowMerge?: boolean;
-    autoMerge?: boolean;
-    monitorPullRequests?: boolean;
-  };
-}): Promise<Project> {
+export async function createProject(input: ProjectInput): Promise<Project> {
   return requestJSON("/api/projects", jsonInit("POST", input));
 }
 
-export async function updateProject(id: string, input: {
-  id: string;
-  name?: string;
-  localPath: string;
-  repo?: string;
-  upstreamRepo?: string;
-  headRepoOwner?: string;
-  pushRemote?: string;
-  vcs?: string;
-  defaultBase?: string;
-  workspaceRoot?: string;
-  targetLabels?: Record<string, string>;
-  remoteCheckouts?: Record<string, string>;
-  githubIssues?: {
-    enabled?: boolean;
-    labels?: string[];
-    issueLimit?: number;
-    autoPublish?: boolean;
-  };
-  githubMentions?: {
-    enabled?: boolean;
-    reasons?: string[];
-    limit?: number;
-  };
-  pullRequestPolicy?: {
-    branchPrefix?: string;
-    draft?: boolean;
-    allowMerge?: boolean;
-    autoMerge?: boolean;
-    monitorPullRequests?: boolean;
-  };
-}): Promise<Project> {
+export async function updateProject(id: string, input: ProjectInput): Promise<Project> {
   return requestJSON(`/api/projects/${encodeURIComponent(id)}`, jsonInit("PUT", input));
 }
 
