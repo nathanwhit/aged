@@ -268,7 +268,13 @@ func (d *GitHubDriver) pollMentions(ctx context.Context) error {
 		if seen[mention.ID] {
 			continue
 		}
-		if _, err := d.service.CreateTask(ctx, githubMentionTaskRequest(mention)); err != nil {
+		if routed, err := d.routeMentionToExistingTask(ctx, snapshot, mention); err != nil {
+			errs = append(errs, fmt.Sprintf("%s mention %s route: %v", mention.Repo, mention.ID, err))
+			continue
+		} else if routed {
+			continue
+		}
+		if _, err := d.service.CreateTask(ctx, githubMentionTaskRequest(mention, d.projectIDForMention(mention))); err != nil {
 			errs = append(errs, fmt.Sprintf("%s mention %s task: %v", mention.Repo, mention.ID, err))
 		}
 	}
@@ -279,6 +285,64 @@ func (d *GitHubDriver) pollMentions(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (d *GitHubDriver) routeMentionToExistingTask(ctx context.Context, snapshot core.Snapshot, mention GitHubMention) (bool, error) {
+	task, ok := githubMentionExistingTask(snapshot, mention)
+	if !ok {
+		return false, nil
+	}
+	if err := d.service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: githubMentionExistingTaskPrompt(mention)}); err != nil {
+		return false, err
+	}
+	if err := d.service.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":       "github_mention_routed",
+		"source":     "github-mention",
+		"externalId": mention.ID,
+		"repo":       mention.Repo,
+		"number":     mention.Number,
+		"url":        mention.URL,
+		"reason":     mention.Reason,
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func githubMentionExistingTask(snapshot core.Snapshot, mention GitHubMention) (core.Task, bool) {
+	if strings.TrimSpace(mention.Repo) == "" || mention.Number <= 0 {
+		return core.Task{}, false
+	}
+	needle := core.PullRequest{Repo: mention.Repo, Number: mention.Number, URL: mention.URL}
+	for _, pr := range snapshot.PullRequests {
+		if !samePullRequestIdentity(pr, needle) {
+			continue
+		}
+		task, ok := findTask(snapshot, pr.TaskID)
+		if ok && !isTerminalTaskStatus(task.Status) {
+			return task, true
+		}
+	}
+	for _, task := range snapshot.Tasks {
+		if isTerminalTaskStatus(task.Status) {
+			continue
+		}
+		if taskWatchesPullRequest(task, needle) {
+			return task, true
+		}
+	}
+	return core.Task{}, false
+}
+
+func (d *GitHubDriver) projectIDForMention(mention GitHubMention) string {
+	if d == nil || d.service == nil || d.service.projects == nil {
+		return ""
+	}
+	project, ok := d.service.projects.FindByIssueRepo(mention.Repo)
+	if !ok {
+		return ""
+	}
+	return project.ID
 }
 
 type githubDriverSettingsStore interface {
@@ -332,21 +396,35 @@ func githubMentionReasons(values []string) map[string]bool {
 func githubMentionExternalIDs(snapshot core.Snapshot) map[string]bool {
 	seen := map[string]bool{}
 	for _, event := range snapshot.Events {
-		if event.Type != core.EventTaskCreated {
+		if event.Type != core.EventTaskCreated && event.Type != core.EventTaskAction {
 			continue
 		}
 		var payload struct {
 			Metadata map[string]any `json:"metadata"`
+			Kind     string         `json:"kind"`
+			Source   string         `json:"source"`
+			External string         `json:"externalId"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
 			continue
 		}
-		if stringMetadataValue(payload.Metadata["source"]) != "github-mention" {
-			continue
-		}
-		externalID := stringMetadataValue(payload.Metadata["externalId"])
-		if externalID != "" {
-			seen[externalID] = true
+		switch event.Type {
+		case core.EventTaskCreated:
+			if stringMetadataValue(payload.Metadata["source"]) != "github-mention" {
+				continue
+			}
+			externalID := stringMetadataValue(payload.Metadata["externalId"])
+			if externalID != "" {
+				seen[externalID] = true
+			}
+		case core.EventTaskAction:
+			if payload.Kind != "github_mention_routed" || payload.Source != "github-mention" {
+				continue
+			}
+			externalID := strings.TrimSpace(payload.External)
+			if externalID != "" {
+				seen[externalID] = true
+			}
 		}
 	}
 	return seen
@@ -529,7 +607,7 @@ Implement the requested change in the current repository. Do not open the pull r
 `, issue.Repo, issue.Number, issue.URL, issue.Title, strings.Join(issue.Labels, ", "), body)
 }
 
-func githubMentionTaskRequest(mention GitHubMention) core.CreateTaskRequest {
+func githubMentionTaskRequest(mention GitHubMention, projectID string) core.CreateTaskRequest {
 	title := fmt.Sprintf("GitHub mention %s#%d: %s", mention.Repo, mention.Number, strings.TrimSpace(mention.Title))
 	if mention.Number <= 0 {
 		title = fmt.Sprintf("GitHub mention %s: %s", mention.Repo, strings.TrimSpace(mention.Title))
@@ -552,10 +630,15 @@ func githubMentionTaskRequest(mention GitHubMention) core.CreateTaskRequest {
 	return core.CreateTaskRequest{
 		Title:      title,
 		Prompt:     githubMentionPrompt(mention),
+		ProjectID:  projectID,
 		Source:     "github-mention",
 		ExternalID: mention.ID,
 		Metadata:   core.MustJSON(metadata),
 	}
+}
+
+func githubMentionExistingTaskPrompt(mention GitHubMention) string {
+	return "A new GitHub notification arrived for an existing tracked pull request. Handle it as part of this existing task rather than starting a separate task.\n\n" + githubMentionPrompt(mention)
 }
 
 func githubMentionPrompt(mention GitHubMention) string {
@@ -592,6 +675,8 @@ func pullRequestNeedsBabysitter(pr core.PullRequest) bool {
 	review := strings.ToUpper(strings.TrimSpace(pr.ReviewStatus))
 	merge := strings.ToUpper(strings.TrimSpace(pr.MergeStatus))
 	return pullRequestHasUntriggeredFeedback(pr) ||
+		pullRequestAutoMergeError(pr) != "" ||
+		pullRequestMergeNeedsWork(pr) ||
 		checks == "failing" ||
 		review == "CHANGES_REQUESTED" ||
 		review == "COMMENTED" ||

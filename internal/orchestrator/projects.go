@@ -297,6 +297,10 @@ func normalizeProject(project core.Project) (core.Project, error) {
 		project.GitHubMentions.Limit = 0
 	}
 	project.PullRequestPolicy.BranchPrefix = strings.TrimSpace(project.PullRequestPolicy.BranchPrefix)
+	project.PullRequestPolicy.MergeMethod = normalizePullRequestMergeMethod(project.PullRequestPolicy.MergeMethod)
+	if !validPullRequestMergeMethod(project.PullRequestPolicy.MergeMethod) {
+		return core.Project{}, fmt.Errorf("project %q pullRequestPolicy.mergeMethod must be squash, merge, or rebase", project.ID)
+	}
 	if project.ID == "" {
 		return core.Project{}, errors.New("project id is required")
 	}
@@ -336,6 +340,28 @@ func normalizeProject(project core.Project) (core.Project, error) {
 		project.PullRequestPolicy.BranchPrefix = "codex/aged-"
 	}
 	return project, nil
+}
+
+func normalizePullRequestMergeMethod(method string) string {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "", "squash":
+		return "squash"
+	case "merge":
+		return "merge"
+	case "rebase":
+		return "rebase"
+	default:
+		return strings.ToLower(strings.TrimSpace(method))
+	}
+}
+
+func validPullRequestMergeMethod(method string) bool {
+	switch normalizePullRequestMergeMethod(method) {
+	case "squash", "merge", "rebase":
+		return true
+	default:
+		return false
+	}
 }
 
 func repoOwner(repo string) string {

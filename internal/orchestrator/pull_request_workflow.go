@@ -137,7 +137,7 @@ func objectiveForPullRequest(pr core.PullRequest) (core.ObjectiveStatus, string)
 	case "CLOSED":
 		return core.ObjectiveAbandoned, "pr_closed"
 	}
-	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") || pullRequestHasUntriggeredFeedback(pr) {
+	if strings.EqualFold(pr.ChecksStatus, "failing") || strings.EqualFold(pr.ReviewStatus, "CHANGES_REQUESTED") || pullRequestMergeNeedsWork(pr) || pullRequestAutoMergeError(pr) != "" || pullRequestHasUntriggeredFeedback(pr) {
 		return core.ObjectiveActive, "pr_needs_work"
 	}
 	if pullRequestChecksPassing(pr) && (pr.ReviewStatus == "" || strings.EqualFold(pr.ReviewStatus, "APPROVED")) {
@@ -183,6 +183,10 @@ func pullRequestFollowUpPrompt(pr core.PullRequest) string {
 	if comment != "" {
 		comment = "\nLatest PR feedback:\n" + comment + "\n"
 	}
+	autoMergeError := pullRequestAutoMergeError(pr)
+	if autoMergeError != "" {
+		autoMergeError = "\nAuto-merge failed:\n" + autoMergeError + "\n"
+	}
 	return fmt.Sprintf(`GitHub pull request %s#%d needs follow-up work on the existing task.
 
 Pull request URL: %s
@@ -193,9 +197,10 @@ Checks: %s
 Merge status: %s
 Review status: %s
 %s
+%s
 
 Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should decide whether a GitHub PR comment is warranted, such as answering reviewer feedback, explaining that no code change is needed, or summarizing a completed fix; if so, it should leave a concise comment on the pull request and report what it posted. Keep this as the same long-running task objective; do not start a separate babysitter task.
-`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment)
+`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment, autoMergeError)
 }
 
 func pullRequestCommentPromptContext(pr core.PullRequest) string {

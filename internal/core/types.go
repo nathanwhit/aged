@@ -266,6 +266,7 @@ type PullRequestPolicy struct {
 	Draft               bool   `json:"draft,omitempty"`
 	AllowMerge          bool   `json:"allowMerge,omitempty"`
 	AutoMerge           bool   `json:"autoMerge,omitempty"`
+	MergeMethod         string `json:"mergeMethod,omitempty"`
 	MonitorPullRequests *bool  `json:"monitorPullRequests,omitempty"`
 }
 

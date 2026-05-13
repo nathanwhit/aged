@@ -121,6 +121,7 @@ type discordPullRequestPolicyPatch struct {
 	Draft        *bool   `json:"draft"`
 	AllowMerge   *bool   `json:"allowMerge"`
 	AutoMerge    *bool   `json:"autoMerge"`
+	MergeMethod  *string `json:"mergeMethod"`
 }
 
 type discordTargetPatch struct {
@@ -893,7 +894,8 @@ Return exactly one JSON object with this schema and no Markdown fence:
       "branchPrefix": "optional PR branch prefix",
       "draft": false,
       "allowMerge": false,
-      "autoMerge": false
+      "autoMerge": false,
+      "mergeMethod": "squash | merge | rebase"
     }
   },
   "target": {
@@ -2107,6 +2109,9 @@ func mergeDiscordProjectPatch(current core.Project, _ core.Project, patch discor
 		}
 		if patch.PullRequestPolicy.AutoMerge != nil {
 			updated.PullRequestPolicy.AutoMerge = *patch.PullRequestPolicy.AutoMerge
+		}
+		if patch.PullRequestPolicy.MergeMethod != nil {
+			updated.PullRequestPolicy.MergeMethod = strings.TrimSpace(*patch.PullRequestPolicy.MergeMethod)
 		}
 	}
 	updated.ID = current.ID
