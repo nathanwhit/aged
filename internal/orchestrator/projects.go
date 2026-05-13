@@ -204,36 +204,33 @@ func (r *ProjectRegistry) Resolve(req core.CreateTaskRequest) (core.Project, err
 }
 
 func (r *ProjectRegistry) FindByRepo(repo string) (core.Project, bool) {
-	repo = strings.TrimSpace(strings.ToLower(repo))
-	if repo == "" || r == nil {
-		return core.Project{}, false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, project := range r.projects {
-		if strings.ToLower(project.Repo) == repo {
-			return project, true
-		}
-	}
-	return core.Project{}, false
+	return r.findByRepo(repo, false, func(project core.Project) string { return project.Repo })
 }
 
 func (r *ProjectRegistry) FindByIssueRepo(repo string) (core.Project, bool) {
+	return r.findByRepo(repo, true, func(project core.Project) string { return project.UpstreamRepo }, func(project core.Project) string { return project.Repo })
+}
+
+func (r *ProjectRegistry) findByRepo(repo string, sorted bool, repoFields ...func(core.Project) string) (core.Project, bool) {
 	repo = strings.TrimSpace(strings.ToLower(repo))
 	if repo == "" || r == nil {
 		return core.Project{}, false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	projects := r.sortedProjectsLocked()
-	for _, project := range projects {
-		if strings.ToLower(project.UpstreamRepo) == repo {
-			return project, true
+	projects := make([]core.Project, 0, len(r.projects))
+	if sorted {
+		projects = r.sortedProjectsLocked()
+	} else {
+		for _, project := range r.projects {
+			projects = append(projects, project)
 		}
 	}
-	for _, project := range projects {
-		if strings.ToLower(project.Repo) == repo {
-			return project, true
+	for _, repoField := range repoFields {
+		for _, project := range projects {
+			if strings.ToLower(repoField(project)) == repo {
+				return project, true
+			}
 		}
 	}
 	return core.Project{}, false
