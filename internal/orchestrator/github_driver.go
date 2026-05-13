@@ -179,10 +179,14 @@ func (d *GitHubDriver) RunOnce(ctx context.Context) error {
 	if err := d.monitorPullRequests(ctx); err != nil {
 		errs = append(errs, err.Error())
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
+	return collectedStringErrors(errs)
+}
+
+func collectedStringErrors(errs []string) error {
+	if len(errs) == 0 {
+		return nil
 	}
-	return nil
+	return errors.New(strings.Join(errs, "; "))
 }
 
 func (d *GitHubDriver) pollIssues(ctx context.Context) error {
@@ -222,10 +226,7 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 			}
 		}
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
+	return collectedStringErrors(errs)
 }
 
 func (d *GitHubDriver) pollMentions(ctx context.Context) error {
@@ -271,8 +272,8 @@ func (d *GitHubDriver) pollMentions(ctx context.Context) error {
 			errs = append(errs, fmt.Sprintf("%s mention %s task: %v", mention.Repo, mention.ID, err))
 		}
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
+	if err := collectedStringErrors(errs); err != nil {
+		return err
 	}
 	if err := d.saveMentionPollCursor(ctx, pollStarted); err != nil {
 		return err
@@ -434,10 +435,7 @@ func (d *GitHubDriver) publishCompletedIssueTasks(ctx context.Context) error {
 			errs = append(errs, fmt.Sprintf("%s publish pr: %v", task.ID, err))
 		}
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
+	return collectedStringErrors(errs)
 }
 
 func (d *GitHubDriver) monitorPullRequests(ctx context.Context) error {
