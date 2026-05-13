@@ -91,6 +91,51 @@ func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	}
 }
 
+func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectRoot := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:        "project-1",
+		Name:      "Project",
+		LocalPath: projectRoot,
+		Repo:      "owner/repo",
+		PullRequestPolicy: core.PullRequestPolicy{
+			AllowMerge: true,
+			AutoMerge:  true,
+		},
+	}}, "project-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &mergeTrackingPullRequestPublisher{
+		fakePullRequestPublisher: fakePullRequestPublisher{status: monitoredPullRequestStatus("passing", "CLEAN", "APPROVED")},
+	}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	service.SetProjects(projects)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "project-1", core.TaskWaiting)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, "task-1", core.TaskSucceeded)
+	if publisher.mergeCalls != 1 {
+		t.Fatalf("merge calls = %d, want 1", publisher.mergeCalls)
+	}
+	if publisher.mergeSpec.Repo != "owner/repo" || publisher.mergeSpec.Number != 7 || publisher.mergeSpec.Method != "squash" {
+		t.Fatalf("merge spec = %+v", publisher.mergeSpec)
+	}
+	if snapshot.PullRequests[0].State != "MERGED" {
+		t.Fatalf("pull request state = %q, want MERGED", snapshot.PullRequests[0].State)
+	}
+	if snapshot.Tasks[0].ObjectivePhase != "merged" {
+		t.Fatalf("objective phase = %q, want merged", snapshot.Tasks[0].ObjectivePhase)
+	}
+}
+
 func TestServiceDefaultPullRequestMonitorKeepsFeedbackPendingWhileTaskRunning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -273,7 +318,27 @@ func TestServicePullRequestMonitorRespectsProjectOptOut(t *testing.T) {
 	}
 }
 
-func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStore, publisher *fakePullRequestPublisher) *Service {
+type mergeTrackingPullRequestPublisher struct {
+	fakePullRequestPublisher
+	merged     core.PullRequest
+	mergeSpec  PullRequestMergeSpec
+	mergeCalls int
+}
+
+func (p *mergeTrackingPullRequestPublisher) Merge(_ context.Context, pr core.PullRequest, spec PullRequestMergeSpec) (core.PullRequest, error) {
+	p.mergeCalls++
+	p.merged = pr
+	p.mergeSpec = spec
+	merged := pr
+	merged.State = "MERGED"
+	merged.ChecksStatus = "passing"
+	merged.ChecksConclusion = "SUCCESS"
+	merged.MergeStatus = "MERGED"
+	merged.Mergeable = "MERGEABLE"
+	return merged, nil
+}
+
+func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStore, publisher PullRequestPublisher) *Service {
 	t.Helper()
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "continue"}}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},

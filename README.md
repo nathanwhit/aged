@@ -181,7 +181,7 @@ PRs are first-class snapshot state.
 - `POST /api/pull-requests/{id}/refresh` refreshes checks, reviews, merge state, and unresolved feedback.
 - `POST /api/pull-requests/{id}/babysit` marks the same task as waiting on the PR.
 
-The GitHub monitor steers the original task when checks fail, reviews request changes, mergeability blocks, or new external PR feedback appears. Merged PRs satisfy related tasks; closed unmerged PRs abandon/cancel them. Aged does not merge PRs automatically today.
+The GitHub monitor steers the original task when checks fail, reviews request changes, mergeability blocks, or new external PR feedback appears. Merged PRs satisfy related tasks; closed unmerged PRs abandon/cancel them. Projects with both `allowMerge` and `autoMerge` enabled automatically squash-merge ready tracked PRs.
 
 ## Drivers And Plugins
 
