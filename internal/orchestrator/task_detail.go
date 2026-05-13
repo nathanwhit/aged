@@ -67,14 +67,26 @@ func BuildTaskDetail(snapshot core.Snapshot, taskID string, eventLimit int) (Tas
 	if !ok {
 		return TaskDetail{}, eventstore.ErrNotFound
 	}
+	var executionNodes []core.ExecutionNode
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID {
+			executionNodes = append(executionNodes, node)
+		}
+	}
+	var pullRequests []core.PullRequest
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID == taskID {
+			pullRequests = append(pullRequests, pr)
+		}
+	}
 	detail := TaskDetail{
 		Task:               task,
 		Workers:            taskDetailWorkers(snapshot, taskID),
-		ExecutionNodes:     taskExecutionNodes(snapshot, taskID),
-		PullRequests:       taskPullRequests(snapshot, taskID),
+		ExecutionNodes:     executionNodes,
+		PullRequests:       pullRequests,
 		RecentEvents:       recentTaskEvents(snapshot.Events, taskID, eventLimit),
 		ApplyPolicy:        taskApplyPolicy(snapshot, taskID),
-		AvailableActions:   taskAvailableActions(snapshot, task),
+		AvailableActions:   taskAvailableActions(snapshot, task, pullRequests),
 		OrchestrationGraph: taskOrchestrationGraph(snapshot, taskID),
 	}
 	if project, ok := projectByID(snapshot.Projects, task.ProjectID); ok {
@@ -146,26 +158,6 @@ func taskDetailWorkers(snapshot core.Snapshot, taskID string) []TaskDetailWorker
 		workers = append(workers, item)
 	}
 	return workers
-}
-
-func taskExecutionNodes(snapshot core.Snapshot, taskID string) []core.ExecutionNode {
-	var nodes []core.ExecutionNode
-	for _, node := range snapshot.ExecutionNodes {
-		if node.TaskID == taskID {
-			nodes = append(nodes, node)
-		}
-	}
-	return nodes
-}
-
-func taskPullRequests(snapshot core.Snapshot, taskID string) []core.PullRequest {
-	var pullRequests []core.PullRequest
-	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID == taskID {
-			pullRequests = append(pullRequests, pr)
-		}
-	}
-	return pullRequests
 }
 
 func taskOrchestrationGraph(snapshot core.Snapshot, taskID string) *core.OrchestrationGraph {
@@ -275,7 +267,7 @@ func taskApplyPolicy(snapshot core.Snapshot, taskID string) ApplyPolicyRecommend
 	return recommendation
 }
 
-func taskAvailableActions(snapshot core.Snapshot, task core.Task) []AvailableAction {
+func taskAvailableActions(snapshot core.Snapshot, task core.Task, pullRequests []core.PullRequest) []AvailableAction {
 	actions := []AvailableAction{
 		{Name: "aged_steer_task", Description: "Send steering, feedback, or an answer to a waiting task.", TargetID: task.ID},
 		{Name: "aged_watch_prs", Description: "Attach existing GitHub pull requests to this task.", TargetID: task.ID},
@@ -292,10 +284,10 @@ func taskAvailableActions(snapshot core.Snapshot, task core.Task) []AvailableAct
 	if taskCanApplyFinalResult(snapshot, task) {
 		actions = append(actions, AvailableAction{Name: "aged_apply_task_result", Description: "Apply the selected final worker result locally.", TargetID: task.ID})
 	}
-	if canPublishPullRequestForTask(task) && len(taskPullRequests(snapshot, task.ID)) == 0 {
+	if canPublishPullRequestForTask(task) && len(pullRequests) == 0 {
 		actions = append(actions, AvailableAction{Name: "aged_publish_pr", Description: "Open a GitHub pull request for this task result.", TargetID: task.ID})
 	}
-	for _, pr := range taskPullRequests(snapshot, task.ID) {
+	for _, pr := range pullRequests {
 		actions = append(actions,
 			AvailableAction{Name: "aged_refresh_pr", Description: "Refresh PR checks, reviews, and mergeability.", TargetID: pr.ID},
 			AvailableAction{Name: "aged_babysit_pr", Description: "Start or return a babysitter task for this PR.", TargetID: pr.ID},
