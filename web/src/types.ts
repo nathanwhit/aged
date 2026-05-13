@@ -165,6 +165,15 @@ export type Plugin = {
   };
 };
 
+export type PromptSet = {
+  id: string;
+  name: string;
+  description?: string;
+  templates?: Record<string, string>;
+  builtIn?: boolean;
+  default?: boolean;
+};
+
 export type GitHubDriverConfig = {
   enabled: boolean;
   intervalSeconds?: number;
@@ -404,6 +413,7 @@ export type Snapshot = {
   executionNodes?: ExecutionNode[] | null;
   targets?: TargetState[] | null;
   plugins?: Plugin[] | null;
+  promptSets?: PromptSet[] | null;
   projects?: Project[] | null;
   pullRequests?: PullRequestState[] | null;
   orchestrationGraphs?: OrchestrationGraph[] | null;

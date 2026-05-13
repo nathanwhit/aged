@@ -50,6 +50,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/plugins", s.registerPlugin)
 	mux.HandleFunc("PUT /api/plugins/{id}", s.updatePlugin)
 	mux.HandleFunc("DELETE /api/plugins/{id}", s.deletePlugin)
+	mux.HandleFunc("GET /api/prompt-sets", s.promptSets)
+	mux.HandleFunc("POST /api/prompt-sets", s.registerPromptSet)
+	mux.HandleFunc("PUT /api/prompt-sets/{id}", s.updatePromptSet)
+	mux.HandleFunc("DELETE /api/prompt-sets/{id}", s.deletePromptSet)
 	mux.HandleFunc("GET /api/drivers/github", s.githubDriver)
 	mux.HandleFunc("PUT /api/drivers/github", s.updateGitHubDriver)
 	mux.HandleFunc("GET /api/drivers/discord", s.discordDriver)
@@ -227,6 +231,39 @@ func (s *Server) updatePlugin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deletePlugin(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w, s.service.DeletePlugin(r.Context(), r.PathValue("id")))
+}
+
+func (s *Server) promptSets(w http.ResponseWriter, r *http.Request) {
+	s.writeSnapshotField(w, r, func(snapshot core.Snapshot) any { return snapshot.PromptSets })
+}
+
+func (s *Server) registerPromptSet(w http.ResponseWriter, r *http.Request) {
+	promptSet, ok := decodeRequest[core.PromptSet](w, r)
+	if !ok {
+		return
+	}
+	registered, err := s.service.RegisterPromptSet(r.Context(), promptSet)
+	writeResult(w, http.StatusCreated, registered, err)
+}
+
+func (s *Server) updatePromptSet(w http.ResponseWriter, r *http.Request) {
+	promptSet, ok := decodeRequest[core.PromptSet](w, r)
+	if !ok {
+		return
+	}
+	if promptSet.ID == "" {
+		promptSet.ID = r.PathValue("id")
+	}
+	if promptSet.ID != r.PathValue("id") {
+		writeError(w, fmt.Errorf("prompt set id mismatch"))
+		return
+	}
+	registered, err := s.service.RegisterPromptSet(r.Context(), promptSet)
+	writeResult(w, http.StatusOK, registered, err)
+}
+
+func (s *Server) deletePromptSet(w http.ResponseWriter, r *http.Request) {
+	writeNoContent(w, s.service.DeletePromptSet(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) githubDriver(w http.ResponseWriter, _ *http.Request) {

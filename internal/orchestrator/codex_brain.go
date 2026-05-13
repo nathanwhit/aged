@@ -19,17 +19,19 @@ const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
 type CodexBrainConfig struct {
 	CodexPath    string
 	TemplatePath string
+	PromptSets   *PromptSetRegistry
 	WorkDir      string
 	Timeout      time.Duration
 	Fallback     BrainProvider
 }
 
 type CodexBrain struct {
-	codexPath string
-	template  string
-	workDir   string
-	timeout   time.Duration
-	fallback  BrainProvider
+	codexPath  string
+	template   string
+	promptSets *PromptSetRegistry
+	workDir    string
+	timeout    time.Duration
+	fallback   BrainProvider
 }
 
 func NewCodexBrain(config CodexBrainConfig) (*CodexBrain, error) {
@@ -46,11 +48,12 @@ func NewCodexBrain(config CodexBrainConfig) (*CodexBrain, error) {
 		timeout = 2 * time.Minute
 	}
 	return &CodexBrain{
-		codexPath: codexPath,
-		template:  string(template),
-		workDir:   config.WorkDir,
-		timeout:   timeout,
-		fallback:  config.Fallback,
+		codexPath:  codexPath,
+		template:   string(template),
+		promptSets: config.PromptSets,
+		workDir:    config.WorkDir,
+		timeout:    timeout,
+		fallback:   config.Fallback,
 	}, nil
 }
 
@@ -75,30 +78,10 @@ func (b *CodexBrain) Plan(ctx context.Context, task core.Task, steering []string
 }
 
 func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state OrchestrationState) (ReplanDecision, error) {
-	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	prompt := b.replanPrompt(task, state)
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return ReplanDecision{}, fmt.Errorf("codex replan command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
-	}
-
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	builtinPrompt := b.replanPrompt(task, state)
+	rendered, custom := b.customPrompt(task, "replan", replanPromptPayload(task, state))
+	decision, fallbackReason, err := b.replanWithFallback(ctx, rendered, custom, builtinPrompt)
 	if err != nil {
-		return ReplanDecision{}, err
-	}
-	content = trimJSONFence(content)
-	decision, err := decodeReplanDecision([]byte(content))
-	if err != nil {
-		return ReplanDecision{}, fmt.Errorf("decode codex replan decision: %w", err)
-	}
-	if err := decision.Validate(); err != nil {
 		return ReplanDecision{}, err
 	}
 	if decision.Metadata == nil {
@@ -106,70 +89,45 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	}
 	decision.Metadata["brain"] = "codex"
 	decision.Metadata["scheduler"] = "orchestrator"
+	for key, value := range promptMetadata(rendered, fallbackReason) {
+		decision.Metadata[key] = value
+	}
 	return decision, nil
 }
 
 func (b *CodexBrain) ReviewCompletion(ctx context.Context, task core.Task, candidate WorkerTurnResult, reason string) (CompletionReview, error) {
-	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	prompt := b.completionReviewPrompt(task, candidate, reason)
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return CompletionReview{}, fmt.Errorf("codex completion review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
-	}
-
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	builtinPrompt := b.completionReviewPrompt(task, candidate, reason)
+	rendered, custom := b.customPrompt(task, "completion_review", completionReviewPayload(task, candidate, reason))
+	review, fallbackReason, err := b.completionReviewWithFallback(ctx, rendered, custom, builtinPrompt)
 	if err != nil {
 		return CompletionReview{}, err
-	}
-	content = trimJSONFence(content)
-	review, err := decodeCompletionReview([]byte(content))
-	if err != nil {
-		return CompletionReview{}, fmt.Errorf("decode codex completion review: %w", err)
 	}
 	if review.Metadata == nil {
 		review.Metadata = map[string]any{}
 	}
 	review.Metadata["brain"] = "codex"
 	review.Metadata["scheduler"] = "orchestrator"
+	for key, value := range promptMetadata(rendered, fallbackReason) {
+		review.Metadata[key] = value
+	}
 	return review, nil
 }
 
 func (b *CodexBrain) ReviewPublication(ctx context.Context, task core.Task, candidate WorkerTurnResult, action PlanAction) (PublicationReview, error) {
-	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	prompt := b.publicationReviewPrompt(task, candidate, action)
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return PublicationReview{}, fmt.Errorf("codex publication review command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
-	}
-
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	builtinPrompt := b.publicationReviewPrompt(task, candidate, action)
+	rendered, custom := b.customPrompt(task, "publication_review", publicationReviewPayload(task, candidate, action))
+	review, fallbackReason, err := b.publicationReviewWithFallback(ctx, rendered, custom, builtinPrompt)
 	if err != nil {
 		return PublicationReview{}, err
-	}
-	content = trimJSONFence(content)
-	review, err := decodePublicationReview([]byte(content))
-	if err != nil {
-		return PublicationReview{}, fmt.Errorf("decode codex publication review: %w", err)
 	}
 	if review.Metadata == nil {
 		review.Metadata = map[string]any{}
 	}
 	review.Metadata["brain"] = "codex"
 	review.Metadata["scheduler"] = "orchestrator"
+	for key, value := range promptMetadata(rendered, fallbackReason) {
+		review.Metadata[key] = value
+	}
 	return review, nil
 }
 
@@ -211,30 +169,35 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 }
 
 func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
-	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	prompt := b.prompt(task, steering)
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
-	cmd.Stdin = strings.NewReader(prompt)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return Plan{}, fmt.Errorf("codex brain command failed: %w: %s", err, commandFailureDetail(stdout.String(), stderr.String()))
+	if rendered, ok := b.customPrompt(task, "plan", b.taskMessage(task, steering)); ok {
+		plan, err := b.planWithPrompt(ctx, rendered.Prompt)
+		if err == nil {
+			if plan.Metadata == nil {
+				plan.Metadata = map[string]any{}
+			}
+			for key, value := range promptMetadata(rendered, "") {
+				plan.Metadata[key] = value
+			}
+			plan.Metadata["brain"] = "codex"
+			plan.Metadata["scheduler"] = "orchestrator"
+			return plan, nil
+		}
+		plan, fallbackErr := b.planWithPrompt(ctx, b.prompt(task, steering))
+		if fallbackErr != nil {
+			return Plan{}, fmt.Errorf("custom codex plan prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+		}
+		if plan.Metadata == nil {
+			plan.Metadata = map[string]any{}
+		}
+		for key, value := range promptMetadata(rendered, err.Error()) {
+			plan.Metadata[key] = value
+		}
+		plan.Metadata["brain"] = "codex"
+		plan.Metadata["scheduler"] = "orchestrator"
+		return plan, nil
 	}
-
-	content, err := extractCodexAgentMessage(stdout.Bytes())
+	plan, err := b.planWithPrompt(ctx, b.prompt(task, steering))
 	if err != nil {
-		return Plan{}, err
-	}
-	content = trimJSONFence(content)
-	plan, err := decodeCodexPlan([]byte(content))
-	if err != nil {
-		return Plan{}, fmt.Errorf("decode codex brain plan: %w", err)
-	}
-	if err := plan.Validate(); err != nil {
 		return Plan{}, err
 	}
 	if plan.Metadata == nil {
@@ -243,6 +206,128 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 	plan.Metadata["brain"] = "codex"
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
+}
+
+func (b *CodexBrain) replanWithFallback(ctx context.Context, rendered RenderedPrompt, custom bool, builtinPrompt string) (ReplanDecision, string, error) {
+	if custom {
+		decision, err := b.replanWithPrompt(ctx, rendered.Prompt)
+		if err == nil {
+			return decision, "", nil
+		}
+		fallback, fallbackErr := b.replanWithPrompt(ctx, builtinPrompt)
+		if fallbackErr != nil {
+			return ReplanDecision{}, "", fmt.Errorf("custom codex replan prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+		}
+		return fallback, err.Error(), nil
+	}
+	decision, err := b.replanWithPrompt(ctx, builtinPrompt)
+	return decision, "", err
+}
+
+func (b *CodexBrain) completionReviewWithFallback(ctx context.Context, rendered RenderedPrompt, custom bool, builtinPrompt string) (CompletionReview, string, error) {
+	if custom {
+		review, err := b.completionReviewWithPrompt(ctx, rendered.Prompt)
+		if err == nil {
+			return review, "", nil
+		}
+		fallback, fallbackErr := b.completionReviewWithPrompt(ctx, builtinPrompt)
+		if fallbackErr != nil {
+			return CompletionReview{}, "", fmt.Errorf("custom codex completion review prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+		}
+		return fallback, err.Error(), nil
+	}
+	review, err := b.completionReviewWithPrompt(ctx, builtinPrompt)
+	return review, "", err
+}
+
+func (b *CodexBrain) publicationReviewWithFallback(ctx context.Context, rendered RenderedPrompt, custom bool, builtinPrompt string) (PublicationReview, string, error) {
+	if custom {
+		review, err := b.publicationReviewWithPrompt(ctx, rendered.Prompt)
+		if err == nil {
+			return review, "", nil
+		}
+		fallback, fallbackErr := b.publicationReviewWithPrompt(ctx, builtinPrompt)
+		if fallbackErr != nil {
+			return PublicationReview{}, "", fmt.Errorf("custom codex publication review prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+		}
+		return fallback, err.Error(), nil
+	}
+	review, err := b.publicationReviewWithPrompt(ctx, builtinPrompt)
+	return review, "", err
+}
+
+func (b *CodexBrain) planWithPrompt(ctx context.Context, prompt string) (Plan, error) {
+	content, err := b.runCodexPrompt(ctx, prompt, "codex brain command failed")
+	if err != nil {
+		return Plan{}, err
+	}
+	plan, err := decodeCodexPlan([]byte(content))
+	if err != nil {
+		return Plan{}, fmt.Errorf("decode codex brain plan: %w", err)
+	}
+	if err := plan.Validate(); err != nil {
+		return Plan{}, err
+	}
+	return plan, nil
+}
+
+func (b *CodexBrain) replanWithPrompt(ctx context.Context, prompt string) (ReplanDecision, error) {
+	content, err := b.runCodexPrompt(ctx, prompt, "codex replan command failed")
+	if err != nil {
+		return ReplanDecision{}, err
+	}
+	decision, err := decodeReplanDecision([]byte(content))
+	if err != nil {
+		return ReplanDecision{}, fmt.Errorf("decode codex replan decision: %w", err)
+	}
+	if err := decision.Validate(); err != nil {
+		return ReplanDecision{}, err
+	}
+	return decision, nil
+}
+
+func (b *CodexBrain) completionReviewWithPrompt(ctx context.Context, prompt string) (CompletionReview, error) {
+	content, err := b.runCodexPrompt(ctx, prompt, "codex completion review command failed")
+	if err != nil {
+		return CompletionReview{}, err
+	}
+	review, err := decodeCompletionReview([]byte(content))
+	if err != nil {
+		return CompletionReview{}, fmt.Errorf("decode codex completion review: %w", err)
+	}
+	return review, nil
+}
+
+func (b *CodexBrain) publicationReviewWithPrompt(ctx context.Context, prompt string) (PublicationReview, error) {
+	content, err := b.runCodexPrompt(ctx, prompt, "codex publication review command failed")
+	if err != nil {
+		return PublicationReview{}, err
+	}
+	review, err := decodePublicationReview([]byte(content))
+	if err != nil {
+		return PublicationReview{}, fmt.Errorf("decode codex publication review: %w", err)
+	}
+	return review, nil
+}
+
+func (b *CodexBrain) runCodexPrompt(ctx context.Context, prompt string, failurePrefix string) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	cmd.Stdin = strings.NewReader(prompt)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%s: %w: %s", failurePrefix, err, commandFailureDetail(stdout.String(), stderr.String()))
+	}
+	content, err := extractCodexAgentMessage(stdout.Bytes())
+	if err != nil {
+		return "", err
+	}
+	return trimJSONFence(content), nil
 }
 
 func commandFailureDetail(stdout string, stderr string) string {
@@ -554,8 +639,28 @@ func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 	return "Schedule this task. Return only the JSON plan, with no prose or markdown.\n\n" + string(data)
 }
 
-func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
-	payload := map[string]any{
+func (b *CodexBrain) customPrompt(task core.Task, templateName string, input any) (RenderedPrompt, bool) {
+	if b.promptSets == nil {
+		return RenderedPrompt{}, false
+	}
+	data := map[string]any{
+		"system":      strings.TrimSpace(b.template),
+		"input_json":  input,
+		"task_id":     task.ID,
+		"task_title":  task.Title,
+		"task_prompt": task.Prompt,
+		"task_json": map[string]any{
+			"id":             task.ID,
+			"title":          task.Title,
+			"prompt":         task.Prompt,
+			"completionMode": taskCompletionModeFromTask(task),
+		},
+	}
+	return b.promptSets.Render(task, templateName, data)
+}
+
+func replanPromptPayload(task core.Task, state OrchestrationState) map[string]any {
+	return map[string]any{
 		"task": map[string]any{
 			"id":             task.ID,
 			"title":          task.Title,
@@ -569,6 +674,34 @@ func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) stri
 			{"kind": "mock", "description": "No-op deterministic worker for smoke tests and scheduler validation."},
 		},
 	}
+}
+
+func completionReviewPayload(task core.Task, candidate WorkerTurnResult, reason string) map[string]any {
+	return map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"selectedCandidate": candidate,
+		"completionReason":  reason,
+	}
+}
+
+func publicationReviewPayload(task core.Task, candidate WorkerTurnResult, action PlanAction) map[string]any {
+	return map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"candidate":         candidate,
+		"publicationAction": action,
+	}
+}
+
+func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
+	payload := replanPromptPayload(task, state)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return task.Prompt
@@ -619,15 +752,7 @@ Dynamic replanning input:
 }
 
 func (b *CodexBrain) completionReviewPrompt(task core.Task, candidate WorkerTurnResult, reason string) string {
-	payload := map[string]any{
-		"task": map[string]any{
-			"id":     task.ID,
-			"title":  task.Title,
-			"prompt": task.Prompt,
-		},
-		"selectedCandidate": candidate,
-		"completionReason":  reason,
-	}
+	payload := completionReviewPayload(task, candidate, reason)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return task.Prompt
@@ -661,15 +786,7 @@ Completion review input:
 }
 
 func (b *CodexBrain) publicationReviewPrompt(task core.Task, candidate WorkerTurnResult, action PlanAction) string {
-	payload := map[string]any{
-		"task": map[string]any{
-			"id":     task.ID,
-			"title":  task.Title,
-			"prompt": task.Prompt,
-		},
-		"candidate":         candidate,
-		"publicationAction": action,
-	}
+	payload := publicationReviewPayload(task, candidate, action)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return task.Prompt

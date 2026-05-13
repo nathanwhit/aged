@@ -1,4 +1,4 @@
-import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
@@ -72,6 +72,18 @@ export async function updatePlugin(id: string, input: Plugin): Promise<Plugin> {
 
 export async function deletePlugin(id: string): Promise<void> {
   return requestVoid(`/api/plugins/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function registerPromptSet(input: PromptSet): Promise<PromptSet> {
+  return requestJSON("/api/prompt-sets", jsonInit("POST", input));
+}
+
+export async function updatePromptSet(id: string, input: PromptSet): Promise<PromptSet> {
+  return requestJSON(`/api/prompt-sets/${encodeURIComponent(id)}`, jsonInit("PUT", input));
+}
+
+export async function deletePromptSet(id: string): Promise<void> {
+  return requestVoid(`/api/prompt-sets/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function getGitHubDriver(): Promise<GitHubDriverState> {
