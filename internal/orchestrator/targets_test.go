@@ -364,6 +364,32 @@ func TestSSHRunnerInfersTerminalStatusWhenRemoteSessionDisappears(t *testing.T) 
 	}
 }
 
+func TestSSHRunnerCompletesWhenClaudeResultArrivesBeforeProcessExit(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			`{"type":"result","subtype":"success","result":"done"}` + "\n",
+		},
+		status: []string{`{"status":"running"}`},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("claude"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v, want succeeded", status)
+	}
+	if !sink.has(worker.EventResult, "stdout", "done") {
+		t.Fatalf("result was not emitted: %+v", sink.events)
+	}
+	if !executor.commandContains("kill-session") {
+		t.Fatalf("remote session was not cleaned up: %+v", executor.commands)
+	}
+}
+
 func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
 	executor := &timeoutThenStatusExecutor{}
 	runner := SSHRunner{
@@ -1006,6 +1032,15 @@ func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, er
 	default:
 		return "", nil
 	}
+}
+
+func (e *scriptedPollExecutor) commandContains(pattern string) bool {
+	for _, command := range e.commands {
+		if strings.Contains(strings.Join(command, " "), pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func valueAt(values []string, index int) string {
