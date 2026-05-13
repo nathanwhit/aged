@@ -122,6 +122,7 @@ export type PullRequestPolicy = {
   draft?: boolean;
   allowMerge?: boolean;
   autoMerge?: boolean;
+  mergeMethod?: "squash" | "merge" | "rebase";
   monitorPullRequests?: boolean;
 };
 

@@ -69,6 +69,7 @@ Projects are persisted in SQLite. On an empty database, `-projects` / `AGED_PROJ
         "draft": false,
         "allowMerge": false,
         "autoMerge": false,
+        "mergeMethod": "squash",
         "monitorPullRequests": true
       }
     }
@@ -181,7 +182,7 @@ PRs are first-class snapshot state.
 - `POST /api/pull-requests/{id}/refresh` refreshes checks, reviews, merge state, and unresolved feedback.
 - `POST /api/pull-requests/{id}/babysit` marks the same task as waiting on the PR.
 
-The GitHub monitor steers the original task when checks fail, reviews request changes, mergeability blocks, or new external PR feedback appears. Merged PRs satisfy related tasks; closed unmerged PRs abandon/cancel them. Projects with both `allowMerge` and `autoMerge` enabled automatically squash-merge ready tracked PRs.
+The GitHub monitor steers the original task when checks fail, reviews request changes, mergeability blocks, or new external PR feedback appears. Merged PRs satisfy related tasks; closed unmerged PRs abandon/cancel them. Projects with both `allowMerge` and `autoMerge` enabled automatically merge ready tracked PRs with `pullRequestPolicy.mergeMethod`, which defaults to `squash` and can be `squash`, `merge`, or `rebase`.
 
 ## Drivers And Plugins
 

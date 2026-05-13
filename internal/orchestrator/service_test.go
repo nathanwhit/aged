@@ -8119,6 +8119,9 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 	if remoteWorker.Prompt != wantPrompt {
 		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
 	}
+	if !strings.Contains(remoteWorker.Prompt, "do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR") {
+		t.Fatalf("worker prompt missing draft PR guard:\n%s", remoteWorker.Prompt)
+	}
 	if remoteWorker.PromptPath != "/runs/"+remoteWorker.ID+"/prompt.txt" {
 		t.Fatalf("worker prompt path = %q", remoteWorker.PromptPath)
 	}

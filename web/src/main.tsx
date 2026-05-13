@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -1121,6 +1121,7 @@ function ProjectPanel({
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
+  const [mergeMethod, setMergeMethod] = useState<NonNullable<PullRequestPolicy["mergeMethod"]>>("squash");
   const [monitorPullRequests, setMonitorPullRequests] = useState(true);
   const [projectFormOpen, setProjectFormOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1149,6 +1150,7 @@ function ProjectPanel({
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
+    setMergeMethod(project.pullRequestPolicy?.mergeMethod ?? "squash");
     setMonitorPullRequests(project.pullRequestPolicy?.monitorPullRequests ?? true);
     setProjectFormOpen(true);
   }
@@ -1175,6 +1177,7 @@ function ProjectPanel({
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
+    setMergeMethod("squash");
     setMonitorPullRequests(true);
     setProjectFormOpen(false);
   }
@@ -1213,6 +1216,7 @@ function ProjectPanel({
           draft: draftPRs,
           allowMerge,
           autoMerge,
+          mergeMethod,
           monitorPullRequests,
         },
       };
@@ -1357,6 +1361,14 @@ function ProjectPanel({
           <label className="checkbox-label">
             <input type="checkbox" checked={autoMerge} onChange={(event) => setAutoMerge(event.target.checked)} />
             Auto-merge when policy allows
+          </label>
+          <label>
+            Merge method
+            <select value={mergeMethod} onChange={(event) => setMergeMethod(event.target.value as NonNullable<PullRequestPolicy["mergeMethod"]>)}>
+              <option value="squash">Squash</option>
+              <option value="merge">Merge commit</option>
+              <option value="rebase">Rebase</option>
+            </select>
           </label>
           <label className="checkbox-label">
             <input type="checkbox" checked={monitorPullRequests} onChange={(event) => setMonitorPullRequests(event.target.checked)} />

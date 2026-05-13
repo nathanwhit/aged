@@ -47,3 +47,33 @@ func TestNewProjectRegistryKeepsAutoVCSForPlainDirectory(t *testing.T) {
 		t.Fatalf("VCS = %q, want auto", project.VCS)
 	}
 }
+
+func TestNewProjectRegistryNormalizesPullRequestMergeMethod(t *testing.T) {
+	dir := t.TempDir()
+	registry, err := NewProjectRegistry([]core.Project{{
+		ID:        "plain",
+		LocalPath: dir,
+		PullRequestPolicy: core.PullRequestPolicy{
+			MergeMethod: " ReBase ",
+		},
+	}}, "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Default().PullRequestPolicy.MergeMethod; got != "rebase" {
+		t.Fatalf("merge method = %q, want rebase", got)
+	}
+}
+
+func TestNewProjectRegistryRejectsInvalidPullRequestMergeMethod(t *testing.T) {
+	_, err := NewProjectRegistry([]core.Project{{
+		ID:        "plain",
+		LocalPath: t.TempDir(),
+		PullRequestPolicy: core.PullRequestPolicy{
+			MergeMethod: "octopus",
+		},
+	}}, "plain")
+	if err == nil || !strings.Contains(err.Error(), "mergeMethod") {
+		t.Fatalf("err = %v, want mergeMethod validation error", err)
+	}
+}

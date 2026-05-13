@@ -239,6 +239,7 @@ func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace) str
 	b.WriteString("# Original Orchestrator\n\n")
 	b.WriteString("This worker is running on a remote execution target under an existing aged orchestrator. Do not start a new aged daemon or orchestrator from this worker.\n\n")
 	b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
+	b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
 	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
 	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, and `AGED_WORKER_CALLBACK_DIR`.\n\n")
 	b.WriteString(prompt)

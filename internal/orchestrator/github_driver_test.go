@@ -673,6 +673,96 @@ func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
 	}
 }
 
+func TestGitHubDriverRoutesMentionTasksToMentionRepoProject(t *testing.T) {
+	fixture := newGitHubDriverTestFixture(t, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"denoland/deno"},
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			AutoPublish: boolPtr(false),
+		},
+	}, &fakeGitHubClient{mentions: []GitHubMention{{
+		ID:          "thread-1",
+		Repo:        "denoland/deno",
+		SubjectType: "PullRequest",
+		Number:      33992,
+		Title:       "Dedupe JS sources",
+		URL:         "https://github.com/denoland/deno/pull/33992",
+		Reason:      "mention",
+	}}})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "aged", Name: "aged", LocalPath: t.TempDir(), Repo: "nathanwhit/aged", UpstreamRepo: "nathanwhit/aged"},
+		{ID: "deno", Name: "deno", LocalPath: t.TempDir(), Repo: "nathanwhit/deno", UpstreamRepo: "denoland/deno"},
+	}, "aged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.SetProjects(projects)
+
+	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-mention", "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing github mention task")
+	}
+	if task.ProjectID != "deno" {
+		t.Fatalf("mention task project = %q, want deno", task.ProjectID)
+	}
+}
+
+func TestGitHubDriverRoutesMentionsToExistingTrackedPullRequestTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	client := &fakeGitHubClient{mentions: []GitHubMention{{
+		ID:          "thread-1",
+		Repo:        "owner/repo",
+		SubjectType: "PullRequest",
+		Number:      7,
+		Title:       "Add feature",
+		URL:         "https://github.com/owner/repo/pull/7",
+		Reason:      "mention",
+		Body:        "@aged please take another look",
+	}}}
+	service := newTestPullRequestMonitorService(t, store, &fakePullRequestPublisher{})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+		},
+	}, client)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventTaskSteered, "task-1")
+	if _, ok, err := service.FindTaskByExternalID(ctx, "github-mention", "thread-1"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("created a separate github mention task")
+	}
+	if got := countEvents(snapshot.Events, core.EventTaskSteered, "task-1"); got != 1 {
+		t.Fatalf("task steered events = %d, want 1", got)
+	}
+	if got := countGitHubMentionRoutedActions(snapshot.Events, "task-1", "thread-1"); got != 1 {
+		t.Fatalf("routed mention actions = %d, want 1", got)
+	}
+}
+
 func TestGitHubDriverMentionsIncludeReadAndAdvanceCursor(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -793,6 +883,27 @@ func (c fakeGitHubClient) ListIssues(context.Context, string, []string, int) ([]
 func (c *fakeGitHubClient) ListMentions(_ context.Context, options GitHubMentionListOptions) ([]GitHubMention, error) {
 	c.mentionOptions = append(c.mentionOptions, options)
 	return c.mentions, nil
+}
+
+func countGitHubMentionRoutedActions(events []core.Event, taskID string, externalID string) int {
+	var count int
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind       string `json:"kind"`
+			Source     string `json:"source"`
+			ExternalID string `json:"externalId"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == "github_mention_routed" && payload.Source == "github-mention" && payload.ExternalID == externalID {
+			count++
+		}
+	}
+	return count
 }
 
 func boolPtr(value bool) *bool {
