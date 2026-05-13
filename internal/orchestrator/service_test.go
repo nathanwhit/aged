@@ -2521,32 +2521,9 @@ func TestServiceStartsNewTaskWorkspaceFromFetchedProjectDefaultBase(t *testing.T
 	store := openTestStore(t)
 	defer store.Close()
 
-	repo := initGitTestRepo(t)
-	runTestGit(t, repo, "branch", "-M", "main")
-	remote := t.TempDir()
-	runTestGit(t, remote, "init", "--bare")
-	runTestGit(t, repo, "remote", "add", "origin", remote)
-	runTestGit(t, repo, "push", "-u", "origin", "main")
-	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	updaterParent := t.TempDir()
-	updater := filepath.Join(updaterParent, "updater")
-	runTestGit(t, updaterParent, "clone", remote, updater)
-	runTestGit(t, updater, "config", "user.name", "aged-test")
-	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
-	runTestGit(t, updater, "config", "commit.gpgsign", "false")
-	if err := os.WriteFile(filepath.Join(updater, "file.txt"), []byte("remote update\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runTestGit(t, updater, "add", "file.txt")
-	runTestGit(t, updater, "commit", "-m", "remote update")
-	runTestGit(t, updater, "push", "origin", "main")
-	remoteCommit := strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD"))
-
-	staleCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "refs/remotes/origin/main"))
-	if staleCommit == remoteCommit {
-		t.Fatalf("test setup failed: local origin/main is already current")
-	}
+	fixture := prepareStaleOriginMainFixture(t, "remote update")
+	repo := fixture.repo
+	fixture.assertLocalOriginMainStale(t)
 	projects, err := NewProjectRegistry([]core.Project{{
 		ID:          "repo",
 		Name:        "Repo",
@@ -2576,39 +2553,16 @@ func TestServiceStartsNewTaskWorkspaceFromFetchedProjectDefaultBase(t *testing.T
 		t.Fatalf("workspace base revision = %q, want origin default base", workspace.baseRevision)
 	}
 	gotCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", workspace.baseRevision))
-	if gotCommit != remoteCommit {
-		t.Fatalf("workspace base revision commit = %q, want %q", gotCommit, remoteCommit)
+	if gotCommit != fixture.remoteCommit {
+		t.Fatalf("workspace base revision commit = %q, want %q", gotCommit, fixture.remoteCommit)
 	}
 }
 
 func TestSyncedProjectWorkspaceBaseRevisionFetchesStaleBase(t *testing.T) {
 	ctx := context.Background()
-	repo := initGitTestRepo(t)
-	runTestGit(t, repo, "branch", "-M", "main")
-	remote := t.TempDir()
-	runTestGit(t, remote, "init", "--bare")
-	runTestGit(t, repo, "remote", "add", "origin", remote)
-	runTestGit(t, repo, "push", "-u", "origin", "main")
-	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	updaterParent := t.TempDir()
-	updater := filepath.Join(updaterParent, "updater")
-	runTestGit(t, updaterParent, "clone", remote, updater)
-	runTestGit(t, updater, "config", "user.name", "aged-test")
-	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
-	runTestGit(t, updater, "config", "commit.gpgsign", "false")
-	if err := os.WriteFile(filepath.Join(updater, "file.txt"), []byte("remote update\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runTestGit(t, updater, "add", "file.txt")
-	runTestGit(t, updater, "commit", "-m", "remote update")
-	runTestGit(t, updater, "push", "origin", "main")
-	remoteCommit := strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD"))
-
-	staleCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "refs/remotes/origin/main"))
-	if staleCommit == remoteCommit {
-		t.Fatalf("test setup failed: local origin/main is already current")
-	}
+	fixture := prepareStaleOriginMainFixture(t, "remote update")
+	repo := fixture.repo
+	fixture.assertLocalOriginMainStale(t)
 	ref, err := syncedProjectWorkspaceBaseRevision(ctx, core.Project{
 		LocalPath:   repo,
 		DefaultBase: "main",
@@ -2620,41 +2574,18 @@ func TestSyncedProjectWorkspaceBaseRevisionFetchesStaleBase(t *testing.T) {
 		t.Fatalf("synced base ref = %q, want refs/remotes/origin/main", ref)
 	}
 	gotCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", ref))
-	if gotCommit != remoteCommit {
-		t.Fatalf("synced base commit = %q, want %q", gotCommit, remoteCommit)
+	if gotCommit != fixture.remoteCommit {
+		t.Fatalf("synced base commit = %q, want %q", gotCommit, fixture.remoteCommit)
 	}
 }
 
 func TestSyncedProjectWorkspaceBaseRevisionUsesOriginFallbackWithoutBranchUpstream(t *testing.T) {
 	ctx := context.Background()
-	repo := initGitTestRepo(t)
-	runTestGit(t, repo, "branch", "-M", "main")
-	remote := t.TempDir()
-	runTestGit(t, remote, "init", "--bare")
-	runTestGit(t, repo, "remote", "add", "origin", remote)
-	runTestGit(t, repo, "push", "-u", "origin", "main")
+	fixture := prepareStaleOriginMainFixture(t, "origin fallback update")
+	repo := fixture.repo
 	runTestGit(t, repo, "config", "--unset", "branch.main.remote")
 	runTestGit(t, repo, "config", "--unset", "branch.main.merge")
-	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
-
-	updaterParent := t.TempDir()
-	updater := filepath.Join(updaterParent, "updater")
-	runTestGit(t, updaterParent, "clone", remote, updater)
-	runTestGit(t, updater, "config", "user.name", "aged-test")
-	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
-	runTestGit(t, updater, "config", "commit.gpgsign", "false")
-	if err := os.WriteFile(filepath.Join(updater, "file.txt"), []byte("origin fallback update\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runTestGit(t, updater, "add", "file.txt")
-	runTestGit(t, updater, "commit", "-m", "origin fallback update")
-	runTestGit(t, updater, "push", "origin", "main")
-	remoteCommit := strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD"))
-
-	staleCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "refs/remotes/origin/main"))
-	if staleCommit == remoteCommit {
-		t.Fatalf("test setup failed: local origin/main is already current")
-	}
+	fixture.assertLocalOriginMainStale(t)
 	ref, err := syncedProjectWorkspaceBaseRevision(ctx, core.Project{
 		LocalPath:   repo,
 		DefaultBase: "main",
@@ -2666,8 +2597,54 @@ func TestSyncedProjectWorkspaceBaseRevisionUsesOriginFallbackWithoutBranchUpstre
 		t.Fatalf("synced base ref = %q, want refs/remotes/origin/main", ref)
 	}
 	gotCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", ref))
-	if gotCommit != remoteCommit {
-		t.Fatalf("synced base commit = %q, want %q", gotCommit, remoteCommit)
+	if gotCommit != fixture.remoteCommit {
+		t.Fatalf("synced base commit = %q, want %q", gotCommit, fixture.remoteCommit)
+	}
+}
+
+type staleOriginMainFixture struct {
+	repo         string
+	remoteCommit string
+	remoteRef    string
+}
+
+func prepareStaleOriginMainFixture(t *testing.T, updateMessage string) staleOriginMainFixture {
+	t.Helper()
+
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "origin", remote)
+	runTestGit(t, repo, "push", "-u", "origin", "main")
+	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	updaterParent := t.TempDir()
+	updater := filepath.Join(updaterParent, "updater")
+	runTestGit(t, updaterParent, "clone", remote, updater)
+	runTestGit(t, updater, "config", "user.name", "aged-test")
+	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, updater, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(updater, "file.txt"), []byte(updateMessage+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, updater, "add", "file.txt")
+	runTestGit(t, updater, "commit", "-m", updateMessage)
+	runTestGit(t, updater, "push", "origin", "main")
+
+	return staleOriginMainFixture{
+		repo:         repo,
+		remoteCommit: strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD")),
+		remoteRef:    "refs/remotes/origin/main",
+	}
+}
+
+func (f staleOriginMainFixture) assertLocalOriginMainStale(t *testing.T) {
+	t.Helper()
+
+	staleCommit := strings.TrimSpace(runTestGit(t, f.repo, "rev-parse", f.remoteRef))
+	if staleCommit == f.remoteCommit {
+		t.Fatalf("test setup failed: local origin/main is already current")
 	}
 }
 
