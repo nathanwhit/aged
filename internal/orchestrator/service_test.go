@@ -7904,6 +7904,65 @@ func TestServiceDeduplicatesConcurrentNonSteerableSteeringRestarts(t *testing.T)
 	}
 }
 
+func TestServiceCancelTaskStopsPendingSteeringRestart(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	firstCancelSeen := make(chan struct{})
+	firstCancelRelease := make(chan struct{})
+	retryStarted := make(chan struct{}, 1)
+	runner := &restartOnSteeringRunner{
+		started:            started,
+		firstCancelSeen:    firstCancelSeen,
+		firstCancelRelease: firstCancelRelease,
+		retryStarted:       retryStarted,
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "continue the investigation",
+	}}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Cancel steering restart", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "continue"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstCancelSeen:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("initial worker was not canceled")
+	}
+	if err := service.CancelTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(firstCancelRelease)
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, task.ID, "steering_restart", "skipped")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("steering restart did not skip after task cancel; events = %+v", snapshot.Events)
+	})
+	if status := taskStatus(snapshot, task.ID); status != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", status)
+	}
+	if created := countEvents(snapshot.Events, core.EventWorkerCreated, task.ID); created != 1 {
+		t.Fatalf("worker.created count = %d, want 1", created)
+	}
+	select {
+	case <-retryStarted:
+		t.Fatal("steering restart launched a retry worker after task cancel")
+	default:
+	}
+}
+
 func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9601,13 +9660,15 @@ type blockingEventRunner struct {
 }
 
 type restartOnSteeringRunner struct {
-	mu              sync.Mutex
-	started         chan<- struct{}
-	retryStarted    chan<- struct{}
-	retryRelease    <-chan struct{}
-	calls           int
-	prompt          string
-	resumeSessionID string
+	mu                 sync.Mutex
+	started            chan<- struct{}
+	firstCancelSeen    chan<- struct{}
+	firstCancelRelease <-chan struct{}
+	retryStarted       chan<- struct{}
+	retryRelease       <-chan struct{}
+	calls              int
+	prompt             string
+	resumeSessionID    string
 }
 
 type steeringRunner struct {
@@ -9814,6 +9875,12 @@ func (r *restartOnSteeringRunner) Run(ctx context.Context, spec worker.Spec, sin
 		}
 		close(r.started)
 		<-ctx.Done()
+		if r.firstCancelSeen != nil {
+			r.firstCancelSeen <- struct{}{}
+		}
+		if r.firstCancelRelease != nil {
+			<-r.firstCancelRelease
+		}
 		return ctx.Err()
 	}
 	if r.retryStarted != nil {

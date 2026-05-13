@@ -32,7 +32,10 @@ var (
 	errWorkerCallbackDeferred = errors.New("worker callback deferred")
 )
 
-const taskCancelReasonStartupRecovery = "startup_worker_recovery"
+const (
+	taskCancelReasonStartupRecovery = "startup_worker_recovery"
+	taskCancelReasonUser            = "user_requested"
+)
 
 type WorkerApplyResult struct {
 	WorkerID      string                 `json:"workerId"`
@@ -1121,6 +1124,41 @@ func taskCanceledByStartupRecovery(snapshot core.Snapshot, taskID string) bool {
 	return workerEvent > 0 && workerEvent < latestCanceledStatusEvent && !taskStatusEventBetween(snapshot, taskID, workerEvent, latestCanceledStatusEvent)
 }
 
+func taskCanceledByUserAfterLatestSteeringRestart(snapshot core.Snapshot, taskID string) bool {
+	var latestRestart int64
+	var latestUserCancel int64
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskAction:
+			var payload struct {
+				Kind   string `json:"kind"`
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Kind == "steering_restart" && payload.Status == "started" {
+				latestRestart = event.ID
+			}
+		case core.EventTaskStatus:
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+				Reason string          `json:"reason,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			if payload.Status == core.TaskCanceled && payload.Reason == taskCancelReasonUser {
+				latestUserCancel = event.ID
+			}
+		}
+	}
+	return latestRestart > 0 && latestUserCancel > latestRestart
+}
+
 func latestStartupCanceledWorkerEvent(snapshot core.Snapshot, taskID string) int64 {
 	var latest int64
 	for _, event := range snapshot.Events {
@@ -1719,11 +1757,11 @@ func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID str
 		})
 		return
 	}
-	if task.Status == core.TaskSucceeded {
+	if task.Status == core.TaskSucceeded || taskCanceledByUserAfterLatestSteeringRestart(snapshot, taskID) {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":   "steering_restart",
 			"status": "skipped",
-			"reason": "task completed before steering restart could resume it",
+			"reason": "task reached a terminal status before steering restart could resume it",
 		})
 		return
 	}
@@ -1939,6 +1977,7 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	s.mu.Lock()
 	cancel := s.cancels[workerID]
 	remote := s.remoteRuns[workerID]
+	taskID := s.tasks[workerID]
 	s.mu.Unlock()
 	if cancel == nil {
 		return s.cancelPersistedWorker(ctx, workerID)
@@ -1947,7 +1986,37 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 		_ = s.sshRunner.Cancel(ctx, remote)
 	}
 	cancel()
+	if strings.TrimSpace(taskID) != "" {
+		_ = s.markLiveWorkerCanceled(ctx, taskID, workerID, remote)
+	}
 	return nil
+}
+
+func (s *Service) markLiveWorkerCanceled(ctx context.Context, taskID string, workerID string, remote remoteRun) error {
+	if s.workerCompleted(ctx, taskID, workerID) {
+		return nil
+	}
+	changes := WorkspaceChanges{}
+	if remote.Session != "" {
+		changes = WorkspaceChanges{
+			Root:    remote.RunDir,
+			CWD:     remote.WorkDir,
+			Mode:    "remote",
+			VCSType: "ssh",
+		}
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":           core.WorkerCanceled,
+			"summary":          "Worker was canceled from live daemon state.",
+			"error":            "worker canceled by user request",
+			"workspaceChanges": changes,
+		}),
+	})
+	return err
 }
 
 func (s *Service) cancelPersistedWorker(ctx context.Context, workerID string) error {
@@ -2065,6 +2134,7 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"status": core.TaskCanceled,
+			"reason": taskCancelReasonUser,
 		}),
 	})
 	return err
@@ -3084,12 +3154,17 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			workspaceResult = WorkspaceResultCanceled
 		}
 		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
-		_, _ = s.append(ctx, core.Event{
-			Type:     core.EventWorkerCompleted,
-			TaskID:   task.ID,
-			WorkerID: workerID,
-			Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
-		})
+		if s.workerCompleted(context.Background(), task.ID, workerID) {
+			status = core.WorkerCanceled
+			err = context.Canceled
+		} else {
+			_, _ = s.append(ctx, core.Event{
+				Type:     core.EventWorkerCompleted,
+				TaskID:   task.ID,
+				WorkerID: workerID,
+				Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
+			})
+		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
@@ -3098,28 +3173,42 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 
 	if runState.isWaitingForInput() {
 		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
+		status := core.WorkerWaiting
+		var statusErr error
+		if s.workerCompleted(context.Background(), task.ID, workerID) {
+			status = core.WorkerCanceled
+			statusErr = context.Canceled
+		} else {
+			_, _ = s.append(ctx, core.Event{
+				Type:     core.EventWorkerCompleted,
+				TaskID:   task.ID,
+				WorkerID: workerID,
+				Payload:  core.MustJSON(runState.completionPayload(status, statusErr, changes)),
+			})
+		}
+		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
+		return runState.turnResult(workerID, plan, status, statusErr, changes), nil
+	}
+
+	changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
+	status := core.WorkerSucceeded
+	var statusErr error
+	if s.workerCompleted(context.Background(), task.ID, workerID) {
+		status = core.WorkerCanceled
+		statusErr = context.Canceled
+	} else {
 		_, _ = s.append(ctx, core.Event{
 			Type:     core.EventWorkerCompleted,
 			TaskID:   task.ID,
 			WorkerID: workerID,
-			Payload:  core.MustJSON(runState.completionPayload(core.WorkerWaiting, nil, changes)),
+			Payload:  core.MustJSON(runState.completionPayload(status, statusErr, changes)),
 		})
-		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
-		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
-		return runState.turnResult(workerID, plan, core.WorkerWaiting, nil, changes), nil
 	}
-
-	changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
-	_, _ = s.append(ctx, core.Event{
-		Type:     core.EventWorkerCompleted,
-		TaskID:   task.ID,
-		WorkerID: workerID,
-		Payload:  core.MustJSON(runState.completionPayload(core.WorkerSucceeded, nil, changes)),
-	})
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
-	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
+	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
 }
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
@@ -3469,12 +3558,17 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		statusErr = context.Canceled
 	}
 	changes := s.sshRunner.DescribeChanges(ctx, remoteRun)
-	_, _ = s.append(ctx, core.Event{
-		Type:     core.EventWorkerCompleted,
-		TaskID:   task.ID,
-		WorkerID: workerID,
-		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
-	})
+	if s.workerCompleted(context.Background(), task.ID, workerID) {
+		workerStatus = core.WorkerCanceled
+		statusErr = context.Canceled
+	} else {
+		_, _ = s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   task.ID,
+			WorkerID: workerID,
+			Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
+		})
+	}
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
 	if err := sshRunner.drainRemoteCallbacks(ctx, remoteRun, sink); err != nil {
