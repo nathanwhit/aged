@@ -62,12 +62,52 @@ func TestPluginRegistryRejectsBuiltinMutation(t *testing.T) {
 	if _, err := registry.Register(core.Plugin{ID: "runner:codex", Name: "Custom Codex", Kind: "runner", Enabled: false}); err == nil || !strings.Contains(err.Error(), "built-in") {
 		t.Fatalf("replace built-in err = %v", err)
 	}
+	if _, err := registry.Register(core.Plugin{ID: "runner:codex", Name: "Custom Codex", Kind: "runner", Enabled: false, BuiltIn: true}); err == nil || !strings.Contains(err.Error(), "built-in") {
+		t.Fatalf("replace built-in with builtIn=true err = %v", err)
+	}
 
 	plugins := registry.Snapshot()
 	for _, plugin := range plugins {
 		if plugin.ID == "runner:codex" && (!plugin.BuiltIn || !plugin.Enabled || plugin.Name != "Codex CLI Worker") {
 			t.Fatalf("built-in plugin mutated: %+v", plugin)
 		}
+	}
+}
+
+func TestServiceRejectsBuiltinPluginMutation(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+	service := NewService(store, StaticBrain{}, nil, t.TempDir())
+
+	if _, err := service.RegisterPlugin(ctx, core.Plugin{
+		ID:      "driver:discord",
+		Name:    "Custom Discord Driver",
+		Kind:    "driver",
+		Enabled: true,
+		BuiltIn: true,
+	}); err == nil || !strings.Contains(err.Error(), "built-in") {
+		t.Fatalf("service replace built-in err = %v", err)
+	}
+
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugin, ok := pluginByID(snapshot.Plugins, "driver:discord")
+	if !ok {
+		t.Fatalf("missing built-in discord plugin: %+v", snapshot.Plugins)
+	}
+	if !plugin.BuiltIn || plugin.Name != "Discord Chat Driver" || plugin.Enabled {
+		t.Fatalf("built-in plugin mutated: %+v", plugin)
+	}
+
+	persisted, err := store.ListPlugins(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("persisted plugins = %+v, want none", persisted)
 	}
 }
 

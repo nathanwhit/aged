@@ -117,7 +117,7 @@ func (r *PluginRegistry) Register(plugin core.Plugin) (core.Plugin, error) {
 	replaced := false
 	for index, existing := range r.plugins {
 		if existing.ID == normalized.ID {
-			if existing.BuiltIn && !normalized.BuiltIn {
+			if existing.BuiltIn {
 				return core.Plugin{}, errors.New("built-in plugin cannot be replaced")
 			}
 			normalized.Driver = existing.Driver
