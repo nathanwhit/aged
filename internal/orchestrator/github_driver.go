@@ -148,6 +148,11 @@ func (d *GitHubDriver) RunOnce(ctx context.Context) error {
 
 func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 	var errs []string
+	snapshot, err := d.service.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	resolvedIssues := githubIssueExternalIDsWithMergedPullRequests(snapshot)
 	for _, source := range d.config.Issues {
 		if source.Enabled != nil && !*source.Enabled {
 			continue
@@ -169,6 +174,9 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 			if issue.Repo == "" {
 				issue.Repo = repo
 			}
+			if resolvedIssues[fmt.Sprintf("%s#%d", issue.Repo, issue.Number)] {
+				continue
+			}
 			autoPublish := boolDefault(source.AutoPublish, boolDefault(d.config.PullRequests.AutoPublish, true))
 			if _, err := d.service.CreateTask(ctx, githubIssueTaskRequest(issue, source.ProjectID, autoPublish)); err != nil {
 				errs = append(errs, fmt.Sprintf("%s#%d task: %v", issue.Repo, issue.Number, err))
@@ -179,6 +187,53 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// githubIssueExternalIDsWithMergedPullRequests returns the set of github-issue
+// external IDs whose prior aged task already saw its pull request merge. The
+// scan walks the full event history so cleared tasks still count, preventing
+// the driver from recreating tasks for issues that have already been resolved
+// by a merged PR but remain open on GitHub.
+func githubIssueExternalIDsWithMergedPullRequests(snapshot core.Snapshot) map[string]bool {
+	externalIDByTask := map[string]string{}
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventTaskCreated {
+			continue
+		}
+		var payload struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if stringMetadataValue(payload.Metadata["source"]) != "github-issue" {
+			continue
+		}
+		externalID := stringMetadataValue(payload.Metadata["externalId"])
+		if externalID != "" {
+			externalIDByTask[event.TaskID] = externalID
+		}
+	}
+	resolved := map[string]bool{}
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventTaskMilestone {
+			continue
+		}
+		externalID, ok := externalIDByTask[event.TaskID]
+		if !ok {
+			continue
+		}
+		var payload struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Name == "pr_merged" {
+			resolved[externalID] = true
+		}
+	}
+	return resolved
 }
 
 func (d *GitHubDriver) publishCompletedIssueTasks(ctx context.Context) error {
