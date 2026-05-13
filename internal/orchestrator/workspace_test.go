@@ -94,55 +94,42 @@ func TestDefaultWorkspaceRootUsesUserAgedDirectory(t *testing.T) {
 
 func TestParseJJDiffSummary(t *testing.T) {
 	files := parseJJDiffSummary("M internal/orchestrator/service.go\nA web/src/types.ts\nD old.txt\n")
-	if len(files) != 3 {
-		t.Fatalf("files = %+v", files)
-	}
-	if files[0] != (WorkspaceChangedFile{Path: "internal/orchestrator/service.go", Status: "modified"}) {
-		t.Fatalf("first file = %+v", files[0])
-	}
-	if files[1] != (WorkspaceChangedFile{Path: "web/src/types.ts", Status: "added"}) {
-		t.Fatalf("second file = %+v", files[1])
-	}
-	if files[2] != (WorkspaceChangedFile{Path: "old.txt", Status: "deleted"}) {
-		t.Fatalf("third file = %+v", files[2])
-	}
+	assertChangedFiles(t, files, []WorkspaceChangedFile{
+		{Path: "internal/orchestrator/service.go", Status: "modified"},
+		{Path: "web/src/types.ts", Status: "added"},
+		{Path: "old.txt", Status: "deleted"},
+	})
 }
 
 func TestParseGitPorcelain(t *testing.T) {
 	files := parseGitPorcelain(" M internal/orchestrator/service.go\n?? web/src/types.ts\nR  old.txt -> new.txt\n")
-	if len(files) != 4 {
-		t.Fatalf("files = %+v", files)
-	}
-	if files[0] != (WorkspaceChangedFile{Path: "internal/orchestrator/service.go", Status: "modified"}) {
-		t.Fatalf("first file = %+v", files[0])
-	}
-	if files[1] != (WorkspaceChangedFile{Path: "web/src/types.ts", Status: "untracked"}) {
-		t.Fatalf("second file = %+v", files[1])
-	}
-	if files[2] != (WorkspaceChangedFile{Path: "old.txt", Status: "renamed_from"}) {
-		t.Fatalf("third file = %+v", files[2])
-	}
-	if files[3] != (WorkspaceChangedFile{Path: "new.txt", Status: "renamed"}) {
-		t.Fatalf("fourth file = %+v", files[3])
-	}
+	assertChangedFiles(t, files, []WorkspaceChangedFile{
+		{Path: "internal/orchestrator/service.go", Status: "modified"},
+		{Path: "web/src/types.ts", Status: "untracked"},
+		{Path: "old.txt", Status: "renamed_from"},
+		{Path: "new.txt", Status: "renamed"},
+	})
 }
 
 func TestParseGitNameStatus(t *testing.T) {
 	files := parseGitNameStatus("M\x00internal/orchestrator/service.go\x00A\x00web/src/types.ts\x00R100\x00old.txt\x00new.txt\x00")
-	if len(files) != 4 {
-		t.Fatalf("files = %+v", files)
+	assertChangedFiles(t, files, []WorkspaceChangedFile{
+		{Path: "internal/orchestrator/service.go", Status: "modified"},
+		{Path: "web/src/types.ts", Status: "added"},
+		{Path: "old.txt", Status: "renamed_from"},
+		{Path: "new.txt", Status: "renamed"},
+	})
+}
+
+func assertChangedFiles(t *testing.T, got, want []WorkspaceChangedFile) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("changed files length = %d, want %d\ngot:  %+v\nwant: %+v", len(got), len(want), got, want)
 	}
-	if files[0] != (WorkspaceChangedFile{Path: "internal/orchestrator/service.go", Status: "modified"}) {
-		t.Fatalf("first file = %+v", files[0])
-	}
-	if files[1] != (WorkspaceChangedFile{Path: "web/src/types.ts", Status: "added"}) {
-		t.Fatalf("second file = %+v", files[1])
-	}
-	if files[2] != (WorkspaceChangedFile{Path: "old.txt", Status: "renamed_from"}) {
-		t.Fatalf("third file = %+v", files[2])
-	}
-	if files[3] != (WorkspaceChangedFile{Path: "new.txt", Status: "renamed"}) {
-		t.Fatalf("fourth file = %+v", files[3])
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("changed file[%d] = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 
