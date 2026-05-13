@@ -809,41 +809,27 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		}
 		return string(bytes), nil
 	}
-	prompt, err := decode(payload.PromptBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback prompt %s: %w", fileName, err)
-	}
-	title, err := decode(payload.TitleBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback title %s: %w", fileName, err)
-	}
-	prBody, err := decode(payload.BodyBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback body %s: %w", fileName, err)
-	}
-	projectID, err := decode(payload.ProjectIDBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback project %s: %w", fileName, err)
-	}
-	repo, err := decode(payload.RepoBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback repo %s: %w", fileName, err)
-	}
-	base, err := decode(payload.BaseBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback base %s: %w", fileName, err)
-	}
-	branch, err := decode(payload.BranchBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback branch %s: %w", fileName, err)
-	}
-	parentTaskID, err := decode(payload.ParentTaskIDBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback parent task %s: %w", fileName, err)
-	}
-	parentWorkerID, err := decode(payload.ParentWorkerIDBase64)
-	if err != nil {
-		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback parent worker %s: %w", fileName, err)
+	var prompt, title, prBody, projectID, repo, base, branch, parentTaskID, parentWorkerID string
+	for _, field := range []struct {
+		name  string
+		value string
+		out   *string
+	}{
+		{"prompt", payload.PromptBase64, &prompt},
+		{"title", payload.TitleBase64, &title},
+		{"body", payload.BodyBase64, &prBody},
+		{"project", payload.ProjectIDBase64, &projectID},
+		{"repo", payload.RepoBase64, &repo},
+		{"base", payload.BaseBase64, &base},
+		{"branch", payload.BranchBase64, &branch},
+		{"parent task", payload.ParentTaskIDBase64, &parentTaskID},
+		{"parent worker", payload.ParentWorkerIDBase64, &parentWorkerID},
+	} {
+		decoded, err := decode(field.value)
+		if err != nil {
+			return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback %s %s: %w", field.name, fileName, err)
+		}
+		*field.out = decoded
 	}
 	return RemoteWorkerCallback{
 		ID:                   strings.TrimSuffix(path.Base(fileName), ".json"),
