@@ -807,40 +807,21 @@ func (d *DiscordDriver) deleteDiscordPlugin(ctx context.Context, channel Discord
 }
 
 func (d *DiscordDriver) discordProjectByID(ctx context.Context, projectID string) (core.Project, error) {
-	snapshot, err := d.service.Snapshot(ctx)
-	if err != nil {
-		return core.Project{}, err
-	}
-	if project, ok := projectByID(snapshot.Projects, projectID); ok {
-		return project, nil
-	}
-	return core.Project{}, fmt.Errorf("project not found: %s", projectID)
+	return snapshotItemByID(ctx, d.service, projectID, "project", func(snapshot core.Snapshot) (core.Project, bool) {
+		return projectByID(snapshot.Projects, projectID)
+	})
 }
 
 func (d *DiscordDriver) discordTargetByID(ctx context.Context, targetID string) (core.TargetState, error) {
-	snapshot, err := d.service.Snapshot(ctx)
-	if err != nil {
-		return core.TargetState{}, err
-	}
-	for _, target := range snapshot.Targets {
-		if target.ID == targetID {
-			return target, nil
-		}
-	}
-	return core.TargetState{}, fmt.Errorf("target not found: %s", targetID)
+	return snapshotItemByID(ctx, d.service, targetID, "target", func(snapshot core.Snapshot) (core.TargetState, bool) {
+		return itemByID(snapshot.Targets, targetID, func(target core.TargetState) string { return target.ID })
+	})
 }
 
 func (d *DiscordDriver) discordPluginByID(ctx context.Context, pluginID string) (core.Plugin, error) {
-	snapshot, err := d.service.Snapshot(ctx)
-	if err != nil {
-		return core.Plugin{}, err
-	}
-	for _, plugin := range snapshot.Plugins {
-		if plugin.ID == pluginID {
-			return plugin, nil
-		}
-	}
-	return core.Plugin{}, fmt.Errorf("plugin not found: %s", pluginID)
+	return snapshotItemByID(ctx, d.service, pluginID, "plugin", func(snapshot core.Snapshot) (core.Plugin, bool) {
+		return itemByID(snapshot.Plugins, pluginID, func(plugin core.Plugin) string { return plugin.ID })
+	})
 }
 
 func (d *DiscordDriver) createDiscordTask(ctx context.Context, channel DiscordChannelConfig, message DiscordMessage, proposal DiscordTaskProposal) error {
@@ -2348,12 +2329,30 @@ func projectByID(projects []core.Project, id string) (core.Project, bool) {
 	if id == "" {
 		return core.Project{}, false
 	}
-	for _, project := range projects {
-		if project.ID == id {
-			return project, true
+	return itemByID(projects, id, func(project core.Project) string { return project.ID })
+}
+
+func snapshotItemByID[T any](ctx context.Context, service *Service, id string, kind string, lookup func(core.Snapshot) (T, bool)) (T, error) {
+	snapshot, err := service.Snapshot(ctx)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	if item, ok := lookup(snapshot); ok {
+		return item, nil
+	}
+	var zero T
+	return zero, fmt.Errorf("%s not found: %s", kind, id)
+}
+
+func itemByID[T any](items []T, id string, itemID func(T) string) (T, bool) {
+	for _, item := range items {
+		if itemID(item) == id {
+			return item, true
 		}
 	}
-	return core.Project{}, false
+	var zero T
+	return zero, false
 }
 
 func (d *DiscordDriver) savedTaskProposal(ctx context.Context, channelID string, userID string) DiscordTaskProposal {
