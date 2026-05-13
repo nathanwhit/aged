@@ -234,6 +234,16 @@ fi
 	if _, ok := pluginByID(snapshot.Plugins, "driver:delete-test"); ok {
 		t.Fatalf("deleted plugin still present immediately after delete: %+v", snapshot.Plugins)
 	}
+	if _, ok := pluginByID(service.plugins.Snapshot(), "driver:delete-test"); ok {
+		t.Fatalf("deleted plugin still present in runtime registry immediately after delete")
+	}
+	storedPlugins, err := store.ListPlugins(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pluginByID(storedPlugins, "driver:delete-test"); ok {
+		t.Fatalf("deleted plugin still present in persistent plugin list: %+v", storedPlugins)
+	}
 
 	time.Sleep(150 * time.Millisecond)
 	snapshot, err = service.Snapshot(ctx)
@@ -242,6 +252,9 @@ fi
 	}
 	if _, ok := pluginByID(snapshot.Plugins, "driver:delete-test"); ok {
 		t.Fatalf("deleted plugin was restored after supervisor exit: %+v", snapshot.Plugins)
+	}
+	if _, ok := pluginByID(service.plugins.Snapshot(), "driver:delete-test"); ok {
+		t.Fatalf("deleted plugin was restored in runtime registry after supervisor exit")
 	}
 	if runner, ok := pluginByID(snapshot.Plugins, "runner:benchmark_compare"); ok && runner.Status != "ready" {
 		t.Fatalf("unrelated plugin was mutated after delete: %+v", runner)
