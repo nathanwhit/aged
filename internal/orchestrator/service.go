@@ -2897,7 +2897,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
-		target, err := s.targets.SelectID(retryTargetID)
+		target, err := s.targets.SelectID(retryTargetID, plan.WorkerKind)
 		if err == nil {
 			return target, nil
 		}
@@ -2909,7 +2909,7 @@ func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetC
 		return fallback, nil
 	}
 	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
-		lookup, lookupErr := s.executionTargetForWorker(ctx, retryFromWorkerID)
+		lookup, lookupErr := s.executionTargetForWorker(ctx, retryFromWorkerID, plan.WorkerKind)
 		if lookupErr != nil {
 			return TargetConfig{}, lookupErr
 		}
@@ -2934,7 +2934,7 @@ type previousTargetLookup struct {
 	selectErr error
 }
 
-func (s *Service) executionTargetForWorker(ctx context.Context, workerID string) (previousTargetLookup, error) {
+func (s *Service) executionTargetForWorker(ctx context.Context, workerID string, workerKind string) (previousTargetLookup, error) {
 	var result previousTargetLookup
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -2949,7 +2949,7 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string)
 		if node.WorkerID != workerID || strings.TrimSpace(node.TargetID) == "" {
 			continue
 		}
-		target, selectErr := s.targets.SelectID(node.TargetID)
+		target, selectErr := s.targets.SelectID(node.TargetID, workerKind)
 		result.target = target
 		result.targetID = node.TargetID
 		result.selectErr = selectErr
@@ -2967,7 +2967,7 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string)
 	if targetID == "" {
 		return result, nil
 	}
-	target, selectErr := s.targets.SelectID(targetID)
+	target, selectErr := s.targets.SelectID(targetID, workerKind)
 	result.target = target
 	result.targetID = targetID
 	result.selectErr = selectErr

@@ -8428,6 +8428,47 @@ func TestServiceRetryFallsBackWhenExplicitRetryTargetIsUnhealthy(t *testing.T) {
 	}
 }
 
+func TestServiceRetryTargetIDFallsBackWhenTargetLacksRequestedWorkerTool(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-pinned", Kind: TargetKindSSH, Host: "vm-pinned", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-pinned", core.TargetHealth{
+		Status:    "ok",
+		Reachable: true,
+		Tmux:      true,
+		Tools:     map[string]bool{"codex": false},
+	}, core.TargetResources{})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryTargetID": "vm-pinned",
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %q, want local", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-pinned" {
+		t.Fatalf("fallback from = %v, want vm-pinned", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); !strings.Contains(reason, `execution target "vm-pinned" does not support worker kind "codex"`) {
+		t.Fatalf("fallback reason = %q, want unsupported worker kind", reason)
+	}
+}
+
 func TestServiceRetryFallsBackWhenPreviousWorkerTargetIsUnhealthy(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8478,6 +8519,62 @@ func TestServiceRetryFallsBackWhenPreviousWorkerTargetIsUnhealthy(t *testing.T) 
 	}
 	if plan.Metadata["retryTargetFallbackToID"] != "vm-good" {
 		t.Fatalf("fallback to = %v, want vm-good", plan.Metadata["retryTargetFallbackToID"])
+	}
+}
+
+func TestServiceRetryTargetReuseFallsBackWhenTargetLacksRequestedWorkerTool(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	previousWorkerID := "previous-worker"
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   "task-retry-target-tool",
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   previousWorkerID,
+			"workerKind": "codex",
+			"nodeId":     "node-previous",
+			"targetId":   "vm-previous",
+			"targetKind": "ssh",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-previous", Kind: TargetKindSSH, Host: "vm-previous", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("vm-previous", core.TargetHealth{
+		Status:    "ok",
+		Reachable: true,
+		Tmux:      true,
+		Tools:     map[string]bool{"codex": false},
+	}, core.TargetResources{})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry",
+		Metadata: map[string]any{
+			"retryFromWorkerID": previousWorkerID,
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" {
+		t.Fatalf("target = %q, want local", target.ID)
+	}
+	if plan.Metadata["retryTargetFallbackFromID"] != "vm-previous" {
+		t.Fatalf("fallback from = %v, want vm-previous", plan.Metadata["retryTargetFallbackFromID"])
+	}
+	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); !strings.Contains(reason, `execution target "vm-previous" does not support worker kind "codex"`) {
+		t.Fatalf("fallback reason = %q, want unsupported worker kind", reason)
 	}
 }
 
