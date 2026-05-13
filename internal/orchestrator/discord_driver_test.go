@@ -95,6 +95,9 @@ func TestDiscordDriverDoesNotAdvanceLastSeenWhenHandlingFails(t *testing.T) {
 	if got := driver.lastSeen["chan"]; got != "" {
 		t.Fatalf("lastSeen = %q, want empty after handling failure", got)
 	}
+	if got := client.listAfterIDs; len(got) != 1 || got[0] != "" {
+		t.Fatalf("ListMessages afterIDs = %+v, want []string{\"\"}", got)
+	}
 
 	client.sendErr = nil
 	if err := driver.RunOnce(ctx); err != nil {
@@ -102,6 +105,9 @@ func TestDiscordDriverDoesNotAdvanceLastSeenWhenHandlingFails(t *testing.T) {
 	}
 	if got := driver.lastSeen["chan"]; got != "1" {
 		t.Fatalf("lastSeen = %q, want 1 after successful retry", got)
+	}
+	if got := client.listAfterIDs; len(got) != 2 || got[1] != "" {
+		t.Fatalf("ListMessages afterIDs = %+v, want retry with empty afterID", got)
 	}
 }
 
@@ -1623,6 +1629,8 @@ type fakeDiscordClient struct {
 	messages map[string][]DiscordMessage
 	sent     []string
 	sendErr  error
+
+	listAfterIDs []string
 }
 
 func targetByID(targets []core.TargetState, id string) (core.TargetState, bool) {
@@ -1648,6 +1656,7 @@ func (c *fakeDiscordClient) Me(context.Context) (DiscordUser, error) {
 }
 
 func (c *fakeDiscordClient) ListMessages(_ context.Context, channelID string, afterID string, limit int) ([]DiscordMessage, error) {
+	c.listAfterIDs = append(c.listAfterIDs, afterID)
 	var out []DiscordMessage
 	for _, message := range c.messages[channelID] {
 		if afterID != "" && message.ID <= afterID {
