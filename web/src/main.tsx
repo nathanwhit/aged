@@ -70,6 +70,8 @@ type DashboardPaneId =
   | "task-detail"
   | "pull-requests"
   | "current-state"
+  | "projects"
+  | "assistant"
   | "targets"
   | "plugins"
   | "workers"
@@ -88,7 +90,7 @@ type DashboardPane = {
   element: React.ReactNode;
 };
 
-const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v1";
+const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v3";
 const DASHBOARD_MIN_SPAN = 4;
 const DASHBOARD_MAX_SPAN = 12;
 const DASHBOARD_MIN_HEIGHT = 0;
@@ -97,13 +99,14 @@ const DASHBOARD_HEIGHT_STEP = 48;
 const SELECTED_TASK_OUTPUT_EVENT_LIMIT = 250;
 const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "task-detail", span: 12, minHeight: 0 },
-  { id: "pull-requests", span: 6, minHeight: 0 },
-  { id: "current-state", span: 6, minHeight: 0 },
+  { id: "current-state", span: 4, minHeight: 0 },
+  { id: "pull-requests", span: 8, minHeight: 0 },
   { id: "workers", span: 12, minHeight: 0 },
   { id: "worker-detail", span: 8, minHeight: 0 },
+  { id: "timeline", span: 12, minHeight: 320 },
   { id: "targets", span: 4, minHeight: 0 },
-  { id: "plugins", span: 8, minHeight: 0 },
-  { id: "timeline", span: 12, minHeight: 360 },
+  { id: "projects", span: 4, minHeight: 0 },
+  { id: "assistant", span: 4, minHeight: 0 },
 ];
 
 function App() {
@@ -213,30 +216,36 @@ function App() {
     }
   }
 
-  const pluginPane: DashboardPane = {
-    id: "plugins",
-    title: "Plugins",
+  const projectPane: DashboardPane = {
+    id: "projects",
+    title: "Projects",
     element: (
-      <PluginPanel
-        plugins={snapshot.plugins}
-        onRegister={async (plugin) => {
+      <ProjectPanel
+        projects={snapshot.projects}
+        onCreate={async (input) => {
           setError("");
-          await registerPlugin(plugin);
+          await createProject(input);
           await refresh();
         }}
-        onUpdate={async (id, plugin) => {
+        onUpdate={async (id, input) => {
           setError("");
-          await updatePlugin(id, plugin);
+          await updateProject(id, input);
           await refresh();
         }}
         onDelete={async (id) => {
           setError("");
-          await deletePlugin(id);
+          await deleteProject(id);
           await refresh();
         }}
+        onHealth={getProjectHealth}
         onError={setError}
       />
     ),
+  };
+  const assistantPane: DashboardPane = {
+    id: "assistant",
+    title: "Ask",
+    element: <AssistantPanel onError={setError} />,
   };
   const targetPanes: DashboardPane[] = snapshot.targets.length > 0
     ? [{
@@ -335,14 +344,14 @@ function App() {
         },
       ]
     : [];
-  const dashboardPanes: DashboardPane[] = [...taskPanes, ...targetPanes, pluginPane];
+  const dashboardPanes: DashboardPane[] = [...taskPanes, ...targetPanes, projectPane, assistantPane];
 
   return (
     <main className="app">
       <header className="topbar">
         <div>
           <h1>aged</h1>
-          <p>Local agent orchestration</p>
+          <p>Agent orchestration</p>
         </div>
         <div className="topbar-actions">
           <span className={connected ? "pill ok" : "pill"}>{connected ? "Live" : "Offline"}</span>
@@ -359,8 +368,76 @@ function App() {
         </div>
       )}
 
+      <DashboardOverview
+        tasks={snapshot.tasks}
+        workers={snapshot.workers}
+        selectedTask={selectedTask}
+        progress={progress}
+      />
+
       <section className="layout">
-        <section className="left-stack">
+        <section className="left-rail">
+          <section className="panel task-list">
+            <div className="panel-title split-title">
+              <span>
+                <Activity size={18} />
+                <h2>Tasks</h2>
+              </span>
+              <button className="icon-button ghost" disabled={!hasTerminalTasks} onClick={handleClearFinished} title="Clear finished tasks">
+                <Trash2 size={16} />
+              </button>
+            </div>
+            {initialSnapshotStatus === "loading" ? (
+              <TaskListLoading />
+            ) : initialSnapshotStatus === "error" && snapshot.tasks.length === 0 && !pendingTask ? (
+              <p className="empty">Unable to load tasks.</p>
+            ) : snapshot.tasks.length === 0 && !pendingTask ? (
+              <p className="empty">No tasks yet.</p>
+            ) : (
+              <>
+                {activeTasks.length === 0 && !pendingTask ? (
+                  <p className="empty">No active tasks.</p>
+                ) : (
+                  activeTasks.map((task) => (
+                    <TaskRow
+                      key={task.id}
+                      task={task}
+                      selected={task.id === selectedTask?.id}
+                      retrying={retryingTaskId === task.id}
+                      onSelect={setSelectedTaskId}
+                      onRetry={handleRetryTask}
+                      onClear={handleClearTask}
+                    />
+                  ))
+                )}
+                {pendingTask && <PendingTaskRow task={pendingTask} />}
+                {completedTasks.length > 0 && (
+                  <div className="completed-task-group">
+                    <button className="secondary compact completed-toggle" onClick={() => setShowCompletedTasks((value) => !value)}>
+                      <Check size={14} />
+                      {showCompletedTasks ? "Hide completed" : `Show completed (${completedTasks.length})`}
+                    </button>
+                    {showCompletedTasks && (
+                      <div className="completed-task-list">
+                        {completedTasks.map((task) => (
+                          <TaskRow
+                            key={task.id}
+                            task={task}
+                            selected={task.id === selectedTask?.id}
+                            retrying={retryingTaskId === task.id}
+                            onSelect={setSelectedTaskId}
+                            onRetry={handleRetryTask}
+                            onClear={handleClearTask}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+
           <TaskComposer
             onCreate={async (input) => {
               setError("");
@@ -378,88 +455,6 @@ function App() {
             onError={setError}
             projects={snapshot.projects}
           />
-          <ProjectPanel
-            projects={snapshot.projects}
-            onCreate={async (input) => {
-              setError("");
-              await createProject(input);
-              await refresh();
-            }}
-            onUpdate={async (id, input) => {
-              setError("");
-              await updateProject(id, input);
-              await refresh();
-            }}
-            onDelete={async (id) => {
-              setError("");
-              await deleteProject(id);
-              await refresh();
-            }}
-            onHealth={getProjectHealth}
-            onError={setError}
-          />
-          <AssistantPanel onError={setError} />
-        </section>
-
-        <section className="panel task-list">
-          <div className="panel-title split-title">
-            <span>
-              <Activity size={18} />
-              <h2>Tasks</h2>
-            </span>
-            <button className="icon-button ghost" disabled={!hasTerminalTasks} onClick={handleClearFinished} title="Clear finished tasks">
-              <Trash2 size={16} />
-            </button>
-          </div>
-          {initialSnapshotStatus === "loading" ? (
-            <TaskListLoading />
-          ) : initialSnapshotStatus === "error" && snapshot.tasks.length === 0 && !pendingTask ? (
-            <p className="empty">Unable to load tasks.</p>
-          ) : snapshot.tasks.length === 0 && !pendingTask ? (
-            <p className="empty">No tasks yet.</p>
-          ) : (
-            <>
-              {activeTasks.length === 0 && !pendingTask ? (
-                <p className="empty">No active tasks.</p>
-              ) : (
-                activeTasks.map((task) => (
-                  <TaskRow
-                    key={task.id}
-                    task={task}
-                    selected={task.id === selectedTask?.id}
-                    retrying={retryingTaskId === task.id}
-                    onSelect={setSelectedTaskId}
-                    onRetry={handleRetryTask}
-                    onClear={handleClearTask}
-                  />
-                ))
-              )}
-              {pendingTask && <PendingTaskRow task={pendingTask} />}
-              {completedTasks.length > 0 && (
-                <div className="completed-task-group">
-                  <button className="secondary compact completed-toggle" onClick={() => setShowCompletedTasks((value) => !value)}>
-                    <Check size={14} />
-                    {showCompletedTasks ? "Hide completed" : `Show completed (${completedTasks.length})`}
-                  </button>
-                  {showCompletedTasks && (
-                    <div className="completed-task-list">
-                      {completedTasks.map((task) => (
-                        <TaskRow
-                          key={task.id}
-                          task={task}
-                          selected={task.id === selectedTask?.id}
-                          retrying={retryingTaskId === task.id}
-                          onSelect={setSelectedTaskId}
-                          onRetry={handleRetryTask}
-                          onClear={handleClearTask}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
         </section>
 
         {initialSnapshotStatus === "loading" ? (
@@ -478,6 +473,49 @@ function App() {
         )}
       </section>
     </main>
+  );
+}
+
+function DashboardOverview({
+  tasks,
+  workers,
+  selectedTask,
+  progress,
+}: {
+  tasks: Task[];
+  workers: Worker[];
+  selectedTask: Task | undefined;
+  progress: WorkProgress;
+}) {
+  const activeTasks = tasks.filter((task) => !isTerminalTask(task));
+  const runningWorkers = workers.filter((worker) => worker.status === "running").length;
+  const waitingWorkers = workers.filter((worker) => worker.status === "waiting" || worker.status === "queued").length;
+  const failedTasks = tasks.filter((task) => task.status === "failed" || task.status === "canceled").length;
+  return (
+    <section className="overview-strip" aria-label="Dashboard overview">
+      <div className="overview-primary">
+        <span>Selected task</span>
+        <strong>{selectedTask?.title ?? "No task selected"}</strong>
+        <small>
+          {selectedTask
+            ? [selectedTask.projectId && `Project ${selectedTask.projectId}`, selectedTask.id.slice(0, 8), `${progress.percent}%`].filter(Boolean).join(" · ")
+            : "Create or select a task to inspect it."}
+        </small>
+      </div>
+      <OverviewMetric label="Active" value={String(activeTasks.length)} />
+      <OverviewMetric label="Running" value={String(runningWorkers || progress.running)} />
+      <OverviewMetric label="Waiting" value={String(waitingWorkers || progress.waiting)} />
+      <OverviewMetric label="Failed" value={String(failedTasks)} tone={failedTasks ? "bad" : undefined} />
+    </section>
+  );
+}
+
+function OverviewMetric({ label, value, tone }: { label: string; value: string; tone?: "bad" }) {
+  return (
+    <div className={tone ? `overview-metric ${tone}` : "overview-metric"}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -507,15 +545,18 @@ function TaskRow({
 }) {
   return (
     <div className={selected ? "task-row selected" : "task-row"}>
-      <button className="task-row-main" onClick={() => onSelect(task.id)}>
-        <span>
+      <button className="task-row-main" onClick={() => onSelect(task.id)} type="button" aria-current={selected ? "true" : undefined}>
+        <span className="task-row-copy">
           <strong>{task.title}</strong>
-          <small>{task.id.slice(0, 8)}</small>
+          <small className="task-row-meta">
+            {[task.projectId && `Project ${task.projectId}`, task.id.slice(0, 8)].filter(Boolean).join(" · ")}
+          </small>
           {task.error && <small className="task-row-error">{task.error}</small>}
         </span>
         <span className="task-row-status">
           {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
           <Status value={task.status} />
+          {task.objectiveStatus && String(task.objectiveStatus) !== task.status && <span className="pill subtle">{humanizeKey(task.objectiveStatus)}</span>}
           {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
         </span>
       </button>
@@ -554,6 +595,8 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
     const orderedIds = new Set(ordered.map((pane) => pane.id));
     return [...ordered, ...panes.filter((pane) => !orderedIds.has(pane.id))];
   }, [layout, paneById, panes]);
+  const hasTaskPane = orderedPanes.some((pane) => pane.id === "task-detail" || pane.id === "workers" || pane.id === "timeline");
+  const customizable = hasTaskPane && orderedPanes.length > 2;
 
   useEffect(() => {
     if (!resizing) return;
@@ -608,12 +651,14 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
 
   return (
     <section className="workspace" aria-label="Dashboard panes">
-      <div className="dashboard-toolbar">
-        <span>{orderedPanes.length} panes</span>
-        <button className="icon-button ghost" onClick={() => setLayout(defaultDashboardLayout())} title="Reset dashboard layout">
-          <RotateCcw size={16} />
-        </button>
-      </div>
+      {customizable && (
+        <div className="dashboard-toolbar">
+          <span>{orderedPanes.length} panes</span>
+          <button className="icon-button ghost" onClick={() => setLayout(defaultDashboardLayout())} title="Reset dashboard layout">
+            <RotateCcw size={16} />
+          </button>
+        </div>
+      )}
       <div className="dashboard-grid" ref={gridRef}>
         {orderedPanes.map((pane) => {
           const item = paneLayout(pane.id);
@@ -622,6 +667,7 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
               key={pane.id}
               className={[
                 "dashboard-pane",
+                customizable ? "" : "plain",
                 draggingId === pane.id ? "dragging" : "",
                 dragOverId === pane.id && draggingId !== pane.id ? "drag-over" : "",
                 resizing?.id === pane.id ? "resizing" : "",
@@ -632,75 +678,83 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
                   "--pane-min-height": `${item.minHeight}px`,
                 } as React.CSSProperties
               }
-              onDragOver={(event) => {
-                event.preventDefault();
-                setDragOverId(pane.id);
-              }}
-              onDragLeave={() => setDragOverId((current) => (current === pane.id ? null : current))}
-              onDrop={(event) => {
-                event.preventDefault();
-                const sourceId = event.dataTransfer.getData("text/plain") as DashboardPaneId;
-                movePane(sourceId, pane.id);
-                setDraggingId(null);
-                setDragOverId(null);
-              }}
-            >
-              <div className="dashboard-pane-chrome">
-                <div
-                  className="dashboard-pane-grip"
-                  draggable
-                  title={`Drag ${pane.title}`}
-                  aria-label={`Drag ${pane.title}`}
-                  role="button"
-                  tabIndex={0}
-                  onDragStart={(event) => {
-                    event.dataTransfer.effectAllowed = "move";
-                    event.dataTransfer.setData("text/plain", pane.id);
-                    setDraggingId(pane.id);
-                  }}
-                  onDragEnd={() => {
+              onDragOver={customizable
+                ? (event) => {
+                    event.preventDefault();
+                    setDragOverId(pane.id);
+                  }
+                : undefined}
+              onDragLeave={customizable ? () => setDragOverId((current) => (current === pane.id ? null : current)) : undefined}
+              onDrop={customizable
+                ? (event) => {
+                    event.preventDefault();
+                    const sourceId = event.dataTransfer.getData("text/plain") as DashboardPaneId;
+                    movePane(sourceId, pane.id);
                     setDraggingId(null);
                     setDragOverId(null);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-                      event.preventDefault();
-                      movePaneByOffset(pane.id, -1);
-                    }
-                    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-                      event.preventDefault();
-                      movePaneByOffset(pane.id, 1);
-                    }
-                  }}
-                >
-                  <GripVertical size={16} />
-                  <span>{pane.title}</span>
+                  }
+                : undefined}
+            >
+              {customizable && (
+                <div className="dashboard-pane-chrome">
+                  <div
+                    className="dashboard-pane-grip"
+                    draggable
+                    title={`Drag ${pane.title}`}
+                    aria-label={`Drag ${pane.title}`}
+                    role="button"
+                    tabIndex={0}
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", pane.id);
+                      setDraggingId(pane.id);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingId(null);
+                      setDragOverId(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+                        event.preventDefault();
+                        movePaneByOffset(pane.id, -1);
+                      }
+                      if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+                        event.preventDefault();
+                        movePaneByOffset(pane.id, 1);
+                      }
+                    }}
+                  >
+                    <GripVertical size={16} />
+                    <span>{pane.title}</span>
+                  </div>
+                  <div className="dashboard-pane-actions">
+                    <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span - 2 })} disabled={item.span <= DASHBOARD_MIN_SPAN} title={`Make ${pane.title} narrower`}>
+                      <Minimize2 size={14} />
+                    </button>
+                    <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span + 2 })} disabled={item.span >= DASHBOARD_MAX_SPAN} title={`Make ${pane.title} wider`}>
+                      <Maximize2 size={14} />
+                    </button>
+                  </div>
                 </div>
-                <div className="dashboard-pane-actions">
-                  <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span - 2 })} disabled={item.span <= DASHBOARD_MIN_SPAN} title={`Make ${pane.title} narrower`}>
-                    <Minimize2 size={14} />
-                  </button>
-                  <button className="icon-button ghost" onClick={() => updatePaneLayout(setLayout, pane.id, { span: item.span + 2 })} disabled={item.span >= DASHBOARD_MAX_SPAN} title={`Make ${pane.title} wider`}>
-                    <Maximize2 size={14} />
-                  </button>
-                </div>
-              </div>
+              )}
               {pane.element}
-              <button
-                className="dashboard-pane-resize"
-                aria-label={`Resize ${pane.title}`}
-                title={`Resize ${pane.title}`}
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  setResizing({
-                    id: pane.id,
-                    startX: event.clientX,
-                    startY: event.clientY,
-                    startSpan: item.span,
-                    startMinHeight: item.minHeight,
-                  });
-                }}
-              />
+              {customizable && (
+                <button
+                  className="dashboard-pane-resize"
+                  aria-label={`Resize ${pane.title}`}
+                  title={`Resize ${pane.title}`}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    setResizing({
+                      id: pane.id,
+                      startX: event.clientX,
+                      startY: event.clientY,
+                      startSpan: item.span,
+                      startMinHeight: item.minHeight,
+                    });
+                  }}
+                />
+              )}
             </div>
           );
         })}
@@ -737,10 +791,9 @@ function normalizeDashboardLayout(value: unknown): DashboardPaneLayout[] {
   for (const entry of value) {
     if (!isRecord(entry) || typeof entry.id !== "string" || !defaults.has(entry.id as DashboardPaneId)) continue;
     const defaultsForPane = defaults.get(entry.id as DashboardPaneId)!;
-    const minSpan = entry.id === "plugins" ? 8 : DASHBOARD_MIN_SPAN;
     normalized.push({
       id: entry.id as DashboardPaneId,
-      span: clampNumber(entry.span, defaultsForPane.span, minSpan, DASHBOARD_MAX_SPAN),
+      span: clampNumber(entry.span, defaultsForPane.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
       minHeight: clampNumber(entry.minHeight, defaultsForPane.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
     });
     defaults.delete(entry.id as DashboardPaneId);
@@ -758,7 +811,7 @@ function updatePaneLayout(
       item.id === id
         ? {
             ...item,
-            span: values.span === undefined ? item.span : clamp(values.span, item.id === "plugins" ? 8 : DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
+            span: values.span === undefined ? item.span : clamp(values.span, DASHBOARD_MIN_SPAN, DASHBOARD_MAX_SPAN),
             minHeight: values.minHeight === undefined ? item.minHeight : clamp(values.minHeight, DASHBOARD_MIN_HEIGHT, DASHBOARD_MAX_HEIGHT),
           }
         : item,
@@ -1022,9 +1075,9 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
   return (
     <div className="task-row pending-start" aria-busy="true" aria-live="polite">
       <div className="task-row-main pending-task-main">
-        <span>
+        <span className="task-row-copy">
           <strong>{title}</strong>
-          <small>Start request in progress</small>
+          <small className="task-row-meta">Start request in progress</small>
         </span>
         <span className="status starting">
           <LoaderCircle className="spin" size={12} />
@@ -1533,18 +1586,13 @@ function TaskDetail({
   return (
     <section className="panel detail">
       <div className="detail-heading">
-        <div>
+        <div className="detail-title-block">
           <h2>{task.title}</h2>
-          {task.projectId && <small>Project {task.projectId}</small>}
-          <div className="task-prompt-block">
-            <small>{durableLoop ? "Original prompt" : "Prompt"}</small>
-            <p>{task.prompt}</p>
-            {hasCustomLoopPrompt && (
-              <>
-                <small>Current loop prompt</small>
-                <p>{currentLoopPrompt}</p>
-              </>
-            )}
+          <div className="task-detail-meta">
+            {task.projectId && <span>Project {task.projectId}</span>}
+            <span>{task.id.slice(0, 8)}</span>
+            <span>{completionMode === "github" ? "GitHub completion" : "Local completion"}</span>
+            {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
         </div>
         <div className="detail-actions">
@@ -1570,6 +1618,22 @@ function TaskDetail({
           </button>
         </div>
       </div>
+      <details className="task-prompt-block" open={task.prompt.length < 520 && !hasCustomLoopPrompt}>
+        <summary>
+          <span>{durableLoop ? "Task prompts" : "Task request"}</span>
+          <small>{task.prompt.length.toLocaleString()} chars</small>
+        </summary>
+        <div className="task-prompt-content">
+          <small>{durableLoop ? "Original prompt" : "Prompt"}</small>
+          <p>{task.prompt}</p>
+          {hasCustomLoopPrompt && (
+            <>
+              <small>Current loop prompt</small>
+              <p>{currentLoopPrompt}</p>
+            </>
+          )}
+        </div>
+      </details>
       {(task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} />
       )}
@@ -2927,7 +2991,7 @@ function PluginPanel({
   );
 
   return (
-    <section className="panel">
+    <section className="panel plugin-panel">
       <div className="panel-title split-title">
         <span>
           <Puzzle size={18} />
@@ -2987,14 +3051,20 @@ function PluginPanel({
           </div>
         </form>
       )}
-      <div className="plugin-section">
-        <div className="plugin-section-title">Custom</div>
-        {customPlugins.length > 0 ? renderPluginCards(customPlugins) : <p className="empty-state">No custom plugins registered.</p>}
-      </div>
-      <div className="plugin-section">
-        <div className="plugin-section-title">System</div>
-        {renderPluginCards(systemPlugins)}
-      </div>
+      <details className="plugin-inventory">
+        <summary>
+          <span>Plugin inventory</span>
+          <small>{customPlugins.length} custom · {systemPlugins.length} system</small>
+        </summary>
+        <div className="plugin-section">
+          <div className="plugin-section-title">Custom</div>
+          {customPlugins.length > 0 ? renderPluginCards(customPlugins) : <p className="empty-state">No custom plugins registered.</p>}
+        </div>
+        <div className="plugin-section">
+          <div className="plugin-section-title">System</div>
+          {renderPluginCards(systemPlugins)}
+        </div>
+      </details>
     </section>
   );
 }
@@ -3837,7 +3907,7 @@ function humanizeKey(key: string): string {
 }
 
 function Status({ value }: { value: string }) {
-  return <span className={`status ${value}`}>{value}</span>;
+  return <span className={`status ${value}`}>{humanizeKey(value)}</span>;
 }
 
 function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
