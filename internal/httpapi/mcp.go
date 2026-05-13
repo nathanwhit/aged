@@ -421,13 +421,21 @@ func (s *Server) mcpSnapshotField(ctx context.Context, field func(core.Snapshot)
 	return field(snapshot), nil
 }
 
-func (s *Server) updateMCPProject(ctx context.Context, patch mcpProjectPatch) (core.Project, error) {
-	projectID := ""
-	if patch.ID != nil {
-		projectID = strings.TrimSpace(*patch.ID)
+func requiredMCPPatchID(id *string) (string, error) {
+	if id == nil {
+		return "", errors.New("id is required")
 	}
-	if projectID == "" {
-		return core.Project{}, errors.New("id is required")
+	trimmed := strings.TrimSpace(*id)
+	if trimmed == "" {
+		return "", errors.New("id is required")
+	}
+	return trimmed, nil
+}
+
+func (s *Server) updateMCPProject(ctx context.Context, patch mcpProjectPatch) (core.Project, error) {
+	projectID, err := requiredMCPPatchID(patch.ID)
+	if err != nil {
+		return core.Project{}, err
 	}
 	snapshot, err := s.service.Snapshot(ctx)
 	if err != nil {
@@ -516,12 +524,9 @@ func (s *Server) refreshMCPTargetHealth(ctx context.Context, targetID string) (c
 }
 
 func (s *Server) updateMCPTarget(ctx context.Context, patch mcpTargetPatch) (core.TargetConfig, error) {
-	targetID := ""
-	if patch.ID != nil {
-		targetID = strings.TrimSpace(*patch.ID)
-	}
-	if targetID == "" {
-		return core.TargetConfig{}, errors.New("id is required")
+	targetID, err := requiredMCPPatchID(patch.ID)
+	if err != nil {
+		return core.TargetConfig{}, err
 	}
 	snapshot, err := s.service.Snapshot(ctx)
 	if err != nil {
@@ -584,12 +589,9 @@ func mergeMCPTargetPatch(current core.TargetConfig, patch mcpTargetPatch) core.T
 }
 
 func (s *Server) updateMCPPlugin(ctx context.Context, patch mcpPluginPatch) (core.Plugin, error) {
-	pluginID := ""
-	if patch.ID != nil {
-		pluginID = strings.TrimSpace(*patch.ID)
-	}
-	if pluginID == "" {
-		return core.Plugin{}, errors.New("id is required")
+	pluginID, err := requiredMCPPatchID(patch.ID)
+	if err != nil {
+		return core.Plugin{}, err
 	}
 	snapshot, err := s.service.Snapshot(ctx)
 	if err != nil {
