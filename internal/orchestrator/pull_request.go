@@ -949,12 +949,24 @@ func parsePullRequestURL(value string) (string, int) {
 	if err != nil {
 		return "", 0
 	}
+	if parsed.Scheme != "" || parsed.Host != "" {
+		if !isSupportedGitHubPullRequestHost(parsed.Hostname()) {
+			return "", 0
+		}
+	}
 	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 	if len(parts) < 4 || parts[2] != "pull" {
 		return "", 0
 	}
-	number, _ := strconv.Atoi(parts[3])
+	number, err := strconv.Atoi(parts[3])
+	if err != nil || number <= 0 {
+		return "", 0
+	}
 	return parts[0] + "/" + parts[1], number
+}
+
+func isSupportedGitHubPullRequestHost(host string) bool {
+	return strings.EqualFold(strings.TrimSpace(host), "github.com")
 }
 
 func prHeadRef(owner string, branch string) string {
