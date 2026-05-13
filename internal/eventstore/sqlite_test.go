@@ -11,16 +11,37 @@ import (
 	"aged/internal/core"
 )
 
+func openTestSQLiteStore(tb testing.TB, ctx context.Context) *SQLiteStore {
+	tb.Helper()
+
+	store, err := OpenSQLite(ctx, filepath.Join(tb.TempDir(), "aged.db"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			tb.Fatal(err)
+		}
+	})
+	return store
+}
+
+func appendSQLiteEvents(tb testing.TB, ctx context.Context, store *SQLiteStore, events ...core.Event) {
+	tb.Helper()
+
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			tb.Fatal(err)
+		}
+	}
+}
+
 func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-1"
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(t, ctx, store, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -28,12 +49,10 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 			"prompt":   "Generate enough events to cross the default page size.",
 			"metadata": map[string]any{},
 		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	for i := 0; i < 205; i++ {
-		if _, err := store.Append(ctx, core.Event{
+		appendSQLiteEvents(t, ctx, store, core.Event{
 			Type:     core.EventWorkerOutput,
 			TaskID:   taskID,
 			WorkerID: "worker-1",
@@ -41,20 +60,16 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 				"stream": "stdout",
 				"text":   "progress",
 			}),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
 	}
 
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(t, ctx, store, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"status": core.TaskSucceeded,
 		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -73,73 +88,63 @@ func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 
 func TestSnapshotMergesDuplicatePullRequestIDsByTaskAndGitHubIdentity(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-1"
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Task",
-			"prompt": "Prompt",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventPRPublished,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":     "pr-generated",
-			"repo":   "owner/repo",
-			"number": 7,
-			"url":    "https://github.com/owner/repo/pull/7",
-			"state":  "OPEN",
-			"metadata": map[string]any{
-				"projectId": "project-1",
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventPRStatusChecked,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":               "pr-generated",
-			"checksStatus":     "passing",
-			"checksConclusion": "success",
-			"mergeStatus":      "CLEAN",
-			"mergeable":        "MERGEABLE",
-			"reviewStatus":     "APPROVED",
-			"metadata": map[string]any{
-				"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventPRPublished,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":     "github:owner/repo#7",
-			"repo":   "owner/repo",
-			"number": 7,
-			"url":    "https://github.com/owner/repo/pull/7",
-			"state":  "OPEN",
-			"metadata": map[string]any{
-				"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
-				"watch":                              true,
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task",
+				"prompt": "Prompt",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-generated",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"state":  "OPEN",
+				"metadata": map[string]any{
+					"projectId": "project-1",
+				},
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRStatusChecked,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":               "pr-generated",
+				"checksStatus":     "passing",
+				"checksConclusion": "success",
+				"mergeStatus":      "CLEAN",
+				"mergeable":        "MERGEABLE",
+				"reviewStatus":     "APPROVED",
+				"metadata": map[string]any{
+					"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
+				},
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "github:owner/repo#7",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"state":  "OPEN",
+				"metadata": map[string]any{
+					"latestPullRequestFeedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
+					"watch":                              true,
+				},
+			}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -160,70 +165,58 @@ func TestSnapshotMergesDuplicatePullRequestIDsByTaskAndGitHubIdentity(t *testing
 
 func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	startedAt := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
 	outputAt := startedAt.Add(10 * time.Minute)
-	if _, err := store.Append(ctx, core.Event{
-		At:     startedAt,
-		Type:   core.EventTaskCreated,
-		TaskID: "task-1",
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Task",
-			"prompt": "Prompt",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		At:       startedAt,
-		Type:     core.EventExecutionPlanned,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"nodeId":     "node-1",
-			"workerId":   "worker-1",
-			"workerKind": "codex",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		At:       startedAt,
-		Type:     core.EventWorkerCreated,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"kind": "codex",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		At:       startedAt,
-		Type:     core.EventWorkerStarted,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload:  core.MustJSON(map[string]any{}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		At:       outputAt,
-		Type:     core.EventWorkerOutput,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"kind": "log",
-			"text": "still working",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			At:     startedAt,
+			Type:   core.EventTaskCreated,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task",
+				"prompt": "Prompt",
+			}),
+		},
+		core.Event{
+			At:       startedAt,
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-1",
+				"workerId":   "worker-1",
+				"workerKind": "codex",
+			}),
+		},
+		core.Event{
+			At:       startedAt,
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		},
+		core.Event{
+			At:       startedAt,
+			Type:     core.EventWorkerStarted,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload:  core.MustJSON(map[string]any{}),
+		},
+		core.Event{
+			At:       outputAt,
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "log",
+				"text": "still working",
+			}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -253,32 +246,24 @@ func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 
 func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-summary"
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(t, ctx, store, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"title":  "Summary task",
 			"prompt": "Keep initial payload small.",
 		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	for i := 0; i < 20; i++ {
-		if _, err := store.Append(ctx, core.Event{
+		appendSQLiteEvents(t, ctx, store, core.Event{
 			Type:     core.EventWorkerOutput,
 			TaskID:   taskID,
 			WorkerID: "worker-summary",
 			Payload:  core.MustJSON(map[string]any{"text": "verbose output"}),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
 	}
 
 	summary, err := store.SnapshotSummary(ctx)
@@ -298,40 +283,27 @@ func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) 
 
 func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-events"
-	events := []core.Event{
-		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Events", "prompt": "Load detail lazily"})},
-		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
-	}
-	for _, event := range events {
-		if _, err := store.Append(ctx, event); err != nil {
-			t.Fatal(err)
-		}
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Events", "prompt": "Load detail lazily"})},
+		core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-events", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+	)
 	for i := 0; i < 5; i++ {
-		if _, err := store.Append(ctx, core.Event{
+		appendSQLiteEvents(t, ctx, store, core.Event{
 			Type:     core.EventWorkerOutput,
 			TaskID:   taskID,
 			WorkerID: "worker-events",
 			Payload:  core.MustJSON(map[string]any{"text": i}),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
 	}
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(t, ctx, store, core.Event{
 		Type:     core.EventWorkerCompleted,
 		TaskID:   taskID,
 		WorkerID: "worker-events",
 		Payload:  core.MustJSON(map[string]any{"status": core.WorkerSucceeded}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	limited, err := store.ListTaskEvents(ctx, taskID, 2)
 	if err != nil {
@@ -356,42 +328,32 @@ func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 
 func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(b.TempDir(), "aged.db"))
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(b, ctx)
 
 	taskID := "task-bench"
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(b, ctx, store, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"title":  "Benchmark task",
 			"prompt": "Measure snapshot payload size.",
 		}),
-	}); err != nil {
-		b.Fatal(err)
-	}
+	})
 	for i := 0; i < 2000; i++ {
-		if _, err := store.Append(ctx, core.Event{
+		appendSQLiteEvents(b, ctx, store, core.Event{
 			Type:     core.EventWorkerOutput,
 			TaskID:   taskID,
 			WorkerID: "worker-bench",
 			Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 512)}),
-		}); err != nil {
-			b.Fatal(err)
-		}
+		})
 	}
-	if _, err := store.Append(ctx, core.Event{
+	appendSQLiteEvents(b, ctx, store, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"status": core.TaskSucceeded,
 		}),
-	}); err != nil {
-		b.Fatal(err)
-	}
+	})
 
 	b.Run("full", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -427,33 +389,27 @@ func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
 
 func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-1"
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Publish task",
-			"prompt": "Open a PR.",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskFailed,
-			"error":  "publish completion pull request: patch does not apply",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Publish task",
+				"prompt": "Open a PR.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskFailed,
+				"error":  "publish completion pull request: patch does not apply",
+			}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -469,35 +425,29 @@ func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 
 func TestSnapshotProjectsWorkerPrompt(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: "task-1",
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Prompt task",
-			"prompt": "Original request",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventWorkerCreated,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"kind":       "codex",
-			"command":    []string{"codex", "exec", "-"},
-			"prompt":     "line one\n  line two",
-			"promptPath": "prompt.txt",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Prompt task",
+				"prompt": "Original request",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"kind":       "codex",
+				"command":    []string{"codex", "exec", "-"},
+				"prompt":     "line one\n  line two",
+				"promptPath": "prompt.txt",
+			}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -517,66 +467,54 @@ func TestSnapshotProjectsWorkerPrompt(t *testing.T) {
 
 func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	taskID := "task-objective"
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Resolve issue",
-			"prompt": "Open a PR and babysit it.",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskArtifact,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"id":   "pr-1",
-			"kind": "github_pull_request",
-			"name": "owner/repo#12",
-			"url":  "https://github.com/owner/repo/pull/12",
-			"ref":  "codex/aged-test",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskMilestone,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"name":    "pr_opened",
-			"phase":   "pr_opened",
-			"summary": "Pull request opened.",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskObjective,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.ObjectiveWaitingExternal,
-			"phase":  "pr_opened",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskWaiting,
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Resolve issue",
+				"prompt": "Open a PR and babysit it.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskArtifact,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":   "pr-1",
+				"kind": "github_pull_request",
+				"name": "owner/repo#12",
+				"url":  "https://github.com/owner/repo/pull/12",
+				"ref":  "codex/aged-test",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskMilestone,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"name":    "pr_opened",
+				"phase":   "pr_opened",
+				"summary": "Pull request opened.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskObjective,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.ObjectiveWaitingExternal,
+				"phase":  "pr_opened",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -596,61 +534,53 @@ func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 
 func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventExecutionPlanned,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"nodeId":        "node-0",
-			"workerId":      "worker-1",
-			"workerKind":    "codex",
-			"planId":        "plan-1",
-			"spawnId":       "implementation",
-			"role":          "implementer",
-			"reason":        "Implement the change.",
-			"targetId":      "vm-1",
-			"targetKind":    "ssh",
-			"remoteSession": "aged-worker",
-			"remoteRunDir":  "/runs/worker-1",
-			"remoteWorkDir": "/repo",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventExecutionPlanned,
-		TaskID:   "task-1",
-		WorkerID: "worker-2",
-		Payload: core.MustJSON(map[string]any{
-			"nodeId":       "node-1",
-			"workerId":     "worker-2",
-			"workerKind":   "claude",
-			"planId":       "plan-1",
-			"spawnId":      "review",
-			"role":         "reviewer",
-			"reason":       "Review the implementation.",
-			"targetId":     "vm-1",
-			"targetKind":   "ssh",
-			"dependsOn":    []string{"implementation"},
-			"parentNodeId": "node-0",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventWorkerStarted,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload:  core.MustJSON(map[string]any{}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":        "node-0",
+				"workerId":      "worker-1",
+				"workerKind":    "codex",
+				"planId":        "plan-1",
+				"spawnId":       "implementation",
+				"role":          "implementer",
+				"reason":        "Implement the change.",
+				"targetId":      "vm-1",
+				"targetKind":    "ssh",
+				"remoteSession": "aged-worker",
+				"remoteRunDir":  "/runs/worker-1",
+				"remoteWorkDir": "/repo",
+			}),
+		},
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-1",
+			WorkerID: "worker-2",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":       "node-1",
+				"workerId":     "worker-2",
+				"workerKind":   "claude",
+				"planId":       "plan-1",
+				"spawnId":      "review",
+				"role":         "reviewer",
+				"reason":       "Review the implementation.",
+				"targetId":     "vm-1",
+				"targetKind":   "ssh",
+				"dependsOn":    []string{"implementation"},
+				"parentNodeId": "node-0",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerStarted,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload:  core.MustJSON(map[string]any{}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
@@ -725,11 +655,7 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 
 func TestProjectsUpdateAndDeleteInSQLite(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	first := core.Project{ID: "a", Name: "A", LocalPath: t.TempDir(), VCS: "auto", DefaultBase: "main"}
 	second := core.Project{ID: "b", Name: "B", LocalPath: t.TempDir(), VCS: "auto", DefaultBase: "main"}
@@ -761,11 +687,7 @@ func TestProjectsUpdateAndDeleteInSQLite(t *testing.T) {
 
 func TestPluginsPersistInSQLite(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	plugin := core.Plugin{
 		ID:           "runner:lint",
@@ -802,11 +724,7 @@ func TestPluginsPersistInSQLite(t *testing.T) {
 
 func TestTargetsPersistInSQLite(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
 	target := core.TargetConfig{
 		ID:           "vm-1",
@@ -843,60 +761,48 @@ func TestTargetsPersistInSQLite(t *testing.T) {
 
 func TestSnapshotHidesClearedTasksAndKeepsEvents(t *testing.T) {
 	ctx := context.Background()
-	store, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := openTestSQLiteStore(t, ctx)
 
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: "task-1",
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Finished task",
-			"prompt": "Clear me",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventExecutionPlanned,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"nodeId":     "node-1",
-			"workerId":   "worker-1",
-			"workerKind": "mock",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventWorkerCreated,
-		TaskID:   "task-1",
-		WorkerID: "worker-1",
-		Payload: core.MustJSON(map[string]any{
-			"kind": "mock",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: "task-1",
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskSucceeded,
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:    core.EventTaskCleared,
-		TaskID:  "task-1",
-		Payload: core.MustJSON(map[string]any{"reason": "test"}),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Finished task",
+				"prompt": "Clear me",
+			}),
+		},
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-1",
+				"workerId":   "worker-1",
+				"workerKind": "mock",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "mock",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskSucceeded,
+			}),
+		},
+		core.Event{
+			Type:    core.EventTaskCleared,
+			TaskID:  "task-1",
+			Payload: core.MustJSON(map[string]any{"reason": "test"}),
+		},
+	)
 
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
