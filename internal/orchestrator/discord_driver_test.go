@@ -857,6 +857,7 @@ func TestDiscordDriverUpdatesProject(t *testing.T) {
 			Draft:        true,
 			AllowMerge:   true,
 			AutoMerge:    true,
+			MergeMethod:  "merge",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -881,7 +882,7 @@ func TestDiscordDriverUpdatesProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	project, ok := projectByID(snapshot.Projects, "node")
-	if !ok || project.Name != "Node Runtime" || project.DefaultBase != "trunk" || project.LocalPath != nodeDir || project.Repo != "nodejs/node" || project.TargetLabels["role"] != "ci" || project.PullRequestPolicy.BranchPrefix != "aged/" || !project.PullRequestPolicy.Draft || !project.PullRequestPolicy.AllowMerge || !project.PullRequestPolicy.AutoMerge {
+	if !ok || project.Name != "Node Runtime" || project.DefaultBase != "trunk" || project.LocalPath != nodeDir || project.Repo != "nodejs/node" || project.TargetLabels["role"] != "ci" || project.PullRequestPolicy.BranchPrefix != "aged/" || !project.PullRequestPolicy.Draft || !project.PullRequestPolicy.AllowMerge || !project.PullRequestPolicy.AutoMerge || project.PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("project = %+v ok=%v", project, ok)
 	}
 	if !strings.Contains(client.sent[len(client.sent)-1], "Updated project `node`") {
@@ -900,7 +901,8 @@ func TestDiscordDriverUpdatesProject(t *testing.T) {
 					"branchPrefix": "",
 					"draft": false,
 					"allowMerge": false,
-					"autoMerge": false
+					"autoMerge": false,
+					"mergeMethod": ""
 				}
 			},
 			"proposedTask": null
@@ -915,7 +917,7 @@ func TestDiscordDriverUpdatesProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	project, ok = projectByID(snapshot.Projects, "node")
-	if !ok || project.Repo != "" || project.DefaultBase != "main" || len(project.TargetLabels) != 0 || project.PullRequestPolicy.BranchPrefix != "codex/aged-" || project.PullRequestPolicy.Draft || project.PullRequestPolicy.AllowMerge || project.PullRequestPolicy.AutoMerge {
+	if !ok || project.Repo != "" || project.DefaultBase != "main" || len(project.TargetLabels) != 0 || project.PullRequestPolicy.BranchPrefix != "codex/aged-" || project.PullRequestPolicy.Draft || project.PullRequestPolicy.AllowMerge || project.PullRequestPolicy.AutoMerge || project.PullRequestPolicy.MergeMethod != "squash" {
 		t.Fatalf("cleared project = %+v ok=%v", project, ok)
 	}
 }

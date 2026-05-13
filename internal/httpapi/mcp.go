@@ -72,6 +72,7 @@ type mcpPullRequestPolicyPatch struct {
 	Draft               *bool   `json:"draft"`
 	AllowMerge          *bool   `json:"allowMerge"`
 	AutoMerge           *bool   `json:"autoMerge"`
+	MergeMethod         *string `json:"mergeMethod"`
 	MonitorPullRequests *bool   `json:"monitorPullRequests"`
 }
 
@@ -496,6 +497,9 @@ func mergeMCPProjectPatch(current core.Project, patch mcpProjectPatch) core.Proj
 		}
 		if patch.PullRequestPolicy.AutoMerge != nil {
 			updated.PullRequestPolicy.AutoMerge = *patch.PullRequestPolicy.AutoMerge
+		}
+		if patch.PullRequestPolicy.MergeMethod != nil {
+			updated.PullRequestPolicy.MergeMethod = strings.TrimSpace(*patch.PullRequestPolicy.MergeMethod)
 		}
 		if patch.PullRequestPolicy.MonitorPullRequests != nil {
 			updated.PullRequestPolicy.MonitorPullRequests = patch.PullRequestPolicy.MonitorPullRequests
@@ -1074,6 +1078,7 @@ func pullRequestPolicyMCPSchema() map[string]any {
 		"draft":               map[string]any{"type": "boolean", "description": "Create PRs as draft by default."},
 		"allowMerge":          map[string]any{"type": "boolean", "description": "Allow PR merge actions."},
 		"autoMerge":           map[string]any{"type": "boolean", "description": "Enable auto-merge when available."},
+		"mergeMethod":         map[string]any{"type": "string", "enum": []string{"squash", "merge", "rebase"}, "description": "Merge method for automated merges."},
 		"monitorPullRequests": map[string]any{"type": "boolean", "description": "Refresh tracked PRs and resume tasks when checks or reviews need follow-up. Defaults to true."},
 	}, nil)
 }

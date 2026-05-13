@@ -2,6 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"aged/internal/core"
@@ -38,6 +41,7 @@ func TestServiceDefaultPullRequestMonitorContinuesTasksForPRsNeedingAttention(t 
 	}{
 		{name: "failing checks", status: monitoredPullRequestStatus("failing", "CLEAN", "APPROVED")},
 		{name: "dirty branch", status: monitoredPullRequestStatus("success", "DIRTY", "APPROVED")},
+		{name: "conflicting mergeability", status: monitoredPullRequestStatus("success", "CONFLICTING", "APPROVED")},
 		{name: "new comment", status: monitoredPullRequestStatus("success", "CLEAN", "COMMENTED")},
 		{name: "untriggered feedback metadata", status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "", core.MustJSON(map[string]any{
 			"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
@@ -103,15 +107,16 @@ func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
 		LocalPath: projectRoot,
 		Repo:      "owner/repo",
 		PullRequestPolicy: core.PullRequestPolicy{
-			AllowMerge: true,
-			AutoMerge:  true,
+			AllowMerge:  true,
+			AutoMerge:   true,
+			MergeMethod: "rebase",
 		},
 	}}, "project-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	publisher := &mergeTrackingPullRequestPublisher{
-		fakePullRequestPublisher: fakePullRequestPublisher{status: monitoredPullRequestStatus("passing", "CLEAN", "APPROVED")},
+		fakePullRequestPublisher: fakePullRequestPublisher{status: monitoredPullRequestStatus("passing", "UNKNOWN", "APPROVED")},
 	}
 	service := newTestPullRequestMonitorService(t, store, publisher)
 	service.SetProjects(projects)
@@ -125,7 +130,7 @@ func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
 	if publisher.mergeCalls != 1 {
 		t.Fatalf("merge calls = %d, want 1", publisher.mergeCalls)
 	}
-	if publisher.mergeSpec.Repo != "owner/repo" || publisher.mergeSpec.Number != 7 || publisher.mergeSpec.Method != "squash" {
+	if publisher.mergeSpec.Repo != "owner/repo" || publisher.mergeSpec.Number != 7 || publisher.mergeSpec.Method != "rebase" {
 		t.Fatalf("merge spec = %+v", publisher.mergeSpec)
 	}
 	if snapshot.PullRequests[0].State != "MERGED" {
@@ -133,6 +138,108 @@ func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
 	}
 	if snapshot.Tasks[0].ObjectivePhase != "merged" {
 		t.Fatalf("objective phase = %q, want merged", snapshot.Tasks[0].ObjectivePhase)
+	}
+}
+
+func TestServicePullRequestMonitorUsesPullRequestRepoMergePolicy(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	agedRoot := t.TempDir()
+	denoRoot := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{
+		{
+			ID:        "aged",
+			Name:      "aged",
+			LocalPath: agedRoot,
+			Repo:      "nathanwhit/aged",
+			PullRequestPolicy: core.PullRequestPolicy{
+				AllowMerge: true,
+				AutoMerge:  true,
+			},
+		},
+		{
+			ID:           "deno",
+			Name:         "deno",
+			LocalPath:    denoRoot,
+			Repo:         "nathanwhit/deno",
+			UpstreamRepo: "denoland/deno",
+			PullRequestPolicy: core.PullRequestPolicy{
+				AllowMerge: false,
+				AutoMerge:  false,
+			},
+		},
+	}, "aged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := monitoredPullRequestStatus("passing", "UNKNOWN", "APPROVED")
+	status.Repo = "denoland/deno"
+	status.URL = "https://github.com/denoland/deno/pull/33992"
+	publisher := &mergeTrackingPullRequestPublisher{
+		fakePullRequestPublisher: fakePullRequestPublisher{status: status},
+	}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	service.SetProjects(projects)
+	appendTrackedPullRequestWithRepo(t, ctx, store, "task-1", "aged", core.TaskWaiting, "denoland/deno", 33992)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+	if publisher.mergeCalls != 0 {
+		t.Fatalf("merge calls = %d, want 0", publisher.mergeCalls)
+	}
+	if snapshot.PullRequests[0].State == "MERGED" {
+		t.Fatalf("pull request state = %q, want unmerged", snapshot.PullRequests[0].State)
+	}
+}
+
+func TestServicePullRequestMonitorStartsFollowUpWhenAutoMergeFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectRoot := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:        "project-1",
+		Name:      "Project",
+		LocalPath: projectRoot,
+		Repo:      "owner/repo",
+		PullRequestPolicy: core.PullRequestPolicy{
+			AllowMerge: true,
+			AutoMerge:  true,
+		},
+	}}, "project-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &mergeTrackingPullRequestPublisher{
+		fakePullRequestPublisher: fakePullRequestPublisher{status: monitoredPullRequestStatus("passing", "UNKNOWN", "APPROVED")},
+		mergeErr:                 errors.New("merge conflict after base branch changed"),
+	}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	service.SetProjects(projects)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "project-1", core.TaskWaiting)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventPRFollowUp, "task-1")
+	if publisher.mergeCalls != 1 {
+		t.Fatalf("merge calls = %d, want 1", publisher.mergeCalls)
+	}
+	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("missing task steering event")
+	}
+	if snapshot.Tasks[0].ObjectivePhase != "pr_needs_work" {
+		t.Fatalf("objective phase = %q, want pr_needs_work", snapshot.Tasks[0].ObjectivePhase)
+	}
+	if got := pullRequestAutoMergeError(snapshot.PullRequests[0]); !strings.Contains(got, "merge conflict") {
+		t.Fatalf("auto merge error = %q", got)
 	}
 }
 
@@ -323,12 +430,16 @@ type mergeTrackingPullRequestPublisher struct {
 	merged     core.PullRequest
 	mergeSpec  PullRequestMergeSpec
 	mergeCalls int
+	mergeErr   error
 }
 
 func (p *mergeTrackingPullRequestPublisher) Merge(_ context.Context, pr core.PullRequest, spec PullRequestMergeSpec) (core.PullRequest, error) {
 	p.mergeCalls++
 	p.merged = pr
 	p.mergeSpec = spec
+	if p.mergeErr != nil {
+		return core.PullRequest{}, p.mergeErr
+	}
 	merged := pr
 	merged.State = "MERGED"
 	merged.ChecksStatus = "passing"
@@ -348,6 +459,10 @@ func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStor
 }
 
 func appendTrackedPullRequest(t *testing.T, ctx context.Context, store *eventstore.SQLiteStore, taskID string, projectID string, status core.TaskStatus) {
+	appendTrackedPullRequestWithRepo(t, ctx, store, taskID, projectID, status, "owner/repo", 7)
+}
+
+func appendTrackedPullRequestWithRepo(t *testing.T, ctx context.Context, store *eventstore.SQLiteStore, taskID string, projectID string, status core.TaskStatus, repo string, number int) {
 	t.Helper()
 	taskPayload := map[string]any{
 		"title":  "Task",
@@ -377,9 +492,9 @@ func appendTrackedPullRequest(t *testing.T, ctx context.Context, store *eventsto
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"id":     "pr-1",
-			"repo":   "owner/repo",
-			"number": 7,
-			"url":    "https://github.com/owner/repo/pull/7",
+			"repo":   repo,
+			"number": number,
+			"url":    "https://github.com/" + repo + "/pull/" + fmt.Sprint(number),
 			"branch": "codex/aged-test",
 			"base":   "main",
 			"title":  "Task",

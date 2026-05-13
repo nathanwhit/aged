@@ -912,7 +912,8 @@ func TestMCPProjectTools(t *testing.T) {
 					"branchPrefix": "aged/",
 					"draft": true,
 					"allowMerge": true,
-					"autoMerge": true
+					"autoMerge": true,
+					"mergeMethod": "rebase"
 				}
 			}
 		}
@@ -982,7 +983,7 @@ func TestMCPProjectTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(updateContent["text"].(string)), &updatedProject); err != nil {
 		t.Fatal(err)
 	}
-	if updatedProject.Name != "Node Runtime" || updatedProject.DefaultBase != "trunk" || updatedProject.LocalPath != projectDir || updatedProject.Repo != "nodejs/node" || updatedProject.TargetLabels["role"] != "ci" || updatedProject.PullRequestPolicy.BranchPrefix != "aged/" || !updatedProject.PullRequestPolicy.Draft || !updatedProject.PullRequestPolicy.AllowMerge || !updatedProject.PullRequestPolicy.AutoMerge {
+	if updatedProject.Name != "Node Runtime" || updatedProject.DefaultBase != "trunk" || updatedProject.LocalPath != projectDir || updatedProject.Repo != "nodejs/node" || updatedProject.TargetLabels["role"] != "ci" || updatedProject.PullRequestPolicy.BranchPrefix != "aged/" || !updatedProject.PullRequestPolicy.Draft || !updatedProject.PullRequestPolicy.AllowMerge || !updatedProject.PullRequestPolicy.AutoMerge || updatedProject.PullRequestPolicy.MergeMethod != "rebase" {
 		t.Fatalf("update project result = %+v", updatedProject)
 	}
 
@@ -1001,7 +1002,8 @@ func TestMCPProjectTools(t *testing.T) {
 					"branchPrefix": "",
 					"draft": false,
 					"allowMerge": false,
-					"autoMerge": false
+					"autoMerge": false,
+					"mergeMethod": ""
 				}
 			}
 		}
@@ -1011,7 +1013,7 @@ func TestMCPProjectTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(clearContent["text"].(string)), &clearedProject); err != nil {
 		t.Fatal(err)
 	}
-	if clearedProject.Repo != "" || clearedProject.DefaultBase != "main" || len(clearedProject.TargetLabels) != 0 || clearedProject.PullRequestPolicy.BranchPrefix != "codex/aged-" || clearedProject.PullRequestPolicy.Draft || clearedProject.PullRequestPolicy.AllowMerge || clearedProject.PullRequestPolicy.AutoMerge {
+	if clearedProject.Repo != "" || clearedProject.DefaultBase != "main" || len(clearedProject.TargetLabels) != 0 || clearedProject.PullRequestPolicy.BranchPrefix != "codex/aged-" || clearedProject.PullRequestPolicy.Draft || clearedProject.PullRequestPolicy.AllowMerge || clearedProject.PullRequestPolicy.AutoMerge || clearedProject.PullRequestPolicy.MergeMethod != "squash" {
 		t.Fatalf("cleared project result = %+v", clearedProject)
 	}
 
@@ -1502,7 +1504,8 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"vcs": "git",
 		"defaultBase": "main",
 		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5},
-		"githubMentions": {"enabled": true, "reasons": ["mention", "review_requested"], "limit": 8}
+		"githubMentions": {"enabled": true, "reasons": ["mention", "review_requested"], "limit": 8},
+		"pullRequestPolicy": {"mergeMethod": "merge"}
 	}`, projectDir)
 	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -1517,7 +1520,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 || created.PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -1525,7 +1528,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 || projects[0].PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("projects = %+v", projects)
 	}
 }

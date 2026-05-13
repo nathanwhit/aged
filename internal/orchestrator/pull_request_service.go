@@ -95,7 +95,14 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 		if s.pullRequestAutoMergeEnabled(snapshot, checked) && pullRequestReadyForAutoMerge(checked) {
 			merged, err := s.mergePullRequest(ctx, snapshot, checked)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("%s merge pr: %v", checked.ID, err))
+				failed, recordErr := s.recordPullRequestAutoMergeFailure(ctx, snapshot, checked, err)
+				if recordErr != nil {
+					errs = append(errs, fmt.Sprintf("%s record merge failure: %v", checked.ID, recordErr))
+					continue
+				}
+				if err := s.ContinueTaskForPullRequest(ctx, failed.ID); err != nil {
+					errs = append(errs, fmt.Sprintf("%s continue after merge failure: %v", failed.ID, err))
+				}
 				continue
 			}
 			checked = merged
@@ -113,24 +120,16 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 }
 
 func (s *Service) pullRequestMonitoringDisabled(snapshot core.Snapshot, pr core.PullRequest) bool {
-	task, ok := findTask(snapshot, pr.TaskID)
+	project, ok := s.projectForPullRequestPolicy(snapshot, pr)
 	if !ok {
-		return false
-	}
-	project, err := s.projectForTask(task)
-	if err != nil {
 		return false
 	}
 	return project.PullRequestPolicy.MonitorPullRequests != nil && !*project.PullRequestPolicy.MonitorPullRequests
 }
 
 func (s *Service) pullRequestAutoMergeEnabled(snapshot core.Snapshot, pr core.PullRequest) bool {
-	task, ok := findTask(snapshot, pr.TaskID)
+	project, ok := s.projectForPullRequestPolicy(snapshot, pr)
 	if !ok {
-		return false
-	}
-	project, err := s.projectForTask(task)
-	if err != nil {
 		return false
 	}
 	return project.PullRequestPolicy.AllowMerge && project.PullRequestPolicy.AutoMerge
@@ -179,6 +178,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 		"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
 		"mergeAllowed":      project.PullRequestPolicy.AllowMerge,
 		"autoMerge":         project.PullRequestPolicy.AutoMerge,
+		"mergeMethod":       project.PullRequestPolicy.MergeMethod,
 		"pullRequestPolicy": project.PullRequestPolicy,
 	}
 	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
@@ -775,7 +775,7 @@ func (s *Service) mergePullRequest(ctx context.Context, snapshot core.Snapshot, 
 		Repo:    pr.Repo,
 		Number:  pr.Number,
 		URL:     pr.URL,
-		Method:  "squash",
+		Method:  s.pullRequestMergeMethod(snapshot, pr),
 	})
 	if err != nil {
 		return core.PullRequest{}, err
@@ -809,6 +809,60 @@ func (s *Service) mergePullRequest(ctx context.Context, snapshot core.Snapshot, 
 	}
 	merged = normalizePullRequestStatusFields(merged)
 	return s.recordPullRequestStatus(ctx, snapshot, merged)
+}
+
+func (s *Service) pullRequestMergeMethod(snapshot core.Snapshot, pr core.PullRequest) string {
+	project, ok := s.projectForPullRequestPolicy(snapshot, pr)
+	if !ok {
+		return "squash"
+	}
+	return normalizePullRequestMergeMethod(project.PullRequestPolicy.MergeMethod)
+}
+
+func (s *Service) projectForPullRequestPolicy(snapshot core.Snapshot, pr core.PullRequest) (core.Project, bool) {
+	if len(pr.Metadata) > 0 {
+		var metadata map[string]any
+		if err := json.Unmarshal(pr.Metadata, &metadata); err == nil {
+			if projectID := strings.TrimSpace(stringMetadataValue(metadata["projectId"])); projectID != "" {
+				if s.projects == nil {
+					return core.Project{}, false
+				}
+				return s.projects.Get(projectID)
+			}
+		}
+	}
+	if repo := pullRequestRepoForPolicy(pr); repo != "" {
+		if s.projects == nil {
+			return core.Project{}, false
+		}
+		return s.projects.FindByIssueRepo(repo)
+	}
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return core.Project{}, false
+	}
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return core.Project{}, false
+	}
+	return project, true
+}
+
+func pullRequestRepoForPolicy(pr core.PullRequest) string {
+	if repo := strings.TrimSpace(pr.Repo); repo != "" {
+		return repo
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		repo, _ := parsePullRequestURL(pr.URL)
+		return repo
+	}
+	return ""
+}
+
+func (s *Service) recordPullRequestAutoMergeFailure(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, mergeErr error) (core.PullRequest, error) {
+	failed := pr
+	failed.Metadata = pullRequestMetadataWithAutoMergeFailure(pr.Metadata, mergeErr)
+	return s.recordPullRequestStatus(ctx, snapshot, failed)
 }
 
 func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Snapshot, checked core.PullRequest) (core.PullRequest, error) {
@@ -885,16 +939,19 @@ func pullRequestReadyForAutoMerge(pr core.PullRequest) bool {
 	if review != "" && review != "APPROVED" {
 		return false
 	}
+	return !pullRequestMergeNeedsWork(pr)
+}
+
+func pullRequestMergeNeedsWork(pr core.PullRequest) bool {
 	merge := strings.ToUpper(strings.TrimSpace(pr.MergeStatus))
 	mergeable := strings.ToUpper(strings.TrimSpace(pr.Mergeable))
-	switch {
-	case merge == "CLEAN" || merge == "HAS_HOOKS" || merge == "MERGEABLE":
-		return true
-	case mergeable == "MERGEABLE":
-		return true
-	default:
-		return false
+	for _, value := range []string{merge, mergeable} {
+		switch value {
+		case "DIRTY", "BLOCKED", "CONFLICTING", "BEHIND":
+			return true
+		}
 	}
+	return false
 }
 
 func pullRequestMetadataString(pr core.PullRequest, key string) string {
@@ -906,6 +963,27 @@ func pullRequestMetadataString(pr core.PullRequest, key string) string {
 		return ""
 	}
 	return stringMetadataValue(metadata[key])
+}
+
+func pullRequestMetadataWithAutoMergeFailure(raw json.RawMessage, mergeErr error) json.RawMessage {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	metadata["autoMergeError"] = strings.TrimSpace(mergeErr.Error())
+	metadata["autoMergeFailedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+	return core.MustJSON(metadata)
+}
+
+func pullRequestAutoMergeError(pr core.PullRequest) string {
+	if len(pr.Metadata) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(stringMetadataValue(metadata["autoMergeError"]))
 }
 
 func (s *Service) ReconcilePullRequestTerminalTasks(ctx context.Context, prID string) error {
