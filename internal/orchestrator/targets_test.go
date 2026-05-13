@@ -340,6 +340,30 @@ func TestSSHRunnerPollDedupesRemoteCodexInfrastructureWarningsAcrossPolls(t *tes
 	}
 }
 
+func TestSSHRunnerInfersTerminalStatusWhenRemoteSessionDisappears(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			`{"type":"result","subtype":"success","result":"done"}` + "\n",
+		},
+		status:         []string{`{"status":"running"}`},
+		sessionMissing: true,
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("claude"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v, want succeeded", status)
+	}
+	if !sink.has(worker.EventResult, "stdout", "done") {
+		t.Fatalf("result was not emitted: %+v", sink.events)
+	}
+}
+
 func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
 	executor := &timeoutThenStatusExecutor{}
 	runner := SSHRunner{
@@ -948,11 +972,12 @@ func (e *gatedRemoteStatusExecutor) Run(_ context.Context, argv []string) (strin
 }
 
 type scriptedPollExecutor struct {
-	commands [][]string
-	stdout   []string
-	stderr   []string
-	status   []string
-	poll     int
+	commands       [][]string
+	stdout         []string
+	stderr         []string
+	status         []string
+	poll           int
+	sessionMissing bool
 }
 
 func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, error) {
@@ -973,6 +998,11 @@ func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, er
 			e.poll++
 		}
 		return out, nil
+	case strings.Contains(joined, "tmux has-session"):
+		if e.sessionMissing {
+			return "", exitCodeError{code: 1}
+		}
+		return "", nil
 	default:
 		return "", nil
 	}

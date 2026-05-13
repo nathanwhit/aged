@@ -164,7 +164,7 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 	defer ticker.Stop()
 	consecutivePollTimeouts := 0
 	for {
-		status, err := r.pollOnce(ctx, run, filter, sink, &stdoutOffset, &stderrOffset)
+		status, err := r.pollOnce(ctx, run, parser, filter, sink, &stdoutOffset, &stderrOffset)
 		if err != nil {
 			if errors.Is(err, errSSHPollCommandTimeout) && consecutivePollTimeouts < 1 {
 				consecutivePollTimeouts++
@@ -198,7 +198,7 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 
 func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Parser, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
 	filter := worker.NewOutputFilter(parser)
-	status, err := r.pollOnce(ctx, run, filter, sink, stdoutOffset, stderrOffset)
+	status, err := r.pollOnce(ctx, run, parser, filter, sink, stdoutOffset, stderrOffset)
 	if err != nil {
 		_ = filter.Flush(ctx, sink)
 		return status, err
@@ -211,7 +211,7 @@ func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 	return status, nil
 }
 
-func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.OutputFilter, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
+func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
 	stdout, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stdout.log"))+" 2>/dev/null || true")
 	emitNewRemoteLines(ctx, filter, sink, "stdout", stdout, stdoutOffset)
 	stderr, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stderr.log"))+" 2>/dev/null || true")
@@ -232,7 +232,55 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.O
 	if status.Status == "" {
 		status.Status = "running"
 	}
+	if status.Status == "running" {
+		active, activeErr := r.remoteSessionActive(ctx, run)
+		if activeErr == nil && !active {
+			return inferTerminalRemoteStatus(parser, stdout, stderr), nil
+		}
+	}
 	return status, nil
+}
+
+func (r SSHRunner) remoteSessionActive(ctx context.Context, run remoteRun) (bool, error) {
+	_, err := r.runPollCommand(ctx, run.Target, "tmux has-session -t "+shellQuote(run.Session)+" 2>/dev/null")
+	if err == nil {
+		return true, nil
+	}
+	if commandExitCode(err) == 1 {
+		return false, nil
+	}
+	return true, err
+}
+
+func inferTerminalRemoteStatus(parser worker.Parser, stdout string, stderr string) remoteStatus {
+	status := remoteStatus{
+		Status: "failed",
+		Error:  "remote worker session ended before writing terminal status",
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		event := parser.ParseLine("stdout", line)
+		switch event.Kind {
+		case worker.EventResult:
+			status = remoteStatus{Status: "succeeded", Exit: 0}
+		case worker.EventError:
+			status = remoteStatus{Status: "failed", Error: nonEmpty(event.Text, status.Error)}
+		}
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		event := parser.ParseLine("stderr", line)
+		if event.Kind == worker.EventError {
+			status = remoteStatus{Status: "failed", Error: nonEmpty(event.Text, status.Error)}
+		}
+	}
+	return status
 }
 
 func (r SSHRunner) drainRemoteCallbacks(ctx context.Context, run remoteRun, sink worker.Sink) error {
