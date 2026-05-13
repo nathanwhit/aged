@@ -457,6 +457,45 @@ func TestRegisterPluginEndpointPersistsAndExposesPlugin(t *testing.T) {
 	}
 }
 
+func TestUpdatePluginRejectsIDMismatchAsBadRequest(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/plugins/runner:lint", strings.NewReader(`{
+		"id": "runner:fmt",
+		"name": "Lint Runner",
+		"kind": "runner",
+		"enabled": true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var payload map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["error"] != "plugin id mismatch" {
+		t.Fatalf("error = %q", payload["error"])
+	}
+}
+
 func TestGitHubDriverEndpointHotTogglesConfig(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -645,6 +684,43 @@ func TestRegisterTargetEndpointPersistsAndExposesTarget(t *testing.T) {
 	defer healthRes.Body.Close()
 	if healthRes.StatusCode != http.StatusOK {
 		t.Fatalf("health status = %d", healthRes.StatusCode)
+	}
+}
+
+func TestUpdateTargetRejectsIDMismatchAsBadRequest(t *testing.T) {
+	store, err := eventstore.OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/api/targets/local-ci", strings.NewReader(`{
+		"id": "remote-ci",
+		"kind": "local"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var payload map[string]string
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["error"] != "target id mismatch" {
+		t.Fatalf("error = %q", payload["error"])
 	}
 }
 
