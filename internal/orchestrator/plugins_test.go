@@ -282,13 +282,13 @@ func TestPluginRegistryLifecycleUpdatePreservesLargeDriverLogTail(t *testing.T) 
 	}})
 	stale := registry.Snapshot()[0]
 	largeLine := "stdout: " + strings.Repeat("l", 2*1024*1024)
-	registry.appendDriverLog(0, largeLine)
+	registry.appendDriverLog(0, "", 0, largeLine)
 
 	stale.Status = "running"
 	stale.Error = ""
 	stale.Driver.Managed = true
 	stale.Driver.PID = 1234
-	registry.updatePlugin(0, stale)
+	registry.updatePlugin(0, stale, 0)
 
 	plugin := registry.Snapshot()[0]
 	if plugin.Status != "running" || !plugin.Driver.Managed || plugin.Driver.PID != 1234 {
