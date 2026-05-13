@@ -82,7 +82,7 @@ func (b *APIBrain) Plan(ctx context.Context, task core.Task, steering []string) 
 }
 
 func (b *APIBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
-	request := chatCompletionRequest{
+	content, err := b.chatCompletion(ctx, "api brain", chatCompletionRequest{
 		Model: b.model,
 		Messages: []chatMessage{
 			{
@@ -95,42 +95,10 @@ func (b *APIBrain) plan(ctx context.Context, task core.Task, steering []string) 
 			},
 		},
 		ResponseFormat: planResponseFormat(),
-	}
-	body, err := json.Marshal(request)
+	})
 	if err != nil {
 		return Plan{}, err
 	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return Plan{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpRes, err := b.httpClient.Do(httpReq)
-	if err != nil {
-		return Plan{}, err
-	}
-	defer httpRes.Body.Close()
-
-	responseBody, err := io.ReadAll(io.LimitReader(httpRes.Body, 4<<20))
-	if err != nil {
-		return Plan{}, err
-	}
-	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
-		return Plan{}, fmt.Errorf("api brain returned %s: %s", httpRes.Status, strings.TrimSpace(string(responseBody)))
-	}
-
-	var response chatCompletionResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return Plan{}, fmt.Errorf("decode api brain response: %w", err)
-	}
-	if len(response.Choices) == 0 {
-		return Plan{}, errors.New("api brain returned no choices")
-	}
-
-	content := strings.TrimSpace(response.Choices[0].Message.Content)
 	content = trimJSONFence(content)
 	var plan Plan
 	if err := json.Unmarshal([]byte(content), &plan); err != nil {
@@ -149,7 +117,7 @@ func (b *APIBrain) plan(ctx context.Context, task core.Task, steering []string) 
 }
 
 func (b *APIBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
-	request := chatCompletionRequest{
+	content, err := b.chatCompletion(ctx, "api assistant", chatCompletionRequest{
 		Model: b.model,
 		Messages: []chatMessage{
 			{
@@ -161,44 +129,51 @@ func (b *APIBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.Ass
 				Content: b.assistantMessage(req),
 			},
 		},
-	}
-	body, err := json.Marshal(request)
+	})
 	if err != nil {
 		return core.AssistantResponse{}, err
-	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return core.AssistantResponse{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpRes, err := b.httpClient.Do(httpReq)
-	if err != nil {
-		return core.AssistantResponse{}, err
-	}
-	defer httpRes.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(httpRes.Body, 4<<20))
-	if err != nil {
-		return core.AssistantResponse{}, err
-	}
-	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
-		return core.AssistantResponse{}, fmt.Errorf("api assistant returned %s: %s", httpRes.Status, strings.TrimSpace(string(responseBody)))
-	}
-	var response chatCompletionResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return core.AssistantResponse{}, fmt.Errorf("decode api assistant response: %w", err)
-	}
-	if len(response.Choices) == 0 {
-		return core.AssistantResponse{}, errors.New("api assistant returned no choices")
 	}
 	return core.AssistantResponse{
 		ConversationID: req.ConversationID,
-		Message:        strings.TrimSpace(response.Choices[0].Message.Content),
+		Message:        content,
 		Metadata: core.MustJSON(map[string]any{
 			"brain": "api",
 			"model": b.model,
 		}),
 	}, nil
+}
+
+func (b *APIBrain) chatCompletion(ctx context.Context, caller string, request chatCompletionRequest) (string, error) {
+	body, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+b.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpRes, err := b.httpClient.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer httpRes.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(httpRes.Body, 4<<20))
+	if err != nil {
+		return "", err
+	}
+	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
+		return "", fmt.Errorf("%s returned %s: %s", caller, httpRes.Status, strings.TrimSpace(string(responseBody)))
+	}
+	var response chatCompletionResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return "", fmt.Errorf("decode %s response: %w", caller, err)
+	}
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("%s returned no choices", caller)
+	}
+	return strings.TrimSpace(response.Choices[0].Message.Content), nil
 }
 
 func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
