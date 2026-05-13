@@ -343,37 +343,30 @@ func createFeedbackTask(ctx context.Context, cfg config, result evalResult) (cor
 }
 
 func feedbackPrompt(result evalResult, failed []string) string {
-	var b strings.Builder
-	b.WriteString("A durable-loop eval run produced failing checks. Inspect the scorecard, decide which failures are legitimate product or evaluator problems, and implement one narrow improvement. Open a PR only if there is a real code or documentation change.\n\n")
-	b.WriteString("Eval: ")
-	b.WriteString(result.Name)
-	b.WriteString("\n")
-	b.WriteString("Eval task ID: ")
-	b.WriteString(result.TaskID)
-	b.WriteString("\n")
-	b.WriteString("Scorecard path: ")
-	b.WriteString(result.OutputPath)
-	b.WriteString("\n")
-	b.WriteString("Task status before evaluator stop: ")
-	b.WriteString(string(result.TaskStatusBeforeStop))
-	b.WriteString("\n")
-	b.WriteString("Final task status: ")
-	b.WriteString(string(result.FinalTaskStatus))
-	b.WriteString("\n\n")
-	b.WriteString("Failed checks:\n")
+	var failedChecks strings.Builder
 	for _, name := range failed {
-		b.WriteString("- ")
-		b.WriteString(name)
-		b.WriteString("\n")
+		failedChecks.WriteString("- ")
+		failedChecks.WriteString(name)
+		failedChecks.WriteString("\n")
 	}
-	b.WriteString("\nScorecard summary:\n")
 	summary, _ := json.MarshalIndent(struct {
 		Metrics evalMetrics `json:"metrics"`
 		Checks  []evalCheck `json:"checks"`
 	}{Metrics: result.Metrics, Checks: result.Checks}, "", "  ")
-	b.Write(summary)
-	b.WriteString("\n\nDo not blindly optimize for the smoke worker. If a failure is expected for mock mode, improve the evaluator or documentation so real failures and expected smoke failures are distinguishable.")
-	return b.String()
+	return fmt.Sprintf(`A durable-loop eval run produced failing checks. Inspect the scorecard, decide which failures are legitimate product or evaluator problems, and implement one narrow improvement. Open a PR only if there is a real code or documentation change.
+
+Eval: %s
+Eval task ID: %s
+Scorecard path: %s
+Task status before evaluator stop: %s
+Final task status: %s
+
+Failed checks:
+%s
+Scorecard summary:
+%s
+
+Do not blindly optimize for the smoke worker. If a failure is expected for mock mode, improve the evaluator or documentation so real failures and expected smoke failures are distinguishable.`, result.Name, result.TaskID, result.OutputPath, result.TaskStatusBeforeStop, result.FinalTaskStatus, failedChecks.String(), summary)
 }
 
 func getSnapshot(ctx context.Context, baseURL string) (core.Snapshot, error) {
