@@ -114,6 +114,42 @@ func TestTargetRegistrySkipsSSHWithoutRemoteCheckoutRoot(t *testing.T) {
 	}
 }
 
+func TestTargetRegistryRegisterRejectsUnknownKind(t *testing.T) {
+	registry := NewLocalTargetRegistry()
+	for _, kind := range []TargetKind{"remote", "ssHh"} {
+		_, err := registry.Register(TargetConfig{ID: "bad-" + string(kind), Kind: kind})
+		if err == nil {
+			t.Fatalf("Register kind %q succeeded, want error", kind)
+		}
+		if !strings.Contains(err.Error(), "target kind") || !strings.Contains(err.Error(), "local") || !strings.Contains(err.Error(), "ssh") {
+			t.Fatalf("Register kind %q error = %q, want useful kind validation", kind, err.Error())
+		}
+	}
+}
+
+func TestTargetRegistryRegisterAllowsKnownAndEmptyKinds(t *testing.T) {
+	registry := NewLocalTargetRegistry()
+	for _, tc := range []struct {
+		name string
+		in   TargetConfig
+		want TargetKind
+	}{
+		{name: "empty", in: TargetConfig{ID: "empty"}, want: TargetKindLocal},
+		{name: "local", in: TargetConfig{ID: "local-2", Kind: TargetKindLocal}, want: TargetKindLocal},
+		{name: "ssh", in: TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, want: TargetKindSSH},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := registry.Register(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Kind != tc.want {
+				t.Fatalf("kind = %q, want %q", got.Kind, tc.want)
+			}
+		})
+	}
+}
+
 func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
 		"checkoutRootOK=true",
