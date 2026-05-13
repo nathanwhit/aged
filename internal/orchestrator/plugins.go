@@ -242,20 +242,20 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 		if err != nil {
 			plugin.Status = "error"
 			plugin.Error = strings.TrimSpace(err.Error())
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(index, plugin, 0)
 			continue
 		}
 		var described core.Plugin
 		if err := json.Unmarshal(bytes.TrimSpace(out), &described); err != nil {
 			plugin.Status = "error"
 			plugin.Error = "decode plugin describe: " + err.Error()
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(index, plugin, 0)
 			continue
 		}
 		if described.ID != "" && described.ID != plugin.ID {
 			plugin.Status = "error"
 			plugin.Error = "plugin described mismatched id " + described.ID
-			r.updatePlugin(index, plugin)
+			r.updatePlugin(index, plugin, 0)
 			continue
 		}
 		plugin.Status = "ready"
@@ -278,7 +278,7 @@ func (r *PluginRegistry) Probe(ctx context.Context) {
 		if len(described.Config) > 0 {
 			plugin.Config = described.Config
 		}
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(index, plugin, 0)
 	}
 }
 
@@ -296,7 +296,7 @@ func (r *PluginRegistry) StartDrivers(ctx context.Context) {
 		plugin.Driver.Managed = true
 		plugin.Driver.RestartPolicy = nonEmpty(plugin.Config["restart"], "on_failure")
 		plugin.Status = "starting"
-		r.updatePlugin(index, plugin)
+		r.updatePlugin(index, plugin, 0)
 		driverCtx, cancel := context.WithCancel(ctx)
 		generation := r.setDriverCancel(plugin.ID, cancel)
 		go r.superviseDriver(driverCtx, index, plugin.ID, generation)
@@ -316,20 +316,20 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 		if outErr != nil || errErr != nil {
 			plugin.Status = "error"
 			plugin.Error = strings.TrimSpace(nonEmpty(errorString(outErr), errorString(errErr)))
-			r.updateDriverPlugin(index, plugin, generation)
+			r.updatePlugin(index, plugin, generation)
 			return
 		}
 		if err := cmd.Start(); err != nil {
 			plugin.Status = "error"
 			plugin.Error = err.Error()
-			r.updateDriverPlugin(index, plugin, generation)
+			r.updatePlugin(index, plugin, generation)
 			return
 		}
 		plugin.Status = "running"
 		plugin.Error = ""
 		plugin.Driver.PID = cmd.Process.Pid
 		plugin.Driver.StartedAt = time.Now().UTC()
-		r.updateDriverPlugin(index, plugin, generation)
+		r.updatePlugin(index, plugin, generation)
 		go r.captureDriverLogs(ctx, index, plugin.ID, generation, "stdout", stdout)
 		go r.captureDriverLogs(ctx, index, plugin.ID, generation, "stderr", stderr)
 		err := cmd.Wait()
@@ -350,7 +350,7 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 				plugin.Driver.RestartPolicy = ""
 			}
 			plugin.Error = ""
-			r.updateDriverPlugin(index, plugin, generation)
+			r.updatePlugin(index, plugin, generation)
 			r.clearDriverCancel(plugin.ID, generation)
 			return
 		}
@@ -361,14 +361,14 @@ func (r *PluginRegistry) superviseDriver(ctx context.Context, index int, id stri
 			plugin.Status = "stopped"
 			plugin.Error = ""
 		}
-		r.updateDriverPlugin(index, plugin, generation)
+		r.updatePlugin(index, plugin, generation)
 		if !shouldRestartPlugin(plugin, err) {
 			r.clearDriverCancel(plugin.ID, generation)
 			return
 		}
 		plugin.Driver.RestartCount++
 		plugin.Status = "restarting"
-		r.updateDriverPlugin(index, plugin, generation)
+		r.updatePlugin(index, plugin, generation)
 		select {
 		case <-ctx.Done():
 			return
@@ -402,24 +402,12 @@ func (r *PluginRegistry) clearDriverCancel(id string, generation uint64) {
 
 func (r *PluginRegistry) captureDriverLogs(ctx context.Context, index int, id string, generation uint64, stream string, reader io.Reader) {
 	_ = worker.StreamReaderLines(ctx, stream, reader, func(line string) error {
-		r.appendDriverLogForRun(index, id, generation, stream+": "+line)
+		r.appendDriverLog(index, id, generation, stream+": "+line)
 		return nil
 	}, nil)
 }
 
-func (r *PluginRegistry) appendDriverLog(index int, line string) {
-	r.appendDriverLogFor(index, "", line)
-}
-
-func (r *PluginRegistry) appendDriverLogFor(index int, id string, line string) {
-	r.appendDriverLogWithGeneration(index, id, 0, line)
-}
-
-func (r *PluginRegistry) appendDriverLogForRun(index int, id string, generation uint64, line string) {
-	r.appendDriverLogWithGeneration(index, id, generation, line)
-}
-
-func (r *PluginRegistry) appendDriverLogWithGeneration(index int, id string, generation uint64, line string) {
+func (r *PluginRegistry) appendDriverLog(index int, id string, generation uint64, line string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	index, ok := r.indexForLocked(index, id)
@@ -456,15 +444,7 @@ func (r *PluginRegistry) driverPluginAt(index int, id string, generation uint64)
 	return clonePlugin(r.plugins[index]), true
 }
 
-func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin) {
-	r.updatePluginForGeneration(index, plugin, 0)
-}
-
-func (r *PluginRegistry) updateDriverPlugin(index int, plugin core.Plugin, generation uint64) {
-	r.updatePluginForGeneration(index, plugin, generation)
-}
-
-func (r *PluginRegistry) updatePluginForGeneration(index int, plugin core.Plugin, generation uint64) {
+func (r *PluginRegistry) updatePlugin(index int, plugin core.Plugin, generation uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	index, ok := r.indexForLocked(index, plugin.ID)
