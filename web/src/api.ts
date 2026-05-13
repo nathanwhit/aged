@@ -1,18 +1,17 @@
 import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
-async function requestJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
+async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
-  return response.json();
+  if (!response.ok) throw new Error(await errorMessage(response));
+  return response;
+}
+
+async function requestJSON<T = any>(url: string, init?: RequestInit): Promise<T> {
+  return (await request(url, init)).json();
 }
 
 async function requestVoid(url: string, init?: RequestInit): Promise<void> {
-  const response = await fetch(url, init);
-  if (!response.ok) {
-    throw new Error(await errorMessage(response));
-  }
+  await request(url, init);
 }
 
 function jsonInit(method: "POST" | "PUT", body: unknown): RequestInit {
