@@ -331,10 +331,7 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 		}, nil
 	}
 
-	destination, workspaceName, err := m.workspaceDestination(root, spec)
-	if err != nil {
-		return PreparedWorkspace{}, err
-	}
+	destination, workspaceName := isolatedWorkspaceDestination(root, m.WorkspaceRoot, spec)
 	if _, err := os.Stat(destination); err == nil {
 		return PreparedWorkspace{}, fmt.Errorf("workspace destination already exists: %s", destination)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -382,20 +379,6 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 		WorkerID:      spec.WorkerID,
 		TaskID:        spec.TaskID,
 	}, nil
-}
-
-func (m JJWorkspaceManager) workspaceDestination(root string, spec WorkspaceSpec) (string, string, error) {
-	name := "aged-" + shortID(spec.WorkerID)
-	workspaceRoot := m.WorkspaceRoot
-	if workspaceRoot == "" {
-		workspaceRoot = defaultWorkspaceRoot()
-	} else {
-		workspaceRoot = expandWorkspaceRoot(workspaceRoot)
-	}
-	if !filepath.IsAbs(workspaceRoot) {
-		workspaceRoot = filepath.Join(root, workspaceRoot)
-	}
-	return filepath.Join(workspaceRoot, name), name, nil
 }
 
 func (m JJWorkspaceManager) cleanupPolicy() string {
@@ -606,7 +589,7 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 			TaskID:        spec.TaskID,
 		}, nil
 	}
-	destination, workspaceName := gitWorkspaceDestination(root, m.WorkspaceRoot, spec)
+	destination, workspaceName := isolatedWorkspaceDestination(root, m.WorkspaceRoot, spec)
 	if _, err := os.Stat(destination); err == nil {
 		return PreparedWorkspace{}, fmt.Errorf("workspace destination already exists: %s", destination)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -1295,7 +1278,7 @@ func normalizeChangeStatus(status string) string {
 	}
 }
 
-func gitWorkspaceDestination(root string, workspaceRoot string, spec WorkspaceSpec) (string, string) {
+func isolatedWorkspaceDestination(root string, workspaceRoot string, spec WorkspaceSpec) (string, string) {
 	name := "aged-" + shortID(spec.WorkerID)
 	if workspaceRoot == "" {
 		workspaceRoot = defaultWorkspaceRoot()
