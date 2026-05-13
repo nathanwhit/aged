@@ -20,6 +20,7 @@ type GitHubDriverConfig struct {
 	IntervalSeconds int                           `json:"intervalSeconds,omitempty"`
 	IssueLimit      int                           `json:"issueLimit,omitempty"`
 	Issues          []GitHubIssueSourceConfig     `json:"issues,omitempty"`
+	Mentions        GitHubMentionDriverConfig     `json:"mentions,omitempty"`
 	PullRequests    GitHubPullRequestDriverConfig `json:"pullRequests,omitempty"`
 }
 
@@ -40,6 +41,13 @@ type GitHubPullRequestDriverConfig struct {
 	Draft       bool     `json:"draft,omitempty"`
 }
 
+type GitHubMentionDriverConfig struct {
+	Enabled *bool    `json:"enabled,omitempty"`
+	Repos   []string `json:"repos,omitempty"`
+	Reasons []string `json:"reasons,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
+}
+
 type GitHubIssue struct {
 	Repo      string
 	Number    int
@@ -50,8 +58,23 @@ type GitHubIssue struct {
 	UpdatedAt string
 }
 
+type GitHubMention struct {
+	ID          string
+	Repo        string
+	SubjectType string
+	Number      int
+	Title       string
+	URL         string
+	Reason      string
+	Body        string
+	Author      string
+	CommentURL  string
+	UpdatedAt   string
+}
+
 type GitHubClient interface {
 	ListIssues(ctx context.Context, repo string, labels []string, limit int) ([]GitHubIssue, error)
+	ListMentions(ctx context.Context, limit int) ([]GitHubMention, error)
 }
 
 type GitHubDriver struct {
@@ -134,6 +157,9 @@ func (d *GitHubDriver) RunOnce(ctx context.Context) error {
 	if err := d.pollIssues(ctx); err != nil {
 		errs = append(errs, err.Error())
 	}
+	if err := d.pollMentions(ctx); err != nil {
+		errs = append(errs, err.Error())
+	}
 	if err := d.publishCompletedIssueTasks(ctx); err != nil {
 		errs = append(errs, err.Error())
 	}
@@ -187,6 +213,87 @@ func (d *GitHubDriver) pollIssues(ctx context.Context) error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func (d *GitHubDriver) pollMentions(ctx context.Context) error {
+	if !boolDefault(d.config.Mentions.Enabled, false) {
+		return nil
+	}
+	limit := d.config.Mentions.Limit
+	if limit <= 0 {
+		limit = d.config.IssueLimit
+	}
+	mentions, err := d.client.ListMentions(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("mentions: %w", err)
+	}
+	snapshot, err := d.service.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	seen := githubMentionExternalIDs(snapshot)
+	reasons := githubMentionReasons(d.config.Mentions.Reasons)
+	var errs []string
+	for _, mention := range mentions {
+		mention.Repo = strings.TrimSpace(mention.Repo)
+		mention.ID = strings.TrimSpace(mention.ID)
+		if mention.Repo == "" || mention.ID == "" {
+			continue
+		}
+		if !reasons[strings.ToLower(strings.TrimSpace(mention.Reason))] {
+			continue
+		}
+		if !d.monitorsMentionRepo(mention.Repo) {
+			continue
+		}
+		if seen[mention.ID] {
+			continue
+		}
+		if _, err := d.service.CreateTask(ctx, githubMentionTaskRequest(mention)); err != nil {
+			errs = append(errs, fmt.Sprintf("%s mention %s task: %v", mention.Repo, mention.ID, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func githubMentionReasons(values []string) map[string]bool {
+	if len(values) == 0 {
+		values = []string{"mention", "team_mention", "review_requested"}
+	}
+	out := map[string]bool{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			out[value] = true
+		}
+	}
+	return out
+}
+
+func githubMentionExternalIDs(snapshot core.Snapshot) map[string]bool {
+	seen := map[string]bool{}
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventTaskCreated {
+			continue
+		}
+		var payload struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if stringMetadataValue(payload.Metadata["source"]) != "github-mention" {
+			continue
+		}
+		externalID := stringMetadataValue(payload.Metadata["externalId"])
+		if externalID != "" {
+			seen[externalID] = true
+		}
+	}
+	return seen
 }
 
 // githubIssueExternalIDsWithMergedPullRequests returns the set of github-issue
@@ -309,6 +416,22 @@ func (d *GitHubDriver) monitorsPullRequestRepo(repo string) bool {
 	return false
 }
 
+func (d *GitHubDriver) monitorsMentionRepo(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return true
+	}
+	for _, allowed := range d.config.Mentions.Repos {
+		if strings.EqualFold(strings.TrimSpace(allowed), repo) {
+			return true
+		}
+	}
+	if len(d.config.Mentions.Repos) > 0 {
+		return false
+	}
+	return d.monitorsPullRequestRepo(repo)
+}
+
 func githubIssueTaskRequest(issue GitHubIssue, projectID string, githubCompletion bool) core.CreateTaskRequest {
 	labels := issue.Labels
 	slices.Sort(labels)
@@ -351,6 +474,61 @@ Issue body:
 
 Implement the requested change in the current repository. Do not open the pull request yourself; the orchestrator will publish the PR after the task succeeds. Report changed files, commands run, and any blockers.
 `, issue.Repo, issue.Number, issue.URL, issue.Title, strings.Join(issue.Labels, ", "), body)
+}
+
+func githubMentionTaskRequest(mention GitHubMention) core.CreateTaskRequest {
+	title := fmt.Sprintf("GitHub mention %s#%d: %s", mention.Repo, mention.Number, strings.TrimSpace(mention.Title))
+	if mention.Number <= 0 {
+		title = fmt.Sprintf("GitHub mention %s: %s", mention.Repo, strings.TrimSpace(mention.Title))
+	}
+	metadata := map[string]any{
+		"repo":           mention.Repo,
+		"number":         mention.Number,
+		"url":            mention.URL,
+		"reason":         mention.Reason,
+		"subjectType":    mention.SubjectType,
+		"updatedAt":      mention.UpdatedAt,
+		"completionMode": "local",
+	}
+	if mention.CommentURL != "" {
+		metadata["commentUrl"] = mention.CommentURL
+	}
+	if mention.Author != "" {
+		metadata["author"] = mention.Author
+	}
+	return core.CreateTaskRequest{
+		Title:      title,
+		Prompt:     githubMentionPrompt(mention),
+		Source:     "github-mention",
+		ExternalID: mention.ID,
+		Metadata:   core.MustJSON(metadata),
+	}
+}
+
+func githubMentionPrompt(mention GitHubMention) string {
+	body := strings.TrimSpace(mention.Body)
+	if body == "" {
+		body = "(no mention body available)"
+	}
+	subject := strings.TrimSpace(mention.SubjectType)
+	if subject == "" {
+		subject = "GitHub item"
+	}
+	return fmt.Sprintf(`Handle this GitHub notification for %s.
+
+Repository: %s
+URL: %s
+Notification reason: %s
+Subject: %s #%d
+Title: %s
+Author: %s
+Comment URL: %s
+
+Mention body:
+%s
+
+Inspect the linked GitHub context and decide the appropriate response. If this is a pull request review request or mention, review the PR and leave a concise GitHub comment or review when useful. Use gh pr review for whole-PR review comments, approval, or change requests; when precise inline code comments are warranted, use gh api to create a pull request review with line or range comments. If code changes are clearly requested and appropriate for the current repository, make them in the current checkout and report what changed. Do not open a new pull request unless explicitly asked.
+`, subject, mention.Repo, mention.URL, mention.Reason, subject, mention.Number, mention.Title, mention.Author, mention.CommentURL, body)
 }
 
 func pullRequestNeedsBabysitter(pr core.PullRequest) bool {
@@ -435,4 +613,99 @@ func (ghGitHubClient) ListIssues(ctx context.Context, repo string, labels []stri
 		})
 	}
 	return issues, nil
+}
+
+func (ghGitHubClient) ListMentions(ctx context.Context, limit int) ([]GitHubMention, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	out, err := runCommand(ctx, "", "gh", "api", "--method", "GET", "notifications", "-F", "all=false", "-F", "participating=false", "-F", "per_page="+strconv.Itoa(limit))
+	if err != nil {
+		return nil, wrapGitHubCommandError("list GitHub notifications", err)
+	}
+	var payload []struct {
+		ID         string `json:"id"`
+		Reason     string `json:"reason"`
+		UpdatedAt  string `json:"updated_at"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		Subject struct {
+			Title            string `json:"title"`
+			Type             string `json:"type"`
+			URL              string `json:"url"`
+			LatestCommentURL string `json:"latest_comment_url"`
+		} `json:"subject"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return nil, err
+	}
+	mentions := make([]GitHubMention, 0, len(payload))
+	for _, item := range payload {
+		repo := strings.TrimSpace(item.Repository.FullName)
+		number := githubNotificationSubjectNumber(item.Subject.URL)
+		url := githubNotificationHTMLURL(repo, item.Subject.Type, number)
+		body, author, commentURL := ghGitHubMentionComment(ctx, item.Subject.LatestCommentURL)
+		mentions = append(mentions, GitHubMention{
+			ID:          item.ID,
+			Repo:        repo,
+			SubjectType: item.Subject.Type,
+			Number:      number,
+			Title:       item.Subject.Title,
+			URL:         url,
+			Reason:      item.Reason,
+			Body:        body,
+			Author:      author,
+			CommentURL:  commentURL,
+			UpdatedAt:   item.UpdatedAt,
+		})
+	}
+	return mentions, nil
+}
+
+func ghGitHubMentionComment(ctx context.Context, apiURL string) (string, string, string) {
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		return "", "", ""
+	}
+	out, err := runCommand(ctx, "", "gh", "api", apiURL)
+	if err != nil {
+		return "", "", ""
+	}
+	var payload struct {
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return "", "", ""
+	}
+	return payload.Body, payload.User.Login, payload.HTMLURL
+}
+
+func githubNotificationSubjectNumber(apiURL string) int {
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		return 0
+	}
+	parts := strings.Split(strings.TrimRight(apiURL, "/"), "/")
+	if len(parts) == 0 {
+		return 0
+	}
+	number, _ := strconv.Atoi(parts[len(parts)-1])
+	return number
+}
+
+func githubNotificationHTMLURL(repo string, subjectType string, number int) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || number <= 0 {
+		return ""
+	}
+	path := "issues"
+	if strings.EqualFold(subjectType, "PullRequest") {
+		path = "pull"
+	}
+	return fmt.Sprintf("https://github.com/%s/%s/%d", repo, path, number)
 }

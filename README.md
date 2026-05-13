@@ -191,13 +191,13 @@ GitHub driver:
 go run ./cmd/aged -github-driver github-driver.json
 ```
 
-It uses local `gh` auth, creates idempotent issue tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work. The same config can be read or hot-swapped while the daemon is running:
+It uses local `gh` auth, creates idempotent issue and mention tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work. Mention tasks use local completion, so review-request mentions can be satisfied by a GitHub review/comment without opening a new PR. The same config can be read or hot-swapped while the daemon is running:
 
 ```sh
 curl http://localhost:8787/api/drivers/github
 curl -X PUT http://localhost:8787/api/drivers/github \
   -H 'content-type: application/json' \
-  -d '{"enabled":true,"issues":[{"repo":"owner/repo","labels":["aged"]}]}'
+  -d '{"enabled":true,"issues":[{"repo":"owner/repo","labels":["aged"]}],"mentions":{"enabled":true,"repos":["owner/repo"]}}'
 ```
 
 Projects can also opt into issue polling directly with `githubIssues`; the driver uses the project's `upstreamRepo` when present, otherwise `repo`, and routes created issue tasks back to that project:

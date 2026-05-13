@@ -599,12 +599,125 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 	}
 }
 
+func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			AutoPublish: boolPtr(false),
+		},
+	}, fakeGitHubClient{mentions: []GitHubMention{{
+		ID:          "thread-1",
+		Repo:        "owner/repo",
+		SubjectType: "PullRequest",
+		Number:      12,
+		Title:       "Add feature",
+		URL:         "https://github.com/owner/repo/pull/12",
+		Reason:      "review_requested",
+		Body:        "@aged can you review this?",
+		Author:      "octocat",
+		CommentURL:  "https://github.com/owner/repo/pull/12#issuecomment-1",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	task, ok, err := service.FindTaskByExternalID(ctx, "github-mention", "thread-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing github mention task")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "local" {
+		t.Fatalf("metadata completionMode = %v, want local", metadata["completionMode"])
+	}
+	if metadata["reason"] != "review_requested" || metadata["subjectType"] != "PullRequest" {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventTaskCreated, task.ID) != 1 {
+		t.Fatalf("task.created count = %d, want 1", countEvents(snapshot.Events, core.EventTaskCreated, task.ID))
+	}
+	if len(snapshot.PullRequests) != 0 {
+		t.Fatalf("pull requests = %+v, want none for review-comment-only mention task", snapshot.PullRequests)
+	}
+}
+
+func TestGitHubDriverSkipsMentionReasonsAndReposOutsideConfig(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+			Reasons: []string{"mention"},
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			Enabled: boolPtr(false),
+		},
+	}, fakeGitHubClient{mentions: []GitHubMention{{
+		ID:     "thread-1",
+		Repo:   "owner/repo",
+		Number: 12,
+		Reason: "review_requested",
+	}, {
+		ID:     "thread-2",
+		Repo:   "other/repo",
+		Number: 13,
+		Reason: "mention",
+	}}})
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 0 {
+		t.Fatalf("tasks = %+v, want none", snapshot.Tasks)
+	}
+}
+
 type fakeGitHubClient struct {
-	issues []GitHubIssue
+	issues   []GitHubIssue
+	mentions []GitHubMention
 }
 
 func (c fakeGitHubClient) ListIssues(context.Context, string, []string, int) ([]GitHubIssue, error) {
 	return c.issues, nil
+}
+
+func (c fakeGitHubClient) ListMentions(context.Context, int) ([]GitHubMention, error) {
+	return c.mentions, nil
 }
 
 func boolPtr(value bool) *bool {

@@ -240,10 +240,19 @@ func (r *ProjectRegistry) FindByIssueRepo(repo string) (core.Project, bool) {
 }
 
 func (r *ProjectRegistry) findByMetadataRepo(metadata map[string]any, repo string) (core.Project, bool) {
-	if source, ok := metadata["source"].(string); ok && strings.TrimSpace(source) == "github-issue" {
+	if source, ok := metadata["source"].(string); ok && githubExternalSourceUsesUpstreamRepo(source) {
 		return r.FindByIssueRepo(repo)
 	}
 	return r.FindByRepo(repo)
+}
+
+func githubExternalSourceUsesUpstreamRepo(source string) bool {
+	switch strings.TrimSpace(source) {
+	case "github-issue", "github-mention":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *ProjectRegistry) sortedProjectsLocked() []core.Project {
