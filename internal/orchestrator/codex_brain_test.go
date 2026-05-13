@@ -50,6 +50,42 @@ func TestCodexBrainExecArgsUseYoloPermissions(t *testing.T) {
 	}
 }
 
+func TestClaudeBrainPlansFromStreamResult(t *testing.T) {
+	brain := newTestClaudeBrain(t, "valid", nil)
+	plan, err := brain.Plan(context.Background(), core.Task{
+		ID:     "task-1",
+		Title:  "Implement task",
+		Prompt: "Make the scheduler use Claude.",
+	}, []string{"keep it small"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.WorkerKind != "claude" {
+		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	}
+	if plan.Prompt != "Investigate and implement the requested scheduler change." {
+		t.Fatalf("Prompt = %q", plan.Prompt)
+	}
+	if plan.Metadata["brain"] != "claude" {
+		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])
+	}
+}
+
+func TestClaudeBrainArgsUseStreamJSONAndSkipPermissions(t *testing.T) {
+	brain := &CodexBrain{provider: "claude"}
+	got := brain.claudeArgs()
+	want := []string{
+		"--print",
+		"--output-format",
+		"stream-json",
+		"--verbose",
+		"--dangerously-skip-permissions",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
 func TestCodexBrainSendsSchedulerPromptOnStdin(t *testing.T) {
 	dir := t.TempDir()
 	templatePath := filepath.Join(dir, "scheduler.md")
@@ -364,6 +400,32 @@ func newTestCodexBrain(t *testing.T, mode string, fallback BrainProvider) *Codex
 	return brain
 }
 
+func newTestClaudeBrain(t *testing.T, mode string, fallback BrainProvider) *CodexBrain {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scheduler.md")
+	if err := os.WriteFile(path, []byte("schedule the work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\n" +
+		"case \" $* \" in *\" --dangerously-skip-permissions \"*) ;; *) echo missing skip permissions >&2; exit 42;; esac\n" +
+		"printf '%s\\n' " + strconv.Quote(testClaudeBrainOutput(t, mode)) + "\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brain, err := NewClaudeBrain(ClaudeBrainConfig{
+		ClaudePath:   claudePath,
+		TemplatePath: path,
+		WorkDir:      dir,
+		Fallback:     fallback,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return brain
+}
+
 func testCodexBrainOutput(t *testing.T, mode string) string {
 	t.Helper()
 	switch mode {
@@ -382,6 +444,40 @@ func testCodexBrainOutput(t *testing.T, mode string) string {
 		return codexAgentMessageLine(t, plan)
 	case "invalid":
 		return `{"type":"item.completed","item":{"type":"agent_message","text":"{\"workerKind\":\"codex\"}"}}`
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
+	}
+	return ""
+}
+
+func testClaudeBrainOutput(t *testing.T, mode string) string {
+	t.Helper()
+	switch mode {
+	case "valid":
+		plan := Plan{
+			WorkerKind: "claude",
+			Prompt:     "Investigate and implement the requested scheduler change.",
+			Rationale:  "The task benefits from a Claude-backed scheduler.",
+			Steps: []PlanStep{{
+				Title:       "Implement",
+				Description: "Make the scheduler run through Claude.",
+			}},
+			RequiredApprovals: []ApprovalRequest{},
+			Spawns:            []SpawnRequest{},
+		}
+		content, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line, err := json.Marshal(map[string]any{
+			"type":    "result",
+			"subtype": "success",
+			"result":  string(content),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(line)
 	default:
 		t.Fatalf("unknown helper mode %q", mode)
 	}

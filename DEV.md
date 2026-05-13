@@ -11,7 +11,7 @@ The initial local-first vertical slice is implemented.
 - Snapshot reconstruction pages through the complete event log instead of stopping at the public event-listing page size.
 - HTTP API for health, snapshots, event history, task creation, steering, and cancellation.
 - SSE event stream for live dashboard updates.
-- Prompt-driven, Codex-backed, and API-backed orchestrator brain abstraction.
+- Prompt-driven, Codex-backed, Claude-backed, and API-backed orchestrator brain abstraction.
 - Plugin manifests are first-class snapshot/API state. Built-in brain/runner/driver capabilities are projected by default, and `-plugins` / `AGED_PLUGINS` can add external plugin descriptors for drivers, runners, or integrations. Enabled `aged-plugin-v1` command plugins are probed at startup with `command... describe`.
 - Plugins can be registered dynamically through `POST /api/plugins`, updated with `PUT /api/plugins/{id}`, deleted with `DELETE /api/plugins/{id}`, and managed from the dashboard Plugins panel. Runtime registrations are persisted in SQLite and reloaded on daemon restart.
 - Enabled `aged-plugin-v1` driver plugins are supervised as long-running `command... serve` processes. Snapshots/UI expose driver lifecycle state, PID, restart policy, restart count, recent logs, and failures.
@@ -206,7 +206,7 @@ The initial local-first vertical slice is implemented.
 - Added regression coverage for follow-up target inheritance and retry target inheritance.
 - Added an end-to-end dynamic replan regression where a local candidate is followed by a dependent worker while a higher-scored SSH target is available; the test fails if the dependent worker leaks to SSH.
 - Investigated VM failures where remote tmux workers reported `codex: command not found` even though Codex was installed under mise. Remote worker startup now bootstraps a predictable user tool PATH before launching tmux commands.
-- Codex scheduler/assistant/worker prompts now use stdin (`-`) instead of placing the full prompt in argv, preventing `argument list too long` on long-running tasks with large event histories. SSH workers upload the prompt to a remote file and redirect it into the CLI so the prompt is not embedded in the SSH command either.
+- Codex and Claude scheduler/assistant/worker prompts now use stdin instead of placing the full prompt in argv, preventing `argument list too long` on long-running tasks with large event histories. SSH workers upload the prompt to a remote file and redirect it into the CLI so the prompt is not embedded in the SSH command either.
 - Claude stream-json workers now include `--verbose`, matching the current Claude CLI requirement for `--print --output-format stream-json`.
 - SSH health probes now report runner tool availability (`codex`, `claude`, `git`, `jj`), and target selection skips SSH targets that have probed as missing the requested worker CLI. This keeps Codex work off targets where Codex is not installed.
 - Git candidate-base commits disable GPG signing so VM/test environments with signing helpers do not block internal worktree commits.
@@ -235,6 +235,7 @@ http://127.0.0.1:8787
 - The orchestrator must support long-lived, multi-turn tasks: it should be able to decompose large refactors, schedule implementation/review/follow-up worker turns, inspect outputs, incorporate feedback, request approvals, and decide when to continue, revise, merge, or stop.
 - Performance-improvement tasks currently rely on prompt conventions: scheduler guidance should decompose work into investigation, profiling/benchmark analysis, implementation, and validation turns; workers should report stable markdown sections including benchmark commands and before/after numbers when applicable.
 - Codex-backed scheduling is available with `AGED_BRAIN=codex`.
+- Claude-backed scheduling is available with `AGED_BRAIN=claude`.
 - API-backed scheduling is available with `AGED_BRAIN=api`, `AGED_BRAIN_MODEL`, and `AGED_BRAIN_API_KEY`.
 - Codex and Claude runners are wired as subprocess adapters; Codex has now completed retained self-bootstrap and self-apply tasks end to end.
 - Worker output normalization has been tuned against one real Claude smoke stream and retained Codex self-bootstrap/self-apply runs; broader task streams still need coverage.

@@ -5,7 +5,7 @@
 ## Current State
 
 - SQLite-backed daemon with HTTP API, SSE, MCP, and a React/Vite dashboard
-- Prompt, Codex, API, and static scheduler brains
+- Prompt, Codex, Claude, API, and static scheduler brains
 - Codex, Claude, shell, mock, benchmark, and plugin-backed workers
 - `jj` and Git workspace support, with isolated workspaces by default
 - Local and SSH/tmux execution targets
@@ -37,6 +37,7 @@ Useful scheduler/assistant settings:
 
 ```sh
 AGED_BRAIN=codex go run ./cmd/aged
+AGED_BRAIN=claude go run ./cmd/aged
 AGED_BRAIN=api AGED_BRAIN_MODEL=<model> AGED_BRAIN_API_KEY=<key> go run ./cmd/aged
 AGED_ASSISTANT=codex go run ./cmd/aged
 AGED_ASSISTANT=claude go run ./cmd/aged

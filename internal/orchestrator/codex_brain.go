@@ -14,7 +14,13 @@ import (
 	"aged/internal/core"
 )
 
-const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+const (
+	codexBrainKind             = "codex"
+	claudeBrainKind            = "claude"
+	codexYoloFlag              = "--dangerously-bypass-approvals-and-sandbox"
+	claudeSkipPermissionsFlag  = "--dangerously-skip-permissions"
+	defaultBrainCommandTimeout = 2 * time.Minute
+)
 
 type CodexBrainConfig struct {
 	CodexPath    string
@@ -25,8 +31,30 @@ type CodexBrainConfig struct {
 	Fallback     BrainProvider
 }
 
+type ClaudeBrainConfig struct {
+	ClaudePath   string
+	TemplatePath string
+	PromptSets   *PromptSetRegistry
+	WorkDir      string
+	Timeout      time.Duration
+	Fallback     BrainProvider
+}
+
+type cliBrainConfig struct {
+	Provider     string
+	CodexPath    string
+	ClaudePath   string
+	TemplatePath string
+	PromptSets   *PromptSetRegistry
+	WorkDir      string
+	Timeout      time.Duration
+	Fallback     BrainProvider
+}
+
 type CodexBrain struct {
+	provider   string
 	codexPath  string
+	claudePath string
 	template   string
 	promptSets *PromptSetRegistry
 	workDir    string
@@ -35,26 +63,70 @@ type CodexBrain struct {
 }
 
 func NewCodexBrain(config CodexBrainConfig) (*CodexBrain, error) {
+	return newCLIBrain(cliBrainConfig{
+		Provider:     codexBrainKind,
+		CodexPath:    config.CodexPath,
+		TemplatePath: config.TemplatePath,
+		PromptSets:   config.PromptSets,
+		WorkDir:      config.WorkDir,
+		Timeout:      config.Timeout,
+		Fallback:     config.Fallback,
+	})
+}
+
+func NewClaudeBrain(config ClaudeBrainConfig) (*CodexBrain, error) {
+	return newCLIBrain(cliBrainConfig{
+		Provider:     claudeBrainKind,
+		ClaudePath:   config.ClaudePath,
+		TemplatePath: config.TemplatePath,
+		PromptSets:   config.PromptSets,
+		WorkDir:      config.WorkDir,
+		Timeout:      config.Timeout,
+		Fallback:     config.Fallback,
+	})
+}
+
+func newCLIBrain(config cliBrainConfig) (*CodexBrain, error) {
 	template, err := os.ReadFile(config.TemplatePath)
 	if err != nil {
 		return nil, err
+	}
+	provider := strings.TrimSpace(config.Provider)
+	if provider == "" {
+		provider = codexBrainKind
+	}
+	if provider != codexBrainKind && provider != claudeBrainKind {
+		return nil, fmt.Errorf("CLI brain provider must be one of %q or %q", codexBrainKind, claudeBrainKind)
 	}
 	codexPath := strings.TrimSpace(config.CodexPath)
 	if codexPath == "" {
 		codexPath = "codex"
 	}
+	claudePath := strings.TrimSpace(config.ClaudePath)
+	if claudePath == "" {
+		claudePath = "claude"
+	}
 	timeout := config.Timeout
 	if timeout <= 0 {
-		timeout = 2 * time.Minute
+		timeout = defaultBrainCommandTimeout
 	}
 	return &CodexBrain{
+		provider:   provider,
 		codexPath:  codexPath,
+		claudePath: claudePath,
 		template:   string(template),
 		promptSets: config.PromptSets,
 		workDir:    config.WorkDir,
 		timeout:    timeout,
 		fallback:   config.Fallback,
 	}, nil
+}
+
+func (b *CodexBrain) kind() string {
+	if b == nil || strings.TrimSpace(b.provider) == "" {
+		return codexBrainKind
+	}
+	return strings.TrimSpace(b.provider)
 }
 
 func (b *CodexBrain) Plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
@@ -67,12 +139,12 @@ func (b *CodexBrain) Plan(ctx context.Context, task core.Task, steering []string
 	}
 	fallbackPlan, fallbackErr := b.fallback.Plan(ctx, task, steering)
 	if fallbackErr != nil {
-		return Plan{}, fmt.Errorf("codex brain failed: %w; fallback failed: %w", err, fallbackErr)
+		return Plan{}, fmt.Errorf("%s brain failed: %w; fallback failed: %w", b.kind(), err, fallbackErr)
 	}
 	if fallbackPlan.Metadata == nil {
 		fallbackPlan.Metadata = map[string]any{}
 	}
-	fallbackPlan.Metadata["brain"] = "codex-fallback"
+	fallbackPlan.Metadata["brain"] = b.kind() + "-fallback"
 	fallbackPlan.Metadata["fallbackReason"] = err.Error()
 	return fallbackPlan, nil
 }
@@ -87,7 +159,7 @@ func (b *CodexBrain) Replan(ctx context.Context, task core.Task, state Orchestra
 	if decision.Metadata == nil {
 		decision.Metadata = map[string]any{}
 	}
-	decision.Metadata["brain"] = "codex"
+	decision.Metadata["brain"] = b.kind()
 	decision.Metadata["scheduler"] = "orchestrator"
 	for key, value := range promptMetadata(rendered, fallbackReason) {
 		decision.Metadata[key] = value
@@ -105,7 +177,7 @@ func (b *CodexBrain) ReviewCompletion(ctx context.Context, task core.Task, candi
 	if review.Metadata == nil {
 		review.Metadata = map[string]any{}
 	}
-	review.Metadata["brain"] = "codex"
+	review.Metadata["brain"] = b.kind()
 	review.Metadata["scheduler"] = "orchestrator"
 	for key, value := range promptMetadata(rendered, fallbackReason) {
 		review.Metadata[key] = value
@@ -123,7 +195,7 @@ func (b *CodexBrain) ReviewPublication(ctx context.Context, task core.Task, cand
 	if review.Metadata == nil {
 		review.Metadata = map[string]any{}
 	}
-	review.Metadata["brain"] = "codex"
+	review.Metadata["brain"] = b.kind()
 	review.Metadata["scheduler"] = "orchestrator"
 	for key, value := range promptMetadata(rendered, fallbackReason) {
 		review.Metadata[key] = value
@@ -137,6 +209,34 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 
 	prompt := b.assistantPrompt(req)
 	workDir := nonEmpty(strings.TrimSpace(req.WorkDir), b.workDir)
+	if b.kind() == claudeBrainKind {
+		args := []string{"--print", "--output-format", "stream-json", "--verbose"}
+		if strings.TrimSpace(req.ProviderSessionID) != "" {
+			args = []string{"--resume", req.ProviderSessionID, "--print", "--output-format", "stream-json", "--verbose"}
+		}
+		stdout, err := runPromptCommand(runCtx, b.claudePath, args, workDir, prompt, "claude assistant command failed")
+		if err != nil {
+			return core.AssistantResponse{}, err
+		}
+		output := string(stdout)
+		content := extractLastParsedResult(claudeBrainKind, output)
+		if content == "" {
+			content = strings.TrimSpace(output)
+		}
+		sessionID := nonEmpty(extractClaudeSessionID(output), req.ProviderSessionID)
+		return core.AssistantResponse{
+			ConversationID:    req.ConversationID,
+			Message:           strings.TrimSpace(content),
+			Provider:          claudeBrainKind,
+			ProviderSessionID: sessionID,
+			Metadata: core.MustJSON(map[string]any{
+				"brain":             claudeBrainKind,
+				"providerSessionId": sessionID,
+				"resumed":           req.ProviderSessionID != "",
+			}),
+		}, nil
+	}
+
 	args := []string{"exec", "--sandbox", "read-only", "--json", "--cd", workDir, "-"}
 	if strings.TrimSpace(req.ProviderSessionID) != "" {
 		args = []string{"exec", "resume", "--json", req.ProviderSessionID, "-"}
@@ -161,7 +261,7 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 		Provider:          "codex",
 		ProviderSessionID: sessionID,
 		Metadata: core.MustJSON(map[string]any{
-			"brain":             "codex",
+			"brain":             codexBrainKind,
 			"providerSessionId": sessionID,
 			"resumed":           req.ProviderSessionID != "",
 		}),
@@ -169,7 +269,9 @@ func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.A
 }
 
 func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string) (Plan, error) {
-	if rendered, ok := b.customPrompt(task, "plan", b.taskMessage(task, steering)); ok {
+	var customErrors []string
+	var failedPrompt RenderedPrompt
+	for _, rendered := range b.customPrompts(task, planTemplateNames(task), b.taskMessage(task, steering)) {
 		plan, err := b.planWithPrompt(ctx, rendered.Prompt)
 		if err == nil {
 			if plan.Metadata == nil {
@@ -178,32 +280,29 @@ func (b *CodexBrain) plan(ctx context.Context, task core.Task, steering []string
 			for key, value := range promptMetadata(rendered, "") {
 				plan.Metadata[key] = value
 			}
-			plan.Metadata["brain"] = "codex"
+			plan.Metadata["brain"] = b.kind()
 			plan.Metadata["scheduler"] = "orchestrator"
 			return plan, nil
 		}
-		plan, fallbackErr := b.planWithPrompt(ctx, b.prompt(task, steering))
-		if fallbackErr != nil {
-			return Plan{}, fmt.Errorf("custom codex plan prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
-		}
-		if plan.Metadata == nil {
-			plan.Metadata = map[string]any{}
-		}
-		for key, value := range promptMetadata(rendered, err.Error()) {
-			plan.Metadata[key] = value
-		}
-		plan.Metadata["brain"] = "codex"
-		plan.Metadata["scheduler"] = "orchestrator"
-		return plan, nil
+		failedPrompt = rendered
+		customErrors = append(customErrors, fmt.Sprintf("%s: %v", rendered.Template, err))
 	}
 	plan, err := b.planWithPrompt(ctx, b.prompt(task, steering))
 	if err != nil {
+		if len(customErrors) > 0 {
+			return Plan{}, fmt.Errorf("custom %s plan prompts failed: %s; built-in prompt failed: %w", b.kind(), strings.Join(customErrors, "; "), err)
+		}
 		return Plan{}, err
 	}
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
-	plan.Metadata["brain"] = "codex"
+	if len(customErrors) > 0 {
+		for key, value := range promptMetadata(failedPrompt, strings.Join(customErrors, "; ")) {
+			plan.Metadata[key] = value
+		}
+	}
+	plan.Metadata["brain"] = b.kind()
 	plan.Metadata["scheduler"] = "orchestrator"
 	return plan, nil
 }
@@ -216,7 +315,7 @@ func (b *CodexBrain) replanWithFallback(ctx context.Context, rendered RenderedPr
 		}
 		fallback, fallbackErr := b.replanWithPrompt(ctx, builtinPrompt)
 		if fallbackErr != nil {
-			return ReplanDecision{}, "", fmt.Errorf("custom codex replan prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+			return ReplanDecision{}, "", fmt.Errorf("custom %s replan prompt failed: %w; built-in prompt failed: %w", b.kind(), err, fallbackErr)
 		}
 		return fallback, err.Error(), nil
 	}
@@ -232,7 +331,7 @@ func (b *CodexBrain) completionReviewWithFallback(ctx context.Context, rendered 
 		}
 		fallback, fallbackErr := b.completionReviewWithPrompt(ctx, builtinPrompt)
 		if fallbackErr != nil {
-			return CompletionReview{}, "", fmt.Errorf("custom codex completion review prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+			return CompletionReview{}, "", fmt.Errorf("custom %s completion review prompt failed: %w; built-in prompt failed: %w", b.kind(), err, fallbackErr)
 		}
 		return fallback, err.Error(), nil
 	}
@@ -248,7 +347,7 @@ func (b *CodexBrain) publicationReviewWithFallback(ctx context.Context, rendered
 		}
 		fallback, fallbackErr := b.publicationReviewWithPrompt(ctx, builtinPrompt)
 		if fallbackErr != nil {
-			return PublicationReview{}, "", fmt.Errorf("custom codex publication review prompt failed: %w; built-in prompt failed: %w", err, fallbackErr)
+			return PublicationReview{}, "", fmt.Errorf("custom %s publication review prompt failed: %w; built-in prompt failed: %w", b.kind(), err, fallbackErr)
 		}
 		return fallback, err.Error(), nil
 	}
@@ -257,13 +356,13 @@ func (b *CodexBrain) publicationReviewWithFallback(ctx context.Context, rendered
 }
 
 func (b *CodexBrain) planWithPrompt(ctx context.Context, prompt string) (Plan, error) {
-	content, err := b.runCodexPrompt(ctx, prompt, "codex brain command failed")
+	content, err := b.runBrainPrompt(ctx, prompt, b.kind()+" brain command failed")
 	if err != nil {
 		return Plan{}, err
 	}
 	plan, err := decodeCodexPlan([]byte(content))
 	if err != nil {
-		return Plan{}, fmt.Errorf("decode codex brain plan: %w", err)
+		return Plan{}, fmt.Errorf("decode %s brain plan: %w", b.kind(), err)
 	}
 	if err := plan.Validate(); err != nil {
 		return Plan{}, err
@@ -272,13 +371,13 @@ func (b *CodexBrain) planWithPrompt(ctx context.Context, prompt string) (Plan, e
 }
 
 func (b *CodexBrain) replanWithPrompt(ctx context.Context, prompt string) (ReplanDecision, error) {
-	content, err := b.runCodexPrompt(ctx, prompt, "codex replan command failed")
+	content, err := b.runBrainPrompt(ctx, prompt, b.kind()+" replan command failed")
 	if err != nil {
 		return ReplanDecision{}, err
 	}
 	decision, err := decodeReplanDecision([]byte(content))
 	if err != nil {
-		return ReplanDecision{}, fmt.Errorf("decode codex replan decision: %w", err)
+		return ReplanDecision{}, fmt.Errorf("decode %s replan decision: %w", b.kind(), err)
 	}
 	if err := decision.Validate(); err != nil {
 		return ReplanDecision{}, err
@@ -287,34 +386,41 @@ func (b *CodexBrain) replanWithPrompt(ctx context.Context, prompt string) (Repla
 }
 
 func (b *CodexBrain) completionReviewWithPrompt(ctx context.Context, prompt string) (CompletionReview, error) {
-	content, err := b.runCodexPrompt(ctx, prompt, "codex completion review command failed")
+	content, err := b.runBrainPrompt(ctx, prompt, b.kind()+" completion review command failed")
 	if err != nil {
 		return CompletionReview{}, err
 	}
 	review, err := decodeCompletionReview([]byte(content))
 	if err != nil {
-		return CompletionReview{}, fmt.Errorf("decode codex completion review: %w", err)
+		return CompletionReview{}, fmt.Errorf("decode %s completion review: %w", b.kind(), err)
 	}
 	return review, nil
 }
 
 func (b *CodexBrain) publicationReviewWithPrompt(ctx context.Context, prompt string) (PublicationReview, error) {
-	content, err := b.runCodexPrompt(ctx, prompt, "codex publication review command failed")
+	content, err := b.runBrainPrompt(ctx, prompt, b.kind()+" publication review command failed")
 	if err != nil {
 		return PublicationReview{}, err
 	}
 	review, err := decodePublicationReview([]byte(content))
 	if err != nil {
-		return PublicationReview{}, fmt.Errorf("decode codex publication review: %w", err)
+		return PublicationReview{}, fmt.Errorf("decode %s publication review: %w", b.kind(), err)
 	}
 	return review, nil
 }
 
-func (b *CodexBrain) runCodexPrompt(ctx context.Context, prompt string, failurePrefix string) (string, error) {
+func (b *CodexBrain) runBrainPrompt(ctx context.Context, prompt string, failurePrefix string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	var cmd *exec.Cmd
+	switch b.kind() {
+	case claudeBrainKind:
+		cmd = exec.CommandContext(runCtx, b.claudePath, b.claudeArgs()...)
+		cmd.Dir = b.workDir
+	default:
+		cmd = exec.CommandContext(runCtx, b.codexPath, b.execArgs()...)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -323,9 +429,19 @@ func (b *CodexBrain) runCodexPrompt(ctx context.Context, prompt string, failureP
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("%s: %w: %s", failurePrefix, err, commandFailureDetail(stdout.String(), stderr.String()))
 	}
-	content, err := extractCodexAgentMessage(stdout.Bytes())
-	if err != nil {
-		return "", err
+	var content string
+	switch b.kind() {
+	case claudeBrainKind:
+		content = extractLastParsedResult(claudeBrainKind, stdout.String())
+		if strings.TrimSpace(content) == "" {
+			return "", errors.New("claude brain returned no result")
+		}
+	default:
+		var err error
+		content, err = extractCodexAgentMessage(stdout.Bytes())
+		if err != nil {
+			return "", err
+		}
 	}
 	return trimJSONFence(content), nil
 }
@@ -366,6 +482,10 @@ func (b *CodexBrain) assistantPrompt(req core.AssistantRequest) string {
 
 func (b *CodexBrain) execArgs() []string {
 	return []string{"exec", codexYoloFlag, "--json", "--cd", b.workDir, "-"}
+}
+
+func (b *CodexBrain) claudeArgs() []string {
+	return []string{"--print", "--output-format", "stream-json", "--verbose", claudeSkipPermissionsFlag}
 }
 
 func decodeReplanDecision(data []byte) (ReplanDecision, error) {
@@ -640,8 +760,16 @@ func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
 }
 
 func (b *CodexBrain) customPrompt(task core.Task, templateName string, input any) (RenderedPrompt, bool) {
-	if b.promptSets == nil {
+	rendered := b.customPrompts(task, []string{templateName}, input)
+	if len(rendered) == 0 {
 		return RenderedPrompt{}, false
+	}
+	return rendered[0], true
+}
+
+func (b *CodexBrain) customPrompts(task core.Task, templateNames []string, input any) []RenderedPrompt {
+	if b.promptSets == nil {
+		return nil
 	}
 	data := map[string]any{
 		"system":      strings.TrimSpace(b.template),
@@ -656,7 +784,33 @@ func (b *CodexBrain) customPrompt(task core.Task, templateName string, input any
 			"completionMode": taskCompletionModeFromTask(task),
 		},
 	}
-	return b.promptSets.Render(task, templateName, data)
+	var rendered []RenderedPrompt
+	for _, templateName := range templateNames {
+		if prompt, ok := b.promptSets.Render(task, templateName, data); ok {
+			rendered = append(rendered, prompt)
+		}
+	}
+	return rendered
+}
+
+func planTemplateNames(task core.Task) []string {
+	if isGitHubReviewRequestTask(task) {
+		return []string{PromptTemplateGitHubReview, PromptTemplatePlan}
+	}
+	return []string{PromptTemplatePlan}
+}
+
+func isGitHubReviewRequestTask(task core.Task) bool {
+	if len(task.Metadata) == 0 {
+		return false
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return false
+	}
+	return strings.EqualFold(stringMetadataValue(metadata["source"]), "github-mention") &&
+		strings.EqualFold(stringMetadataValue(metadata["reason"]), "review_requested") &&
+		strings.EqualFold(stringMetadataValue(metadata["subjectType"]), "PullRequest")
 }
 
 func replanPromptPayload(task core.Task, state OrchestrationState) map[string]any {

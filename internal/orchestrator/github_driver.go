@@ -681,7 +681,7 @@ Comment URL: %s
 Mention body:
 %s
 
-Inspect the linked GitHub context and decide the appropriate response. If this is a pull request review request or mention, review the PR and leave a concise GitHub comment or review when useful. Use gh pr review for whole-PR review comments, approval, or change requests; when precise inline code comments are warranted, use gh api to create a pull request review with line or range comments. If code changes are clearly requested and appropriate for the current repository, make them in the current checkout and report what changed. Do not open a new pull request unless explicitly asked.
+Inspect the linked GitHub context and decide the appropriate response. If this is a pull request review request, leave an actual GitHub pull request review rather than only a top-level comment. Use gh api to create inline review comments on exact files and lines when specific code feedback is warranted, then submit a neutral comment, approval, or request-changes review as appropriate. Use gh pr review --comment, --approve, or --request-changes for whole-PR review submission when inline comments are not needed. If this is a mention rather than a review request, prefer a review for PR-wide feedback and use a normal comment only when a review would not fit. If code changes are clearly requested and appropriate for the current repository, make them in the current checkout and report what changed. Do not open a new pull request unless explicitly asked.
 `, subject, mention.Repo, mention.URL, mention.Reason, subject, mention.Number, mention.Title, mention.Author, mention.CommentURL, body)
 }
 
