@@ -2403,21 +2403,9 @@ function CommandLine({ event }: { event: EventRecord }) {
 
 function WorkspaceSummary({ event }: { event: EventRecord }) {
   const payload = event.payload as DisplayPayload;
-  const dirty = Boolean(payload.dirty ?? payload.workspaceChanges?.dirty ?? false);
   return (
     <section className="worker-section-card">
-      <div className="section-title-row">
-        <strong>Workspace</strong>
-        <span className="tool-status neutral">{payload.mode ?? "unknown"}</span>
-        <span className="tool-status neutral">{payload.vcsType ?? "vcs unknown"}</span>
-        <span className={dirty ? "tool-status warning" : "tool-status"}>{dirty ? "dirty" : "clean"}</span>
-      </div>
-      <div className="path-list">
-        <PathRow label="CWD" value={payload.cwd ?? payload.root ?? "unknown"} />
-        {payload.root && payload.root !== payload.cwd && <PathRow label="Root" value={payload.root} />}
-        {payload.sourceRoot && <PathRow label="Source" value={payload.sourceRoot} />}
-        {payload.workspaceName && <PathRow label="Workspace" value={payload.workspaceName} />}
-      </div>
+      <WorkspaceStateBlock title="Workspace" payload={payload} headerClassName="section-title-row" showUnknownBadges />
     </section>
   );
 }
@@ -2444,6 +2432,28 @@ function PathRow({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <code title={value}>{value}</code>
     </div>
+  );
+}
+
+function WorkspaceStateBlock({ title, payload, headerClassName, showUnknownBadges = false }: { title: string; payload: Record<string, unknown>; headerClassName: string; showUnknownBadges?: boolean }) {
+  const mode = payloadValue(payload.mode), vcsType = payloadValue(payload.vcsType);
+  const cwd = payloadValue(payload.cwd || payload.root) || "unknown", root = payloadValue(payload.root);
+  const dirty = payload.dirty === true || asRecord(payload.workspaceChanges).dirty === true;
+  return (
+    <>
+      <div className={headerClassName}>
+        <strong>{title}</strong>
+        {(mode || showUnknownBadges) && <span className="tool-status neutral">{mode || "unknown"}</span>}
+        {(vcsType || showUnknownBadges) && <span className="tool-status neutral">{vcsType || "vcs unknown"}</span>}
+        <span className={dirty ? "tool-status warning" : "tool-status"}>{dirty ? "dirty" : "clean"}</span>
+      </div>
+      <div className="path-list">
+        <PathRow label="CWD" value={cwd} />
+        {root && root !== payloadValue(payload.cwd) && <PathRow label="Root" value={root} />}
+        {payloadValue(payload.sourceRoot) && <PathRow label="Source" value={payloadValue(payload.sourceRoot)} />}
+        {payloadValue(payload.workspaceName) && <PathRow label="Workspace" value={payloadValue(payload.workspaceName)} />}
+      </div>
+    </>
   );
 }
 
@@ -3456,21 +3466,9 @@ function WorkerLifecycleCard({ title, subtitle }: { title: string; subtitle: str
 }
 
 function WorkerWorkspaceCard({ payload }: { payload: Record<string, unknown> }) {
-  const dirty = payload.dirty === true || asRecord(payload.workspaceChanges).dirty === true;
   return (
     <div className="lifecycle-card">
-      <div className="tool-card-header">
-        <strong>Workspace Ready</strong>
-        {payloadValue(payload.mode) && <span className="tool-status neutral">{payloadValue(payload.mode)}</span>}
-        {payloadValue(payload.vcsType) && <span className="tool-status neutral">{payloadValue(payload.vcsType)}</span>}
-        <span className={dirty ? "tool-status warning" : "tool-status"}>{dirty ? "dirty" : "clean"}</span>
-      </div>
-      <div className="path-list">
-        <PathRow label="CWD" value={payloadValue(payload.cwd || payload.root) || "unknown"} />
-        {payloadValue(payload.root) && payload.root !== payload.cwd && <PathRow label="Root" value={payloadValue(payload.root)} />}
-        {payloadValue(payload.sourceRoot) && <PathRow label="Source" value={payloadValue(payload.sourceRoot)} />}
-        {payloadValue(payload.workspaceName) && <PathRow label="Workspace" value={payloadValue(payload.workspaceName)} />}
-      </div>
+      <WorkspaceStateBlock title="Workspace Ready" payload={payload} headerClassName="tool-card-header" />
     </div>
   );
 }
