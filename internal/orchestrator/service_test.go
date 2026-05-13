@@ -7834,6 +7834,76 @@ func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	}
 }
 
+func TestServiceDeduplicatesConcurrentNonSteerableSteeringRestarts(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	retryStarted := make(chan struct{}, 2)
+	retryRelease := make(chan struct{})
+	runner := &restartOnSteeringRunner{
+		started:      started,
+		retryStarted: retryStarted,
+		retryRelease: retryRelease,
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "continue the investigation",
+	}}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Duplicate steer restart", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "continue"})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	select {
+	case <-retryStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("retry worker did not start")
+	}
+	select {
+	case <-retryStarted:
+		t.Fatal("duplicate steering restart launched a second retry worker")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(retryRelease)
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if calls := runner.callsValue(); calls != 2 {
+		t.Fatalf("runner calls = %d, want 2", calls)
+	}
+	if created := countEvents(snapshot.Events, core.EventWorkerCreated, task.ID); created != 2 {
+		t.Fatalf("worker.created count = %d, want 2", created)
+	}
+	if countTaskActions(snapshot.Events, task.ID, "steering_restart", "started") != 1 {
+		t.Fatalf("steering restart started actions = %d, want 1", countTaskActions(snapshot.Events, task.ID, "steering_restart", "started"))
+	}
+	if countTaskActions(snapshot.Events, task.ID, "steering_restart", "skipped") != 1 {
+		t.Fatalf("steering restart skipped actions = %d, want 1", countTaskActions(snapshot.Events, task.ID, "steering_restart", "skipped"))
+	}
+}
+
 func TestServiceRecommendsFinalApplyPolicyForSelectedCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9533,6 +9603,8 @@ type blockingEventRunner struct {
 type restartOnSteeringRunner struct {
 	mu              sync.Mutex
 	started         chan<- struct{}
+	retryStarted    chan<- struct{}
+	retryRelease    <-chan struct{}
 	calls           int
 	prompt          string
 	resumeSessionID string
@@ -9743,6 +9815,16 @@ func (r *restartOnSteeringRunner) Run(ctx context.Context, spec worker.Spec, sin
 		close(r.started)
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if r.retryStarted != nil {
+		r.retryStarted <- struct{}{}
+	}
+	if r.retryRelease != nil {
+		select {
+		case <-r.retryRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return sink.Event(ctx, worker.Event{Kind: worker.EventResult, Text: "resumed with steering"})
 }

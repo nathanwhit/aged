@@ -92,6 +92,8 @@ type Service struct {
 	steering    map[string]chan string
 	remoteRuns  map[string]remoteRun
 	workerCaps  map[string]worker.Capabilities
+
+	steeringRestarts map[string]struct{}
 }
 
 const (
@@ -330,28 +332,29 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		}}, "default")
 	}
 	service := &Service{
-		store:         store,
-		broker:        NewBroker(),
-		brain:         brain,
-		runners:       runners,
-		baseRunners:   maps.Clone(runners),
-		pluginRunners: map[string]struct{}{},
-		workDir:       workDir,
-		projects:      projects,
-		plugins:       NewPluginRegistry(builtinPlugins()),
-		promptSets:    NewPromptSetRegistry(nil, ""),
-		workspaces:    workspaces,
-		targets:       targets,
-		sshRunner:     sshRunner,
-		prPublisher:   NewLocalPullRequestPublisher(),
-		remoteApply:   applyRemotePatch,
-		cancels:       map[string]context.CancelFunc{},
-		taskCancels:   map[string]context.CancelFunc{},
-		taskRuns:      map[string]string{},
-		tasks:         map[string]string{},
-		steering:      map[string]chan string{},
-		remoteRuns:    map[string]remoteRun{},
-		workerCaps:    map[string]worker.Capabilities{},
+		store:            store,
+		broker:           NewBroker(),
+		brain:            brain,
+		runners:          runners,
+		baseRunners:      maps.Clone(runners),
+		pluginRunners:    map[string]struct{}{},
+		workDir:          workDir,
+		projects:         projects,
+		plugins:          NewPluginRegistry(builtinPlugins()),
+		promptSets:       NewPromptSetRegistry(nil, ""),
+		workspaces:       workspaces,
+		targets:          targets,
+		sshRunner:        sshRunner,
+		prPublisher:      NewLocalPullRequestPublisher(),
+		remoteApply:      applyRemotePatch,
+		cancels:          map[string]context.CancelFunc{},
+		taskCancels:      map[string]context.CancelFunc{},
+		taskRuns:         map[string]string{},
+		tasks:            map[string]string{},
+		steering:         map[string]chan string{},
+		remoteRuns:       map[string]remoteRun{},
+		workerCaps:       map[string]worker.Capabilities{},
+		steeringRestarts: map[string]struct{}{},
 	}
 	service.drivers = NewDriverRegistry(service)
 	return service
@@ -1308,6 +1311,22 @@ func (s *Service) startTaskRoutine(taskID string, fn func(context.Context)) {
 	}()
 }
 
+func (s *Service) beginSteeringRestart(taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.steeringRestarts[taskID]; ok {
+		return false
+	}
+	s.steeringRestarts[taskID] = struct{}{}
+	return true
+}
+
+func (s *Service) finishSteeringRestart(taskID string) {
+	s.mu.Lock()
+	delete(s.steeringRestarts, taskID)
+	s.mu.Unlock()
+}
+
 func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (core.Task, error) {
 	if req.Prompt == "" {
 		return core.Task{}, errors.New("prompt is required")
@@ -1639,6 +1658,16 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
 		})
 	} else if snapshotErr == nil && len(restartWorkerIDs) > 0 {
+		if !s.beginSteeringRestart(taskID) {
+			_ = s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":      "steering_restart",
+				"status":    "skipped",
+				"reason":    "steering restart already in progress",
+				"message":   req.Message,
+				"workerIds": restartWorkerIDs,
+			})
+			return nil
+		}
 		for _, active := range restartWorkers {
 			if active.Cancel != nil {
 				active.Cancel()
@@ -1651,6 +1680,7 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 }
 
 func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID string, message string, workerIDs []string) {
+	defer s.finishSteeringRestart(taskID)
 	_ = s.recordTaskAction(ctx, taskID, map[string]any{
 		"kind":      "steering_restart",
 		"status":    "started",
