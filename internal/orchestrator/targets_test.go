@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -494,6 +495,35 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 	}
 	if !sawPromptUpload || !sawPromptRedirect || !sawPathBootstrap || !sawCallbackHelper {
 		t.Fatalf("commands did not upload prompt, install callback helper, redirect stdin, and bootstrap PATH: %+v", executor.commands)
+	}
+}
+
+func TestRemoteCreateTaskHelperHelp(t *testing.T) {
+	helperPath := filepath.Join(t.TempDir(), "aged-create-task")
+	if err := os.WriteFile(helperPath, []byte(remoteCreateTaskHelperScript()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(helperPath, "--help")
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("aged-create-task --help failed: %v\n%s", err, output)
+	}
+	help := string(output)
+	for _, want := range []string{
+		"aged-create-task queues a follow-up task",
+		"Usage:",
+		"--title TITLE",
+		"--project-id ID",
+		"AGED_WORKER_CALLBACK_DIR",
+		"Reads the full new task prompt from stdin",
+		"queued <path>",
+		"Exits 2",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help output missing %q:\n%s", want, help)
+		}
 	}
 }
 

@@ -573,6 +573,45 @@ func remoteCallbackEnv(run remoteRun) string {
 func remoteCreateTaskHelperScript() string {
 	return `#!/bin/sh
 set -eu
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+aged-create-task queues a follow-up task for the original aged orchestrator.
+
+Usage:
+  aged-create-task [--title TITLE] [--project-id PROJECT_ID] < prompt.txt
+  printf '%s\n' "Prompt for the new task" | aged-create-task --title "Follow-up"
+
+Input:
+  Reads the full new task prompt from stdin. The orchestrator trims the prompt
+  and rejects empty prompts when it drains worker callbacks.
+
+Options:
+  --title TITLE          Optional task title. If omitted, aged applies its
+                         normal title/defaulting behavior.
+  --project-id ID        Optional project ID for the new task.
+  -h, --help             Show this help and exit.
+
+Environment:
+  AGED_WORKER_CALLBACK_DIR   Required for queueing callbacks. The helper writes
+                             an atomic JSON callback file into this directory.
+  AGED_PARENT_TASK_ID        Optional parent task metadata; exported by aged for
+                             remote workers.
+  AGED_PARENT_WORKER_ID      Optional parent worker metadata; exported by aged
+                             for remote workers.
+
+Behavior:
+  The command does not contact the orchestrator directly. It writes a callback
+  file that the existing SSH worker session drains over the original control
+  channel. On success it prints "queued <path>".
+
+Failure cases:
+  Exits 2 if AGED_WORKER_CALLBACK_DIR is missing, an unknown argument is passed,
+  or no base64 encoder is available (base64, openssl, or python3).
+EOF
+    exit 0
+    ;;
+esac
 if [ -z "${AGED_WORKER_CALLBACK_DIR:-}" ]; then
   echo "AGED_WORKER_CALLBACK_DIR is required" >&2
   exit 2
