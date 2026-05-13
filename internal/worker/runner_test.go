@@ -522,29 +522,26 @@ func TestCodexOutputFilterLeavesUnknownStderrErrorsUnsuppressed(t *testing.T) {
 	}
 }
 
-func TestBenchmarkCompareRunnerReportsImprovement(t *testing.T) {
-	sink := &recordingSink{}
-	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+func TestBenchmarkCompareRunnerSuccessReports(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+		want   []string
+	}{
+		{
+			name: "improvement",
+			prompt: `
 command: go test -bench=Parser
 baseline: 100
 candidate: 112
 threshold_percent: 5
 higher_is_better: true
-`}, sink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
-		t.Fatalf("events = %+v", sink.events)
-	}
-	if !strings.Contains(sink.events[0].Text, "verdict: improved") {
-		t.Fatalf("report = %s", sink.events[0].Text)
-	}
-}
-
-func TestBenchmarkCompareRunnerUsesRepeatedSamplesAndSameCommand(t *testing.T) {
-	sink := &recordingSink{}
-	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+`,
+			want: []string{"verdict: improved"},
+		},
+		{
+			name: "repeated samples same command",
+			prompt: `
 baseline_command: go test -bench=Parser
 candidate_command: go test -bench=Parser
 baseline_samples: 100, 101, 99
@@ -552,46 +549,28 @@ candidate_samples: 108, 109, 107
 min_samples: 3
 threshold_percent: 5
 higher_is_better: true
-`}, sink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(sink.events[0].Text, "sample_count: 3") || !strings.Contains(sink.events[0].Text, "verdict: improved") {
-		t.Fatalf("report = %s", sink.events[0].Text)
-	}
-}
-
-func TestBenchmarkCompareRunnerParsesScientificNotationScalars(t *testing.T) {
-	sink := &recordingSink{}
-	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+`,
+			want: []string{"sample_count: 3", "verdict: improved"},
+		},
+		{
+			name: "scientific notation scalars",
+			prompt: `
 command: go test -bench=Parser
 baseline: 1e6
 candidate: 1.25e+06
 threshold_percent: 20
 higher_is_better: true
-`}, sink)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
-		t.Fatalf("events = %+v", sink.events)
-	}
-	report := sink.events[0].Text
-	for _, want := range []string{
-		"baseline: 1e+06",
-		"candidate: 1.25e+06",
-		"delta_percent: 25",
-		"verdict: improved",
-	} {
-		if !strings.Contains(report, want) {
-			t.Fatalf("report missing %q:\n%s", want, report)
-		}
-	}
-}
-
-func TestBenchmarkCompareRunnerParsesScientificNotationSamples(t *testing.T) {
-	sink := &recordingSink{}
-	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+`,
+			want: []string{
+				"baseline: 1e+06",
+				"candidate: 1.25e+06",
+				"delta_percent: 25",
+				"verdict: improved",
+			},
+		},
+		{
+			name: "scientific notation samples",
+			prompt: `
 baseline_command: go test -bench=Parser
 candidate_command: go test -bench=Parser
 baseline_samples: 9.5E-3, +1.0e-2, .0105e+0
@@ -599,24 +578,42 @@ candidate_samples: 1.14e-2, 1.20E-02, +1.26e-2
 min_samples: 3
 threshold_percent: 15
 higher_is_better: true
-`}, sink)
+`,
+			want: []string{
+				"baseline: 0.01",
+				"candidate: 0.012",
+				"baseline_samples: 0.0095, 0.01, 0.0105",
+				"candidate_samples: 0.0114, 0.012, 0.0126",
+				"sample_count: 3",
+				"delta_percent: 20",
+				"verdict: improved",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			report := runBenchmarkCompare(t, tt.prompt)
+			for _, want := range tt.want {
+				if !strings.Contains(report, want) {
+					t.Fatalf("report missing %q:\n%s", want, report)
+				}
+			}
+		})
+	}
+}
+
+func runBenchmarkCompare(t *testing.T, prompt string) string {
+	t.Helper()
+	sink := &recordingSink{}
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: prompt}, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := sink.events[0].Text
-	for _, want := range []string{
-		"baseline: 0.01",
-		"candidate: 0.012",
-		"baseline_samples: 0.0095, 0.01, 0.0105",
-		"candidate_samples: 0.0114, 0.012, 0.0126",
-		"sample_count: 3",
-		"delta_percent: 20",
-		"verdict: improved",
-	} {
-		if !strings.Contains(report, want) {
-			t.Fatalf("report missing %q:\n%s", want, report)
-		}
+	if len(sink.events) != 1 || sink.events[0].Kind != EventResult {
+		t.Fatalf("events = %+v", sink.events)
 	}
+	return sink.events[0].Text
 }
 
 func TestBenchmarkCompareNumberParserSupportsFloatNotation(t *testing.T) {
