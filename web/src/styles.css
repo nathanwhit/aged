@@ -1495,14 +1495,21 @@ small {
 .worker-event-details summary {
   color: #343741;
   cursor: pointer;
+  display: -webkit-box;
   font-size: 13px;
   line-height: 1.4;
+  overflow: hidden;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .worker-event-details[open] summary {
+  display: block;
   margin-bottom: 8px;
+  overflow: visible;
+  -webkit-line-clamp: unset;
 }
 
 .event-payload p {
