@@ -26,13 +26,19 @@ type SSHRunner struct {
 type RemoteCallbackHandler func(context.Context, remoteRun, []RemoteWorkerCallback) error
 
 type RemoteWorkerCallback struct {
-	ID             string
-	Type           string
-	Prompt         string
-	Title          string
-	ProjectID      string
-	ParentTaskID   string
-	ParentWorkerID string
+	ID                   string
+	Type                 string
+	Prompt               string
+	Title                string
+	ProjectID            string
+	ParentTaskID         string
+	ParentWorkerID       string
+	Body                 string
+	Repo                 string
+	Base                 string
+	Branch               string
+	Draft                bool
+	ContinueAfterPublish bool
 }
 
 type remoteRun struct {
@@ -137,6 +143,9 @@ func (r SSHRunner) installCallbackEnvironment(ctx context.Context, run remoteRun
 	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remoteCreateTaskHelperPath(run))+" && chmod 700 "+shellQuote(remoteCreateTaskHelperPath(run))), remoteCreateTaskHelperScript()); err != nil {
 		return err
 	}
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remotePublishPRHelperPath(run))+" && chmod 700 "+shellQuote(remotePublishPRHelperPath(run))), remotePublishPRHelperScript()); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -212,7 +221,9 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, filter *worker.O
 		return remoteStatus{Status: "unreachable", Error: strings.TrimSpace(rawStatus)}, err
 	}
 	if err := r.drainRemoteCallbacks(ctx, run, sink); err != nil {
-		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain remote worker callbacks: " + err.Error()})
+		if !errors.Is(err, errWorkerCallbackDeferred) {
+			_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain remote worker callbacks: " + err.Error()})
+		}
 	}
 	var status remoteStatus
 	if err := json.Unmarshal([]byte(strings.TrimSpace(rawStatus)), &status); err != nil {
@@ -561,6 +572,10 @@ func remoteCreateTaskHelperPath(run remoteRun) string {
 	return path.Join(run.RunDir, "bin", "aged-create-task")
 }
 
+func remotePublishPRHelperPath(run remoteRun) string {
+	return path.Join(run.RunDir, "bin", "aged-publish-pr")
+}
+
 func remoteCallbackEnv(run remoteRun) string {
 	lines := []string{
 		"export AGED_PARENT_TASK_ID=" + shellQuote(run.TaskID),
@@ -647,6 +662,81 @@ printf 'queued %s\n' "$out"
 `
 }
 
+func remotePublishPRHelperScript() string {
+	return `#!/bin/sh
+set -eu
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+aged-publish-pr asks the original aged orchestrator to publish this worker result.
+
+Usage:
+  aged-publish-pr [--title TITLE] [--repo OWNER/REPO] [--base BRANCH] [--branch BRANCH] [--draft] [--wait-after-publish] < body.md
+  printf '%s\n' "Summary and validation" | aged-publish-pr --title "Improve loop handling"
+
+Input:
+  Reads the pull request body from stdin. The orchestrator trims the body and
+  rejects empty bodies.
+
+Options:
+  --title TITLE          Optional pull request title.
+  --repo OWNER/REPO      Optional target repository.
+  --base BRANCH          Optional base branch.
+  --branch BRANCH        Optional head branch name.
+  --draft                Open as a draft pull request.
+  --wait-after-publish   Leave the parent task waiting on the PR instead of
+                         continuing. By default this helper is for intermediate
+                         PRs and the parent task continues after publication.
+  -h, --help             Show this help and exit.
+EOF
+    exit 0
+    ;;
+esac
+if [ -z "${AGED_WORKER_CALLBACK_DIR:-}" ]; then
+  echo "AGED_WORKER_CALLBACK_DIR is required" >&2
+  exit 2
+fi
+title=""
+repo=""
+base=""
+branch=""
+draft=false
+continue_after_publish=true
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title) title="$2"; shift 2 ;;
+    --repo) repo="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --branch) branch="$2"; shift 2 ;;
+    --draft) draft=true; shift ;;
+    --wait-after-publish) continue_after_publish=false; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+b64() {
+  if command -v base64 >/dev/null 2>&1; then base64 | tr -d '\n'
+  elif command -v openssl >/dev/null 2>&1; then openssl base64 -A
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())'
+  else echo "base64, openssl, or python3 is required" >&2; exit 2
+  fi
+}
+mkdir -p "$AGED_WORKER_CALLBACK_DIR"
+stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+tmp="$AGED_WORKER_CALLBACK_DIR/publish-pr.$stamp.$$.${RANDOM:-0}.tmp"
+out="${tmp%.tmp}.json"
+body_b64=$(cat | b64)
+title_b64=$(printf '%s' "$title" | b64)
+repo_b64=$(printf '%s' "$repo" | b64)
+base_b64=$(printf '%s' "$base" | b64)
+branch_b64=$(printf '%s' "$branch" | b64)
+parent_task_b64=$(printf '%s' "${AGED_PARENT_TASK_ID:-}" | b64)
+parent_worker_b64=$(printf '%s' "${AGED_PARENT_WORKER_ID:-}" | b64)
+printf '{"type":"publish_pull_request","bodyBase64":"%s","titleBase64":"%s","repoBase64":"%s","baseBase64":"%s","branchBase64":"%s","parentTaskIdBase64":"%s","parentWorkerIdBase64":"%s","draft":%s,"continueAfterPublish":%s}\n' "$body_b64" "$title_b64" "$repo_b64" "$base_b64" "$branch_b64" "$parent_task_b64" "$parent_worker_b64" "$draft" "$continue_after_publish" > "$tmp"
+mv "$tmp" "$out"
+printf 'queued %s\n' "$out"
+`
+}
+
 func remoteCallbackReadScript(run remoteRun) string {
 	return fmt.Sprintf(`dir=%s
 [ -d "$dir" ] || exit 0
@@ -662,10 +752,16 @@ done`, shellQuote(remoteCallbackDir(run)))
 type remoteCallbackPayload struct {
 	Type                 string `json:"type"`
 	PromptBase64         string `json:"promptBase64"`
+	BodyBase64           string `json:"bodyBase64,omitempty"`
 	TitleBase64          string `json:"titleBase64,omitempty"`
 	ProjectIDBase64      string `json:"projectIdBase64,omitempty"`
+	RepoBase64           string `json:"repoBase64,omitempty"`
+	BaseBase64           string `json:"baseBase64,omitempty"`
+	BranchBase64         string `json:"branchBase64,omitempty"`
 	ParentTaskIDBase64   string `json:"parentTaskIdBase64,omitempty"`
 	ParentWorkerIDBase64 string `json:"parentWorkerIdBase64,omitempty"`
+	Draft                bool   `json:"draft,omitempty"`
+	ContinueAfterPublish bool   `json:"continueAfterPublish,omitempty"`
 }
 
 func parseRemoteCallbackFiles(raw string) ([]RemoteWorkerCallback, []string, error) {
@@ -721,9 +817,25 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 	if err != nil {
 		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback title %s: %w", fileName, err)
 	}
+	prBody, err := decode(payload.BodyBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback body %s: %w", fileName, err)
+	}
 	projectID, err := decode(payload.ProjectIDBase64)
 	if err != nil {
 		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback project %s: %w", fileName, err)
+	}
+	repo, err := decode(payload.RepoBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback repo %s: %w", fileName, err)
+	}
+	base, err := decode(payload.BaseBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback base %s: %w", fileName, err)
+	}
+	branch, err := decode(payload.BranchBase64)
+	if err != nil {
+		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback branch %s: %w", fileName, err)
 	}
 	parentTaskID, err := decode(payload.ParentTaskIDBase64)
 	if err != nil {
@@ -734,13 +846,19 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback parent worker %s: %w", fileName, err)
 	}
 	return RemoteWorkerCallback{
-		ID:             strings.TrimSuffix(path.Base(fileName), ".json"),
-		Type:           nonEmpty(payload.Type, "create_task"),
-		Prompt:         prompt,
-		Title:          title,
-		ProjectID:      projectID,
-		ParentTaskID:   parentTaskID,
-		ParentWorkerID: parentWorkerID,
+		ID:                   strings.TrimSuffix(path.Base(fileName), ".json"),
+		Type:                 nonEmpty(payload.Type, "create_task"),
+		Prompt:               prompt,
+		Title:                title,
+		ProjectID:            projectID,
+		ParentTaskID:         parentTaskID,
+		ParentWorkerID:       parentWorkerID,
+		Body:                 prBody,
+		Repo:                 repo,
+		Base:                 base,
+		Branch:               branch,
+		Draft:                payload.Draft,
+		ContinueAfterPublish: payload.ContinueAfterPublish,
 	}, nil
 }
 
