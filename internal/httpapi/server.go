@@ -107,12 +107,7 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := s.service.Snapshot(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshot.Projects)
+	s.writeSnapshotField(w, r, func(snapshot core.Snapshot) any { return snapshot.Projects })
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -143,12 +138,7 @@ func (s *Server) projectHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) targets(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := s.service.Snapshot(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshot.Targets)
+	s.writeSnapshotField(w, r, func(snapshot core.Snapshot) any { return snapshot.Targets })
 }
 
 func (s *Server) registerTarget(w http.ResponseWriter, r *http.Request) {
@@ -198,12 +188,16 @@ func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
+	s.writeSnapshotField(w, r, func(snapshot core.Snapshot) any { return snapshot.Plugins })
+}
+
+func (s *Server) writeSnapshotField(w http.ResponseWriter, r *http.Request, field func(core.Snapshot) any) {
 	snapshot, err := s.service.Snapshot(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, snapshot.Plugins)
+	writeJSON(w, http.StatusOK, field(snapshot))
 }
 
 func (s *Server) registerPlugin(w http.ResponseWriter, r *http.Request) {
