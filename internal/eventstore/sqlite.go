@@ -479,41 +479,32 @@ ORDER BY id ASC`)
 	return projects, defaultID, nil
 }
 
-func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (core.Project, error) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+const projectInsertSQL = `
+INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, pull_request_policy, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+func projectInsertArgs(project core.Project, now string) ([]any, error) {
 	labels, err := jsonString(project.TargetLabels, "{}")
 	if err != nil {
-		return core.Project{}, err
+		return nil, err
 	}
 	remoteCheckouts, err := jsonString(project.RemoteCheckouts, "{}")
 	if err != nil {
-		return core.Project{}, err
+		return nil, err
 	}
 	githubIssues, err := jsonString(project.GitHubIssues, "{}")
 	if err != nil {
-		return core.Project{}, err
+		return nil, err
 	}
 	githubMentions, err := jsonString(project.GitHubMentions, "{}")
 	if err != nil {
-		return core.Project{}, err
+		return nil, err
 	}
 	policy, err := jsonString(project.PullRequestPolicy, "")
 	if err != nil {
-		return core.Project{}, err
+		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return core.Project{}, err
-	}
-	defer tx.Rollback()
-
-	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&count); err != nil {
-		return core.Project{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	return []any{
 		project.ID,
 		project.Name,
 		project.LocalPath,
@@ -531,7 +522,26 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		policy,
 		now,
 		now,
-	); err != nil {
+	}, nil
+}
+
+func (s *SQLiteStore) CreateProject(ctx context.Context, project core.Project) (core.Project, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	args, err := projectInsertArgs(project, now)
+	if err != nil {
+		return core.Project{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Project{}, err
+	}
+	defer tx.Rollback()
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&count); err != nil {
+		return core.Project{}, err
+	}
+	if _, err := tx.ExecContext(ctx, projectInsertSQL, args...); err != nil {
 		return core.Project{}, err
 	}
 	if count == 0 {
@@ -549,23 +559,7 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, project.ID); err != nil 
 
 func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, makeDefault bool) (core.Project, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	labels, err := jsonString(project.TargetLabels, "{}")
-	if err != nil {
-		return core.Project{}, err
-	}
-	remoteCheckouts, err := jsonString(project.RemoteCheckouts, "{}")
-	if err != nil {
-		return core.Project{}, err
-	}
-	githubIssues, err := jsonString(project.GitHubIssues, "{}")
-	if err != nil {
-		return core.Project{}, err
-	}
-	githubMentions, err := jsonString(project.GitHubMentions, "{}")
-	if err != nil {
-		return core.Project{}, err
-	}
-	policy, err := jsonString(project.PullRequestPolicy, "")
+	args, err := projectInsertArgs(project, now)
 	if err != nil {
 		return core.Project{}, err
 	}
@@ -575,9 +569,7 @@ func (s *SQLiteStore) SaveProject(ctx context.Context, project core.Project, mak
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	if _, err := tx.ExecContext(ctx, projectInsertSQL+`
 ON CONFLICT(id) DO UPDATE SET
 	name = excluded.name,
 	local_path = excluded.local_path,
@@ -594,23 +586,7 @@ ON CONFLICT(id) DO UPDATE SET
 	github_mentions = excluded.github_mentions,
 	pull_request_policy = excluded.pull_request_policy,
 	updated_at = excluded.updated_at`,
-		project.ID,
-		project.Name,
-		project.LocalPath,
-		project.Repo,
-		project.UpstreamRepo,
-		project.HeadRepoOwner,
-		project.PushRemote,
-		project.VCS,
-		project.DefaultBase,
-		project.WorkspaceRoot,
-		labels,
-		remoteCheckouts,
-		githubIssues,
-		githubMentions,
-		policy,
-		now,
-		now,
+		args...,
 	); err != nil {
 		return core.Project{}, err
 	}
