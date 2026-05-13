@@ -539,6 +539,8 @@ func pullRequestNeedsBabysitter(pr core.PullRequest) bool {
 	review := strings.ToUpper(strings.TrimSpace(pr.ReviewStatus))
 	merge := strings.ToUpper(strings.TrimSpace(pr.MergeStatus))
 	return pullRequestHasUntriggeredFeedback(pr) ||
+		pullRequestAutoMergeError(pr) != "" ||
+		pullRequestMergeNeedsWork(pr) ||
 		checks == "failing" ||
 		review == "CHANGES_REQUESTED" ||
 		review == "COMMENTED" ||
