@@ -1540,13 +1540,25 @@ func snapshotResponseEvents(events []core.Event, includeEvents bool) []core.Even
 	return nil
 }
 
-func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {
+func (s *SQLiteStore) Setting(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return value, err
+}
+
+func (s *SQLiteStore) SaveSetting(ctx context.Context, key string, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO settings (key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`, key, value)
+	return err
+}
+
+func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {
+	return s.Setting(ctx, key)
 }
 
 func mergeMetadata(base json.RawMessage, workspace json.RawMessage) json.RawMessage {

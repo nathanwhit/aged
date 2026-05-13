@@ -72,9 +72,15 @@ type GitHubMention struct {
 	UpdatedAt   string
 }
 
+type GitHubMentionListOptions struct {
+	Limit       int
+	Since       string
+	IncludeRead bool
+}
+
 type GitHubClient interface {
 	ListIssues(ctx context.Context, repo string, labels []string, limit int) ([]GitHubIssue, error)
-	ListMentions(ctx context.Context, limit int) ([]GitHubMention, error)
+	ListMentions(ctx context.Context, options GitHubMentionListOptions) ([]GitHubMention, error)
 }
 
 type GitHubDriver struct {
@@ -82,6 +88,13 @@ type GitHubDriver struct {
 	client  GitHubClient
 	config  GitHubDriverConfig
 }
+
+const (
+	githubMentionPollCursorSetting = "github_mentions_last_poll_at"
+	githubMentionInitialLookback   = 24 * time.Hour
+	githubMentionCursorOverlap     = 5 * time.Minute
+	githubMentionAPILimit          = 100
+)
 
 func LoadGitHubDriverConfig(value string) (GitHubDriverConfig, error) {
 	value = strings.TrimSpace(value)
@@ -223,7 +236,12 @@ func (d *GitHubDriver) pollMentions(ctx context.Context) error {
 	if limit <= 0 {
 		limit = d.config.IssueLimit
 	}
-	mentions, err := d.client.ListMentions(ctx, limit)
+	pollStarted := time.Now().UTC()
+	mentions, err := d.client.ListMentions(ctx, GitHubMentionListOptions{
+		Limit:       limit,
+		Since:       d.mentionPollSince(ctx, pollStarted),
+		IncludeRead: true,
+	})
 	if err != nil {
 		return fmt.Errorf("mentions: %w", err)
 	}
@@ -255,6 +273,43 @@ func (d *GitHubDriver) pollMentions(ctx context.Context) error {
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
+	}
+	if err := d.saveMentionPollCursor(ctx, pollStarted); err != nil {
+		return err
+	}
+	return nil
+}
+
+type githubDriverSettingsStore interface {
+	Setting(ctx context.Context, key string) (string, error)
+	SaveSetting(ctx context.Context, key string, value string) error
+}
+
+func (d *GitHubDriver) settingsStore() githubDriverSettingsStore {
+	if d == nil || d.service == nil {
+		return nil
+	}
+	store, _ := d.service.store.(githubDriverSettingsStore)
+	return store
+}
+
+func (d *GitHubDriver) mentionPollSince(ctx context.Context, now time.Time) string {
+	since := now.Add(-githubMentionInitialLookback)
+	if store := d.settingsStore(); store != nil {
+		if value, err := store.Setting(ctx, githubMentionPollCursorSetting); err == nil && strings.TrimSpace(value) != "" {
+			if parsed, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); parseErr == nil {
+				since = parsed.Add(-githubMentionCursorOverlap)
+			}
+		}
+	}
+	return since.UTC().Format(time.RFC3339)
+}
+
+func (d *GitHubDriver) saveMentionPollCursor(ctx context.Context, at time.Time) error {
+	if store := d.settingsStore(); store != nil {
+		if err := store.SaveSetting(ctx, githubMentionPollCursorSetting, at.UTC().Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("save GitHub mention cursor: %w", err)
+		}
 	}
 	return nil
 }
@@ -615,11 +670,24 @@ func (ghGitHubClient) ListIssues(ctx context.Context, repo string, labels []stri
 	return issues, nil
 }
 
-func (ghGitHubClient) ListMentions(ctx context.Context, limit int) ([]GitHubMention, error) {
+func (ghGitHubClient) ListMentions(ctx context.Context, options GitHubMentionListOptions) ([]GitHubMention, error) {
+	limit := options.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	out, err := runCommand(ctx, "", "gh", "api", "--method", "GET", "notifications", "-F", "all=false", "-F", "participating=false", "-F", "per_page="+strconv.Itoa(limit))
+	if limit < githubMentionAPILimit {
+		limit = githubMentionAPILimit
+	}
+	args := []string{"api", "--method", "GET", "notifications", "-F", "participating=false", "-F", "per_page=" + strconv.Itoa(limit)}
+	if options.IncludeRead {
+		args = append(args, "-F", "all=true")
+	} else {
+		args = append(args, "-F", "all=false")
+	}
+	if strings.TrimSpace(options.Since) != "" {
+		args = append(args, "-F", "since="+strings.TrimSpace(options.Since))
+	}
+	out, err := runCommand(ctx, "", "gh", args...)
 	if err != nil {
 		return nil, wrapGitHubCommandError("list GitHub notifications", err)
 	}

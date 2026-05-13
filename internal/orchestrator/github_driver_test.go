@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
 	"aged/internal/core"
 	"aged/internal/worker"
@@ -23,7 +25,7 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 		PullRequests: GitHubPullRequestDriverConfig{
 			AutoPublish: boolPtr(false),
 		},
-	}, fakeGitHubClient{issues: []GitHubIssue{{
+	}, &fakeGitHubClient{issues: []GitHubIssue{{
 		Repo:   "owner/repo",
 		Number: 12,
 		Title:  "Add feature",
@@ -82,7 +84,7 @@ func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *test
 	driver := NewGitHubDriver(service, GitHubDriverConfig{
 		Enabled: true,
 		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
-	}, fakeGitHubClient{issues: []GitHubIssue{{
+	}, &fakeGitHubClient{issues: []GitHubIssue{{
 		Repo:   "owner/repo",
 		Number: 12,
 		Title:  "Add feature",
@@ -160,7 +162,7 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 			Repos:       []string{"owner/repo"},
 			AutoBabysit: boolPtr(false),
 		},
-	}, fakeGitHubClient{})
+	}, &fakeGitHubClient{})
 	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +239,7 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 			Repos:       []string{"owner/repo"},
 			AutoBabysit: boolPtr(false),
 		},
-	}, fakeGitHubClient{})
+	}, &fakeGitHubClient{})
 	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +318,7 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 	driver := NewGitHubDriver(service, GitHubDriverConfig{
 		Enabled:      true,
 		PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
-	}, fakeGitHubClient{})
+	}, &fakeGitHubClient{})
 	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +408,7 @@ func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) 
 		PullRequests: GitHubPullRequestDriverConfig{
 			AutoBabysit: boolPtr(false),
 		},
-	}, fakeGitHubClient{})
+	}, &fakeGitHubClient{})
 	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +483,7 @@ func TestGitHubDriverRefreshesMergedPRToSatisfyTask(t *testing.T) {
 	driver := NewGitHubDriver(service, GitHubDriverConfig{
 		Enabled:      true,
 		PullRequests: GitHubPullRequestDriverConfig{Repos: []string{"owner/repo"}},
-	}, fakeGitHubClient{})
+	}, &fakeGitHubClient{})
 	if err := driver.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +554,7 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 			Enabled:     boolPtr(false),
 			AutoPublish: boolPtr(false),
 		},
-	}, fakeGitHubClient{issues: []GitHubIssue{{
+	}, &fakeGitHubClient{issues: []GitHubIssue{{
 		Repo:   "owner/repo",
 		Number: 12,
 		Title:  "Add feature",
@@ -616,7 +618,7 @@ func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
 		PullRequests: GitHubPullRequestDriverConfig{
 			AutoPublish: boolPtr(false),
 		},
-	}, fakeGitHubClient{mentions: []GitHubMention{{
+	}, &fakeGitHubClient{mentions: []GitHubMention{{
 		ID:          "thread-1",
 		Repo:        "owner/repo",
 		SubjectType: "PullRequest",
@@ -665,6 +667,75 @@ func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
 	}
 }
 
+func TestGitHubDriverMentionsIncludeReadAndAdvanceCursor(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	client := &fakeGitHubClient{mentions: []GitHubMention{{
+		ID:        "thread-1",
+		Repo:      "owner/repo",
+		Number:    12,
+		Reason:    "mention",
+		UpdatedAt: "2026-05-13T13:16:07Z",
+	}}}
+	driver := NewGitHubDriver(service, GitHubDriverConfig{
+		Enabled: true,
+		Mentions: GitHubMentionDriverConfig{
+			Enabled: boolPtr(true),
+			Repos:   []string{"owner/repo"},
+			Limit:   7,
+		},
+		PullRequests: GitHubPullRequestDriverConfig{
+			Enabled: boolPtr(false),
+		},
+	}, client)
+
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.mentionOptions) != 1 {
+		t.Fatalf("mention options count = %d, want 1", len(client.mentionOptions))
+	}
+	if !client.mentionOptions[0].IncludeRead {
+		t.Fatalf("IncludeRead = false, want true")
+	}
+	if client.mentionOptions[0].Limit != 7 {
+		t.Fatalf("Limit = %d, want 7", client.mentionOptions[0].Limit)
+	}
+	if _, err := time.Parse(time.RFC3339, client.mentionOptions[0].Since); err != nil {
+		t.Fatalf("Since = %q, want RFC3339: %v", client.mentionOptions[0].Since, err)
+	}
+	cursor, err := store.Setting(ctx, githubMentionPollCursorSetting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(cursor) == "" {
+		t.Fatal("missing mention poll cursor")
+	}
+	client.mentions = nil
+	if err := driver.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.mentionOptions) != 2 {
+		t.Fatalf("mention options count = %d, want 2", len(client.mentionOptions))
+	}
+	firstCursor, err := time.Parse(time.RFC3339Nano, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSince, err := time.Parse(time.RFC3339, client.mentionOptions[1].Since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !secondSince.Equal(firstCursor.Add(-githubMentionCursorOverlap).Truncate(time.Second)) {
+		t.Fatalf("second since = %s, want cursor minus overlap from %s", secondSince, firstCursor)
+	}
+}
+
 func TestGitHubDriverSkipsMentionReasonsAndReposOutsideConfig(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -683,7 +754,7 @@ func TestGitHubDriverSkipsMentionReasonsAndReposOutsideConfig(t *testing.T) {
 		PullRequests: GitHubPullRequestDriverConfig{
 			Enabled: boolPtr(false),
 		},
-	}, fakeGitHubClient{mentions: []GitHubMention{{
+	}, &fakeGitHubClient{mentions: []GitHubMention{{
 		ID:     "thread-1",
 		Repo:   "owner/repo",
 		Number: 12,
@@ -708,15 +779,17 @@ func TestGitHubDriverSkipsMentionReasonsAndReposOutsideConfig(t *testing.T) {
 }
 
 type fakeGitHubClient struct {
-	issues   []GitHubIssue
-	mentions []GitHubMention
+	issues         []GitHubIssue
+	mentions       []GitHubMention
+	mentionOptions []GitHubMentionListOptions
 }
 
 func (c fakeGitHubClient) ListIssues(context.Context, string, []string, int) ([]GitHubIssue, error) {
 	return c.issues, nil
 }
 
-func (c fakeGitHubClient) ListMentions(context.Context, int) ([]GitHubMention, error) {
+func (c *fakeGitHubClient) ListMentions(_ context.Context, options GitHubMentionListOptions) ([]GitHubMention, error) {
+	c.mentionOptions = append(c.mentionOptions, options)
 	return c.mentions, nil
 }
 

@@ -756,7 +756,7 @@ func (fakeHTTPGitHubClient) ListIssues(context.Context, string, []string, int) (
 	return nil, nil
 }
 
-func (fakeHTTPGitHubClient) ListMentions(context.Context, int) ([]orchestrator.GitHubMention, error) {
+func (fakeHTTPGitHubClient) ListMentions(context.Context, orchestrator.GitHubMentionListOptions) ([]orchestrator.GitHubMention, error) {
 	return nil, nil
 }
 
