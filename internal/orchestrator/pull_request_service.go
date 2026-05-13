@@ -80,7 +80,7 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 		if s.pullRequestMonitoringDisabled(snapshot, pr) {
 			continue
 		}
-		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+		if isTerminalPullRequestState(pr.State) {
 			if err := s.ReconcilePullRequestTerminalTasks(ctx, pr.ID); err != nil {
 				errs = append(errs, fmt.Sprintf("%s reconcile terminal pr: %v", pr.ID, err))
 			}
@@ -478,7 +478,7 @@ func (s *Service) workerCreatedPullRequest(ctx context.Context, snapshot core.Sn
 		if len(inspected.Metadata) == 0 {
 			inspected.Metadata = pr.Metadata
 		}
-		if strings.EqualFold(inspected.State, "MERGED") || strings.EqualFold(inspected.State, "CLOSED") {
+		if isTerminalPullRequestState(inspected.State) {
 			continue
 		}
 		return inspected, true, nil
@@ -825,6 +825,10 @@ func (s *Service) ReconcilePullRequestTerminalTasks(ctx context.Context, prID st
 	default:
 		return nil
 	}
+}
+
+func isTerminalPullRequestState(state string) bool {
+	return strings.EqualFold(state, "MERGED") || strings.EqualFold(state, "CLOSED")
 }
 
 func (s *Service) completeRelatedPullRequestTasks(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, taskStatus core.TaskStatus, objectiveStatus core.ObjectiveStatus, milestone string, phase string, summary string) error {
@@ -1430,13 +1434,9 @@ func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (co
 		return core.PullRequest{}, false
 	}
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID != taskID {
-			continue
+		if pr.TaskID == taskID && !isTerminalPullRequestState(pr.State) {
+			return pr, true
 		}
-		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
-			continue
-		}
-		return pr, true
 	}
 	return core.PullRequest{}, false
 }
@@ -1453,10 +1453,7 @@ func (s *Service) pullRequestForUpdateAction(ctx context.Context, taskID string,
 	url := strings.TrimSpace(stringMetadata(inputs, "url"))
 	branch := strings.TrimSpace(stringMetadata(inputs, "branch"))
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID != taskID {
-			continue
-		}
-		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
+		if pr.TaskID != taskID || isTerminalPullRequestState(pr.State) {
 			continue
 		}
 		if id != "" && pr.ID == id {
@@ -1483,13 +1480,9 @@ func (s *Service) pullRequestForUpdateAction(ctx context.Context, taskID string,
 
 func firstOpenPullRequest(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID != taskID {
-			continue
+		if pr.TaskID == taskID && !isTerminalPullRequestState(pr.State) {
+			return pr, true
 		}
-		if strings.EqualFold(pr.State, "MERGED") || strings.EqualFold(pr.State, "CLOSED") {
-			continue
-		}
-		return pr, true
 	}
 	return core.PullRequest{}, false
 }
