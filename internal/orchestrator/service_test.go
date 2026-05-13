@@ -5968,6 +5968,56 @@ func TestServiceTreatsRecoverableWorkerFailureAsUserAction(t *testing.T) {
 	}
 }
 
+func TestServiceTreatsRecoverableDynamicReplanWorkerFailureAsUserAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "produce initial candidate",
+		},
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 10,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial candidate"}}},
+		"follow": failingRunner{
+			kind: "follow",
+			err:  errors.New("unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses"),
+		},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Recover dynamic auth", Prompt: "Keep improving."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 {
+		t.Fatalf("replan states = %d, want 1", len(brain.states))
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "worker_auth_required" {
+		t.Fatalf("reason = %v", payload["reason"])
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "worker_failure_recovery", "continued") {
+		t.Fatalf("unexpected continued worker failure recovery")
+	}
+}
+
 func TestServiceTreatsWorkflowScopePushRejectionAsRecoverable(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7484,6 +7534,47 @@ func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *tes
 	}
 }
 
+func TestServiceWaitsWhenDynamicReplanningStallsWithoutCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "attempt initial implementation",
+		},
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 10,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  failingRunner{kind: "codex", err: errors.New("missing API token")},
+		"follow": failingRunner{kind: "follow", err: errors.New("cannot run worker as root")},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Stalled no candidate", Prompt: "Keep trying until fixed."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID != "" {
+		t.Fatalf("final candidate = %q, want empty", snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("missing fallback replanned event")
+	}
+	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("missing approval-needed event")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"action":"complete"`) {
+		t.Fatalf("unexpected fallback completion")
+	}
+}
+
 func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8610,6 +8701,66 @@ func TestServiceRetryTargetIDFallsBackWhenTargetLacksRequestedWorkerTool(t *test
 	}
 	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); !strings.Contains(reason, `execution target "vm-pinned" does not support worker kind "codex"`) {
 		t.Fatalf("fallback reason = %q, want unsupported worker kind", reason)
+	}
+}
+
+func TestServiceSelectsAnotherTargetAfterWorkerKindMarkedUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-new", Kind: TargetKindSSH, Host: "vm-new", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 10}},
+		{ID: "vm-old", Kind: TargetKindSSH, Host: "vm-old", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	if !targets.MarkWorkerKindUnavailable("vm-new", "codex", "missing auth") {
+		t.Fatalf("failed to mark target worker kind unavailable")
+	}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	target, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry elsewhere",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "vm-old" {
+		t.Fatalf("target = %q, want vm-old", target.ID)
+	}
+}
+
+func TestServiceSelectsLocalAfterAllRemoteWorkerKindsMarkedUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "vm-a", Kind: TargetKindSSH, Host: "vm-a", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 10}},
+		{ID: "vm-b", Kind: TargetKindSSH, Host: "vm-b", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.MarkWorkerKindUnavailable("vm-a", "codex", "missing auth")
+	targets.MarkWorkerKindUnavailable("vm-b", "codex", "missing auth")
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "codex",
+		Prompt:     "retry locally",
+		Metadata:   map[string]any{},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" || target.Kind != TargetKindLocal {
+		t.Fatalf("target = %+v, want local", target)
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "local" {
+		t.Fatalf("fallback to = %v, want local", plan.Metadata["retryTargetFallbackToID"])
 	}
 }
 

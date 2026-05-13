@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"aged/internal/core"
 )
@@ -351,6 +352,34 @@ func (r *TargetRegistry) UpdateHealth(targetID string, health core.TargetHealth,
 	}
 	r.health[targetID] = health
 	r.resource[targetID] = resources
+}
+
+func (r *TargetRegistry) MarkWorkerKindUnavailable(targetID string, workerKind string, reason string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	target, ok := r.targets[targetID]
+	if !ok || target.Kind != TargetKindSSH {
+		return false
+	}
+	workerKind = strings.TrimSpace(workerKind)
+	if workerKind == "" {
+		return false
+	}
+	health := r.health[targetID]
+	if strings.TrimSpace(health.Status) == "" {
+		health.Status = "ok"
+	}
+	health.Reachable = true
+	health.Tmux = true
+	health.RepoPresent = true
+	health.CheckedAt = time.Now().UTC()
+	health.Error = strings.TrimSpace(reason)
+	if health.Tools == nil {
+		health.Tools = map[string]bool{}
+	}
+	health.Tools[workerKind] = false
+	r.health[targetID] = health
+	return true
 }
 
 func (r *TargetRegistry) Snapshot() []core.TargetState {
