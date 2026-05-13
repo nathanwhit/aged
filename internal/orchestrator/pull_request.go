@@ -36,10 +36,23 @@ type PullRequestPublishSpec struct {
 	Metadata      map[string]any
 }
 
+type PullRequestMergeSpec struct {
+	WorkDir string
+	Repo    string
+	Number  int
+	URL     string
+	Method  string
+	Auto    bool
+}
+
 type PullRequestPublisher interface {
 	Publish(ctx context.Context, spec PullRequestPublishSpec) (core.PullRequest, error)
 	Update(ctx context.Context, pr core.PullRequest, spec PullRequestPublishSpec) (core.PullRequest, error)
 	Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error)
+}
+
+type PullRequestMerger interface {
+	Merge(ctx context.Context, pr core.PullRequest, spec PullRequestMergeSpec) (core.PullRequest, error)
 }
 
 type PullRequestListSpec struct {
@@ -528,6 +541,60 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	}
 	checked.Metadata = pullRequestMetadataWithFeedback(pr.Metadata, pullRequestFeedback(payload.Comments, payload.Reviews, threadFeedback), &checked)
 	return checked, nil
+}
+
+func (p LocalPullRequestPublisher) Merge(ctx context.Context, pr core.PullRequest, spec PullRequestMergeSpec) (core.PullRequest, error) {
+	exec := p.exec
+	if exec == nil {
+		exec = runCommand
+	}
+	repo := strings.TrimSpace(nonEmpty(spec.Repo, pr.Repo))
+	if repo == "" {
+		return core.PullRequest{}, errors.New("merge requires repo")
+	}
+	target := strings.TrimSpace(spec.URL)
+	if target == "" {
+		if spec.Number > 0 {
+			target = strconv.Itoa(spec.Number)
+		} else if pr.Number > 0 {
+			target = strconv.Itoa(pr.Number)
+		}
+	}
+	if target == "" {
+		return core.PullRequest{}, errors.New("merge requires pull request number or URL")
+	}
+	method := strings.ToLower(strings.TrimSpace(spec.Method))
+	if method == "" {
+		method = "squash"
+	}
+	args := []string{"pr", "merge", "--repo", repo, target}
+	switch method {
+	case "merge":
+		args = append(args, "--merge")
+	case "rebase":
+		args = append(args, "--rebase")
+	default:
+		args = append(args, "--squash")
+	}
+	if spec.Auto {
+		args = append(args, "--auto")
+	}
+	if _, err := exec(ctx, strings.TrimSpace(spec.WorkDir), "gh", args...); err != nil {
+		return core.PullRequest{}, wrapGitHubCommandError("merge GitHub pull request", err)
+	}
+	merged := pr
+	merged.State = "MERGED"
+	if merged.Repo == "" {
+		merged.Repo = repo
+	}
+	if merged.Number == 0 && spec.Number > 0 {
+		merged.Number = spec.Number
+	}
+	inspected, err := p.Inspect(ctx, merged)
+	if err == nil {
+		return inspected, nil
+	}
+	return merged, nil
 }
 
 func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestListSpec) ([]core.PullRequest, error) {
