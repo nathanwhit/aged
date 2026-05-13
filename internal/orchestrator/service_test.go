@@ -472,22 +472,14 @@ func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	defer store.Close()
 
 	applyCalls := 0
-	publisher := &fakePullRequestPublisher{}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "change",
-		Prompt:     "make change",
-	}}, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{WorkerKind: "change", Prompt: "make change"}},
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
 		},
 		applyCalls: &applyCalls,
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Implement feature", Prompt: "Do it."})
 	if err != nil {
@@ -533,7 +525,6 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	defer store.Close()
 
 	applyCalls := 0
-	publisher := &fakePullRequestPublisher{}
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, ".github"), 0o755); err != nil {
 		t.Fatal(err)
@@ -541,12 +532,9 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, ".github", "pull_request_template.md"), []byte("## Repo checklist\n- [ ] Tests pass\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "change",
-		Prompt:     "make change",
-	}}, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, workspace, fakeWorkspaceManager{
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:      fixedBrain{plan: Plan{WorkerKind: "change", Prompt: "make change"}},
+		workDir:    workspace,
 		cwd:        workspace,
 		sourceRoot: workspace,
 		changes: WorkspaceChanges{
@@ -555,7 +543,6 @@ func TestServiceGitHubCompletionModePublishesFinalCandidate(t *testing.T) {
 		},
 		applyCalls: &applyCalls,
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:    "Implement feature",
@@ -602,7 +589,6 @@ func TestServiceGitHubCompletionModeUsesReplanPullRequestBody(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	publisher := &fakePullRequestPublisher{}
 	brain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
@@ -614,17 +600,13 @@ func TestServiceGitHubCompletionModeUsesReplanPullRequestBody(t *testing.T) {
 			PullRequestBody: "## Summary\n- Implemented the remote follow-up.\n\n## Validation\n- go test ./...",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:  "Remote follow-up",
@@ -648,7 +630,6 @@ func TestServiceGitHubIssueCompletionModeAppendsClosingReferenceToPullRequestBod
 	store := openTestStore(t)
 	defer store.Close()
 
-	publisher := &fakePullRequestPublisher{}
 	brain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
@@ -660,17 +641,13 @@ func TestServiceGitHubIssueCompletionModeAppendsClosingReferenceToPullRequestBod
 			PullRequestBody: "## Summary\n- Implemented the issue fix.",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:      "GitHub issue owner/repo#12: Fix parser",
@@ -836,18 +813,15 @@ func TestServiceGitHubCompletionModeRepairsPublishConflict(t *testing.T) {
 			Rationale: "repair worker is final",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
 		},
 		applyCalls: &applyCalls,
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:    "Collapsible Project Add Dialog",
@@ -916,17 +890,14 @@ func TestServiceGitHubCompletionModeRejectsSameCandidateAfterPublishConflict(t *
 			Rationale: "repair worker is final",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:    "Collapsible Project Add Dialog",
@@ -1001,17 +972,14 @@ func TestServiceGitHubCompletionModeRepeatsPublishRecoveryForNewConflictingCandi
 			Rationale: "second repair is final",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:    "Improve Long-Term Planning Intelligence",
@@ -1073,17 +1041,14 @@ func TestServicePublishRecoveryDoesNotRepublishBlockedCandidateAfterReplanError(
 		},
 		err: errors.New("turn/start failed: Input exceeds the maximum length"),
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:    "Improve Long-Term Planning Intelligence",
@@ -1114,7 +1079,6 @@ func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T)
 	store := openTestStore(t)
 	defer store.Close()
 
-	publisher := &fakePullRequestPublisher{}
 	baseBrain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
@@ -1142,11 +1106,11 @@ func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T)
 			Reason: "the selected candidate is only an intermediate artifact for this open-ended task",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "intermediate artifact produced; more work remains"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
+		runners: map[string]worker.Runner{
+			"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "intermediate artifact produced; more work remains"}}},
+		},
 		changes: WorkspaceChanges{
 			Dirty: true,
 			ChangedFiles: []WorkspaceChangedFile{
@@ -1154,7 +1118,6 @@ func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T)
 			},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:  "Improve Subsystem",
@@ -1192,7 +1155,6 @@ func TestServicePublishesCompletionWhenCompletionReviewApprovesCandidate(t *test
 	store := openTestStore(t)
 	defer store.Close()
 
-	publisher := &fakePullRequestPublisher{}
 	baseBrain := &replanningBrain{
 		plan: Plan{
 			WorkerKind: "change",
@@ -1211,11 +1173,11 @@ func TestServicePublishesCompletionWhenCompletionReviewApprovesCandidate(t *test
 			Reason: "candidate satisfies the bounded task objective",
 		}},
 	}
-	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "planner source changes with tests"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
+		runners: map[string]worker.Runner{
+			"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "planner source changes with tests"}}},
+		},
 		changes: WorkspaceChanges{
 			Dirty: true,
 			ChangedFiles: []WorkspaceChangedFile{
@@ -1224,7 +1186,6 @@ func TestServicePublishesCompletionWhenCompletionReviewApprovesCandidate(t *test
 			},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
 		Title:  "Improve Long-Term Planning Intelligence",
@@ -1253,31 +1214,26 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	publisher := &fakePullRequestPublisher{}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "change",
-		Prompt:     "make change",
-		Actions: []PlanAction{{
-			Kind:   "publish_pull_request",
-			When:   "after_success",
-			Reason: "open a PR so review can happen while the objective continues",
-			Inputs: map[string]any{
-				"repo": "owner/repo",
-				"base": "main",
-				"body": "## Summary\n- Implement feature.\n\n## Validation\n- Worker completed successfully.",
-			},
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "open a PR so review can happen while the objective continues",
+				Inputs: map[string]any{
+					"repo": "owner/repo",
+					"base": "main",
+					"body": "## Summary\n- Implement feature.\n\n## Validation\n- Worker completed successfully.",
+				},
+			}},
 		}},
-	}}, map[string]worker.Runner{
-		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
-	}, t.TempDir(), fakeWorkspaceManager{
-		cwd:        t.TempDir(),
-		sourceRoot: t.TempDir(),
 		changes: WorkspaceChanges{
 			Dirty:        true,
 			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
 		},
 	})
-	service.SetPullRequestPublisher(publisher)
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Implement feature", Prompt: "Do it, open a PR, and babysit it."})
 	if err != nil {
@@ -9039,6 +8995,47 @@ type fakePullRequestPublisher struct {
 	inspectCalls     int
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
+}
+
+type prPublishingServiceOptions struct {
+	brain      BrainProvider
+	runners    map[string]worker.Runner
+	publisher  *fakePullRequestPublisher
+	workDir    string
+	cwd        string
+	sourceRoot string
+	changes    WorkspaceChanges
+	applyCalls *int
+}
+
+func newPRPublishingService(t *testing.T, store eventstore.Store, opts prPublishingServiceOptions) (*Service, *fakePullRequestPublisher) {
+	t.Helper()
+	publisher := opts.publisher
+	if publisher == nil {
+		publisher = &fakePullRequestPublisher{}
+	}
+	if opts.runners == nil {
+		opts.runners = map[string]worker.Runner{
+			"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		}
+	}
+	if opts.workDir == "" {
+		opts.workDir = t.TempDir()
+	}
+	if opts.cwd == "" {
+		opts.cwd = t.TempDir()
+	}
+	if opts.sourceRoot == "" {
+		opts.sourceRoot = t.TempDir()
+	}
+	service := NewServiceWithWorkspaceManager(store, opts.brain, opts.runners, opts.workDir, fakeWorkspaceManager{
+		cwd:        opts.cwd,
+		sourceRoot: opts.sourceRoot,
+		changes:    opts.changes,
+		applyCalls: opts.applyCalls,
+	})
+	service.SetPullRequestPublisher(publisher)
+	return service, publisher
 }
 
 type fakeTitleGenerator struct {
