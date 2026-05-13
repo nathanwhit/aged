@@ -643,6 +643,108 @@ func TestServiceGitHubCompletionModeUsesReplanPullRequestBody(t *testing.T) {
 	}
 }
 
+func TestServiceGitHubIssueCompletionModeAppendsClosingReferenceToPullRequestBody(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		},
+		decisions: []ReplanDecision{{
+			Action:          "complete",
+			Rationale:       "worker completed the GitHub issue task",
+			PullRequestBody: "## Summary\n- Implemented the issue fix.",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:      "GitHub issue owner/repo#12: Fix parser",
+		Prompt:     "Work on GitHub issue owner/repo#12.",
+		Source:     "github-issue",
+		ExternalID: "owner/repo#12",
+		Metadata:   core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if !strings.Contains(publisher.published.Body, "Implemented the issue fix.") {
+		t.Fatalf("published body = %q, want replan-authored PR body", publisher.published.Body)
+	}
+	if !strings.Contains(publisher.published.Body, "Closes owner/repo#12") {
+		t.Fatalf("published body = %q, want GitHub issue closing reference", publisher.published.Body)
+	}
+}
+
+func TestPullRequestBodyWithIssueClosingReferenceDoesNotDuplicateExistingClosingKeyword(t *testing.T) {
+	task := core.Task{
+		Metadata: core.MustJSON(map[string]any{
+			"source":     "github-issue",
+			"externalId": "owner/repo#12",
+		}),
+	}
+	tests := []struct {
+		name        string
+		body        string
+		publishRepo string
+		want        string
+	}{
+		{
+			name:        "same repo shorthand fix",
+			body:        "## Summary\n- Fixed it.\n\nFixes #12",
+			publishRepo: "owner/repo",
+			want:        "## Summary\n- Fixed it.\n\nFixes #12",
+		},
+		{
+			name:        "qualified closes",
+			body:        "## Summary\n- Fixed it.\n\nCloses owner/repo#12",
+			publishRepo: "owner/repo",
+			want:        "## Summary\n- Fixed it.\n\nCloses owner/repo#12",
+		},
+		{
+			name:        "issue url resolves",
+			body:        "## Summary\n- Fixed it.\n\nResolves https://github.com/owner/repo/issues/12",
+			publishRepo: "owner/repo",
+			want:        "## Summary\n- Fixed it.\n\nResolves https://github.com/owner/repo/issues/12",
+		},
+		{
+			name:        "plain issue mention is not enough",
+			body:        "## Summary\n- See #12 for context.",
+			publishRepo: "owner/repo",
+			want:        "## Summary\n- See #12 for context.\n\nCloses owner/repo#12",
+		},
+		{
+			name:        "different issue number is not enough",
+			body:        "## Summary\n- Fixed another issue.\n\nFixes owner/repo#120",
+			publishRepo: "owner/repo",
+			want:        "## Summary\n- Fixed another issue.\n\nFixes owner/repo#120\n\nCloses owner/repo#12",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := pullRequestBodyWithIssueClosingReference(tc.body, task, tc.publishRepo)
+			if got != tc.want {
+				t.Fatalf("body = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestServiceCanceledFollowUpDoesNotPublishPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

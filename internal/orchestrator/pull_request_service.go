@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,10 @@ import (
 	"github.com/google/uuid"
 )
 
-var githubPullRequestURLRE = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
+var (
+	githubPullRequestURLRE      = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
+	pullRequestClosingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
+)
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
 	s.prPublisher = publisher
@@ -160,7 +164,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	publishPatch, patchFromBase := pullRequestPublishPatch(publishWorkspace, changes)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
 	title := defaultPullRequestTitle(req.Title, task, summary, changes)
-	body := strings.TrimSpace(req.Body)
+	body := pullRequestBodyWithIssueClosingReference(strings.TrimSpace(req.Body), task, repo)
 	pr, adopted, err := s.workerCreatedPullRequest(ctx, snapshot, task, workerID, repo, metadata)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -271,6 +275,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	repo := nonEmpty(req.Repo, pr.Repo, pullRequestTargetRepo(req, project, task))
 	base := nonEmpty(req.Base, pr.Base, project.DefaultBase)
 	branch := nonEmpty(req.Branch, pr.Branch)
+	body := pullRequestBodyWithIssueClosingReference(strings.TrimSpace(req.Body), task, repo)
 	updated, err := s.prPublisher.Update(ctx, pr, PullRequestPublishSpec{
 		TaskID:        taskID,
 		WorkerID:      workerID,
@@ -282,7 +287,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		PushRemote:    project.PushRemote,
 		BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
 		Title:         strings.TrimSpace(req.Title),
-		Body:          strings.TrimSpace(req.Body),
+		Body:          body,
 		Draft:         req.Draft,
 		Patch:         publishPatch,
 		PatchFromBase: patchFromBase,
@@ -314,6 +319,98 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		return core.PullRequest{}, err
 	}
 	return updated, nil
+}
+
+type githubIssueClosingReference struct {
+	Repo   string
+	Number int
+}
+
+func (ref githubIssueClosingReference) String() string {
+	return fmt.Sprintf("%s#%d", ref.Repo, ref.Number)
+}
+
+func pullRequestBodyWithIssueClosingReference(body string, task core.Task, publishRepo string) string {
+	ref, ok := githubIssueClosingReferenceForTask(task)
+	if !ok || pullRequestBodyAlreadyClosesIssue(body, ref, publishRepo) {
+		return body
+	}
+	closingLine := "Closes " + ref.String()
+	if body == "" {
+		return closingLine
+	}
+	return body + "\n\n" + closingLine
+}
+
+func githubIssueClosingReferenceForTask(task core.Task) (githubIssueClosingReference, bool) {
+	source, externalID := taskExternalRef(task)
+	if !strings.EqualFold(source, "github-issue") {
+		return githubIssueClosingReference{}, false
+	}
+	if ref, ok := parseGitHubIssueExternalID(externalID); ok {
+		return ref, true
+	}
+	if len(task.Metadata) == 0 {
+		return githubIssueClosingReference{}, false
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return githubIssueClosingReference{}, false
+	}
+	repo := strings.TrimSpace(stringMetadataValue(metadata["repo"]))
+	number := intMetadata(metadata, "number")
+	if repo == "" || number <= 0 {
+		return githubIssueClosingReference{}, false
+	}
+	return githubIssueClosingReference{Repo: repo, Number: number}, true
+}
+
+func parseGitHubIssueExternalID(externalID string) (githubIssueClosingReference, bool) {
+	repo, numberText, ok := strings.Cut(strings.TrimSpace(externalID), "#")
+	if !ok {
+		return githubIssueClosingReference{}, false
+	}
+	repo = strings.TrimSpace(repo)
+	number, err := strconv.Atoi(strings.TrimSpace(numberText))
+	if err != nil || repo == "" || !strings.Contains(repo, "/") || number <= 0 {
+		return githubIssueClosingReference{}, false
+	}
+	return githubIssueClosingReference{Repo: repo, Number: number}, true
+}
+
+func pullRequestBodyAlreadyClosesIssue(body string, ref githubIssueClosingReference, publishRepo string) bool {
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+	numberText := strconv.Itoa(ref.Number)
+	sameRepo := publishRepo == "" || strings.EqualFold(strings.TrimSpace(publishRepo), ref.Repo)
+	for _, line := range strings.Split(body, "\n") {
+		if !pullRequestClosingKeywordRE.MatchString(line) {
+			continue
+		}
+		if lineReferencesQualifiedIssue(line, ref.Repo, numberText) || lineReferencesIssueURL(line, ref.Repo, numberText) {
+			return true
+		}
+		if sameRepo && lineReferencesIssueNumber(line, numberText) {
+			return true
+		}
+	}
+	return false
+}
+
+func lineReferencesQualifiedIssue(line string, repo string, numberText string) bool {
+	pattern := fmt.Sprintf(`(?i)(?:^|[^A-Za-z0-9_.-])%s#%s(?:[^0-9]|$)`, regexp.QuoteMeta(repo), regexp.QuoteMeta(numberText))
+	return regexp.MustCompile(pattern).MatchString(line)
+}
+
+func lineReferencesIssueURL(line string, repo string, numberText string) bool {
+	pattern := fmt.Sprintf(`(?i)github\.com/%s/issues/%s(?:[^0-9]|$)`, regexp.QuoteMeta(repo), regexp.QuoteMeta(numberText))
+	return regexp.MustCompile(pattern).MatchString(line)
+}
+
+func lineReferencesIssueNumber(line string, numberText string) bool {
+	pattern := fmt.Sprintf(`(?:^|[^A-Za-z0-9_])#%s(?:[^0-9]|$)`, regexp.QuoteMeta(numberText))
+	return regexp.MustCompile(pattern).MatchString(line)
 }
 
 func (s *Service) pullRequestPublishSourceRoot(ctx context.Context, snapshot core.Snapshot, workerID string, project core.Project) (string, PreparedWorkspace, error) {
