@@ -27,7 +27,8 @@ type WorkerChangesReview struct {
 }
 
 var (
-	standaloneNoPRPattern = regexp.MustCompile(`\bno\s+pr\b`)
+	standaloneNoPRPattern     = regexp.MustCompile(`\bno\s+pr\b`)
+	errWorkerCallbackDeferred = errors.New("worker callback deferred")
 )
 
 const taskCancelReasonStartupRecovery = "startup_worker_recovery"
@@ -117,8 +118,117 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	} else {
 		b.WriteString("Use the current working directory as the repository root.\n\n")
 	}
+	if helper := strings.TrimSpace(workspaceCreateTaskHelperPath(workspace)); helper != "" {
+		b.WriteString("# Aged Task Creation\n\n")
+		b.WriteString("If this worker needs to delegate, fan out, or spawn follow-up aged tasks, use this helper:\n")
+		b.WriteString(helper)
+		b.WriteString("\n\n")
+		b.WriteString("It reads the new task prompt from stdin. Example: `printf '%s\\n' \"Concrete task prompt\" | ")
+		b.WriteString(helper)
+		b.WriteString(" --title \"Follow-up\"`. When the worker task explicitly asks you to spawn or create aged tasks, queue those tasks with this helper instead of doing the delegated implementation yourself.\n\n")
+	}
+	if helper := strings.TrimSpace(workspacePublishPRHelperPath(workspace)); helper != "" {
+		b.WriteString("# Aged Pull Request Publication\n\n")
+		b.WriteString("If this worker needs to publish an intermediate pull request for its own changes, use this helper instead of `gh pr create`:\n")
+		b.WriteString(helper)
+		b.WriteString("\n\n")
+		b.WriteString("It reads the pull request body from stdin and asks the original aged orchestrator to publish the current worker result. Example: `printf '%s\\n' \"Summary and validation\" | ")
+		b.WriteString(helper)
+		b.WriteString(" --title \"Short PR title\"`. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
+	}
 	b.WriteString("# Worker Task\n\n")
 	b.WriteString(strings.TrimSpace(prompt))
+	return b.String()
+}
+
+func workspaceAgedWorkerDir(workspace PreparedWorkspace) string {
+	if strings.EqualFold(strings.TrimSpace(workspace.Mode), "remote") || strings.EqualFold(strings.TrimSpace(workspace.VCSType), "ssh") {
+		return ""
+	}
+	workerID := strings.TrimSpace(workspace.WorkerID)
+	if workerID == "" {
+		workerID = "worker"
+	}
+	return filepath.Join(os.TempDir(), "aged-worker-callbacks", workerID)
+}
+
+func workspaceCreateTaskHelperPath(workspace PreparedWorkspace) string {
+	base := workspaceAgedWorkerDir(workspace)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "bin", "aged-create-task")
+}
+
+func workspacePublishPRHelperPath(workspace PreparedWorkspace) string {
+	base := workspaceAgedWorkerDir(workspace)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "bin", "aged-publish-pr")
+}
+
+func workspaceCallbackDir(workspace PreparedWorkspace) string {
+	base := workspaceAgedWorkerDir(workspace)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "callbacks")
+}
+
+func installLocalCreateTaskHelper(workspace PreparedWorkspace) (string, string, error) {
+	helperPath := workspaceCreateTaskHelperPath(workspace)
+	callbackDir := workspaceCallbackDir(workspace)
+	if helperPath == "" || callbackDir == "" {
+		return "", "", nil
+	}
+	if err := os.MkdirAll(filepath.Dir(helperPath), 0o755); err != nil {
+		return "", "", err
+	}
+	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
+		return "", "", err
+	}
+	if err := os.WriteFile(helperPath, []byte(localCreateTaskHelperScript(callbackDir, workspace.TaskID, workspace.WorkerID)), 0o700); err != nil {
+		return "", "", err
+	}
+	publishHelperPath := workspacePublishPRHelperPath(workspace)
+	if publishHelperPath != "" {
+		if err := os.WriteFile(publishHelperPath, []byte(localPublishPRHelperScript(callbackDir, workspace.TaskID, workspace.WorkerID)), 0o700); err != nil {
+			return "", "", err
+		}
+	}
+	return helperPath, callbackDir, nil
+}
+
+func localPublishPRHelperScript(callbackDir string, taskID string, workerID string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("if [ -z \"${AGED_WORKER_CALLBACK_DIR:-}\" ]; then AGED_WORKER_CALLBACK_DIR=")
+	b.WriteString(shellQuote(callbackDir))
+	b.WriteString("; fi\nexport AGED_WORKER_CALLBACK_DIR\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_TASK_ID:-}\" ]; then AGED_PARENT_TASK_ID=")
+	b.WriteString(shellQuote(taskID))
+	b.WriteString("; fi\nexport AGED_PARENT_TASK_ID\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_WORKER_ID:-}\" ]; then AGED_PARENT_WORKER_ID=")
+	b.WriteString(shellQuote(workerID))
+	b.WriteString("; fi\nexport AGED_PARENT_WORKER_ID\n")
+	b.WriteString(remotePublishPRHelperScript())
+	return b.String()
+}
+
+func localCreateTaskHelperScript(callbackDir string, taskID string, workerID string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("if [ -z \"${AGED_WORKER_CALLBACK_DIR:-}\" ]; then AGED_WORKER_CALLBACK_DIR=")
+	b.WriteString(shellQuote(callbackDir))
+	b.WriteString("; fi\nexport AGED_WORKER_CALLBACK_DIR\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_TASK_ID:-}\" ]; then AGED_PARENT_TASK_ID=")
+	b.WriteString(shellQuote(taskID))
+	b.WriteString("; fi\nexport AGED_PARENT_TASK_ID\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_WORKER_ID:-}\" ]; then AGED_PARENT_WORKER_ID=")
+	b.WriteString(shellQuote(workerID))
+	b.WriteString("; fi\nexport AGED_PARENT_WORKER_ID\n")
+	b.WriteString(remoteCreateTaskHelperScript())
 	return b.String()
 }
 
@@ -128,6 +238,7 @@ func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace) str
 	b.WriteString("# Original Orchestrator\n\n")
 	b.WriteString("This worker is running on a remote execution target under an existing aged orchestrator. Do not start a new aged daemon or orchestrator from this worker.\n\n")
 	b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
+	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
 	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, and `AGED_WORKER_CALLBACK_DIR`.\n\n")
 	b.WriteString(prompt)
 	return b.String()
@@ -2777,6 +2888,15 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
+	helperPath, callbackDir, err := installLocalCreateTaskHelper(workspace)
+	if err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, fmt.Errorf("install local worker task helper: %w", err)
+	}
+	if helperPath != "" {
+		plan.Metadata["createTaskHelperPath"] = helperPath
+		plan.Metadata["workerCallbackDir"] = callbackDir
+	}
 	capabilities := worker.RunnerCapabilities(runner)
 	var steering chan string
 	if capabilities.LiveSteering {
@@ -2867,6 +2987,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
 		})
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		return runState.turnResult(workerID, plan, status, err, changes), nil
 	}
@@ -2880,6 +3001,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			Payload:  core.MustJSON(runState.completionPayload(core.WorkerWaiting, nil, changes)),
 		})
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		return runState.turnResult(workerID, plan, core.WorkerWaiting, nil, changes), nil
 	}
 
@@ -2891,6 +3013,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		Payload:  core.MustJSON(runState.completionPayload(core.WorkerSucceeded, nil, changes)),
 	})
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+	s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	return runState.turnResult(workerID, plan, core.WorkerSucceeded, nil, changes), nil
 }
@@ -3239,6 +3362,10 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
 	})
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
+	if err := sshRunner.drainRemoteCallbacks(ctx, remoteRun, sink); err != nil {
+		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain terminal remote worker callbacks: " + err.Error()})
+	}
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
 }
 
@@ -3254,50 +3381,246 @@ func sshWorkerStdin(runner worker.Runner, spec worker.Spec, command []string, ca
 
 func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun, callbacks []RemoteWorkerCallback) error {
 	for _, callback := range callbacks {
-		if callback.Type != "" && callback.Type != "create_task" {
+		switch nonEmpty(callback.Type, "create_task") {
+		case "create_task":
+			if err := s.handleRemoteCreateTaskCallback(ctx, run, callback); err != nil {
+				return err
+			}
+		case "publish_pull_request":
+			if !s.workerCompleted(ctx, run.TaskID, run.WorkerID) {
+				return errWorkerCallbackDeferred
+			}
+			if err := s.handleWorkerPublishPullRequestCallback(ctx, run.TaskID, run.WorkerID, callback, "remote"); err != nil {
+				return err
+			}
+		default:
 			return fmt.Errorf("unsupported remote worker callback %q from %s", callback.Type, callback.ID)
 		}
-		prompt := strings.TrimSpace(callback.Prompt)
-		if prompt == "" {
-			return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
+	}
+	return nil
+}
+
+func (s *Service) workerCompleted(ctx context.Context, taskID string, workerID string) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventWorkerCompleted && event.TaskID == taskID && event.WorkerID == workerID {
+			return true
 		}
-		metadata := map[string]any{
-			"source":           "remote_worker",
-			"parentTaskId":     nonEmpty(callback.ParentTaskID, run.TaskID),
-			"parentWorkerId":   nonEmpty(callback.ParentWorkerID, run.WorkerID),
-			"remoteTargetId":   run.Target.ID,
-			"remoteSession":    run.Session,
-			"remoteCallbackId": callback.ID,
-		}
-		req := core.CreateTaskRequest{
-			ProjectID:  strings.TrimSpace(callback.ProjectID),
-			Title:      strings.TrimSpace(callback.Title),
-			Prompt:     prompt,
-			Source:     "remote-worker",
-			ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
-			Metadata:   core.MustJSON(metadata),
-		}
-		var err error
-		req, err = NormalizeCreateTaskRequest(req)
-		if err != nil {
-			return fmt.Errorf("normalize task from remote callback %s: %w", callback.ID, err)
-		}
-		if _, err := s.CreateTask(ctx, req); err != nil {
-			return fmt.Errorf("create task from remote callback %s: %w", callback.ID, err)
-		}
-		if _, err := s.append(ctx, core.Event{
+	}
+	return false
+}
+
+func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remoteRun, callback RemoteWorkerCallback) error {
+	prompt := strings.TrimSpace(callback.Prompt)
+	if prompt == "" {
+		return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
+	}
+	metadata := map[string]any{
+		"source":           "remote_worker",
+		"parentTaskId":     nonEmpty(callback.ParentTaskID, run.TaskID),
+		"parentWorkerId":   nonEmpty(callback.ParentWorkerID, run.WorkerID),
+		"remoteTargetId":   run.Target.ID,
+		"remoteSession":    run.Session,
+		"remoteCallbackId": callback.ID,
+	}
+	req := core.CreateTaskRequest{
+		ProjectID:  strings.TrimSpace(callback.ProjectID),
+		Title:      strings.TrimSpace(callback.Title),
+		Prompt:     prompt,
+		Source:     "remote-worker",
+		ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
+		Metadata:   core.MustJSON(metadata),
+	}
+	var err error
+	req, err = NormalizeCreateTaskRequest(req)
+	if err != nil {
+		return fmt.Errorf("normalize task from remote callback %s: %w", callback.ID, err)
+	}
+	if _, err := s.CreateTask(ctx, req); err != nil {
+		return fmt.Errorf("create task from remote callback %s: %w", callback.ID, err)
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   run.TaskID,
+		WorkerID: run.WorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":       "log",
+			"stream":     "stdout",
+			"text":       "remote worker queued follow-up task: " + prompt,
+			"callbackId": callback.ID,
+		}),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) drainLocalWorkerCallbacks(ctx context.Context, taskID string, workerID string, callbackDir string) {
+	callbackDir = strings.TrimSpace(callbackDir)
+	if callbackDir == "" {
+		return
+	}
+	callbacks, files, err := readLocalWorkerCallbackFiles(callbackDir)
+	if err != nil {
+		_, _ = s.append(context.Background(), core.Event{
 			Type:     core.EventWorkerOutput,
-			TaskID:   run.TaskID,
-			WorkerID: run.WorkerID,
+			TaskID:   taskID,
+			WorkerID: workerID,
 			Payload: core.MustJSON(map[string]any{
-				"kind":       "log",
-				"stream":     "stdout",
-				"text":       "remote worker queued follow-up task: " + prompt,
-				"callbackId": callback.ID,
+				"kind":   "error",
+				"stream": "stderr",
+				"text":   "failed to drain local worker callbacks: " + err.Error(),
 			}),
-		}); err != nil {
+		})
+		return
+	}
+	if len(callbacks) == 0 {
+		return
+	}
+	if err := s.handleLocalWorkerCallbacks(ctx, taskID, workerID, callbacks); err != nil {
+		_, _ = s.append(context.Background(), core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind":   "error",
+				"stream": "stderr",
+				"text":   "failed to handle local worker callbacks: " + err.Error(),
+			}),
+		})
+		return
+	}
+	for _, file := range files {
+		_ = os.Remove(file)
+	}
+}
+
+func readLocalWorkerCallbackFiles(callbackDir string) ([]RemoteWorkerCallback, []string, error) {
+	matches, err := filepath.Glob(filepath.Join(callbackDir, "*.json"))
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(matches)
+	callbacks := make([]RemoteWorkerCallback, 0, len(matches))
+	for _, file := range matches {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return nil, nil, err
+		}
+		callback, err := decodeRemoteCallback(filepath.Base(file), string(data))
+		if err != nil {
+			return nil, nil, err
+		}
+		callbacks = append(callbacks, callback)
+	}
+	return callbacks, matches, nil
+}
+
+func (s *Service) handleLocalWorkerCallbacks(ctx context.Context, taskID string, workerID string, callbacks []RemoteWorkerCallback) error {
+	for _, callback := range callbacks {
+		switch nonEmpty(callback.Type, "create_task") {
+		case "create_task":
+			if err := s.handleLocalCreateTaskCallback(ctx, taskID, workerID, callback); err != nil {
+				return err
+			}
+		case "publish_pull_request":
+			if err := s.handleWorkerPublishPullRequestCallback(ctx, taskID, workerID, callback, "local"); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported local worker callback %q from %s", callback.Type, callback.ID)
+		}
+	}
+	return nil
+}
+
+func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback) error {
+	prompt := strings.TrimSpace(callback.Prompt)
+	if prompt == "" {
+		return fmt.Errorf("local worker callback %s has empty prompt", callback.ID)
+	}
+	metadata := map[string]any{
+		"source":         "local_worker",
+		"parentTaskId":   nonEmpty(callback.ParentTaskID, taskID),
+		"parentWorkerId": nonEmpty(callback.ParentWorkerID, workerID),
+		"callbackId":     callback.ID,
+	}
+	req := core.CreateTaskRequest{
+		ProjectID:  strings.TrimSpace(callback.ProjectID),
+		Title:      strings.TrimSpace(callback.Title),
+		Prompt:     prompt,
+		Source:     "local-worker",
+		ExternalID: nonEmpty(workerID, taskID) + ":" + callback.ID,
+		Metadata:   core.MustJSON(metadata),
+	}
+	var err error
+	req, err = NormalizeCreateTaskRequest(req)
+	if err != nil {
+		return fmt.Errorf("normalize task from local callback %s: %w", callback.ID, err)
+	}
+	if _, err := s.CreateTask(ctx, req); err != nil {
+		return fmt.Errorf("create task from local callback %s: %w", callback.ID, err)
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":       "log",
+			"stream":     "stdout",
+			"text":       "local worker queued follow-up task: " + prompt,
+			"callbackId": callback.ID,
+		}),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) error {
+	body := strings.TrimSpace(callback.Body)
+	if body == "" {
+		return fmt.Errorf("%s worker callback %s has empty pull request body", source, callback.ID)
+	}
+	publishWorkerID := nonEmpty(callback.ParentWorkerID, workerID)
+	pr, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
+		WorkerID: publishWorkerID,
+		Repo:     strings.TrimSpace(callback.Repo),
+		Base:     strings.TrimSpace(callback.Base),
+		Branch:   strings.TrimSpace(callback.Branch),
+		Title:    strings.TrimSpace(callback.Title),
+		Body:     body,
+		Draft:    callback.Draft,
+	})
+	if err != nil {
+		return fmt.Errorf("publish pull request from %s callback %s: %w", source, callback.ID, err)
+	}
+	if callback.ContinueAfterPublish {
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "continuing_after_pr", "Pull request opened from worker callback; objective continues looking for more results."); err != nil {
 			return err
 		}
+		if err := s.setTaskStatus(ctx, taskID, core.TaskRunning); err != nil {
+			return err
+		}
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":                 "log",
+			"stream":               "stdout",
+			"text":                 source + " worker published pull request: " + pr.URL,
+			"callbackId":           callback.ID,
+			"pullRequestId":        pr.ID,
+			"url":                  pr.URL,
+			"continueAfterPublish": callback.ContinueAfterPublish,
+		}),
+	}); err != nil {
+		return err
 	}
 	return nil
 }

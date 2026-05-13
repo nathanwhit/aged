@@ -17,7 +17,7 @@ Each iteration:
 3. Find exactly one small reliability, orchestration, or developer-experience improvement.
 4. Implement it as a narrow, reviewable change.
 5. Run the relevant tests.
-6. Commit, push, and open a PR if there is a real change.
+6. If there is a real change, use `aged-publish-pr` to ask the orchestrator to publish the current worker result as an intermediate PR; do not run `gh pr create` yourself.
 7. Do not mark the task complete just because one PR was opened. Continue looking for the next useful improvement until explicitly canceled or blocked on user input.
 
 Prefer improvements around:
@@ -49,7 +49,7 @@ curl -sS http://127.0.0.1:8787/api/tasks \
   -H 'content-type: application/json' \
   -d '{
     "title": "Durable loop PR producer eval",
-    "prompt": "You are running as a durable maintenance loop for aged.\n\nEach iteration:\n1. Inspect the repo and current open PRs.\n2. If there is already an open PR from a prior iteration, inspect its CI/review state first and fix it before starting new work.\n3. Find exactly one small reliability, orchestration, or developer-experience improvement.\n4. Implement it as a narrow, reviewable change.\n5. Run the relevant tests.\n6. Commit, push, and open a PR if there is a real change.\n7. Do not mark the task complete just because one PR was opened. Continue looking for the next useful improvement until explicitly canceled or blocked on user input.\n\nPrefer improvements around:\n- durable loop behavior\n- stuck or hung worker detection\n- PR publishing quality\n- worker prompt visibility\n- reducing hard-coded orchestration logic\n\nAsk for input only when genuinely blocked.",
+    "prompt": "You are running as a durable maintenance loop for aged.\n\nEach iteration:\n1. Inspect the repo and current open PRs.\n2. If there is already an open PR from a prior iteration, inspect its CI/review state first and fix it before starting new work.\n3. Find exactly one small reliability, orchestration, or developer-experience improvement.\n4. Implement it as a narrow, reviewable change.\n5. Run the relevant tests.\n6. If there is a real change, use `aged-publish-pr` to ask the orchestrator to publish the current worker result as an intermediate PR; do not run `gh pr create` yourself.\n7. Do not mark the task complete just because one PR was opened. Continue looking for the next useful improvement until explicitly canceled or blocked on user input.\n\nPrefer improvements around:\n- durable loop behavior\n- stuck or hung worker detection\n- PR publishing quality\n- worker prompt visibility\n- reducing hard-coded orchestration logic\n\nAsk for input only when genuinely blocked.",
     "metadata": {
       "executionMode": "loop",
       "loopWorkerKind": "codex",

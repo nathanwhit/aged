@@ -5226,6 +5226,112 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	}
 }
 
+func TestLocalWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &localCallbackRunner{kind: "callback"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "callback",
+		Prompt:     "parent task creates a follow-up",
+	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Parent", Prompt: "Run local parent."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.parentWorkerID == "" {
+		t.Fatalf("callback runner did not run; prompt:\n%s", runner.prompt)
+	}
+	var found core.Task
+	for _, candidate := range snapshot.Tasks {
+		if candidate.Title == "Local follow-up" {
+			found = candidate
+			break
+		}
+	}
+	if found.ID == "" || found.Prompt != "follow up from local" {
+		t.Fatalf("missing created follow-up task: %+v", snapshot.Tasks)
+	}
+	source, externalID := taskExternalRef(found)
+	if source != "local-worker" || !strings.Contains(externalID, runner.parentWorkerID) {
+		t.Fatalf("external ref = %q %q", source, externalID)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(found.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["parentTaskId"] != task.ID || metadata["parentWorkerId"] != runner.parentWorkerID {
+		t.Fatalf("metadata = %+v, want parent ids %q %q", metadata, task.ID, runner.parentWorkerID)
+	}
+	if !strings.Contains(runner.prompt, "aged-create-task") {
+		t.Fatalf("runner prompt missing task helper instructions:\n%s", runner.prompt)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "local worker queued follow-up task") {
+		t.Fatalf("missing parent worker callback event")
+	}
+}
+
+func TestLocalWorkerCallbackPublishesPullRequestThroughOriginalOrchestrator(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	runner := &localPublishPRCallbackRunner{kind: "callback"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "callback",
+		Prompt:     "publish an intermediate pull request",
+	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "loop.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Parent",
+		Prompt:   "Run local parent.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "local"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventContains(snapshot.Events, core.EventWorkerOutput, "local worker published pull request")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not record local worker PR publication; events = %+v", task.ID, snapshot.Events)
+	})
+	if runner.parentWorkerID == "" {
+		t.Fatalf("callback runner did not run; prompt:\n%s", runner.prompt)
+	}
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	if publisher.published.WorkerID != runner.parentWorkerID {
+		t.Fatalf("published worker = %q, want %q", publisher.published.WorkerID, runner.parentWorkerID)
+	}
+	if publisher.published.Title != "Local callback PR" || publisher.published.Body != "Callback PR body" || publisher.published.Repo != "owner/repo" {
+		t.Fatalf("published spec = %+v", publisher.published)
+	}
+	if !strings.Contains(runner.prompt, "aged-publish-pr") {
+		t.Fatalf("runner prompt missing publish helper instructions:\n%s", runner.prompt)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "local worker published pull request") {
+		t.Fatalf("missing parent worker publish event")
+	}
+}
+
 func TestRecoverRemoteWorkerResumesTaskAfterCompletion(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8053,7 +8159,7 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 		t.Fatalf("workers = %+v", snapshot.Workers)
 	}
 	remoteWorker := snapshot.Workers[0]
-	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default"})
+	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default", Mode: "remote", VCSType: "ssh"})
 	if remoteWorker.Prompt != wantPrompt {
 		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
 	}
@@ -9597,6 +9703,62 @@ func (r fileWritingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sin
 		return err
 	}
 	return os.WriteFile(target, []byte(r.body), 0o644)
+}
+
+type localCallbackRunner struct {
+	kind           string
+	prompt         string
+	parentWorkerID string
+}
+
+func (r *localCallbackRunner) Kind() string {
+	return r.kind
+}
+
+func (r *localCallbackRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *localCallbackRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink) error {
+	r.prompt = spec.Prompt
+	if r.parentWorkerID != "" {
+		return nil
+	}
+	r.parentWorkerID = spec.ID
+	callbackDir := filepath.Join(os.TempDir(), "aged-worker-callbacks", spec.ID, "callbacks")
+	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
+		return err
+	}
+	body := `{"type":"create_task","promptBase64":"` + base64.StdEncoding.EncodeToString([]byte("follow up from local")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Local follow-up")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `"}`
+	return os.WriteFile(filepath.Join(callbackDir, "create-task.local.json"), []byte(body), 0o644)
+}
+
+type localPublishPRCallbackRunner struct {
+	kind           string
+	prompt         string
+	parentWorkerID string
+}
+
+func (r *localPublishPRCallbackRunner) Kind() string {
+	return r.kind
+}
+
+func (r *localPublishPRCallbackRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r *localPublishPRCallbackRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink) error {
+	r.prompt = spec.Prompt
+	if r.parentWorkerID != "" {
+		return nil
+	}
+	r.parentWorkerID = spec.ID
+	callbackDir := filepath.Join(os.TempDir(), "aged-worker-callbacks", spec.ID, "callbacks")
+	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
+		return err
+	}
+	body := `{"type":"publish_pull_request","bodyBase64":"` + base64.StdEncoding.EncodeToString([]byte("Callback PR body")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Local callback PR")) + `","repoBase64":"` + base64.StdEncoding.EncodeToString([]byte("owner/repo")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `","continueAfterPublish":true}`
+	return os.WriteFile(filepath.Join(callbackDir, "publish-pr.local.json"), []byte(body), 0o644)
 }
 
 func (r *recordingRunner) Kind() string {
