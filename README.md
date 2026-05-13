@@ -200,14 +200,15 @@ curl -X PUT http://localhost:8787/api/drivers/github \
   -d '{"enabled":true,"issues":[{"repo":"owner/repo","labels":["aged"]}],"mentions":{"enabled":true,"repos":["owner/repo"]}}'
 ```
 
-Projects can also opt into issue polling directly with `githubIssues`; the driver uses the project's `upstreamRepo` when present, otherwise `repo`, and routes created issue tasks back to that project:
+Projects can also opt into issue and mention polling directly with `githubIssues` and `githubMentions`; the driver uses the project's `upstreamRepo` when present, otherwise `repo`, and routes created tasks back to that project:
 
 ```json
 {
   "id": "repo",
   "repo": "fork-owner/repo",
   "upstreamRepo": "owner/repo",
-  "githubIssues": { "enabled": true, "labels": ["aged"], "issueLimit": 20 }
+  "githubIssues": { "enabled": true, "labels": ["aged"], "issueLimit": 20 },
+  "githubMentions": { "enabled": true, "reasons": ["mention", "team_mention", "review_requested"], "limit": 20 }
 }
 ```
 

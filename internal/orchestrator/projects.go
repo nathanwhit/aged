@@ -292,6 +292,10 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	if project.GitHubIssues.IssueLimit < 0 {
 		project.GitHubIssues.IssueLimit = 0
 	}
+	project.GitHubMentions.Reasons = uniqueNonEmptyStrings(project.GitHubMentions.Reasons)
+	if project.GitHubMentions.Limit < 0 {
+		project.GitHubMentions.Limit = 0
+	}
 	project.PullRequestPolicy.BranchPrefix = strings.TrimSpace(project.PullRequestPolicy.BranchPrefix)
 	if project.ID == "" {
 		return core.Project{}, errors.New("project id is required")

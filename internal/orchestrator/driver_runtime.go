@@ -249,9 +249,6 @@ func (d *GitHubDriverRuntime) effectiveConfig(config GitHubDriverConfig) GitHubD
 		return config
 	}
 	for _, project := range d.service.projects.Snapshot() {
-		if !project.GitHubIssues.Enabled {
-			continue
-		}
 		repo := strings.TrimSpace(project.UpstreamRepo)
 		if repo == "" {
 			repo = strings.TrimSpace(project.Repo)
@@ -259,15 +256,45 @@ func (d *GitHubDriverRuntime) effectiveConfig(config GitHubDriverConfig) GitHubD
 		if repo == "" {
 			continue
 		}
-		config.Issues = append(config.Issues, GitHubIssueSourceConfig{
-			Repo:        repo,
-			Labels:      append([]string(nil), project.GitHubIssues.Labels...),
-			ProjectID:   project.ID,
-			IssueLimit:  project.GitHubIssues.IssueLimit,
-			AutoPublish: project.GitHubIssues.AutoPublish,
-		})
+		if project.GitHubIssues.Enabled {
+			config.Issues = append(config.Issues, GitHubIssueSourceConfig{
+				Repo:        repo,
+				Labels:      append([]string(nil), project.GitHubIssues.Labels...),
+				ProjectID:   project.ID,
+				IssueLimit:  project.GitHubIssues.IssueLimit,
+				AutoPublish: project.GitHubIssues.AutoPublish,
+			})
+		}
+		if project.GitHubMentions.Enabled {
+			enabled := true
+			config.Mentions.Enabled = &enabled
+			if !containsFold(config.Mentions.Repos, repo) {
+				config.Mentions.Repos = append(config.Mentions.Repos, repo)
+			}
+			for _, reason := range project.GitHubMentions.Reasons {
+				if !containsFold(config.Mentions.Reasons, reason) {
+					config.Mentions.Reasons = append(config.Mentions.Reasons, reason)
+				}
+			}
+			if project.GitHubMentions.Limit > config.Mentions.Limit {
+				config.Mentions.Limit = project.GitHubMentions.Limit
+			}
+		}
 	}
 	return config
+}
+
+func containsFold(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return true
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *GitHubDriverRuntime) run(ctx context.Context, generation int, driver *GitHubDriver, interval time.Duration) {

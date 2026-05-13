@@ -231,20 +231,21 @@ type PluginDriverState struct {
 }
 
 type Project struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	LocalPath         string            `json:"localPath"`
-	Repo              string            `json:"repo,omitempty"`
-	UpstreamRepo      string            `json:"upstreamRepo,omitempty"`
-	HeadRepoOwner     string            `json:"headRepoOwner,omitempty"`
-	PushRemote        string            `json:"pushRemote,omitempty"`
-	VCS               string            `json:"vcs,omitempty"`
-	DefaultBase       string            `json:"defaultBase,omitempty"`
-	WorkspaceRoot     string            `json:"workspaceRoot,omitempty"`
-	TargetLabels      map[string]string `json:"targetLabels,omitempty"`
-	RemoteCheckouts   map[string]string `json:"remoteCheckouts,omitempty"`
-	GitHubIssues      GitHubIssuePolicy `json:"githubIssues,omitempty"`
-	PullRequestPolicy PullRequestPolicy `json:"pullRequestPolicy,omitempty"`
+	ID                string              `json:"id"`
+	Name              string              `json:"name"`
+	LocalPath         string              `json:"localPath"`
+	Repo              string              `json:"repo,omitempty"`
+	UpstreamRepo      string              `json:"upstreamRepo,omitempty"`
+	HeadRepoOwner     string              `json:"headRepoOwner,omitempty"`
+	PushRemote        string              `json:"pushRemote,omitempty"`
+	VCS               string              `json:"vcs,omitempty"`
+	DefaultBase       string              `json:"defaultBase,omitempty"`
+	WorkspaceRoot     string              `json:"workspaceRoot,omitempty"`
+	TargetLabels      map[string]string   `json:"targetLabels,omitempty"`
+	RemoteCheckouts   map[string]string   `json:"remoteCheckouts,omitempty"`
+	GitHubIssues      GitHubIssuePolicy   `json:"githubIssues,omitempty"`
+	GitHubMentions    GitHubMentionPolicy `json:"githubMentions,omitempty"`
+	PullRequestPolicy PullRequestPolicy   `json:"pullRequestPolicy,omitempty"`
 }
 
 type GitHubIssuePolicy struct {
@@ -252,6 +253,12 @@ type GitHubIssuePolicy struct {
 	Labels      []string `json:"labels,omitempty"`
 	IssueLimit  int      `json:"issueLimit,omitempty"`
 	AutoPublish *bool    `json:"autoPublish,omitempty"`
+}
+
+type GitHubMentionPolicy struct {
+	Enabled bool     `json:"enabled,omitempty"`
+	Reasons []string `json:"reasons,omitempty"`
+	Limit   int      `json:"limit,omitempty"`
 }
 
 type PullRequestPolicy struct {
