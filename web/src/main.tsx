@@ -115,12 +115,13 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
 
   async function refresh() {
     const next = normalizeSnapshot(await getSnapshot({ events: "none" }));
     setSnapshot(next);
     setInitialSnapshotStatus("ready");
-    setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : next.tasks.at(-1)?.id || ""));
+    setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : preferredTask(next.tasks)?.id || ""));
   }
 
   useEffect(() => {
@@ -146,7 +147,7 @@ function App() {
   }, [initialSnapshotStatus]);
 
   const selectedTask = useMemo(
-    () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? snapshot.tasks.at(-1),
+    () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? preferredTask(snapshot.tasks),
     [selectedTaskId, snapshot.tasks],
   );
 
@@ -176,6 +177,8 @@ function App() {
   const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
+  const activeTasks = snapshot.tasks.filter((task) => !isTerminalTask(task));
+  const completedTasks = snapshot.tasks.filter(isTerminalTask);
 
   async function handleClearTask(taskId: string) {
     try {
@@ -416,38 +419,45 @@ function App() {
             <p className="empty">No tasks yet.</p>
           ) : (
             <>
-              {snapshot.tasks.map((task) => (
-                <div
-                  key={task.id}
-                  className={task.id === selectedTask?.id ? "task-row selected" : "task-row"}
-                >
-                  <button className="task-row-main" onClick={() => setSelectedTaskId(task.id)}>
-                    <span>
-                      <strong>{task.title}</strong>
-                      <small>{task.id.slice(0, 8)}</small>
-                      {task.error && <small className="task-row-error">{task.error}</small>}
-                    </span>
-                    <span className="task-row-status">
-                      {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
-                      <Status value={task.status} />
-                      {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
-                    </span>
-                  </button>
-                  <div className="task-row-actions">
-                    {isRetryableTask(task) && (
-                      <button className="icon-button ghost task-action" disabled={retryingTaskId === task.id} onClick={() => handleRetryTask(task.id)} title="Retry task">
-                        <RefreshCw size={16} />
-                      </button>
-                    )}
-                    {isTerminalTask(task) && (
-                      <button className="icon-button ghost danger-text task-action" onClick={() => handleClearTask(task.id)} title="Clear task">
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
+              {activeTasks.length === 0 && !pendingTask ? (
+                <p className="empty">No active tasks.</p>
+              ) : (
+                activeTasks.map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    selected={task.id === selectedTask?.id}
+                    retrying={retryingTaskId === task.id}
+                    onSelect={setSelectedTaskId}
+                    onRetry={handleRetryTask}
+                    onClear={handleClearTask}
+                  />
+                ))
+              )}
               {pendingTask && <PendingTaskRow task={pendingTask} />}
+              {completedTasks.length > 0 && (
+                <div className="completed-task-group">
+                  <button className="secondary compact completed-toggle" onClick={() => setShowCompletedTasks((value) => !value)}>
+                    <Check size={14} />
+                    {showCompletedTasks ? "Hide completed" : `Show completed (${completedTasks.length})`}
+                  </button>
+                  {showCompletedTasks && (
+                    <div className="completed-task-list">
+                      {completedTasks.map((task) => (
+                        <TaskRow
+                          key={task.id}
+                          task={task}
+                          selected={task.id === selectedTask?.id}
+                          retrying={retryingTaskId === task.id}
+                          onSelect={setSelectedTaskId}
+                          onRetry={handleRetryTask}
+                          onClear={handleClearTask}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
         </section>
@@ -476,6 +486,51 @@ function TaskListLoading() {
     <div className="task-list-loading" role="status" aria-live="polite">
       <LoaderCircle className="spin" size={16} />
       <span>Loading tasks...</span>
+    </div>
+  );
+}
+
+function TaskRow({
+  task,
+  selected,
+  retrying,
+  onSelect,
+  onRetry,
+  onClear,
+}: {
+  task: Task;
+  selected: boolean;
+  retrying: boolean;
+  onSelect: (id: string) => void;
+  onRetry: (id: string) => void;
+  onClear: (id: string) => void;
+}) {
+  return (
+    <div className={selected ? "task-row selected" : "task-row"}>
+      <button className="task-row-main" onClick={() => onSelect(task.id)}>
+        <span>
+          <strong>{task.title}</strong>
+          <small>{task.id.slice(0, 8)}</small>
+          {task.error && <small className="task-row-error">{task.error}</small>}
+        </span>
+        <span className="task-row-status">
+          {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
+          <Status value={task.status} />
+          {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
+        </span>
+      </button>
+      <div className="task-row-actions">
+        {isRetryableTask(task) && (
+          <button className="icon-button ghost task-action" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
+            <RefreshCw size={16} />
+          </button>
+        )}
+        {isTerminalTask(task) && (
+          <button className="icon-button ghost danger-text task-action" onClick={() => onClear(task.id)} title="Clear task">
+            <Trash2 size={16} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -752,6 +807,10 @@ function workProgress(task: Task | undefined, workers: Worker[], nodes: Executio
 
 function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
+}
+
+function preferredTask(tasks: Task[]): Task | undefined {
+  return [...tasks].reverse().find((task) => !isTerminalTask(task)) ?? tasks.at(-1);
 }
 
 function isRetryableTask(task: Task): boolean {
