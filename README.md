@@ -189,10 +189,10 @@ The GitHub monitor steers the original task when checks fail, reviews request ch
 GitHub driver:
 
 ```sh
-go run ./cmd/aged -github-driver github-driver.json
+go run ./cmd/aged -github-driver
 ```
 
-It uses local `gh` auth, creates idempotent issue and mention tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work. Mention tasks use local completion, so review-request mentions can be satisfied by a GitHub review/comment without opening a new PR. The same config can be read or hot-swapped while the daemon is running:
+It uses local `gh` auth, creates idempotent issue and mention tasks, publishes GitHub-completion task PRs, refreshes PRs, and starts same-task follow-up when PRs need work. Mention tasks use local completion, so review-request mentions can be satisfied by a GitHub review/comment without opening a new PR. Passing `-github-driver` with no value enables the driver with defaults; pass `-github-driver=github-driver.json` or inline JSON when daemon-wide settings such as `intervalSeconds` need customization. The same config can be read or hot-swapped while the daemon is running:
 
 ```sh
 curl http://localhost:8787/api/drivers/github

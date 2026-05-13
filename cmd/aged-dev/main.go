@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"aged/internal/envutil"
+	"aged/internal/flagutil"
 )
 
 type devServer struct {
@@ -90,12 +91,13 @@ func main() {
 		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "aged daemon retained workspace artifact cleanup")
 		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "aged daemon retained workspace artifact cleanup dry run")
 		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "aged daemon retained workspace artifact cleanup minimum age")
-		githubDriverPath  = flag.String("github-driver", envutil.String("AGED_GITHUB_DRIVER", ""), "aged daemon GitHub driver config JSON path or inline JSON")
+		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
 		discordDriverPath = flag.String("discord-driver", envutil.String("AGED_DISCORD_DRIVER", ""), "aged daemon Discord driver config JSON path or inline JSON")
 		webDistPath       = flag.String("web", envutil.String("AGED_WEB_DIST", "web/dist"), "aged dashboard dist directory")
 		start             = flag.Bool("start", true, "build and start aged immediately")
 	)
-	flag.Parse()
+	flag.Var(githubDriverPath, "github-driver", "enable aged daemon GitHub driver; optionally accepts config JSON path or inline JSON")
+	flag.CommandLine.Parse(flagutil.NormalizeOptionalValueArgs(os.Args[1:], "github-driver"))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -129,7 +131,7 @@ func main() {
 			artifactCleanup:   *artifactCleanup,
 			artifactDryRun:    *artifactDryRun,
 			artifactMinAge:    *artifactMinAge,
-			githubDriverPath:  *githubDriverPath,
+			githubDriverPath:  githubDriverPath.String(),
 			discordDriverPath: *discordDriverPath,
 			webDistPath:       *webDistPath,
 		}),
@@ -199,7 +201,7 @@ func buildDaemonArgs(config daemonConfig) []string {
 		"-workspace-artifact-cleanup=" + strconv.FormatBool(config.artifactCleanup),
 		"-workspace-artifact-cleanup-dry-run=" + strconv.FormatBool(config.artifactDryRun),
 		"-workspace-artifact-cleanup-min-age", config.artifactMinAge.String(),
-		"-github-driver", config.githubDriverPath,
+		"-github-driver=" + config.githubDriverPath,
 		"-discord-driver", config.discordDriverPath,
 		"-web", config.webDistPath,
 	}
