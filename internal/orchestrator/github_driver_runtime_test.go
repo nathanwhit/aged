@@ -39,7 +39,7 @@ func TestServiceGitHubDriverConfigHotToggles(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetProjects(projects)
-	service.Drivers().SetGitHubClient(fakeGitHubClient{
+	service.Drivers().SetGitHubClient(&fakeGitHubClient{
 		issues: []GitHubIssue{{
 			Repo:   "owner/repo",
 			Number: 12,
