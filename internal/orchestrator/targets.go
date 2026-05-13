@@ -317,6 +317,10 @@ func (r *TargetRegistry) Get(id string) (TargetConfig, bool) {
 func (r *TargetRegistry) Configs() []TargetConfig {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.sortedTargetsLocked()
+}
+
+func (r *TargetRegistry) sortedTargetsLocked() []TargetConfig {
 	out := make([]TargetConfig, 0, len(r.targets))
 	for _, target := range r.targets {
 		out = append(out, target)
@@ -353,7 +357,7 @@ func (r *TargetRegistry) Snapshot() []core.TargetState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]core.TargetState, 0, len(r.targets))
-	for _, target := range r.targets {
+	for _, target := range r.sortedTargetsLocked() {
 		out = append(out, core.TargetState{
 			TargetConfig: coreTargetConfig(target),
 			Running:      r.running[target.ID],
@@ -362,7 +366,6 @@ func (r *TargetRegistry) Snapshot() []core.TargetState {
 			Resources:    r.resource[target.ID],
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
