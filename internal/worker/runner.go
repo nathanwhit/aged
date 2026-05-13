@@ -503,22 +503,21 @@ func DefaultRunners() map[string]Runner {
 		MockRunner{},
 		BenchmarkCompareRunner{},
 		NewPromptStdinCommandRunnerWithCapabilities("codex", Capabilities{ResumeSession: true}, func(spec Spec) []string {
-			if strings.TrimSpace(spec.ResumeSessionID) != "" {
+			resumeSessionID := strings.TrimSpace(spec.ResumeSessionID)
+			effortArgs := []string{}
+			if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
+				effortArgs = []string{"-c", "model_reasoning_effort=\"" + effort + "\""}
+			}
+			if resumeSessionID != "" {
 				args := []string{"codex", "exec"}
 				if strings.TrimSpace(spec.WorkDir) != "" {
 					args = append(args, "--cd", spec.WorkDir)
 				}
 				args = append(args, "resume", codexYoloFlag, "--json")
-				if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
-					args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
-				}
-				return append(args, strings.TrimSpace(spec.ResumeSessionID), "-")
+				return append(append(args, effortArgs...), resumeSessionID, "-")
 			}
 			args := []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir}
-			if effort := CodexReasoningEffort(spec.ReasoningEffort); effort != "" {
-				args = append(args, "-c", "model_reasoning_effort=\""+effort+"\"")
-			}
-			return append(args, "-")
+			return append(append(args, effortArgs...), "-")
 		}),
 		NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
 			args := []string{"claude", "--print", "--output-format", "stream-json", "--verbose"}
