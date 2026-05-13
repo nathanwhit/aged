@@ -254,10 +254,7 @@ func (d *DiscordDriver) RunOnce(ctx context.Context) error {
 			errs = append(errs, fmt.Sprintf("%s: %v", channel.ID, err))
 		}
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "; "))
-	}
-	return nil
+	return collectedStringErrors(errs)
 }
 
 func (d *DiscordDriver) ensureBotID(ctx context.Context) error {
