@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -193,6 +194,73 @@ func TestSnapshotCanOmitEventsAndExposeLastEventID(t *testing.T) {
 	}
 	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskSucceeded {
 		t.Fatalf("tasks = %+v", snapshot.Tasks)
+	}
+}
+
+func TestEventStreamUsesLastEventIDAndWritesSSEID(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"title": "Task A", "prompt": "First"})},
+		{Type: core.EventTaskStatus, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})},
+		{Type: core.EventTaskStatus, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, server.URL+"/api/events/stream?after=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Last-Event-ID", "2")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+
+	frame, err := readSSEFrame(bufio.NewReader(res.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(frame, "id: 3\n") {
+		t.Fatalf("frame missing id 3:\n%s", frame)
+	}
+	if strings.Contains(frame, "id: 2\n") {
+		t.Fatalf("frame replayed stale after cursor:\n%s", frame)
+	}
+	if !strings.Contains(frame, "event: event\n") {
+		t.Fatalf("frame missing event name:\n%s", frame)
+	}
+}
+
+func readSSEFrame(reader *bufio.Reader) (string, error) {
+	var frame strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return frame.String(), err
+		}
+		frame.WriteString(line)
+		if line == "\n" {
+			return frame.String(), nil
+		}
 	}
 }
 
