@@ -2536,6 +2536,9 @@ function isInspectableWorkerEvent(event: EventRecord): boolean {
   if (isBenignCodexRolloutRecordEvent(event)) {
     return false;
   }
+  if (isClaudeThinkingEvent(event)) {
+    return false;
+  }
   return event.type.startsWith("worker.");
 }
 
@@ -2578,6 +2581,15 @@ function workerEventLabel(event: EventRecord): string {
     return [payload.kind, payload.stream].filter(Boolean).join(":") || "output";
   }
   return event.type.replace("worker.", "");
+}
+
+function isClaudeThinkingEvent(event: EventRecord): boolean {
+  if (event.type !== "worker.output") {
+    return false;
+  }
+  const payload = asRecord(event.payload);
+  const raw = asRecord(payload.raw ?? payload.rawResult);
+  return isClaudeRaw(raw) && payloadValue(raw.type) === "assistant" && payloadValue(claudeMessageContent(raw)[0]?.type) === "thinking";
 }
 
 function TargetPanel({
@@ -3716,6 +3728,7 @@ function ClaudeToolResultCard({ payload, raw }: { payload: Record<string, unknow
   const contentText = payloadValue(content.content);
   const backgroundTaskId = payloadValue(result.backgroundTaskId);
   const interrupted = result.interrupted === true;
+  const summaryText = claudeToolResultSummary(stdout || stderr || contentText, failed);
   return (
     <div className={failed ? "tool-card failed" : "tool-card"}>
       <div className="tool-card-header">
@@ -3724,6 +3737,7 @@ function ClaudeToolResultCard({ payload, raw }: { payload: Record<string, unknow
         {backgroundTaskId && <span className="tool-status neutral">background {backgroundTaskId}</span>}
         {interrupted && <span className="tool-status warning">interrupted</span>}
       </div>
+      {summaryText && <p>{summaryText}</p>}
       {stdout && <ReadableBlock label="Stdout" value={stdout} className="tool-output" />}
       {stderr && <ReadableBlock label="Stderr" value={stderr} className={failed ? "tool-output failed" : "tool-output"} />}
       {!stdout && !stderr && contentText && <ReadableBlock label="Result" value={contentText} className={failed ? "tool-output failed" : "tool-output"} />}
@@ -3814,6 +3828,20 @@ function ClaudeTodoList({ todos }: { todos: Record<string, unknown>[] }) {
 function claudeMessageContent(raw: Record<string, unknown>): Record<string, unknown>[] {
   const message = asRecord(raw.message);
   return Array.isArray(message.content) ? message.content.map(asRecord) : [];
+}
+
+function claudeToolResultSummary(value: string, failed: boolean): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (parseJSONPayload(trimmed) !== undefined) {
+    return failed ? "JSON result, failed" : "JSON result";
+  }
+  if (failed) {
+    return firstUsefulLine(trimmed) || summarizeText(trimmed);
+  }
+  return summarizeText(trimmed);
 }
 
 function WorkerCreatedCard({ payload }: { payload: Record<string, unknown> }) {
@@ -4068,6 +4096,23 @@ function parseJSONPayload(value: string): unknown {
   }
 }
 
+function summarizeText(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "empty output";
+  if (parseJSONPayload(trimmed) !== undefined) return "JSON output";
+  const lines = trimmed.split(/\r?\n/).filter((line) => line.trim() !== "");
+  const chars = trimmed.length;
+  const lineText = lines.length === 1 ? "1 line" : `${lines.length} lines`;
+  const first = firstUsefulLine(trimmed);
+  if (!first) return `${lineText}, ${chars} chars`;
+  return first.length > 80 ? `${lineText}, ${chars} chars` : `${lineText}: ${first}`;
+}
+
+function firstUsefulLine(value: string): string {
+  const line = value.split(/\r?\n/).map((item) => item.trim()).find(Boolean) ?? "";
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+}
+
 function shellScriptFromCommand(command: string): string {
   const marker = " -lc ";
   const index = command.indexOf(marker);
@@ -4245,15 +4290,15 @@ function claudeWorkerEventLabel(raw: Record<string, unknown>, kind: string | und
     case "assistant": {
       const part = claudeMessageContent(raw)[0] ?? {};
       const partType = payloadValue(part.type);
-      if (partType === "tool_use") return `tool:${payloadValue(part.name) || kind || "use"}`;
-      if (partType === "text") return `message:${kind ?? "log"}`;
+      if (partType === "tool_use") return payloadValue(part.name) || kind || "tool";
+      if (partType === "text") return "message";
       if (partType === "thinking") return "thinking";
       return "assistant";
     }
     case "user":
-      return "tool:result";
+      return "result";
     case "system":
-      return `system:${payloadValue(raw.subtype) || "event"}`;
+      return payloadValue(raw.subtype) || "system";
     case "rate_limit_event":
       return "rate-limit";
     case "result":
@@ -4282,12 +4327,13 @@ function claudeEventDisplayText(payload: Record<string, unknown>, raw: Record<st
     case "user": {
       const result = asRecord(raw.tool_use_result);
       const backgroundTaskId = payloadValue(result.backgroundTaskId);
-      if (backgroundTaskId) return `Background task ${backgroundTaskId}`;
+      if (backgroundTaskId) return `Started background task ${backgroundTaskId}`;
       const stdout = payloadValue(result.stdout).trim();
       const stderr = payloadValue(result.stderr).trim();
-      if (stderr) return stderr;
-      if (stdout) return stdout;
-      return payloadValue(claudeMessageContent(raw)[0]?.content) || payloadValue(payload.text);
+      if (stderr) return `Tool failed: ${firstUsefulLine(stderr) || summarizeText(stderr)}`;
+      if (stdout) return `Tool result: ${summarizeText(stdout)}`;
+      const content = payloadValue(claudeMessageContent(raw)[0]?.content) || payloadValue(payload.text);
+      return content ? `Tool result: ${summarizeText(content)}` : "Tool completed";
     }
     case "system":
       return payloadValue(raw.description) || payloadValue(payload.text) || `Claude ${payloadValue(raw.subtype) || "system event"}`;
