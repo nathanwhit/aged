@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,51 +145,21 @@ func TestPluginRegistryProbesExecutablePluginDescribe(t *testing.T) {
 }
 
 func TestPluginRegistrySupervisesDriverLifecycle(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then echo driver-ready; sleep 0.05; exit 0; fi\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	registry := NewPluginRegistry([]core.Plugin{{
-		ID:       "driver:test",
-		Name:     "Test Driver",
-		Kind:     "driver",
-		Enabled:  true,
-		Command:  []string{path},
-		Protocol: "aged-plugin-v1",
-		Config:   map[string]string{"restart": "never"},
-	}})
+	registry := NewPluginRegistry([]core.Plugin{managedDriverPlugin(t, "driver:test", "Test Driver", "echo driver-ready\nsleep 0.05\nexit 0")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	registry.StartDrivers(ctx)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		plugin := registry.Snapshot()[0]
-		if plugin.Driver.Managed && (plugin.Status == "running" || plugin.Status == "stopped") && len(plugin.Driver.LogTail) > 0 {
-			if !strings.Contains(strings.Join(plugin.Driver.LogTail, "\n"), "driver-ready") {
-				t.Fatalf("log tail = %+v", plugin.Driver.LogTail)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	plugin := waitForPluginLifecycle(t, registry.Snapshot, "driver:test", "driver did not report lifecycle state", func(plugin core.Plugin) bool {
+		return plugin.Driver.Managed && (plugin.Status == "running" || plugin.Status == "stopped") && len(plugin.Driver.LogTail) > 0
+	})
+	if !strings.Contains(strings.Join(plugin.Driver.LogTail, "\n"), "driver-ready") {
+		t.Fatalf("log tail = %+v", plugin.Driver.LogTail)
 	}
-	t.Fatalf("driver did not report lifecycle state: %+v", registry.Snapshot())
 }
 
 func TestServiceDeletePluginRemovesRunningManagedDriverFromSnapshots(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(path, []byte(`#!/bin/sh
-if [ "$1" = describe ]; then
-  printf '{"id":"driver:delete-test","name":"Delete Test Driver","kind":"driver","protocol":"aged-plugin-v1"}\n'
-  exit 0
-fi
-if [ "$1" = serve ]; then
-  echo driver-ready
-  sleep 30
-fi
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	plugin := managedDriverPlugin(t, "driver:delete-test", "Delete Test Driver", "echo driver-ready\nsleep 30")
 	store := openTestStore(t)
 	defer store.Close()
 	service := NewService(store, StaticBrain{}, map[string]worker.Runner{}, t.TempDir())
@@ -196,33 +167,18 @@ fi
 		_ = service.DeletePlugin(context.Background(), "driver:delete-test")
 	})
 
-	if _, err := service.RegisterPlugin(ctx, core.Plugin{
-		ID:       "driver:delete-test",
-		Name:     "Delete Test Driver",
-		Kind:     "driver",
-		Enabled:  true,
-		Command:  []string{path},
-		Protocol: "aged-plugin-v1",
-		Config:   map[string]string{"restart": "never"},
-	}); err != nil {
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	snapshotPlugins := func() []core.Plugin {
 		snapshot, err := service.Snapshot(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		plugin, ok := pluginByID(snapshot.Plugins, "driver:delete-test")
-		if ok && plugin.Driver.Managed && plugin.Driver.PID != 0 && plugin.Status == "running" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("driver did not start: %+v", snapshot.Plugins)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return snapshot.Plugins
 	}
+	waitForPluginLifecycle(t, snapshotPlugins, "driver:delete-test", "driver did not start", runningManagedDriver)
 
 	if err := service.DeletePlugin(ctx, "driver:delete-test"); err != nil {
 		t.Fatal(err)
@@ -263,19 +219,7 @@ fi
 
 func TestServiceDisablePluginCancelsRunningManagedDriver(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(path, []byte(`#!/bin/sh
-if [ "$1" = describe ]; then
-  printf '{"id":"driver:disable-test","name":"Disable Test Driver","kind":"driver","protocol":"aged-plugin-v1"}\n'
-  exit 0
-fi
-if [ "$1" = serve ]; then
-  echo driver-ready
-  sleep 30
-fi
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	plugin := managedDriverPlugin(t, "driver:disable-test", "Disable Test Driver", "echo driver-ready\nsleep 30")
 	store := openTestStore(t)
 	defer store.Close()
 	service := NewService(store, StaticBrain{}, map[string]worker.Runner{}, t.TempDir())
@@ -283,43 +227,21 @@ fi
 		_ = service.DeletePlugin(context.Background(), "driver:disable-test")
 	})
 
-	if _, err := service.RegisterPlugin(ctx, core.Plugin{
-		ID:       "driver:disable-test",
-		Name:     "Disable Test Driver",
-		Kind:     "driver",
-		Enabled:  true,
-		Command:  []string{path},
-		Protocol: "aged-plugin-v1",
-		Config:   map[string]string{"restart": "never"},
-	}); err != nil {
+	if _, err := service.RegisterPlugin(ctx, plugin); err != nil {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	snapshotPlugins := func() []core.Plugin {
 		snapshot, err := service.Snapshot(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		plugin, ok := pluginByID(snapshot.Plugins, "driver:disable-test")
-		if ok && plugin.Driver.Managed && plugin.Driver.PID != 0 && plugin.Status == "running" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("driver did not start: %+v", snapshot.Plugins)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return snapshot.Plugins
 	}
+	waitForPluginLifecycle(t, snapshotPlugins, "driver:disable-test", "driver did not start", runningManagedDriver)
 
-	disabled, err := service.RegisterPlugin(ctx, core.Plugin{
-		ID:       "driver:disable-test",
-		Name:     "Disable Test Driver",
-		Kind:     "driver",
-		Enabled:  false,
-		Command:  []string{path},
-		Protocol: "aged-plugin-v1",
-		Config:   map[string]string{"restart": "never"},
-	})
+	plugin.Enabled = false
+	disabled, err := service.RegisterPlugin(ctx, plugin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,53 +255,21 @@ fi
 		t.Fatalf("disabled plugin kept driver cancel")
 	}
 
-	deadline = time.Now().Add(2 * time.Second)
-	for {
-		snapshot, err := service.Snapshot(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		plugin, ok := pluginByID(snapshot.Plugins, "driver:disable-test")
-		if ok && plugin.Status == "disabled" && !plugin.Driver.Managed && plugin.Driver.PID == 0 && plugin.Driver.RestartPolicy == "" {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("disabled plugin lifecycle was not cleared after supervisor exit: %+v", snapshot.Plugins)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForPluginLifecycle(t, snapshotPlugins, "driver:disable-test", "disabled plugin lifecycle was not cleared after supervisor exit", disabledDriverLifecycleCleared)
 }
 
 func TestPluginRegistryCapturesLargeDriverLogLine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "driver.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"$1\" = serve ]; then printf '%02000000d\\n' 0; exit 0; fi\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	registry := NewPluginRegistry([]core.Plugin{{
-		ID:       "driver:test",
-		Name:     "Test Driver",
-		Kind:     "driver",
-		Enabled:  true,
-		Command:  []string{path},
-		Protocol: "aged-plugin-v1",
-		Config:   map[string]string{"restart": "never"},
-	}})
+	registry := NewPluginRegistry([]core.Plugin{managedDriverPlugin(t, "driver:test", "Test Driver", "printf '%02000000d\\n' 0\nexit 0")})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	registry.StartDrivers(ctx)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		plugin := registry.Snapshot()[0]
-		if len(plugin.Driver.LogTail) > 0 {
-			line := plugin.Driver.LogTail[0]
-			if !strings.HasPrefix(line, "stdout: ") || len(strings.TrimPrefix(line, "stdout: ")) != 2000000 {
-				t.Fatalf("log line length = %d, prefix ok = %v", len(strings.TrimPrefix(line, "stdout: ")), strings.HasPrefix(line, "stdout: "))
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	plugin := waitForPluginLifecycle(t, registry.Snapshot, "driver:test", "driver did not capture large log line", func(plugin core.Plugin) bool {
+		return len(plugin.Driver.LogTail) > 0
+	})
+	line := plugin.Driver.LogTail[0]
+	if !strings.HasPrefix(line, "stdout: ") || len(strings.TrimPrefix(line, "stdout: ")) != 2000000 {
+		t.Fatalf("log line length = %d, prefix ok = %v", len(strings.TrimPrefix(line, "stdout: ")), strings.HasPrefix(line, "stdout: "))
 	}
-	t.Fatalf("driver did not capture large log line: %+v", registry.Snapshot())
 }
 
 func TestPluginRegistryLifecycleUpdatePreservesLargeDriverLogTail(t *testing.T) {
@@ -441,4 +331,54 @@ func corePluginFixture(id string) []core.Plugin {
 		Command:  []string{"aged-linear"},
 		Protocol: "aged-plugin-v1",
 	}}
+}
+
+func managedDriverPlugin(t *testing.T, id, name, serveScript string) core.Plugin {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "driver.sh")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = describe ]; then
+  printf '{"id":"%s","name":"%s","kind":"driver","protocol":"aged-plugin-v1"}\n'
+  exit 0
+fi
+if [ "$1" = serve ]; then
+%s
+fi
+`, id, name, serveScript)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return core.Plugin{
+		ID:       id,
+		Name:     name,
+		Kind:     "driver",
+		Enabled:  true,
+		Command:  []string{path},
+		Protocol: "aged-plugin-v1",
+		Config:   map[string]string{"restart": "never"},
+	}
+}
+
+func waitForPluginLifecycle(t *testing.T, snapshot func() []core.Plugin, id, failure string, predicate func(core.Plugin) bool) core.Plugin {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		plugins := snapshot()
+		plugin, ok := pluginByID(plugins, id)
+		if ok && predicate(plugin) {
+			return plugin
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %+v", failure, plugins)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func runningManagedDriver(plugin core.Plugin) bool {
+	return plugin.Driver.Managed && plugin.Driver.PID != 0 && plugin.Status == "running"
+}
+
+func disabledDriverLifecycleCleared(plugin core.Plugin) bool {
+	return plugin.Status == "disabled" && !plugin.Driver.Managed && plugin.Driver.PID == 0 && plugin.Driver.RestartPolicy == ""
 }
