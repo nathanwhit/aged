@@ -230,6 +230,15 @@ type PluginDriverState struct {
 	LogTail       []string  `json:"logTail,omitempty"`
 }
 
+type PromptSet struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Templates   map[string]string `json:"templates,omitempty"`
+	BuiltIn     bool              `json:"builtIn,omitempty"`
+	Default     bool              `json:"default,omitempty"`
+}
+
 type Project struct {
 	ID                string              `json:"id"`
 	Name              string              `json:"name"`
@@ -409,6 +418,7 @@ type Snapshot struct {
 	ExecutionNodes      []ExecutionNode      `json:"executionNodes"`
 	Targets             []TargetState        `json:"targets,omitempty"`
 	Plugins             []Plugin             `json:"plugins,omitempty"`
+	PromptSets          []PromptSet          `json:"promptSets,omitempty"`
 	Projects            []Project            `json:"projects,omitempty"`
 	PullRequests        []PullRequest        `json:"pullRequests,omitempty"`
 	OrchestrationGraphs []OrchestrationGraph `json:"orchestrationGraphs,omitempty"`

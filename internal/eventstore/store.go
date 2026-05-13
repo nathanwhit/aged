@@ -15,6 +15,9 @@ type Store interface {
 	ListPlugins(ctx context.Context) ([]core.Plugin, error)
 	SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error)
 	DeletePlugin(ctx context.Context, id string) error
+	ListPromptSets(ctx context.Context) ([]core.PromptSet, string, error)
+	SavePromptSet(ctx context.Context, promptSet core.PromptSet, makeDefault bool) (core.PromptSet, error)
+	DeletePromptSet(ctx context.Context, id string) error
 	ListTargets(ctx context.Context) ([]core.TargetConfig, error)
 	SaveTarget(ctx context.Context, target core.TargetConfig) (core.TargetConfig, error)
 	DeleteTarget(ctx context.Context, id string) error

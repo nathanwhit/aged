@@ -33,7 +33,9 @@ func main() {
 		assistantReason   = flag.String("assistant-reasoning", envutil.String("AGED_ASSISTANT_REASONING", "medium"), "interactive assistant reasoning effort: default, low, medium, high, xhigh, or max")
 		brainMode         = flag.String("brain", envutil.String("AGED_BRAIN", "prompt"), "brain provider: prompt, codex, api, or static")
 		promptPath        = flag.String("prompt", envutil.String("AGED_ORCHESTRATOR_PROMPT", "prompts/orchestrator.md"), "fallback worker prompt template")
-		schedulerPrompt   = flag.String("scheduler-prompt", envutil.String("AGED_SCHEDULER_PROMPT", "prompts/scheduler.md"), "API scheduler prompt template")
+		schedulerPrompt   = flag.String("scheduler-prompt", envutil.String("AGED_SCHEDULER_PROMPT", "prompts/default/system.md"), "API scheduler prompt template")
+		promptDir         = flag.String("prompt-dir", envutil.String("AGED_PROMPT_DIR", "prompts/default"), "directory containing built-in Codex prompt set templates")
+		promptSetID       = flag.String("prompt-set", envutil.String("AGED_PROMPT_SET", ""), "default Codex prompt set id")
 		brainEndpoint     = flag.String("brain-endpoint", envutil.String("AGED_BRAIN_ENDPOINT", "https://api.openai.com/v1/chat/completions"), "OpenAI-compatible chat completions endpoint")
 		brainAPIKey       = flag.String("brain-api-key", envutil.First("AGED_BRAIN_API_KEY", "OPENAI_API_KEY"), "API key for the API brain provider")
 		brainModel        = flag.String("brain-model", envutil.String("AGED_BRAIN_MODEL", ""), "model for the API brain provider")
@@ -83,6 +85,21 @@ func main() {
 		fallbackBrain = &orchestrator.StaticBrain{WorkerKind: *workerKind}
 	}
 
+	storedPromptSets, storedPromptSetID, err := store.ListPromptSets(ctx)
+	if err != nil {
+		fatal("load prompt sets", err)
+	}
+	defaultPromptSet, err := orchestrator.LoadDefaultPromptSet(*promptDir)
+	if err != nil {
+		slog.Warn("using hardcoded prompt fallback because default prompt set could not be loaded", "path", *promptDir, "error", err)
+	} else {
+		storedPromptSets = append(storedPromptSets, defaultPromptSet)
+	}
+	defaultPromptSetID := strings.TrimSpace(*promptSetID)
+	if defaultPromptSetID == "" {
+		defaultPromptSetID = storedPromptSetID
+	}
+	promptSets := orchestrator.NewPromptSetRegistry(storedPromptSets, defaultPromptSetID)
 	var brain orchestrator.BrainProvider = fallbackBrain
 	switch *brainMode {
 	case "prompt":
@@ -92,6 +109,7 @@ func main() {
 		codexBrain, err := orchestrator.NewCodexBrain(orchestrator.CodexBrainConfig{
 			CodexPath:    *codexPath,
 			TemplatePath: *schedulerPrompt,
+			PromptSets:   promptSets,
 			WorkDir:      absWorkDir,
 			Fallback:     fallbackBrain,
 		})
@@ -148,6 +166,7 @@ func main() {
 	if err := service.LoadRegisteredTargets(ctx); err != nil {
 		fatal("initialize registered targets", err)
 	}
+	service.SetPromptSets(promptSets)
 	if err := service.LoadProjects(ctx, projects); err != nil {
 		fatal("initialize projects", err)
 	}

@@ -106,6 +106,15 @@ CREATE TABLE IF NOT EXISTS plugins (
 	updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS prompt_sets (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	templates TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS targets (
 	id TEXT PRIMARY KEY,
 	kind TEXT NOT NULL,
@@ -244,6 +253,65 @@ ON CONFLICT(id) DO UPDATE SET
 
 func (s *SQLiteStore) DeletePlugin(ctx context.Context, id string) error {
 	return s.deleteByID(ctx, id, "plugin id is required", `DELETE FROM plugins WHERE id = ?`)
+}
+
+func (s *SQLiteStore) ListPromptSets(ctx context.Context) ([]core.PromptSet, string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, description, templates FROM prompt_sets ORDER BY id ASC`)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var promptSets []core.PromptSet
+	for rows.Next() {
+		promptSet, err := scanPromptSet(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		promptSets = append(promptSets, promptSet)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	defaultID, err := s.setting(ctx, "default_prompt_set_id")
+	return promptSets, defaultID, err
+}
+
+func (s *SQLiteStore) SavePromptSet(ctx context.Context, promptSet core.PromptSet, makeDefault bool) (core.PromptSet, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	templates, err := jsonString(promptSet.Templates, "{}")
+	if err != nil {
+		return core.PromptSet{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.PromptSet{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO prompt_sets (id, name, description, templates, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	name = excluded.name,
+	description = excluded.description,
+	templates = excluded.templates,
+	updated_at = excluded.updated_at`,
+		promptSet.ID, promptSet.Name, promptSet.Description, templates, now, now,
+	); err != nil {
+		return core.PromptSet{}, err
+	}
+	if makeDefault {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ('default_prompt_set_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, promptSet.ID); err != nil {
+			return core.PromptSet{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return core.PromptSet{}, err
+	}
+	return promptSet, nil
+}
+
+func (s *SQLiteStore) DeletePromptSet(ctx context.Context, id string) error {
+	return s.deleteByID(ctx, id, "prompt set id is required", `DELETE FROM prompt_sets WHERE id = ?`)
 }
 
 func (s *SQLiteStore) ListTargets(ctx context.Context) ([]core.TargetConfig, error) {
@@ -1684,6 +1752,20 @@ func scanPlugin(scanner eventScanner) (core.Plugin, error) {
 		}
 	}
 	return plugin, nil
+}
+
+func scanPromptSet(scanner eventScanner) (core.PromptSet, error) {
+	var promptSet core.PromptSet
+	var templates string
+	if err := scanner.Scan(&promptSet.ID, &promptSet.Name, &promptSet.Description, &templates); err != nil {
+		return core.PromptSet{}, err
+	}
+	if templates != "" {
+		if err := json.Unmarshal([]byte(templates), &promptSet.Templates); err != nil {
+			return core.PromptSet{}, err
+		}
+	}
+	return promptSet, nil
 }
 
 func scanTarget(scanner eventScanner) (core.TargetConfig, error) {

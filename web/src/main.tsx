@@ -22,9 +22,9 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -33,6 +33,7 @@ type AppSnapshot = {
   executionNodes: ExecutionNode[];
   targets: TargetState[];
   plugins: Plugin[];
+  promptSets: PromptSet[];
   projects: Project[];
   pullRequests: PullRequestState[];
   orchestrationGraphs: OrchestrationGraph[];
@@ -58,6 +59,7 @@ const emptySnapshot: AppSnapshot = {
   executionNodes: [],
   targets: [],
   plugins: [],
+  promptSets: [],
   projects: [],
   pullRequests: [],
   orchestrationGraphs: [],
@@ -74,6 +76,7 @@ type DashboardPaneId =
   | "assistant"
   | "targets"
   | "plugins"
+  | "prompt-sets"
   | "workers"
   | "worker-detail"
   | "timeline";
@@ -106,6 +109,7 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "timeline", span: 12, minHeight: 320 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "projects", span: 4, minHeight: 0 },
+  { id: "prompt-sets", span: 4, minHeight: 0 },
   { id: "assistant", span: 4, minHeight: 0 },
 ];
 
@@ -245,6 +249,31 @@ function App() {
     title: "Ask",
     element: <AssistantPanel onError={setError} />,
   };
+  const promptSetPane: DashboardPane = {
+    id: "prompt-sets",
+    title: "Prompts",
+    element: (
+      <PromptSetPanel
+        promptSets={snapshot.promptSets}
+        onRegister={async (promptSet) => {
+          setError("");
+          await registerPromptSet(promptSet);
+          await refresh();
+        }}
+        onUpdate={async (id, promptSet) => {
+          setError("");
+          await updatePromptSet(id, promptSet);
+          await refresh();
+        }}
+        onDelete={async (id) => {
+          setError("");
+          await deletePromptSet(id);
+          await refresh();
+        }}
+        onError={setError}
+      />
+    ),
+  };
   const targetPanes: DashboardPane[] = snapshot.targets.length > 0
     ? [{
       id: "targets",
@@ -342,7 +371,7 @@ function App() {
         },
       ]
     : [];
-  const dashboardPanes: DashboardPane[] = [...taskPanes, ...targetPanes, projectPane, assistantPane];
+  const dashboardPanes: DashboardPane[] = [...taskPanes, ...targetPanes, projectPane, promptSetPane, assistantPane];
 
   return (
     <main className="app">
@@ -452,6 +481,7 @@ function App() {
             onStartSettled={() => setPendingTask(null)}
             onError={setError}
             projects={snapshot.projects}
+            promptSets={snapshot.promptSets}
           />
         </section>
 
@@ -938,14 +968,17 @@ function TaskComposer({
   onStartSettled,
   onError,
   projects,
+  promptSets,
 }: {
   onCreate: (input: TaskStartInput) => Promise<Task>;
   onStartPending: (input: TaskStartInput) => void;
   onStartSettled: () => void;
   onError: (message: string) => void;
   projects: Project[];
+  promptSets: PromptSet[];
 }) {
   const [projectId, setProjectId] = useState("");
+  const [promptSetId, setPromptSetId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [runMode, setRunMode] = useState<RunMode>("one-shot");
@@ -966,6 +999,9 @@ function TaskComposer({
           loopIntervalSeconds: interval,
         }
       : { completionMode };
+    if (promptSetId) {
+      metadata.promptSetId = promptSetId;
+    }
     const input = { projectId: projectId || undefined, title, prompt, metadata };
     setBusy(true);
     onStartPending(input);
@@ -973,6 +1009,7 @@ function TaskComposer({
       await onCreate(input);
       setTitle("");
       setPrompt("");
+      setPromptSetId("");
       setRunMode("one-shot");
       setCompletionMode("github");
       setLoopWorkerKind("codex");
@@ -1005,6 +1042,17 @@ function TaskComposer({
       <label>
         Title
         <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Auto-generated if blank" />
+      </label>
+      <label>
+        Prompt set
+        <select value={promptSetId} onChange={(event) => setPromptSetId(event.target.value)}>
+          <option value="">Default prompt set</option>
+          {promptSets.filter((promptSet) => !promptSet.builtIn).map((promptSet) => (
+            <option key={promptSet.id} value={promptSet.id}>
+              {promptSet.name}{promptSet.default ? " (default)" : ""}
+            </option>
+          ))}
+        </select>
       </label>
       <label>
         Prompt
@@ -2795,6 +2843,161 @@ const SYSTEM_PLUGIN_IDS = new Set([
   "driver:discord",
 ]);
 
+const PROMPT_TEMPLATE_KEYS = ["system", "plan", "replan", "completion_review", "publication_review"];
+
+function PromptSetPanel({
+  promptSets,
+  onRegister,
+  onUpdate,
+  onDelete,
+  onError,
+}: {
+  promptSets: PromptSet[];
+  onRegister: (promptSet: PromptSet) => Promise<void>;
+  onUpdate: (id: string, promptSet: PromptSet) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [editingId, setEditingId] = useState("");
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [makeDefault, setMakeDefault] = useState(false);
+  const [templates, setTemplates] = useState<Record<string, string>>({});
+  const [showForm, setShowForm] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const reset = () => {
+    setEditingId("");
+    setId("");
+    setName("");
+    setDescription("");
+    setMakeDefault(false);
+    setTemplates({});
+    setShowForm(false);
+  };
+
+  const edit = (promptSet: PromptSet) => {
+    if (promptSet.builtIn) return;
+    setEditingId(promptSet.id);
+    setId(promptSet.id);
+    setName(promptSet.name);
+    setDescription(promptSet.description ?? "");
+    setMakeDefault(Boolean(promptSet.default));
+    setTemplates(promptSet.templates ?? {});
+    setShowForm(true);
+  };
+
+  const copy = (promptSet: PromptSet) => {
+    setEditingId("");
+    setId("");
+    setName(`${promptSet.name} Custom`);
+    setDescription(promptSet.description ?? "");
+    setMakeDefault(false);
+    setTemplates(promptSet.templates ?? {});
+    setShowForm(true);
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      setBusy(true);
+      const cleanTemplates = Object.fromEntries(Object.entries(templates).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value));
+      const promptSet: PromptSet = {
+        id: id.trim(),
+        name: name.trim() || id.trim(),
+        description: description.trim() || undefined,
+        templates: cleanTemplates,
+        default: makeDefault,
+      };
+      if (editingId) await onUpdate(editingId, promptSet);
+      else await onRegister(promptSet);
+      reset();
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="panel plugin-panel">
+      <div className="panel-title split-title">
+        <span>
+          <FileText size={18} />
+          <h2>Prompt Sets</h2>
+        </span>
+        <button className="secondary compact" type="button" onClick={() => setShowForm((value) => !value)}>
+          {showForm ? "Close" : "Add"}
+        </button>
+      </div>
+      {showForm && (
+        <form className="plugin-register" onSubmit={submit}>
+          <label>
+            ID
+            <input value={id} onChange={(event) => setId(event.target.value)} placeholder="perf" required disabled={Boolean(editingId)} />
+          </label>
+          <label>
+            Name
+            <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Performance" />
+          </label>
+          <label className="plugin-command-field">
+            Description
+            <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Planner and replanner prompt overrides" />
+          </label>
+          {PROMPT_TEMPLATE_KEYS.map((key) => (
+            <label className="plugin-command-field" key={key}>
+              {humanizeKey(key)}
+              <textarea value={templates[key] ?? ""} onChange={(event) => setTemplates((current) => ({ ...current, [key]: event.target.value }))} placeholder={`Optional ${key} template. Use {{system}}, {{input_json}}, {{task_json}}, {{task_prompt}}.`} rows={5} />
+            </label>
+          ))}
+          <div className="plugin-form-footer">
+            <label className="checkbox-label">
+              <input type="checkbox" checked={makeDefault} onChange={(event) => setMakeDefault(event.target.checked)} />
+              Default
+            </label>
+            <div className="plugin-form-actions">
+              <button type="submit" disabled={busy}>{editingId ? "Update" : "Create"}</button>
+              <button type="button" className="secondary" onClick={reset}>Cancel</button>
+            </div>
+          </div>
+        </form>
+      )}
+      <div className="plugin-grid">
+        {promptSets.map((promptSet) => (
+          <article key={promptSet.id} className={["plugin-card", promptSet.builtIn ? "system" : ""].filter(Boolean).join(" ")}>
+            <div>
+              <strong>{promptSet.name}</strong>
+              <small>{promptSet.id}</small>
+            </div>
+            <div className="plugin-status-row">
+              {promptSet.default && <span className="tool-status">default</span>}
+              {promptSet.builtIn && <span className="tool-status neutral">built in</span>}
+              <span className="tool-status neutral">{Object.keys(promptSet.templates ?? {}).length} templates</span>
+            </div>
+            {promptSet.description && <p>{promptSet.description}</p>}
+            <div className="plugin-card-actions">
+              {promptSet.builtIn ? (
+                <>
+                  <span className="plugin-system-note">Built-in fallback</span>
+                  <button className="secondary" onClick={() => copy(promptSet)}>Copy</button>
+                </>
+              ) : (
+                <>
+                  <button className="secondary" onClick={() => edit(promptSet)}>Edit</button>
+                  <button className="secondary danger-text" onClick={() => onDelete(promptSet.id).catch((err) => onError(errorMessage(err)))}>
+                    <Trash2 size={14} />
+                  </button>
+                </>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 type PluginConfigEntry = {
   id: string;
   key: string;
@@ -3933,6 +4136,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     executionNodes,
     targets: snapshot.targets ?? [],
     plugins: snapshot.plugins ?? [],
+    promptSets: snapshot.promptSets ?? [],
     projects: snapshot.projects ?? [],
     pullRequests: snapshot.pullRequests ?? [],
     orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
@@ -4405,6 +4609,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
     ),
     projects: snapshot.projects,
     plugins: snapshot.plugins,
+    promptSets: snapshot.promptSets,
     pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
     targets: snapshot.targets,
     lastEventId: snapshot.lastEventId,

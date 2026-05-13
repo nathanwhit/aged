@@ -75,6 +75,7 @@ type Service struct {
 	workDir       string
 	projects      *ProjectRegistry
 	plugins       *PluginRegistry
+	promptSets    *PromptSetRegistry
 	pluginCtx     context.Context
 	drivers       *DriverRegistry
 	workspaces    WorkspaceManager
@@ -338,6 +339,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		workDir:       workDir,
 		projects:      projects,
 		plugins:       NewPluginRegistry(builtinPlugins()),
+		promptSets:    NewPromptSetRegistry(nil, ""),
 		workspaces:    workspaces,
 		targets:       targets,
 		sshRunner:     sshRunner,
@@ -585,6 +587,58 @@ func (s *Service) SetPlugins(plugins *PluginRegistry) {
 	if plugins != nil {
 		s.plugins = plugins
 	}
+}
+
+func (s *Service) SetPromptSets(promptSets *PromptSetRegistry) {
+	if promptSets != nil {
+		s.promptSets = promptSets
+	}
+}
+
+func (s *Service) LoadPromptSets(ctx context.Context, seed *PromptSetRegistry) error {
+	promptSets, defaultID, err := s.store.ListPromptSets(ctx)
+	if err != nil {
+		return err
+	}
+	var seedPromptSets []core.PromptSet
+	if seed != nil {
+		seedPromptSets = seed.Snapshot()
+	}
+	if defaultID == "" {
+		for _, promptSet := range seedPromptSets {
+			if promptSet.Default {
+				defaultID = promptSet.ID
+				break
+			}
+		}
+	}
+	promptSets = append(promptSets, seedPromptSets...)
+	s.SetPromptSets(NewPromptSetRegistry(promptSets, defaultID))
+	return nil
+}
+
+func (s *Service) RegisterPromptSet(ctx context.Context, promptSet core.PromptSet) (core.PromptSet, error) {
+	makeDefault := promptSet.Default
+	registered, err := s.registerPromptSetRuntime(promptSet, makeDefault)
+	if err != nil {
+		return core.PromptSet{}, err
+	}
+	registered.BuiltIn = false
+	return s.store.SavePromptSet(ctx, registered, makeDefault)
+}
+
+func (s *Service) DeletePromptSet(ctx context.Context, id string) error {
+	if err := s.store.DeletePromptSet(ctx, id); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+		return err
+	}
+	return s.promptSets.Delete(id)
+}
+
+func (s *Service) registerPromptSetRuntime(promptSet core.PromptSet, makeDefault bool) (core.PromptSet, error) {
+	if s.promptSets == nil {
+		s.promptSets = NewPromptSetRegistry(nil, "")
+	}
+	return s.promptSets.Register(promptSet, makeDefault)
 }
 
 func (s *Service) SetPluginRuntimeContext(ctx context.Context) {
@@ -837,6 +891,9 @@ func (s *Service) decorateSnapshot(snapshot core.Snapshot) core.Snapshot {
 		if s.drivers != nil {
 			snapshot.Plugins = s.drivers.DecoratePlugins(snapshot.Plugins)
 		}
+	}
+	if s.promptSets != nil {
+		snapshot.PromptSets = s.promptSets.Snapshot()
 	}
 	return snapshot
 }
