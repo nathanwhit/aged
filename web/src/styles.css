@@ -117,12 +117,17 @@ button {
 }
 
 .overview-primary,
-.overview-metric {
+.overview-metric,
+.panel {
   background: #ffffff;
   border: 1px solid #dfe5ee;
   border-radius: 8px;
   box-shadow: 0 1px 2px rgb(15 23 42 / 5%);
   min-width: 0;
+}
+
+.overview-primary,
+.overview-metric {
   padding: 8px 12px;
 }
 
@@ -322,11 +327,6 @@ button {
 }
 
 .panel {
-  background: #ffffff;
-  border: 1px solid #dfe5ee;
-  border-radius: 8px;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 5%);
-  min-width: 0;
   padding: 16px;
 }
 
@@ -637,11 +637,7 @@ textarea {
   color: #343741;
 }
 
-.primary.compact {
-  min-height: 34px;
-  padding: 6px 10px;
-}
-
+.primary.compact,
 .secondary.compact {
   min-height: 34px;
   padding: 6px 10px;
@@ -856,7 +852,8 @@ small {
 }
 
 .pill.ok,
-.status.succeeded {
+.status.succeeded,
+.status.satisfied {
   background: #e7f4ea;
   border-color: #9bc7a6;
   color: #1d6b34;
@@ -878,12 +875,6 @@ small {
   background: #fff4d6;
   border-color: #e5c466;
   color: #765200;
-}
-
-.status.satisfied {
-  background: #e7f4ea;
-  border-color: #9bc7a6;
-  color: #1d6b34;
 }
 
 .status.starting {
@@ -1109,10 +1100,14 @@ small {
   gap: 12px;
 }
 
-.summary-grid {
+.summary-grid,
+.graph-summary {
   display: grid;
-  gap: 8px;
   grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.summary-grid {
+  gap: 8px;
 }
 
 .metric {
@@ -1251,7 +1246,9 @@ small {
   gap: 10px;
 }
 
-.pr-list {
+.pr-list,
+.worker-grid,
+.node-grid {
   display: grid;
   gap: 10px;
 }
@@ -1293,11 +1290,6 @@ small {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: end;
-}
-
-.worker-grid {
-  display: grid;
-  gap: 10px;
 }
 
 .orchestration-panel {
@@ -1344,7 +1336,8 @@ small {
 .worker-current,
 .worker-activity,
 .worker-context,
-.worker-graph-context {
+.worker-graph-context,
+.worker-review {
   border-top: 1px solid #e7edf4;
   grid-column: 1 / -1;
   min-width: 0;
@@ -1568,13 +1561,25 @@ small {
 .file-change-card,
 .usage-card,
 .lifecycle-card,
-.completion-card {
+.completion-card,
+.worker-section-card,
+.worker-detail-section,
+.plugin-card,
+.graph-node {
   background: #ffffff;
   border: 1px solid #e3e7ee;
   border-radius: 8px;
   display: grid;
-  gap: 10px;
   min-width: 0;
+}
+
+.tool-card,
+.agent-message-card,
+.file-change-card,
+.usage-card,
+.lifecycle-card,
+.completion-card {
+  gap: 10px;
   padding: 10px;
 }
 
@@ -1841,12 +1846,7 @@ small {
 
 .worker-section-card,
 .worker-detail-section {
-  background: #ffffff;
-  border: 1px solid #e3e7ee;
-  border-radius: 8px;
-  display: grid;
   gap: 10px;
-  min-width: 0;
   padding: 12px;
 }
 
@@ -1947,8 +1947,6 @@ small {
 }
 
 .node-grid {
-  display: grid;
-  gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
@@ -2019,7 +2017,8 @@ small {
 }
 
 .plugin-form-footer,
-.plugin-form-actions {
+.plugin-form-actions,
+.plugin-title-actions {
   display: flex;
   gap: 8px;
 }
@@ -2032,8 +2031,6 @@ small {
 
 .plugin-title-actions {
   align-items: center;
-  display: flex;
-  gap: 8px;
 }
 
 .plugin-panel {
@@ -2079,12 +2076,7 @@ small {
 
 .plugin-card,
 .graph-node {
-  background: #ffffff;
-  border: 1px solid #e3e7ee;
-  border-radius: 8px;
-  display: grid;
   gap: 8px;
-  min-width: 0;
   padding: 12px;
 }
 
@@ -2192,9 +2184,7 @@ small {
 }
 
 .graph-summary {
-  display: grid;
   gap: 10px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .node-card {
@@ -2258,12 +2248,9 @@ small {
 
 .worker-review {
   align-items: start;
-  border-top: 1px solid #e7edf4;
   display: grid;
   gap: 10px;
-  grid-column: 1 / -1;
   grid-template-columns: minmax(0, 1fr) auto;
-  padding-top: 10px;
 }
 
 .worker-review-actions {
@@ -2471,10 +2458,7 @@ small {
 }
 
 @media (max-width: 820px) {
-  .summary-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
+  .summary-grid,
   .graph-summary {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -2551,10 +2535,7 @@ small {
     grid-template-columns: 1fr;
   }
 
-  .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
+  .summary-grid,
   .graph-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
