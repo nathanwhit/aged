@@ -7542,6 +7542,25 @@ func TestServiceDeliversSteeringToRunningWorker(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 }
 
+func TestServiceSteerTaskMissingTaskReturnsNotFoundWithoutEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	err := service.SteerTask(ctx, "missing-task", core.SteeringRequest{Message: "adjust course"})
+	if !errors.Is(err, eventstore.ErrNotFound) {
+		t.Fatalf("SteerTask error = %v, want ErrNotFound", err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(snapshot.Events, core.EventTaskSteered, "missing-task") != 0 {
+		t.Fatalf("task.steered events = %d, want 0", countEvents(snapshot.Events, core.EventTaskSteered, "missing-task"))
+	}
+}
+
 func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
