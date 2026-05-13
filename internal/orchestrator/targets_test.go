@@ -167,6 +167,18 @@ func TestTargetRegistryRegisterAllowsKnownAndEmptyKinds(t *testing.T) {
 	}
 }
 
+func TestLoadTargetRegistryFailsForSSHTargetMissingHost(t *testing.T) {
+	path := t.TempDir() + "/targets.json"
+	if err := os.WriteFile(path, []byte(`{"targets":[{"id":"vm","kind":"ssh","workDir":"/repo"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadTargetRegistry(path)
+	if err == nil || !strings.Contains(err.Error(), "ssh target host is required") {
+		t.Fatalf("LoadTargetRegistry error = %v, want ssh target host is required", err)
+	}
+}
+
 func TestSSHRunnerProbeReportsToolAvailability(t *testing.T) {
 	executor := &fakeRemoteExecutor{probeOutput: strings.Join([]string{
 		"checkoutRootOK=true",

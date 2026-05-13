@@ -70,6 +70,11 @@ func LoadTargetRegistry(path string) (*TargetRegistry, error) {
 	if len(payload.Targets) == 0 {
 		return nil, errors.New("target config must include at least one target")
 	}
+	for i, target := range payload.Targets {
+		if _, err := normalizeTargetConfig(target); err != nil {
+			return nil, fmt.Errorf("target %d: %w", i+1, err)
+		}
+	}
 	return NewTargetRegistry(payload.Targets), nil
 }
 
