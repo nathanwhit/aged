@@ -355,6 +355,55 @@ func TestCodexBrainReviewPromptsRejectTestsOnlyFixCandidates(t *testing.T) {
 	}
 }
 
+func TestCodexBrainReplanPromptInstructsHumanStylePRBody(t *testing.T) {
+	brain := &CodexBrain{template: "schedule the work"}
+	prompt := brain.replanPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Implement feature",
+		Prompt: "Implement the feature.",
+	}, OrchestrationState{})
+
+	humanContributorHint := "human contributor"
+	if !strings.Contains(prompt, humanContributorHint) {
+		t.Fatalf("replan prompt missing human-contributor framing for PR body:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Do not restate") {
+		t.Fatalf("replan prompt does not forbid restating the task prompt:\n%s", prompt)
+	}
+	for _, forbidden := range []string{"worker ids", "task ids", "candidate", "aged"} {
+		if !strings.Contains(prompt, forbidden) {
+			t.Fatalf("replan prompt does not forbid orchestration internal %q:\n%s", forbidden, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "## Test plan") && !strings.Contains(prompt, "## Validation") {
+		t.Fatalf("replan prompt does not require a Test plan / Validation section:\n%s", prompt)
+	}
+}
+
+func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
+	for _, path := range []string{"../../prompts/scheduler.md", "../../prompts/default/system.md", "../../prompts/default/replan.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "human contributor") {
+			t.Fatalf("%s missing human-contributor framing for PR body:\n%s", path, body)
+		}
+		if !strings.Contains(body, "Do not restate") {
+			t.Fatalf("%s does not forbid restating the task prompt:\n%s", path, body)
+		}
+		for _, forbidden := range []string{"worker ids", "task ids", "candidate", "aged"} {
+			if !strings.Contains(body, forbidden) {
+				t.Fatalf("%s does not forbid orchestration internal %q", path, forbidden)
+			}
+		}
+		if !strings.Contains(body, "## Test plan") && !strings.Contains(body, "## Validation") {
+			t.Fatalf("%s does not require a Test plan / Validation section", path)
+		}
+	}
+}
+
 func TestDecodeCodexPlanExtractsObjectFromProse(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`Here is the plan:
 	{
