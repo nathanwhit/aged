@@ -319,14 +319,11 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		if err := ensureGitPullRequestHasChanges(ctx, exec, dir, base); err != nil {
 			return err
 		}
-		if _, err := exec(ctx, dir, "git", "branch", "-f", branch, "HEAD"); err != nil {
-			return fmt.Errorf("create git branch: %w", err)
-		}
 		if remote == "" {
 			remote = "origin"
 		}
-		if _, err := exec(ctx, dir, "git", "push", "-u", remote, branch); err != nil {
-			return fmt.Errorf("push git branch: %w", err)
+		if err := pushGitPublishBranch(ctx, exec, dir, branch, remote); err != nil {
+			return err
 		}
 		if spec.ResetWorkDir {
 			if err := resetGitPullRequestWorkDir(ctx, exec, dir, base); err != nil {
@@ -370,16 +367,44 @@ func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec 
 	if err := ensureGitPullRequestHasChanges(ctx, exec, worktree, base); err != nil {
 		return err
 	}
-	if _, err := exec(ctx, worktree, "git", "branch", "-f", branch, "HEAD"); err != nil {
-		return fmt.Errorf("create git branch: %w", err)
-	}
 	if remote == "" {
 		remote = "origin"
 	}
-	if _, err := exec(ctx, worktree, "git", "push", "-u", remote, branch); err != nil {
+	if err := pushGitPublishBranch(ctx, exec, worktree, branch, remote); err != nil {
+		return err
+	}
+	return nil
+}
+
+// pushGitPublishBranch updates the local branch ref to HEAD and pushes it to
+// the remote. When the local branch is currently checked out by another git
+// worktree (e.g. the user's source checkout or a long-lived aged worktree)
+// `git branch -f` refuses with "cannot force update the branch ... used by
+// worktree ...". In that case the local ref is left alone and the remote
+// branch is force-updated directly via a refspec push, which does not require
+// the local branch to be free.
+func pushGitPublishBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string) error {
+	if _, err := exec(ctx, dir, "git", "branch", "-f", branch, "HEAD"); err != nil {
+		if !isBranchInUseByWorktreeError(err) {
+			return fmt.Errorf("create git branch: %w", err)
+		}
+		if _, pushErr := exec(ctx, dir, "git", "push", "--force", remote, "HEAD:refs/heads/"+branch); pushErr != nil {
+			return fmt.Errorf("push git branch: %w", pushErr)
+		}
+		return nil
+	}
+	if _, err := exec(ctx, dir, "git", "push", "-u", remote, branch); err != nil {
 		return fmt.Errorf("push git branch: %w", err)
 	}
 	return nil
+}
+
+func isBranchInUseByWorktreeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cannot force update the branch") && strings.Contains(msg, "used by worktree")
 }
 
 func resetGitPullRequestWorkDir(ctx context.Context, exec commandExecutor, dir string, base string) error {

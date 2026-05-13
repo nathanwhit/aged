@@ -602,6 +602,41 @@ func TestGitWorkspaceManagerApplyConflictAbortsSourceMerge(t *testing.T) {
 	}
 }
 
+func TestApplyGitPatchTreatsEmptyPatchAsNoOp(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	if err := applyGitPatchToWorkspace(ctx, repo, ""); err != nil {
+		t.Fatalf("empty patch should be a no-op, got %v", err)
+	}
+	if err := applyGitPatchToWorkspace(ctx, repo, "   \n\n"); err != nil {
+		t.Fatalf("whitespace-only patch should be a no-op, got %v", err)
+	}
+}
+
+func TestApplyGitPatchTreatsPatchLikeNoOpAsNoOp(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	patch := "diff --git a/file.txt b/file.txt\n"
+	if err := applyGitPatchToWorkspace(ctx, repo, patch); err != nil {
+		t.Fatalf("patch-like no-op should be a no-op, got %v", err)
+	}
+}
+
+func TestApplyGitPatchRejectsNonPatchInput(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	err := applyGitPatchToWorkspace(ctx, repo, "Connection closed by 161.210.92.1 port 22\n")
+	if err == nil {
+		t.Fatal("expected error for non-patch input")
+	}
+	if !strings.Contains(err.Error(), "not a valid git patch") {
+		t.Fatalf("error should describe invalid patch, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Connection closed") {
+		t.Fatalf("error should preserve a preview of the bad input, got %v", err)
+	}
+}
+
 func TestApplyGitPatchAcceptsMissingTrailingNewline(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)

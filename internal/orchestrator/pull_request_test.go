@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -287,6 +288,85 @@ func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testin
 	}
 	assertCommandContains(t, calls, []string{"git", "worktree", "add", "--detach"})
 	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+}
+
+func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "origin", remote)
+	runTestGit(t, repo, "push", "-u", "origin", "main")
+
+	// Create and check out the publish branch in the source repo. This is the
+	// state that triggers "fatal: cannot force update the branch ... used by
+	// worktree ..." when another worktree tries to update the same branch.
+	runTestGit(t, repo, "checkout", "-b", "feature")
+
+	// Simulate the aged worker workspace: a detached worktree that has the
+	// changes to publish.
+	worktree := filepath.Join(t.TempDir(), "aged-worker")
+	runTestGit(t, repo, "worktree", "add", "--detach", worktree, "main")
+	if err := os.WriteFile(filepath.Join(worktree, "fix.txt"), []byte("worker change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	publisher := LocalPullRequestPublisher{
+		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
+			call := append([]string{name}, args...)
+			calls = append(calls, call)
+			switch {
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
+				return "https://github.com/owner/repo/pull/12", nil
+			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
+				return `{"number":12,"url":"https://github.com/owner/repo/pull/12","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
+			default:
+				return runCommand(ctx, dir, name, args...)
+			}
+		},
+	}
+
+	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+		TaskID:  "task-1",
+		WorkDir: worktree,
+		Repo:    "owner/repo",
+		Base:    "main",
+		Branch:  "feature",
+		Title:   "Fix",
+		Body:    "Body",
+	}); err != nil {
+		t.Fatalf("Publish failed: %v", err)
+	}
+
+	// `git branch -f` should have been attempted and a refspec push used as
+	// the fallback because the branch is checked out by the source worktree.
+	assertCommandContains(t, calls, []string{"git", "branch", "-f", "feature", "HEAD"})
+	assertCommandContains(t, calls, []string{"git", "push", "--force", "origin", "HEAD:refs/heads/feature"})
+
+	// The remote branch must now point at the worker's commit.
+	remoteHead := strings.TrimSpace(runTestGit(t, remote, "rev-parse", "refs/heads/feature"))
+	worktreeHead := strings.TrimSpace(runTestGit(t, worktree, "rev-parse", "HEAD"))
+	if remoteHead != worktreeHead {
+		t.Fatalf("remote feature = %q, worktree HEAD = %q", remoteHead, worktreeHead)
+	}
+	// The source checkout must still be on `feature` (we didn't move it).
+	if current := strings.TrimSpace(runTestGit(t, repo, "branch", "--show-current")); current != "feature" {
+		t.Fatalf("source checkout branch = %q, want feature", current)
+	}
+}
+
+func TestIsBranchInUseByWorktreeErrorMatchesGitMessage(t *testing.T) {
+	if !isBranchInUseByWorktreeError(errors.New("fatal: cannot force update the branch 'feature' used by worktree at '/tmp/wt'")) {
+		t.Fatal("expected branch-in-use error to be recognized")
+	}
+	if isBranchInUseByWorktreeError(errors.New("fatal: some other error")) {
+		t.Fatal("unexpected error matched as branch-in-use")
+	}
+	if isBranchInUseByWorktreeError(nil) {
+		t.Fatal("nil should not match branch-in-use")
+	}
 }
 
 func TestInspectPullRequestPopulatesStatusAliasesFromGitHubPayload(t *testing.T) {

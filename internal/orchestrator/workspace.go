@@ -989,6 +989,9 @@ func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) err
 	if patch == "" {
 		return nil
 	}
+	if !looksLikeGitPatch(patch) {
+		return fmt.Errorf("worker patch is not a valid git patch: %s", patchPreview(patch))
+	}
 	apply := func(args ...string) error {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = dir
@@ -1004,10 +1007,10 @@ func applyGitPatchToWorkspace(ctx context.Context, dir string, patch string) err
 		}
 		return nil
 	}
-	if err := apply("apply", "--whitespace=nowarn"); err == nil {
+	if err := apply("apply", "--allow-empty", "--whitespace=nowarn"); err == nil {
 		return nil
 	}
-	return apply("apply", "--3way", "--whitespace=nowarn")
+	return apply("apply", "--3way", "--allow-empty", "--whitespace=nowarn")
 }
 
 func normalizePatchText(patch string) string {
@@ -1018,6 +1021,32 @@ func normalizePatchText(patch string) string {
 		return patch + "\n"
 	}
 	return patch
+}
+
+func looksLikeGitPatch(patch string) bool {
+	for _, line := range strings.Split(patch, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "),
+			strings.HasPrefix(line, "--- "),
+			strings.HasPrefix(line, "+++ "),
+			strings.HasPrefix(line, "@@ "),
+			strings.HasPrefix(line, "Binary files "),
+			strings.HasPrefix(line, "GIT binary patch"),
+			strings.HasPrefix(line, "Index: "):
+			return true
+		}
+	}
+	return false
+}
+
+func patchPreview(patch string) string {
+	const maxLen = 200
+	preview := strings.TrimSpace(patch)
+	preview = strings.ReplaceAll(preview, "\n", " ")
+	if len(preview) > maxLen {
+		preview = preview[:maxLen] + "..."
+	}
+	return preview
 }
 
 func copyGitUntrackedFiles(ctx context.Context, source string, destination string) (bool, error) {
