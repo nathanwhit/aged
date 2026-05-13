@@ -10,115 +10,64 @@ import (
 	"time"
 
 	"aged/internal/core"
+	"aged/internal/eventstore"
 	"aged/internal/worker"
 )
 
 func TestCleanupRetainedWorkspaceArtifactsRemovesIgnoredTarget(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
-	ignoreGitTarget(t, repo)
-	if err := os.MkdirAll(filepath.Join(repo, "target", "debug"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "target", "debug", "artifact.bin"), []byte("build output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "file.txt"), []byte("source edit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newRetainedCleanupFixture(t, "task-clean", "worker-clean", core.WorkerSucceeded, true)
+	writeRetainedTargetFile(t, fixture.repo, "debug/artifact.bin", "build output\n")
+	writeRetainedFile(t, fixture.repo, "file.txt", "source edit\n")
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-clean", "worker-clean", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Cleaned != 1 || report.BytesRemoved == 0 {
 		t.Fatalf("report = %+v, want one cleaned workspace with removed bytes", report)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "target")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target")); !os.IsNotExist(err) {
 		t.Fatalf("target stat err = %v, want not exist", err)
 	}
-	contents, err := os.ReadFile(filepath.Join(repo, "file.txt"))
+	contents, err := os.ReadFile(filepath.Join(fixture.repo, "file.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(contents) != "source edit\n" {
 		t.Fatalf("source contents = %q", contents)
 	}
-	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-clean")
+	cleanup := lastWorkspaceCleanupEvent(t, fixture.ctx, fixture.store, "worker-clean")
 	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 1 || !cleanup.ArtifactDirs[0].Removed {
 		t.Fatalf("cleanup event = %+v, want removed target", cleanup)
 	}
 }
 
 func TestCleanupRetainedWorkspaceArtifactsProtectsActiveWorkers(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
-	ignoreGitTarget(t, repo)
-	if err := os.MkdirAll(filepath.Join(repo, "target"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "target", "artifact.bin"), []byte("build output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newRetainedCleanupFixture(t, "task-active", "worker-active", core.WorkerRunning, true)
+	writeRetainedTargetFile(t, fixture.repo, "artifact.bin", "build output\n")
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-active", "worker-active", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerRunning, now.Add(-2*time.Hour), true)
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if report.Cleaned != 0 || report.Skipped != 1 {
 		t.Fatalf("report = %+v, want active worker skipped", report)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "target", "artifact.bin")); err != nil {
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target", "artifact.bin")); err != nil {
 		t.Fatalf("active worker artifact was removed: %v", err)
 	}
-	if cleanupEventCount(t, ctx, store, "worker-active") != 0 {
+	if cleanupEventCount(t, fixture.ctx, fixture.store, "worker-active") != 0 {
 		t.Fatalf("active worker should not emit cleanup event")
 	}
 }
 
 func TestCleanupRetainedWorkspaceArtifactsProtectsActiveExecutionNodes(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
-	ignoreGitTarget(t, repo)
-	if err := os.MkdirAll(filepath.Join(repo, "target"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "target", "artifact.bin"), []byte("build output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newRetainedCleanupFixture(t, "task-node-active", "worker-node-active", core.WorkerSucceeded, true)
+	writeRetainedTargetFile(t, fixture.repo, "artifact.bin", "build output\n")
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-node-active", "worker-node-active", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	appendRetainedCleanupExecutionNode(t, ctx, store, workspace, "node-active", core.WorkerRunning, now.Add(-time.Hour))
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	appendRetainedCleanupExecutionNode(t, fixture.ctx, fixture.store, fixture.workspace, "node-active", core.WorkerRunning, fixture.now.Add(-time.Hour))
 
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,37 +77,19 @@ func TestCleanupRetainedWorkspaceArtifactsProtectsActiveExecutionNodes(t *testin
 	if !strings.Contains(report.Workspaces[0].Reason, "active execution node") {
 		t.Fatalf("cleanup = %+v, want active execution node reason", report.Workspaces[0])
 	}
-	if _, err := os.Stat(filepath.Join(repo, "target", "artifact.bin")); err != nil {
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target", "artifact.bin")); err != nil {
 		t.Fatalf("active execution node artifact was removed: %v", err)
 	}
-	if cleanupEventCount(t, ctx, store, "worker-node-active") != 0 {
+	if cleanupEventCount(t, fixture.ctx, fixture.store, "worker-node-active") != 0 {
 		t.Fatalf("active execution node should not emit cleanup event")
 	}
 }
 
 func TestCleanupRetainedWorkspaceArtifactsDryRunPreservesTarget(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
-	ignoreGitTarget(t, repo)
-	if err := os.MkdirAll(filepath.Join(repo, "target"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "target", "artifact.bin"), []byte("build output\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newRetainedCleanupFixture(t, "task-dry", "worker-dry", core.WorkerSucceeded, true)
+	writeRetainedTargetFile(t, fixture.repo, "artifact.bin", "build output\n")
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-dry", "worker-dry", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-		DryRun: true,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{DryRun: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,33 +100,22 @@ func TestCleanupRetainedWorkspaceArtifactsDryRunPreservesTarget(t *testing.T) {
 	if !item.DryRun || !item.WouldRemove || item.Removed {
 		t.Fatalf("dry-run item = %+v, want would-remove without removed", item)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "target", "artifact.bin")); err != nil {
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target", "artifact.bin")); err != nil {
 		t.Fatalf("dry run removed target artifact: %v", err)
 	}
 }
 
 func TestCleanupRetainedWorkspaceArtifactsSkipsSymlinkTarget(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
+	fixture := newRetainedCleanupFixture(t, "task-symlink", "worker-symlink", core.WorkerSucceeded, false)
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "artifact.bin"), []byte("outside\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(repo, "target")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(fixture.repo, "target")); err != nil {
 		t.Fatal(err)
 	}
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-symlink", "worker-symlink", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +126,7 @@ func TestCleanupRetainedWorkspaceArtifactsSkipsSymlinkTarget(t *testing.T) {
 	if !strings.Contains(item.Reason, "symlink") {
 		t.Fatalf("artifact item = %+v, want symlink skip reason", item)
 	}
-	if _, err := os.Lstat(filepath.Join(repo, "target")); err != nil {
+	if _, err := os.Lstat(filepath.Join(fixture.repo, "target")); err != nil {
 		t.Fatalf("symlink target was removed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "artifact.bin")); err != nil {
@@ -255,26 +175,10 @@ func TestCleanupRetainedWorkspaceArtifactsSkipsSymlinkRoot(t *testing.T) {
 }
 
 func TestCleanupRetainedWorkspaceArtifactsPreservesVCSVisibleTargetChanges(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-	repo := initGitTestRepo(t)
-	if err := os.MkdirAll(filepath.Join(repo, "target"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "target", "source.txt"), []byte("not ignored\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newRetainedCleanupFixture(t, "task-source", "worker-source", core.WorkerSucceeded, false)
+	writeRetainedTargetFile(t, fixture.repo, "source.txt", "not ignored\n")
 
-	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
-	workspace := retainedCleanupWorkspace("task-source", "worker-source", repo, "git")
-	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-
-	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
-		MinAge: time.Hour,
-		Now:    now,
-	})
+	report, err := fixture.cleanup(RetainedWorkspaceArtifactCleanupOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +189,7 @@ func TestCleanupRetainedWorkspaceArtifactsPreservesVCSVisibleTargetChanges(t *te
 	if !strings.Contains(item.Reason, "VCS-visible changes") {
 		t.Fatalf("artifact item = %+v, want VCS-visible skip reason", item)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "target", "source.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target", "source.txt")); err != nil {
 		t.Fatalf("VCS-visible target file was removed: %v", err)
 	}
 }
@@ -304,6 +208,63 @@ func ignoreGitTarget(t *testing.T, repo string) {
 	}
 	runTestGit(t, repo, "add", ".gitignore")
 	runTestGit(t, repo, "commit", "-m", "ignore target")
+}
+
+type retainedCleanupFixture struct {
+	ctx       context.Context
+	store     *eventstore.SQLiteStore
+	repo      string
+	now       time.Time
+	workspace PreparedWorkspace
+	service   *Service
+}
+
+func newRetainedCleanupFixture(t *testing.T, taskID string, workerID string, status core.WorkerStatus, ignoreTarget bool) retainedCleanupFixture {
+	t.Helper()
+	ctx := context.Background()
+	store := openTestStore(t)
+	t.Cleanup(func() { store.Close() })
+	repo := initGitTestRepo(t)
+	if ignoreTarget {
+		ignoreGitTarget(t, repo)
+	}
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	workspace := retainedCleanupWorkspace(taskID, workerID, repo, "git")
+	appendRetainedCleanupWorker(t, ctx, store, workspace, status, now.Add(-2*time.Hour), true)
+	return retainedCleanupFixture{
+		ctx:       ctx,
+		store:     store,
+		repo:      repo,
+		now:       now,
+		workspace: workspace,
+		service:   NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir()),
+	}
+}
+
+func (f retainedCleanupFixture) cleanup(options RetainedWorkspaceArtifactCleanupOptions) (RetainedWorkspaceArtifactCleanupReport, error) {
+	if options.MinAge == 0 {
+		options.MinAge = time.Hour
+	}
+	if options.Now.IsZero() {
+		options.Now = f.now
+	}
+	return f.service.CleanupRetainedWorkspaceArtifacts(f.ctx, options)
+}
+
+func writeRetainedTargetFile(t *testing.T, repo string, name string, contents string) {
+	t.Helper()
+	writeRetainedFile(t, repo, filepath.Join("target", name), contents)
+}
+
+func writeRetainedFile(t *testing.T, repo string, name string, contents string) {
+	t.Helper()
+	path := filepath.Join(repo, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func retainedCleanupWorkspace(taskID string, workerID string, root string, vcs string) PreparedWorkspace {
