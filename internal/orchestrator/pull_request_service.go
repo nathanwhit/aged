@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
 	"strconv"
 	"strings"
@@ -507,7 +508,10 @@ func (s *Service) workerCreatedPullRequest(ctx context.Context, snapshot core.Sn
 }
 
 func workerCreatedPullRequestMetadata(metadata map[string]any, url string) map[string]any {
-	out := copyAnyMap(metadata)
+	out := maps.Clone(metadata)
+	if out == nil {
+		out = map[string]any{}
+	}
 	out["workerCreated"] = true
 	out["adoptedFromWorkerOutput"] = true
 	out["workerOutputURL"] = url
