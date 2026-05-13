@@ -560,6 +560,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	vcs := read("vcs.txt")
 	root := nonEmpty(read("root.txt"), run.WorkDir)
 	status := readRaw("changes.txt")
+	nameStatus := readRaw("name-status.z")
 	diffStat := readRaw("diffstat.txt")
 	diff := normalizePatchText(readRaw("diff.patch"))
 	stdout := readRaw("stdout.log")
@@ -580,7 +581,11 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	case "jj":
 		changes.ChangedFiles = parseJJDiffSummary(status)
 	case "git":
-		changes.ChangedFiles = parseGitPorcelain(status)
+		if nameStatus != "" {
+			changes.ChangedFiles = parseGitNameStatus(nameStatus)
+		} else {
+			changes.ChangedFiles = parseGitPorcelain(status)
+		}
 	}
 	if firstReadErr != nil {
 		changes.Error = firstReadErr.Error()
@@ -656,7 +661,7 @@ if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.
 		shellQuote(path.Join(run.RunDir, "bin")),
 		remoteWorkerEnvScript(),
 		shellQuote(run.WorkDir),
-		command,
+		remoteBaselineScript(run)+"\n"+command,
 		stdinRedirect,
 		shellQuote(run.RunDir),
 		shellQuote(run.RunDir),
@@ -973,6 +978,35 @@ done
 export PATH`
 }
 
+func remoteGitSnapshotTreeFunction() string {
+	return `aged_git_snapshot_tree() {
+  tmp_index=$(mktemp "${TMPDIR:-/tmp}/aged-git-index.XXXXXX") || return 1
+  rm -f "$tmp_index"
+  (
+    export GIT_INDEX_FILE="$tmp_index"
+    if git rev-parse --verify --quiet HEAD >/dev/null; then
+      git read-tree HEAD || exit 1
+    else
+      git read-tree --empty || exit 1
+    fi
+    git add -A -- . >/dev/null 2>&1 || exit 1
+    git write-tree
+  )
+  code=$?
+  rm -f "$tmp_index"
+  return "$code"
+}`
+}
+
+func remoteBaselineScript(run remoteRun) string {
+	runDir := shellQuote(run.RunDir)
+	return fmt.Sprintf(`if git rev-parse --show-toplevel >/dev/null 2>&1; then
+  git status --porcelain > %[1]s/git-baseline-status.txt 2>&1 || true
+  %[2]s
+  if tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$tree" ]; then printf '%%s\n' "$tree" > %[1]s/git-baseline.tree; fi
+fi`, runDir, remoteGitSnapshotTreeFunction())
+}
+
 func remoteShellCommand(script string) string {
 	if strings.TrimSpace(script) == "" {
 		return ""
@@ -982,7 +1016,18 @@ func remoteShellCommand(script string) string {
 
 func remoteChangeScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
-	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/diff.patch 2>/dev/null || true; done; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; fi`, runDir)
+	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; if [ -s %[1]s/git-baseline-status.txt ]; then %[2]s
+    baseline_tree=$(cat %[1]s/git-baseline.tree 2>/dev/null || true)
+    if current_tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$baseline_tree" ] && [ -n "$current_tree" ]; then
+      git diff --name-status "$baseline_tree" "$current_tree" > %[1]s/changes.txt 2>&1 || true
+      git diff --name-status -z "$baseline_tree" "$current_tree" > %[1]s/name-status.z 2>/dev/null || true
+      git diff --stat "$baseline_tree" "$current_tree" > %[1]s/diffstat.txt 2>&1 || true
+      git diff --binary "$baseline_tree" "$current_tree" > %[1]s/diff.patch 2>&1 || true
+      printf '\n' >> %[1]s/diff.patch
+    else
+      : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch
+    fi
+  else git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/diff.patch 2>/dev/null || true; done; fi; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; fi`, runDir, remoteGitSnapshotTreeFunction())
 }
 
 func remotePrepareCheckoutScript(spec RemoteCheckoutSpec) string {

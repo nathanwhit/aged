@@ -517,6 +517,85 @@ func TestRemoteChangeScriptIncludesUntrackedFilesInPatch(t *testing.T) {
 	}
 }
 
+func TestRemoteChangeScriptFiltersPreExistingDirtyGitWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	run := NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker", WorkDir: repo})
+	run.RunDir = t.TempDir()
+
+	writeTestFile(t, repo, "tracked-dirty.txt", "base\n")
+	writeTestFile(t, repo, "tracked-worker.txt", "base\n")
+	runTestGit(t, repo, "add", "tracked-dirty.txt", "tracked-worker.txt")
+	runTestGit(t, repo, "commit", "-m", "tracked files")
+
+	writeTestFile(t, repo, "tracked-dirty.txt", "base\npreexisting\n")
+	writeTestFile(t, repo, "tracked-worker.txt", "base\npreexisting\n")
+	writeTestFile(t, repo, "preexisting-untracked.txt", "preexisting\n")
+
+	runRemoteTestScript(t, ctx, repo, remoteBaselineScript(run))
+
+	writeTestFile(t, repo, "file.txt", "base\nworker clean file\n")
+	writeTestFile(t, repo, "tracked-worker.txt", "base\npreexisting\nworker\n")
+	writeTestFile(t, repo, "worker-added.txt", "worker added\n")
+
+	runRemoteTestScript(t, ctx, repo, remoteChangeScript(run))
+
+	changes := readTestRunFile(t, run.RunDir, "changes.txt")
+	diff := readTestRunFile(t, run.RunDir, "diff.patch")
+	nameStatus := readTestRunFile(t, run.RunDir, "name-status.z")
+	files := parseGitNameStatus(nameStatus)
+	assertChangedFiles(t, files, []WorkspaceChangedFile{
+		{Path: "file.txt", Status: "modified"},
+		{Path: "tracked-worker.txt", Status: "modified"},
+		{Path: "worker-added.txt", Status: "added"},
+	})
+
+	for _, leaked := range []string{"tracked-dirty.txt", "preexisting-untracked.txt"} {
+		if strings.Contains(changes, leaked) {
+			t.Fatalf("changes leaked pre-existing dirty file %q:\n%s", leaked, changes)
+		}
+		if strings.Contains(diff, leaked) {
+			t.Fatalf("diff leaked pre-existing dirty file %q:\n%s", leaked, diff)
+		}
+	}
+	for _, captured := range []string{"file.txt", "tracked-worker.txt", "worker-added.txt"} {
+		if !strings.Contains(diff, captured) {
+			t.Fatalf("diff did not capture worker file %q:\n%s", captured, diff)
+		}
+	}
+	if strings.Contains(diff, "\n+preexisting\n") {
+		t.Fatalf("diff captured a pre-existing dirty hunk:\n%s", diff)
+	}
+	if !strings.Contains(diff, "\n+worker\n") || !strings.Contains(diff, "\n+worker added\n") {
+		t.Fatalf("diff missing worker additions:\n%s", diff)
+	}
+}
+
+func TestRemoteChangeScriptPreservesCleanGitWorkspaceCapture(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	run := NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker", WorkDir: repo})
+	run.RunDir = t.TempDir()
+
+	runRemoteTestScript(t, ctx, repo, remoteBaselineScript(run))
+	writeTestFile(t, repo, "worker-added.txt", "worker added\n")
+	runRemoteTestScript(t, ctx, repo, remoteChangeScript(run))
+
+	changes := readTestRunFile(t, run.RunDir, "changes.txt")
+	if !strings.Contains(changes, "?? worker-added.txt") {
+		t.Fatalf("clean workspace capture should keep porcelain untracked status, got:\n%s", changes)
+	}
+	if _, err := os.Stat(filepath.Join(run.RunDir, "name-status.z")); err == nil {
+		t.Fatal("clean workspace capture should not use filtered name-status artifact")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	diff := readTestRunFile(t, run.RunDir, "diff.patch")
+	if !strings.Contains(diff, "diff --git a/worker-added.txt b/worker-added.txt") {
+		t.Fatalf("clean workspace capture missed worker-added file:\n%s", diff)
+	}
+}
+
 func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
@@ -1054,6 +1133,33 @@ func valueAt(values []string, index int) string {
 		index = len(values) - 1
 	}
 	return values[index]
+}
+
+func writeTestFile(t *testing.T, repo string, name string, content string) {
+	t.Helper()
+	path := filepath.Join(repo, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runRemoteTestScript(t *testing.T, ctx context.Context, repo string, script string) {
+	t.Helper()
+	if _, err := runCommand(ctx, repo, "sh", "-lc", script); err != nil {
+		t.Fatalf("remote script failed: %v\n%s", err, script)
+	}
+}
+
+func readTestRunFile(t *testing.T, runDir string, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(runDir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
 }
 
 type timeoutThenStatusExecutor struct {
