@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -157,42 +158,22 @@ func TestFindExistingPullRequestKeepsHeadForLocalBranch(t *testing.T) {
 }
 
 func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *testing.T) {
-	var calls [][]string
 	var createdBody string
-	publisher := LocalPullRequestPublisher{
-		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
-			call := append([]string{name}, args...)
-			calls = append(calls, call)
-			switch {
-			case name == "jj" && len(args) >= 1 && args[0] == "root":
-				return "", nil
-			case name == "jj" && len(args) >= 2 && args[0] == "bookmark":
-				return "", nil
-			case name == "jj" && len(args) >= 2 && args[0] == "git":
-				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
-				bodyFile := argAfter(args, "--body-file")
-				if bodyFile == "" {
-					t.Fatalf("missing --body-file in gh pr create args: %v", args)
-				}
-				body, err := os.ReadFile(bodyFile)
-				if err != nil {
-					t.Fatal(err)
-				}
-				createdBody = string(body)
-				return "https://github.com/upstream/repo/pull/9", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
-				return `{"number":9,"url":"https://github.com/upstream/repo/pull/9","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"trunk","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":"REVIEW_REQUIRED"}`, nil
-			case name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
-				return `{}`, nil
-			default:
-				t.Fatalf("unexpected command %s %v", name, args)
-				return "", nil
-			}
-		},
+	stub := newPullRequestCommandStub(t, "upstream/repo", 9, "Fix", "feature", "trunk")
+	stub.reviewDecision = "REVIEW_REQUIRED"
+	stub.createdBody = &createdBody
+	stub.before = func(_ context.Context, _ string, name string, args ...string) (string, bool, error) {
+		if name == "jj" && len(args) >= 1 && (args[0] == "root" || args[0] == "bookmark" || args[0] == "git") {
+			return "", true, nil
+		}
+		return "", false, nil
+	}
+	stub.fallback = func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		t.Fatalf("unexpected command %s %v", name, args)
+		return "", nil
 	}
 
-	pr, err := publisher.Publish(context.Background(), PullRequestPublishSpec{
+	pr, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(context.Background(), PullRequestPublishSpec{
 		TaskID:        "task-1",
 		WorkDir:       "/repo",
 		Repo:          "upstream/repo",
@@ -209,12 +190,12 @@ func TestPublishForkPullRequestUsesUpstreamRepoQualifiedHeadAndPushRemote(t *tes
 	if pr.Repo != "upstream/repo" || pr.Branch != "feature" || pr.Base != "trunk" {
 		t.Fatalf("pr = %+v", pr)
 	}
-	assertCommandContains(t, calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
-	assertCommandContains(t, calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
+	assertCommandContains(t, stub.calls, []string{"jj", "git", "push", "--bookmark", "feature", "--remote", "fork"})
+	assertCommandContains(t, stub.calls, []string{"gh", "pr", "create", "--repo", "upstream/repo", "--base", "trunk", "--head", "fork-owner:feature"})
 	if createdBody != "Body" {
 		t.Fatalf("body file contents = %q", createdBody)
 	}
-	for _, call := range calls {
+	for _, call := range stub.calls {
 		if containsSubsequence(call, []string{"gh", "pr", "create", "--body", "Body"}) {
 			t.Fatalf("gh pr create used --body instead of --body-file: %v", call)
 		}
@@ -233,25 +214,9 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var calls [][]string
-	publisher := LocalPullRequestPublisher{
-		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
-			call := append([]string{name}, args...)
-			calls = append(calls, call)
-			switch {
-			case name == "git" && len(args) > 0 && args[0] == "push":
-				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
-				return "https://github.com/owner/repo/pull/10", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
-				return `{"number":10,"url":"https://github.com/owner/repo/pull/10","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
-			default:
-				return runCommand(ctx, dir, name, args...)
-			}
-		},
-	}
+	stub := newPullRequestCommandStub(t, "owner/repo", 10, "CI", "feature", "main")
 
-	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(ctx, PullRequestPublishSpec{
 		TaskID:  "task-1",
 		WorkDir: repo,
 		Repo:    "owner/repo",
@@ -269,14 +234,14 @@ func TestPublishGitPullRequestCommitsDirtyWorkspaceBeforePush(t *testing.T) {
 	if contents := runTestGit(t, repo, "show", "feature:.github/workflows/ci.yml"); contents != "name: CI\n" {
 		t.Fatalf("published branch missing workflow: %q", contents)
 	}
-	assertCommandContains(t, calls, []string{"git", "add", "-A"})
-	assertCommandContains(t, calls, []string{"git", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
-	for _, call := range calls {
+	assertCommandContains(t, stub.calls, []string{"git", "add", "-A"})
+	assertCommandContains(t, stub.calls, []string{"git", "-c", "commit.gpgsign=false", "commit", "-m", "Update GitHub workflows"})
+	for _, call := range stub.calls {
 		if slices.Contains(call, "user.name=aged") || slices.Contains(call, "user.email=aged@example.invalid") {
 			t.Fatalf("publish commit should not override git author config: %v", call)
 		}
 	}
-	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+	assertCommandContains(t, stub.calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 
 func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testing.T) {
@@ -295,25 +260,9 @@ func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testin
 		t.Fatal(err)
 	}
 
-	var calls [][]string
-	publisher := LocalPullRequestPublisher{
-		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
-			call := append([]string{name}, args...)
-			calls = append(calls, call)
-			switch {
-			case name == "git" && len(args) > 0 && args[0] == "push":
-				return "", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
-				return "https://github.com/owner/repo/pull/11", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
-				return `{"number":11,"url":"https://github.com/owner/repo/pull/11","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
-			default:
-				return runCommand(ctx, dir, name, args...)
-			}
-		},
-	}
+	stub := newPullRequestCommandStub(t, "owner/repo", 11, "CI", "feature", "main")
 
-	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(ctx, PullRequestPublishSpec{
 		TaskID:        "task-1",
 		WorkDir:       repo,
 		Repo:          "owner/repo",
@@ -342,8 +291,8 @@ func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testin
 	if _, err := os.Stat(filepath.Join(repo, "manual-dirty.txt")); err != nil {
 		t.Fatalf("dirty source checkout file was not preserved: %v", err)
 	}
-	assertCommandContains(t, calls, []string{"git", "worktree", "add", "--detach"})
-	assertCommandContains(t, calls, []string{"git", "push", "-u", "origin", "feature"})
+	assertCommandContains(t, stub.calls, []string{"git", "worktree", "add", "--detach"})
+	assertCommandContains(t, stub.calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 
 func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t *testing.T) {
@@ -368,23 +317,16 @@ func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t 
 		t.Fatal(err)
 	}
 
-	var calls [][]string
-	publisher := LocalPullRequestPublisher{
-		exec: func(ctx context.Context, dir string, name string, args ...string) (string, error) {
-			call := append([]string{name}, args...)
-			calls = append(calls, call)
-			switch {
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "create":
-				return "https://github.com/owner/repo/pull/12", nil
-			case name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view":
-				return `{"number":12,"url":"https://github.com/owner/repo/pull/12","state":"OPEN","title":"Fix","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":""}`, nil
-			default:
-				return runCommand(ctx, dir, name, args...)
-			}
-		},
+	stub := newPullRequestCommandStub(t, "owner/repo", 12, "Fix", "feature", "main")
+	stub.before = func(ctx context.Context, dir string, name string, args ...string) (string, bool, error) {
+		if name == "git" && len(args) > 0 && args[0] == "push" {
+			out, err := runCommand(ctx, dir, name, args...)
+			return out, true, err
+		}
+		return "", false, nil
 	}
 
-	if _, err := publisher.Publish(ctx, PullRequestPublishSpec{
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(ctx, PullRequestPublishSpec{
 		TaskID:  "task-1",
 		WorkDir: worktree,
 		Repo:    "owner/repo",
@@ -398,8 +340,8 @@ func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t 
 
 	// `git branch -f` should have been attempted and a refspec push used as
 	// the fallback because the branch is checked out by the source worktree.
-	assertCommandContains(t, calls, []string{"git", "branch", "-f", "feature", "HEAD"})
-	assertCommandContains(t, calls, []string{"git", "push", "--force", "origin", "HEAD:refs/heads/feature"})
+	assertCommandContains(t, stub.calls, []string{"git", "branch", "-f", "feature", "HEAD"})
+	assertCommandContains(t, stub.calls, []string{"git", "push", "--force", "origin", "HEAD:refs/heads/feature"})
 
 	// The remote branch must now point at the worker's commit.
 	remoteHead := strings.TrimSpace(runTestGit(t, remote, "rev-parse", "refs/heads/feature"))
@@ -734,6 +676,57 @@ func TestInspectPullRequestFlagsCommentAfterWatchOnUpgrade(t *testing.T) {
 	}
 	if again.ReviewStatus == "COMMENTED" {
 		t.Fatal("upgrade comment trigger repeated")
+	}
+}
+
+type pullRequestCommandStub struct {
+	t              *testing.T
+	repo           string
+	number         int
+	title          string
+	branch         string
+	base           string
+	reviewDecision string
+	createdBody    *string
+	calls          [][]string
+	before         func(context.Context, string, string, ...string) (string, bool, error)
+	fallback       func(context.Context, string, string, ...string) (string, error)
+}
+
+func newPullRequestCommandStub(t *testing.T, repo string, number int, title string, branch string, base string) *pullRequestCommandStub {
+	return &pullRequestCommandStub{t: t, repo: repo, number: number, title: title, branch: branch, base: base, fallback: runCommand}
+}
+
+func (s *pullRequestCommandStub) exec(ctx context.Context, dir string, name string, args ...string) (string, error) {
+	s.calls = append(s.calls, append([]string{name}, args...))
+	if s.before != nil {
+		if out, ok, err := s.before(ctx, dir, name, args...); ok {
+			return out, err
+		}
+	}
+	switch {
+	case name == "git" && len(args) > 0 && args[0] == "push":
+		return "", nil
+	case name == "gh" && containsSubsequence(args, []string{"pr", "create"}):
+		if s.createdBody != nil {
+			bodyFile := argAfter(args, "--body-file")
+			if bodyFile == "" {
+				s.t.Fatalf("missing --body-file in gh pr create args: %v", args)
+			}
+			body, err := os.ReadFile(bodyFile)
+			if err != nil {
+				s.t.Fatal(err)
+			}
+			*s.createdBody = string(body)
+		}
+		return fmt.Sprintf("https://github.com/%s/pull/%d", s.repo, s.number), nil
+	case name == "gh" && containsSubsequence(args, []string{"pr", "view"}):
+		return fmt.Sprintf(`{"number":%d,"url":"https://github.com/%s/pull/%d","state":"OPEN","title":%q,"isDraft":false,"headRefName":%q,"baseRefName":%q,"mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":%q}`,
+			s.number, s.repo, s.number, s.title, s.branch, s.base, s.reviewDecision), nil
+	case name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+		return `{}`, nil
+	default:
+		return s.fallback(ctx, dir, name, args...)
 	}
 }
 
