@@ -82,6 +82,7 @@ export type Project = {
   targetLabels?: Record<string, string>;
   remoteCheckouts?: Record<string, string>;
   githubIssues?: GitHubIssuePolicy;
+  githubMentions?: GitHubMentionPolicy;
   pullRequestPolicy?: PullRequestPolicy;
 };
 
@@ -90,6 +91,12 @@ export type GitHubIssuePolicy = {
   labels?: string[];
   issueLimit?: number;
   autoPublish?: boolean;
+};
+
+export type GitHubMentionPolicy = {
+  enabled?: boolean;
+  reasons?: string[];
+  limit?: number;
 };
 
 export type PullRequestPolicy = {

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, retryTask, steerTask, updatePlugin, updateProject, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, GitHubIssuePolicy, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, GitHubIssuePolicy, GitHubMentionPolicy, OrchestrationGraph, Plugin, Project, ProjectHealth, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -1098,8 +1098,8 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
-  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
-  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onCreate: (input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; githubMentions?: GitHubMentionPolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
+  onUpdate: (id: string, input: { id: string; name?: string; localPath: string; repo?: string; upstreamRepo?: string; headRepoOwner?: string; pushRemote?: string; vcs?: string; defaultBase?: string; workspaceRoot?: string; remoteCheckouts?: Record<string, string>; githubIssues?: GitHubIssuePolicy; githubMentions?: GitHubMentionPolicy; pullRequestPolicy?: PullRequestPolicy }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
@@ -1119,6 +1119,9 @@ function ProjectPanel({
   const [issueLabels, setIssueLabels] = useState("aged");
   const [issueLimit, setIssueLimit] = useState("20");
   const [issueAutoPublish, setIssueAutoPublish] = useState(true);
+  const [pollGitHubMentions, setPollGitHubMentions] = useState(false);
+  const [mentionReasons, setMentionReasons] = useState("mention, team_mention, review_requested");
+  const [mentionLimit, setMentionLimit] = useState("20");
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
@@ -1144,6 +1147,9 @@ function ProjectPanel({
     setIssueLabels((project.githubIssues?.labels ?? []).join(", "));
     setIssueLimit(project.githubIssues?.issueLimit ? String(project.githubIssues.issueLimit) : "20");
     setIssueAutoPublish(project.githubIssues?.autoPublish ?? true);
+    setPollGitHubMentions(Boolean(project.githubMentions?.enabled));
+    setMentionReasons((project.githubMentions?.reasons ?? ["mention", "team_mention", "review_requested"]).join(", "));
+    setMentionLimit(project.githubMentions?.limit ? String(project.githubMentions.limit) : "20");
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
@@ -1167,6 +1173,9 @@ function ProjectPanel({
     setIssueLabels("aged");
     setIssueLimit("20");
     setIssueAutoPublish(true);
+    setPollGitHubMentions(false);
+    setMentionReasons("mention, team_mention, review_requested");
+    setMentionLimit("20");
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
@@ -1180,6 +1189,7 @@ function ProjectPanel({
     try {
       const parsedRemoteCheckouts = remoteCheckoutRecordFromEntries(remoteCheckoutEntries);
       const parsedIssueLimit = Math.max(0, Number.parseInt(issueLimit, 10) || 0);
+      const parsedMentionLimit = Math.max(0, Number.parseInt(mentionLimit, 10) || 0);
       const input = {
         id,
         name: name || undefined,
@@ -1196,6 +1206,11 @@ function ProjectPanel({
           labels: splitCommaList(issueLabels),
           issueLimit: parsedIssueLimit || undefined,
           autoPublish: issueAutoPublish,
+        },
+        githubMentions: {
+          enabled: pollGitHubMentions,
+          reasons: splitCommaList(mentionReasons),
+          limit: parsedMentionLimit || undefined,
         },
         pullRequestPolicy: {
           branchPrefix: branchPrefix || undefined,
@@ -1322,6 +1337,22 @@ function ProjectPanel({
               <label className="checkbox-label">
                 <input type="checkbox" checked={issueAutoPublish} onChange={(event) => setIssueAutoPublish(event.target.checked)} />
                 Publish PRs
+              </label>
+            </div>
+          )}
+          <label className="checkbox-label">
+            <input type="checkbox" checked={pollGitHubMentions} onChange={(event) => setPollGitHubMentions(event.target.checked)} />
+            Poll GitHub mentions
+          </label>
+          {pollGitHubMentions && (
+            <div className="loop-config">
+              <label>
+                Mention reasons
+                <input value={mentionReasons} onChange={(event) => setMentionReasons(event.target.value)} placeholder="mention, team_mention, review_requested" />
+              </label>
+              <label>
+                Mention limit
+                <input type="number" min="1" step="1" value={mentionLimit} onChange={(event) => setMentionLimit(event.target.value)} />
               </label>
             </div>
           )}

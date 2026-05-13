@@ -70,6 +70,11 @@ export async function createProject(input: {
     issueLimit?: number;
     autoPublish?: boolean;
   };
+  githubMentions?: {
+    enabled?: boolean;
+    reasons?: string[];
+    limit?: number;
+  };
   pullRequestPolicy?: {
     branchPrefix?: string;
     draft?: boolean;
@@ -99,6 +104,11 @@ export async function updateProject(id: string, input: {
     labels?: string[];
     issueLimit?: number;
     autoPublish?: boolean;
+  };
+  githubMentions?: {
+    enabled?: boolean;
+    reasons?: string[];
+    limit?: number;
   };
   pullRequestPolicy?: {
     branchPrefix?: string;

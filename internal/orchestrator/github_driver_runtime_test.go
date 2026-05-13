@@ -29,19 +29,35 @@ func TestServiceGitHubDriverConfigHotToggles(t *testing.T) {
 			Labels:     []string{"aged"},
 			IssueLimit: 7,
 		},
+		GitHubMentions: core.GitHubMentionPolicy{
+			Enabled: true,
+			Reasons: []string{"review_requested"},
+			Limit:   3,
+		},
 	}}, "fork")
 	if err != nil {
 		t.Fatal(err)
 	}
 	service.SetProjects(projects)
-	service.Drivers().SetGitHubClient(fakeGitHubClient{issues: []GitHubIssue{{
-		Repo:   "owner/repo",
-		Number: 12,
-		Title:  "Add feature",
-		Body:   "Please add the feature.",
-		URL:    "https://github.com/owner/repo/issues/12",
-		Labels: []string{"aged"},
-	}}})
+	service.Drivers().SetGitHubClient(fakeGitHubClient{
+		issues: []GitHubIssue{{
+			Repo:   "owner/repo",
+			Number: 12,
+			Title:  "Add feature",
+			Body:   "Please add the feature.",
+			URL:    "https://github.com/owner/repo/issues/12",
+			Labels: []string{"aged"},
+		}},
+		mentions: []GitHubMention{{
+			ID:          "thread-1",
+			Repo:        "owner/repo",
+			SubjectType: "PullRequest",
+			Number:      15,
+			Title:       "Review me",
+			URL:         "https://github.com/owner/repo/pull/15",
+			Reason:      "review_requested",
+		}},
+	})
 
 	state, err := service.Drivers().StartGitHubDriver(ctx, GitHubDriverConfig{})
 	if err != nil {
@@ -67,6 +83,9 @@ func TestServiceGitHubDriverConfigHotToggles(t *testing.T) {
 	if len(state.Config.Issues) != 1 || state.Config.Issues[0].ProjectID != "fork" || state.Config.Issues[0].IssueLimit != 7 {
 		t.Fatalf("effective issues = %+v", state.Config.Issues)
 	}
+	if state.Config.Mentions.Enabled == nil || !*state.Config.Mentions.Enabled || len(state.Config.Mentions.Repos) != 1 || state.Config.Mentions.Repos[0] != "owner/repo" || state.Config.Mentions.Limit != 3 {
+		t.Fatalf("effective mentions = %+v", state.Config.Mentions)
+	}
 	snapshot, err := service.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +98,10 @@ func TestServiceGitHubDriverConfigHotToggles(t *testing.T) {
 	task := waitForGitHubIssueTask(t, service, "github-issue", "owner/repo#12")
 	if task.ProjectID != "fork" {
 		t.Fatalf("task project = %q, want fork", task.ProjectID)
+	}
+	mentionTask := waitForGitHubIssueTask(t, service, "github-mention", "thread-1")
+	if mentionTask.ProjectID != "fork" {
+		t.Fatalf("mention task project = %q, want fork", mentionTask.ProjectID)
 	}
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 

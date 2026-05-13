@@ -1582,7 +1582,8 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"pushRemote": "fork",
 		"vcs": "git",
 		"defaultBase": "main",
-		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5}
+		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5},
+		"githubMentions": {"enabled": true, "reasons": ["mention", "review_requested"], "limit": 8}
 	}`, projectDir)
 	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -1597,7 +1598,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -1605,7 +1606,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 {
 		t.Fatalf("projects = %+v", projects)
 	}
 }
