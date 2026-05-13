@@ -145,6 +145,12 @@ func TestTargetRegistryRegisterRejectsUnknownKind(t *testing.T) {
 	}
 }
 
+func testSSHTarget() TargetConfig {
+	return TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo", WorkRoot: "/runs"}
+}
+func testSSHSpec() worker.Spec { return worker.Spec{ID: "worker-123", WorkDir: "/repo"} }
+func testSSHRun() remoteRun    { return NewRemoteRun(testSSHTarget(), testSSHSpec()) }
+
 func TestTargetRegistryRegisterAllowsKnownAndEmptyKinds(t *testing.T) {
 	registry := NewLocalTargetRegistry()
 	for _, tc := range []struct {
@@ -230,9 +236,7 @@ func TestSSHRunnerProbeRejectsUnpreparableCheckoutRoot(t *testing.T) {
 func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
-	target := TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkDir: "/repo", WorkRoot: "/runs"}
-	spec := worker.Spec{ID: "worker-1234567890", WorkDir: "/repo"}
-	run := NewRemoteRun(target, spec)
+	run := testSSHRun()
 	if err := runner.Start(context.Background(), run, []string{"sh", "-lc", "echo ok"}, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +282,7 @@ func TestSSHRunnerPollsLargeRemoteLogLine(t *testing.T) {
 		status: []string{`{"status":"succeeded","exit":0}`},
 	}
 	runner := SSHRunner{Executor: executor}
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	run := testSSHRun()
 	sink := &recordingWorkerSink{}
 	stdoutOffset := 0
 	stderrOffset := 0
@@ -312,7 +316,7 @@ func TestSSHRunnerPollDedupesRemoteCodexInfrastructureWarningsAcrossPolls(t *tes
 		},
 	}
 	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	run := testSSHRun()
 	sink := &recordingWorkerSink{}
 
 	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("codex"), sink)
@@ -343,7 +347,7 @@ func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
 		PollInterval:       time.Nanosecond,
 		PollCommandTimeout: time.Millisecond,
 	}
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	run := testSSHRun()
 	sink := &recordingWorkerSink{}
 
 	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("mock"), sink)
@@ -361,7 +365,7 @@ func TestSSHRunnerPollRetriesHungStatusRead(t *testing.T) {
 func TestSSHRunnerDescribeChangesTimesOutHungArtifactRead(t *testing.T) {
 	executor := &timeoutDiffPatchExecutor{}
 	runner := SSHRunner{Executor: executor, PollCommandTimeout: time.Millisecond}
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	run := testSSHRun()
 
 	start := time.Now()
 	changes := runner.DescribeChanges(context.Background(), run)
@@ -384,7 +388,7 @@ func TestSSHRunnerDescribeChangesReportsSSHTransportFailure(t *testing.T) {
 		errMessage: "exedev@uncle-storm.exe.xyz: Permission denied (publickey,keyboard-interactive).",
 	}
 	runner := SSHRunner{Executor: executor}
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm", WorkRoot: "/runs"}, worker.Spec{ID: "worker-123", WorkDir: "/repo"})
+	run := testSSHRun()
 
 	changes := runner.DescribeChanges(context.Background(), run)
 	if changes.Error == "" {
@@ -649,10 +653,7 @@ func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 }
 
 func TestNewRemoteRunUsesSpecWorkDirWhenTargetOmitsWorkDir(t *testing.T) {
-	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{
-		ID:      "worker-1234567890",
-		WorkDir: "/repo",
-	})
+	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm"}, testSSHSpec())
 	if run.WorkDir != "/repo" {
 		t.Fatalf("remote workDir = %q, want /repo", run.WorkDir)
 	}
@@ -768,16 +769,11 @@ func TestRecoverRemoteWorkersReservesTargetUntilCompletion(t *testing.T) {
 
 	taskID := "task-recover-remote"
 	workerID := "worker-recover-remote"
+	remoteTarget := testSSHTarget()
+	remoteTarget.Labels = map[string]string{"role": "remote"}
+	remoteTarget.Capacity = TargetCapacity{MaxWorkers: 1, CPUWeight: 100}
 	targets := NewTargetRegistry([]TargetConfig{
-		{
-			ID:       "vm-1",
-			Kind:     TargetKindSSH,
-			Host:     "vm",
-			WorkDir:  "/repo",
-			WorkRoot: "/runs",
-			Labels:   map[string]string{"role": "remote"},
-			Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100},
-		},
+		remoteTarget,
 		{
 			ID:       "local",
 			Kind:     TargetKindLocal,
