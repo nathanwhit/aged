@@ -7777,7 +7777,7 @@ func TestServiceUsesExplicitReplanFinalCandidateForCompetingBranches(t *testing.
 	}
 }
 
-func TestResolveFinalCandidateUsesSelectedWorkerCandidateAncestor(t *testing.T) {
+func TestResolveFinalCandidateUsesSingleChangedLineageWhenSelectionIsEmpty(t *testing.T) {
 	workerID, reason, err := resolveFinalCandidate([]WorkerTurnResult{
 		{
 			WorkerID: "impl",
@@ -7795,15 +7795,119 @@ func TestResolveFinalCandidateUsesSelectedWorkerCandidateAncestor(t *testing.T) 
 				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
 			},
 		},
-	}, "validation")
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if workerID != "impl" {
 		t.Fatalf("workerID = %q, want impl", workerID)
 	}
-	if !strings.Contains(reason, "nearest changed candidate ancestor") {
+	if !strings.Contains(reason, "only successful worker with candidate changes") {
 		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestResolveFinalCandidateDoesNotPublishAncestorForExplicitNoChangeSelection(t *testing.T) {
+	workerID, reason, err := resolveFinalCandidate([]WorkerTurnResult{
+		{
+			WorkerID: "impl",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			},
+		},
+		{
+			WorkerID:     "validation",
+			Status:       core.WorkerSucceeded,
+			BaseWorkerID: "impl",
+			Summary:      "The current repository already contains the fix. The final worktree diff is empty.",
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+	}, "validation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workerID != "" {
+		t.Fatalf("workerID = %q, want no publishable candidate", workerID)
+	}
+	if !strings.Contains(reason, "no candidate changes") {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestServiceGithubCompletionWithSelectedNoChangeWorkerDoesNotPublishAncestor(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-no-change-final"
+	implID := "worker-impl"
+	finalID := "worker-no-change"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Already fixed",
+			"prompt": "Confirm whether issue 107 needs any new code changes.",
+			"metadata": map[string]any{
+				"completionMode": "github",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskReplanned,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"turn": 2,
+			"decision": ReplanDecision{
+				Action:                 "complete",
+				FinalCandidateWorkerID: finalID,
+				PullRequestBody:        "No new changes are needed; the fix is already present.",
+				Rationale:              "The follow-up worker found a clean workspace.",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	err := service.completeTask(ctx, taskID, []WorkerTurnResult{
+		{
+			WorkerID: implID,
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/plugins.go", Status: "modified"}},
+			},
+		},
+		{
+			WorkerID:     finalID,
+			Status:       core.WorkerSucceeded,
+			BaseWorkerID: implID,
+			Summary:      "The intended fix is already present in HEAD and the final worktree diff is empty.",
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+	}, finalID, "The follow-up worker found a clean workspace.")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want no PR for selected no-change final worker", publisher.publishCalls)
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskCandidate, taskID, `"workerId":"`+implID+`"`) {
+		t.Fatalf("older changed ancestor was recorded as final candidate")
 	}
 }
 

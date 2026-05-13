@@ -160,8 +160,8 @@ func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) 
 				return selectedWorkerID, "orchestrator selected final candidate explicitly", nil
 			}
 		}
-		if ancestorID := selectedCandidateAncestor(results, selectedWorkerID); ancestorID != "" {
-			return ancestorID, fmt.Sprintf("orchestrator selected worker %s; using nearest changed candidate ancestor", selectedWorkerID), nil
+		if result, ok := workerResultByID(results, selectedWorkerID); ok && result.Status == core.WorkerSucceeded {
+			return "", fmt.Sprintf("orchestrator selected worker %s with no candidate changes", selectedWorkerID), nil
 		}
 		if fallbackID, fallbackReason, err := resolveFinalCandidate(results, ""); err == nil && fallbackID != "" {
 			return fallbackID, fmt.Sprintf("selected final candidate %q was not applyable; fallback selected %s", selectedWorkerID, fallbackReason), nil

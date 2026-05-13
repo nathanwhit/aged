@@ -597,8 +597,9 @@ Field rules:
 - Use "complete" when the task appears done.
 - When action is "complete" and the task completionMode is "github", write the pull request description in "pullRequestBody". This body must be ready to publish and should include the meaningful summary and validation details the reviewer needs. Do not include changed-file lists or diffstats because the PR diff already shows them.
 - When action is not "complete" or the task completionMode is not "github", set "pullRequestBody" to an empty string.
-- When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id that should be the final task result. If no existing candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
-- When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty.
+- When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id whose changes should be the final task result. If no existing changed candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
+- When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty; do not set it to a no-change review or validation worker unless the correct final result is to complete without publishing changes.
+- When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
 - Use "continue" when another worker turn is needed.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
