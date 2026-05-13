@@ -274,41 +274,34 @@ func TestDefaultCodexRunnerUsesYoloPermissions(t *testing.T) {
 	}
 }
 
-func TestCommandRunnerWritesPromptToStdinForDashArgument(t *testing.T) {
-	dir := t.TempDir()
-	outPath := filepath.Join(dir, "stdin.txt")
-	runner := NewCommandRunner("codex", func(Spec) []string {
-		return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath), "-"}
-	})
-	err := runner.Run(context.Background(), Spec{Prompt: "large prompt body"}, &recordingSink{})
-	if err != nil {
-		t.Fatal(err)
+func TestCommandRunnerWritesPromptToStdinCases(t *testing.T) {
+	tests := map[string]func(string) Runner{
+		"dash argument": func(outPath string) Runner {
+			return NewCommandRunner("codex", func(Spec) []string {
+				return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath), "-"}
+			})
+		},
+		"prompt stdin": func(outPath string) Runner {
+			return NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(Spec) []string {
+				return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath)}
+			})
+		},
 	}
-	out, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != "large prompt body" {
-		t.Fatalf("stdin = %q", out)
-	}
-}
 
-func TestPromptStdinCommandRunnerWritesPromptWithoutDashArgument(t *testing.T) {
-	dir := t.TempDir()
-	outPath := filepath.Join(dir, "stdin.txt")
-	runner := NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(Spec) []string {
-		return []string{"/bin/sh", "-c", "cat > " + shellQuoteTest(outPath)}
-	})
-	err := runner.Run(context.Background(), Spec{Prompt: "large prompt body"}, &recordingSink{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := os.ReadFile(outPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != "large prompt body" {
-		t.Fatalf("stdin = %q", out)
+	for name, newRunner := range tests {
+		t.Run(name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "stdin.txt")
+			if err := newRunner(outPath).Run(context.Background(), Spec{Prompt: "large prompt body"}, &recordingSink{}); err != nil {
+				t.Fatal(err)
+			}
+			out, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != "large prompt body" {
+				t.Fatalf("stdin = %q", out)
+			}
+		})
 	}
 }
 
