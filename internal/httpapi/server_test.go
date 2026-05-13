@@ -756,6 +756,10 @@ func (fakeHTTPGitHubClient) ListIssues(context.Context, string, []string, int) (
 	return nil, nil
 }
 
+func (fakeHTTPGitHubClient) ListMentions(context.Context, int) ([]orchestrator.GitHubMention, error) {
+	return nil, nil
+}
+
 type fakeHTTPDiscordClient struct{}
 
 func (fakeHTTPDiscordClient) Me(context.Context) (orchestrator.DiscordUser, error) {

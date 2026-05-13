@@ -151,6 +151,12 @@ export type GitHubDriverConfig = {
     issueLimit?: number;
     autoPublish?: boolean;
   }[];
+  mentions?: {
+    enabled?: boolean;
+    repos?: string[];
+    reasons?: string[];
+    limit?: number;
+  };
   pullRequests?: {
     enabled?: boolean;
     repos?: string[];
