@@ -109,6 +109,10 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "assistant", span: 4, minHeight: 0 },
 ];
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string>("");
@@ -128,8 +132,8 @@ function App() {
   }
 
   useEffect(() => {
-    refresh().catch((err: Error) => {
-      setError(err.message);
+    refresh().catch((err) => {
+      setError(errorMessage(err));
       setInitialSnapshotStatus((current) => (current === "loading" ? "error" : current));
     });
   }, []);
@@ -163,8 +167,8 @@ function App() {
       .then((events) => {
         if (active) setSnapshot((current) => applyTaskHistoryEvents(current, events));
       })
-      .catch((err: Error) => {
-        if (active) setError(err.message);
+      .catch((err) => {
+        if (active) setError(errorMessage(err));
       });
     return () => {
       active = false;
@@ -188,9 +192,7 @@ function App() {
       setError("");
       await clearTask(taskId);
       await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    }
+    } catch (err) { setError(errorMessage(err)); }
   }
 
   async function handleClearFinished() {
@@ -198,9 +200,7 @@ function App() {
       setError("");
       await clearFinishedTasks();
       await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    }
+    } catch (err) { setError(errorMessage(err)); }
   }
 
   async function handleRetryTask(taskId: string) {
@@ -209,9 +209,7 @@ function App() {
       setError("");
       await retryTask(taskId);
       await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
+    } catch (err) { setError(errorMessage(err)); } finally {
       setRetryingTaskId("");
     }
   }
@@ -355,7 +353,7 @@ function App() {
         </div>
         <div className="topbar-actions">
           <span className={connected ? "pill ok" : "pill"}>{connected ? "Live" : "Offline"}</span>
-          <button className="icon-button" onClick={() => refresh().catch((err: Error) => setError(err.message))} title="Refresh">
+          <button className="icon-button" onClick={() => refresh().catch((err) => setError(errorMessage(err)))} title="Refresh">
             <RefreshCw size={18} />
           </button>
         </div>
@@ -444,7 +442,7 @@ function App() {
               const task = await createTask(input);
               setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
-              refresh().catch((err: Error) => setError(err.message));
+              refresh().catch((err) => setError(errorMessage(err)));
               return task;
             }}
             onStartPending={(input) => {
@@ -980,9 +978,7 @@ function TaskComposer({
       setLoopWorkerKind("codex");
       setLoopRole("maintenance_pr_loop");
       setLoopIntervalSeconds("300");
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
       onStartSettled();
     }
@@ -1226,9 +1222,7 @@ function ProjectPanel({
         await onCreate(input);
       }
       resetForm();
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
     }
   }
@@ -1238,9 +1232,7 @@ function ProjectPanel({
     try {
       const result = await onHealth(projectId);
       setHealth((current) => ({ ...current, [projectId]: result }));
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setHealthBusy("");
     }
   }
@@ -1249,9 +1241,7 @@ function ProjectPanel({
     try {
       await onDelete(projectId);
       if (editingId === projectId) resetForm();
-    } catch (err) {
-      onError((err as Error).message);
-    }
+    } catch (err) { onError(errorMessage(err)); }
   }
 
   return (
@@ -1426,9 +1416,7 @@ function AssistantPanel({ onError }: { onError: (message: string) => void }) {
       setConversationId(response.conversationId);
       setAnswer(response.message);
       setMessage("");
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
     }
   }
@@ -1536,9 +1524,7 @@ function TaskDetail({
     try {
       await onSteer(task.id, message);
       setMessage("");
-    } catch (err) {
-      onError((err as Error).message);
-    }
+    } catch (err) { onError(errorMessage(err)); }
   }
 
   async function applyResult() {
@@ -1546,9 +1532,7 @@ function TaskDetail({
     try {
       await onApply(task.id);
       await onApplied();
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setApplying(false);
     }
   }
@@ -1580,9 +1564,7 @@ function TaskDetail({
     try {
       await onUpdateLoopConfig(task.id, input);
       await onLoopConfigUpdated();
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setSavingLoopConfig(false);
     }
   }
@@ -1608,7 +1590,7 @@ function TaskDetail({
         error: review.changes.error,
       });
     } catch (err) {
-      const error = (err as Error).message;
+      const error = errorMessage(err);
       setDiff({ open: true, loading: false, loaded: true, diff: "", error });
       onError(error);
     }
@@ -1644,7 +1626,7 @@ function TaskDetail({
               <RefreshCw size={18} />
             </button>
           )}
-          <button className="icon-button danger" onClick={() => onCancel(task.id).catch((err: Error) => onError(err.message))} title="Cancel task">
+          <button className="icon-button danger" onClick={() => onCancel(task.id).catch((err) => onError(errorMessage(err)))} title="Cancel task">
             <CircleStop size={18} />
           </button>
         </div>
@@ -1873,9 +1855,7 @@ function PullRequestPanel({
     try {
       await fn();
       await onDone();
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy("");
     }
   }
@@ -1986,9 +1966,7 @@ function WorkerList({
     try {
       await onApply(workerId);
       await onApplied();
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setApplying("");
     }
   }
@@ -2017,7 +1995,7 @@ function WorkerList({
         },
       }));
     } catch (err) {
-      const message = (err as Error).message;
+      const message = errorMessage(err);
       setDiffs((items) => ({
         ...items,
         [workerId]: { open: true, loading: false, loaded: true, diff: "", error: message },
@@ -2069,7 +2047,7 @@ function WorkerList({
                 <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
                   <Eye size={16} />
                 </button>
-                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err: Error) => onError(err.message))} title="Cancel worker">
+                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err) => onError(errorMessage(err)))} title="Cancel worker">
                   <CircleStop size={16} />
                 </button>
                 <div className="worker-context">
@@ -2624,9 +2602,7 @@ function TargetPanel({
         await onRegister(target);
       }
       reset();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
     }
   };
@@ -2635,9 +2611,7 @@ function TargetPanel({
     try {
       setProbingTargetId(targetId);
       await onProbe(targetId);
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setProbingTargetId("");
     }
   };
@@ -2763,7 +2737,7 @@ function TargetPanel({
               <button
                 className="secondary danger-text"
                 disabled={target.running > 0 || targets.length <= 1}
-                onClick={() => onDelete(target.id).catch((err: Error) => onError(err.message))}
+                onClick={() => onDelete(target.id).catch((err) => onError(errorMessage(err)))}
               >
                 <Trash2 size={14} />
               </button>
@@ -2944,9 +2918,7 @@ function PluginPanel({
         await onRegister(plugin);
       }
       reset();
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    } finally {
+    } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
     }
   };
@@ -3008,7 +2980,7 @@ function PluginPanel({
                   <button className="secondary" onClick={() => edit(plugin)}>Edit</button>
                   <button
                     className="secondary danger-text"
-                    onClick={() => onDelete(plugin.id).catch((err: Error) => onError(err.message))}
+                    onClick={() => onDelete(plugin.id).catch((err) => onError(errorMessage(err)))}
                   >
                     <Trash2 size={14} />
                   </button>
