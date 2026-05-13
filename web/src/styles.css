@@ -627,6 +627,23 @@ button:disabled {
   border-color: #a7c3f3;
 }
 
+.completed-task-group {
+  border-top: 1px solid #e9edf2;
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.completed-toggle {
+  justify-self: start;
+}
+
+.completed-task-list {
+  display: grid;
+  gap: 4px;
+}
+
 .task-list-loading,
 .loading-state {
   align-items: center;
