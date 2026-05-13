@@ -1765,70 +1765,31 @@ func scanEvent(scanner eventScanner) (core.Event, error) {
 }
 
 func orderedTasks(values map[string]core.Task) []core.Task {
-	out := make([]core.Task, 0, len(values))
-	for _, task := range values {
-		if task.ID != "" {
-			out = append(out, task)
-		}
-	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].CreatedAt.Before(out[i].CreatedAt) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out
+	return orderedSnapshotValues(values, func(task core.Task) string { return task.ID }, func(task core.Task) time.Time { return task.CreatedAt })
 }
 
 func orderedWorkers(values map[string]core.Worker) []core.Worker {
-	out := make([]core.Worker, 0, len(values))
-	for _, worker := range values {
-		if worker.ID != "" {
-			out = append(out, worker)
-		}
-	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].CreatedAt.Before(out[i].CreatedAt) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out
+	return orderedSnapshotValues(values, func(worker core.Worker) string { return worker.ID }, func(worker core.Worker) time.Time { return worker.CreatedAt })
 }
 
 func orderedExecutionNodes(values map[string]core.ExecutionNode) []core.ExecutionNode {
-	out := make([]core.ExecutionNode, 0, len(values))
-	for _, node := range values {
-		if node.ID != "" {
-			out = append(out, node)
-		}
-	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].CreatedAt.Before(out[i].CreatedAt) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out
+	return orderedSnapshotValues(values, func(node core.ExecutionNode) string { return node.ID }, func(node core.ExecutionNode) time.Time { return node.CreatedAt })
 }
 
 func orderedPullRequests(values map[string]core.PullRequest) []core.PullRequest {
-	out := make([]core.PullRequest, 0, len(values))
-	for _, pr := range values {
-		if pr.ID != "" {
-			out = append(out, pr)
+	return orderedSnapshotValues(values, func(pr core.PullRequest) string { return pr.ID }, func(pr core.PullRequest) time.Time { return pr.CreatedAt })
+}
+
+func orderedSnapshotValues[T any](values map[string]T, id func(T) string, createdAt func(T) time.Time) []T {
+	out := make([]T, 0, len(values))
+	for _, value := range values {
+		if id(value) != "" {
+			out = append(out, value)
 		}
 	}
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].CreatedAt.Before(out[i].CreatedAt) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return createdAt(out[i]).Before(createdAt(out[j]))
+	})
 	return out
 }
 
