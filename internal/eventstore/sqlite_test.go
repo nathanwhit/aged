@@ -3,6 +3,7 @@ package eventstore
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -281,6 +282,173 @@ func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) 
 	}
 }
 
+func TestSnapshotProjectionMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	startedAt := time.Date(2026, 5, 12, 10, 0, 0, 0, time.UTC)
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			At:     startedAt,
+			Type:   core.EventTaskCreated,
+			TaskID: "task-projection",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Projection",
+				"prompt": "Keep projected snapshots current.",
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(time.Second),
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-projection",
+			WorkerID: "worker-projection",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-projection",
+				"workerId":   "worker-projection",
+				"workerKind": "codex",
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(2 * time.Second),
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-projection",
+			WorkerID: "worker-projection",
+			Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+		},
+		core.Event{
+			At:       startedAt.Add(3 * time.Second),
+			Type:     core.EventWorkerStarted,
+			TaskID:   "task-projection",
+			WorkerID: "worker-projection",
+			Payload:  core.MustJSON(map[string]any{}),
+		},
+		core.Event{
+			At:       startedAt.Add(4 * time.Second),
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-projection",
+			WorkerID: "worker-projection",
+			Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 4096)}),
+		},
+		core.Event{
+			At:     startedAt.Add(5 * time.Second),
+			Type:   core.EventTaskPlanned,
+			TaskID: "task-projection",
+			Payload: core.MustJSON(map[string]any{
+				"ignored": true,
+			}),
+		},
+	)
+
+	projected, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := projectionInputEvents(ctx, store.db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := store.snapshotFromEvents(ctx, events, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.LastEventID != 6 {
+		t.Fatalf("projected last event id = %d, want 6", projected.LastEventID)
+	}
+	assertSnapshotsEqual(t, projected, replayed)
+}
+
+func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-recover",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Recover",
+				"prompt": "Rebuild projection on demand.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: "task-recover",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskRunning,
+			}),
+		},
+	)
+
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_projection`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskRunning {
+		t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+	}
+	var lastEventID int64
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_projection WHERE id = 1`).Scan(&lastEventID); err != nil {
+		t.Fatal(err)
+	}
+	if lastEventID != snapshot.LastEventID {
+		t.Fatalf("stored last event id = %d, want %d", lastEventID, snapshot.LastEventID)
+	}
+}
+
+func TestSnapshotProjectionAppendRebuildsStaleProjection(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-stale",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Stale",
+			"prompt": "Repair during append.",
+		}),
+	})
+	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET last_event_id = 0, state = ? WHERE id = 1`, string(core.MustJSON(newSnapshotProjectionState()))); err != nil {
+		t.Fatal(err)
+	}
+	appendSQLiteEvents(t, ctx, store, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: "task-stale",
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskSucceeded,
+		}),
+	})
+
+	snapshot, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LastEventID != 2 {
+		t.Fatalf("last event id = %d, want 2", snapshot.LastEventID)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Status != core.TaskSucceeded {
+		t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
+	}
+}
+
+func assertSnapshotsEqual(tb testing.TB, got core.Snapshot, want core.Snapshot) {
+	tb.Helper()
+
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		tb.Fatalf("snapshots differ\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	}
+}
+
 func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
@@ -385,6 +553,159 @@ func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkSnapshotProjectionLargeHistory(b *testing.B) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(b, ctx)
+
+	seedLargeSnapshotHistory(b, ctx, store, 100, 5, 40)
+
+	b.Run("replay-summary", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			events, err := projectionInputEvents(ctx, store.db, 0)
+			if err != nil {
+				b.Fatal(err)
+			}
+			snapshot, err := store.snapshotFromEvents(ctx, events, false)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if i == 0 {
+				payload, err := json.Marshal(snapshot)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportMetric(float64(len(payload)), "payload_bytes")
+			}
+		}
+	})
+	b.Run("projected-summary", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			snapshot, err := store.SnapshotSummary(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if i == 0 {
+				payload, err := json.Marshal(snapshot)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportMetric(float64(len(payload)), "payload_bytes")
+			}
+		}
+	})
+}
+
+func seedLargeSnapshotHistory(tb testing.TB, ctx context.Context, store *SQLiteStore, taskCount int, workersPerTask int, outputsPerWorker int) {
+	tb.Helper()
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer tx.Rollback()
+	insertEvents := func(events ...core.Event) {
+		tb.Helper()
+		for _, event := range events {
+			if event.At.IsZero() {
+				event.At = time.Now().UTC()
+			}
+			if event.Payload == nil {
+				event.Payload = json.RawMessage(`{}`)
+			}
+			if _, err := tx.ExecContext(ctx, `
+INSERT INTO events (at, type, task_id, worker_id, payload)
+VALUES (?, ?, ?, ?, ?)`,
+				event.At.Format(time.RFC3339Nano),
+				string(event.Type),
+				event.TaskID,
+				event.WorkerID,
+				string(event.Payload),
+			); err != nil {
+				tb.Fatal(err)
+			}
+		}
+	}
+
+	base := time.Date(2026, 5, 13, 9, 0, 0, 0, time.UTC)
+	for taskIndex := 0; taskIndex < taskCount; taskIndex++ {
+		taskID := fmt.Sprintf("task-%03d", taskIndex)
+		insertEvents(core.Event{
+			At:     base.Add(time.Duration(taskIndex) * time.Minute),
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  fmt.Sprintf("Task %03d", taskIndex),
+				"prompt": "Benchmark projected snapshot reads.",
+			}),
+		})
+		for workerIndex := 0; workerIndex < workersPerTask; workerIndex++ {
+			workerID := fmt.Sprintf("%s-worker-%02d", taskID, workerIndex)
+			nodeID := fmt.Sprintf("%s-node-%02d", taskID, workerIndex)
+			insertEvents(
+				core.Event{
+					At:       base.Add(time.Duration(taskIndex*workersPerTask+workerIndex) * time.Second),
+					Type:     core.EventExecutionPlanned,
+					TaskID:   taskID,
+					WorkerID: workerID,
+					Payload: core.MustJSON(map[string]any{
+						"nodeId":     nodeID,
+						"workerId":   workerID,
+						"workerKind": "codex",
+					}),
+				},
+				core.Event{
+					At:       base.Add(time.Duration(taskIndex*workersPerTask+workerIndex)*time.Second + time.Millisecond),
+					Type:     core.EventWorkerCreated,
+					TaskID:   taskID,
+					WorkerID: workerID,
+					Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+				},
+				core.Event{
+					At:       base.Add(time.Duration(taskIndex*workersPerTask+workerIndex)*time.Second + 2*time.Millisecond),
+					Type:     core.EventWorkerStarted,
+					TaskID:   taskID,
+					WorkerID: workerID,
+					Payload:  core.MustJSON(map[string]any{}),
+				},
+			)
+			for outputIndex := 0; outputIndex < outputsPerWorker; outputIndex++ {
+				insertEvents(core.Event{
+					At:       base.Add(time.Duration(taskIndex*workersPerTask+workerIndex)*time.Second + time.Duration(outputIndex+3)*time.Millisecond),
+					Type:     core.EventWorkerOutput,
+					TaskID:   taskID,
+					WorkerID: workerID,
+					Payload: core.MustJSON(map[string]any{
+						"text": strings.Repeat("x", 512),
+					}),
+				})
+			}
+			insertEvents(core.Event{
+				At:       base.Add(time.Duration(taskIndex*workersPerTask+workerIndex)*time.Second + time.Duration(outputsPerWorker+3)*time.Millisecond),
+				Type:     core.EventWorkerCompleted,
+				TaskID:   taskID,
+				WorkerID: workerID,
+				Payload: core.MustJSON(map[string]any{
+					"status": core.WorkerSucceeded,
+				}),
+			})
+		}
+		insertEvents(core.Event{
+			At:     base.Add(time.Duration(taskIndex)*time.Minute + time.Hour),
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskSucceeded,
+			}),
+		})
+	}
+	if err := tx.Commit(); err != nil {
+		tb.Fatal(err)
+	}
+	if _, _, err := store.rebuildSnapshotProjection(ctx); err != nil {
+		tb.Fatal(err)
+	}
 }
 
 func TestSnapshotCarriesTaskStatusError(t *testing.T) {
