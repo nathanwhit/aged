@@ -2455,6 +2455,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
+	if plan.WorkPlan != nil {
+		if err := s.updateTaskWorkPlan(ctx, task.ID, *plan.WorkPlan); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+			return
+		}
+	}
 	if ok, err := s.runImmediatePlanActions(ctx, task, plan); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 		return
@@ -2463,39 +2469,65 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	}
 
 	results := []WorkerTurnResult{}
-	result, err := s.runPlannedWorker(ctx, task, plan)
-	if err != nil {
-		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+	var ok bool
+	if len(plan.Workers) > 0 {
+		results, ok, err = s.runInitialWorkerGraph(ctx, task, plan)
+		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, "", err) {
+				return
+			}
+			_ = s.failTask(ctx, task.ID, err)
 			return
 		}
-		if s.recoverWorkerFailureWithReplan(ctx, task, plan, results, err) {
+		if !ok {
 			return
 		}
-		_ = s.failTask(ctx, task.ID, err)
-		return
-	}
-	results = append(results, result)
-	if result.Status == core.WorkerWaiting {
-		s.handleWorkerQuestion(ctx, task, plan, results, result)
-		return
-	}
-	if result.Status == core.WorkerFailed && s.recoverWorkerFailureWithReplan(ctx, task, plan, results, nil) {
-		return
-	}
-	if !s.finishOrContinueTask(ctx, task.ID, result) {
-		return
-	}
+		results, ok, err = s.runFollowUpWorkers(ctx, task, plan, results, "")
+		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, "", err) {
+				return
+			}
+			_ = s.failTask(ctx, task.ID, err)
+			return
+		}
+		if !ok {
+			return
+		}
+	} else {
+		result, err := s.runPlannedWorker(ctx, task, plan)
+		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, "", err) {
+				return
+			}
+			if s.recoverWorkerFailureWithReplan(ctx, task, plan, results, err) {
+				return
+			}
+			_ = s.failTask(ctx, task.ID, err)
+			return
+		}
+		results = append(results, result)
+		if result.Status == core.WorkerWaiting {
+			s.handleWorkerQuestion(ctx, task, plan, results, result)
+			return
+		}
+		if result.Status == core.WorkerFailed && s.recoverWorkerFailureWithReplan(ctx, task, plan, results, nil) {
+			return
+		}
+		if !s.finishOrContinueTask(ctx, task.ID, result) {
+			return
+		}
 
-	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
-	if err != nil {
-		if s.waitForRecoverableError(ctx, task.ID, "", err) {
+		results, ok, err = s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+		if err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, "", err) {
+				return
+			}
+			_ = s.failTask(ctx, task.ID, err)
 			return
 		}
-		_ = s.failTask(ctx, task.ID, err)
-		return
-	}
-	if !ok {
-		return
+		if !ok {
+			return
+		}
 	}
 	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
@@ -3944,6 +3976,15 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 	return false
 }
 
+func (s *Service) finishOrContinueResults(ctx context.Context, taskID string, results []WorkerTurnResult) bool {
+	for _, result := range results {
+		if !s.finishOrContinueTask(ctx, taskID, result) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) completeTask(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string) error {
 	return s.completeTaskWithPublishRecovery(ctx, taskID, results, selectedWorkerID, reason, publishRecoveryState{})
 }
@@ -5085,6 +5126,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	}
 	recoveryHint := options.RecoveryHint
 	stalledTurns := 0
+	currentWorkPlan := initial.WorkPlan
 	for turn := 1; ; turn++ {
 		if stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
@@ -5095,6 +5137,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
+			WorkPlan:                 currentWorkPlan,
 			Results:                  results,
 			ContextLedger:            s.taskContextLedger(ctx, task.ID),
 			Turn:                     turn,
@@ -5126,6 +5169,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
 			return false, "", "", results
+		}
+		if decision.WorkPlan != nil {
+			if err := s.updateTaskWorkPlan(ctx, task.ID, *decision.WorkPlan); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			}
+			currentWorkPlan = decision.WorkPlan
 		}
 		switch decision.Action {
 		case "complete":
@@ -5206,7 +5256,18 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			}
-			result, err := s.runPlannedWorker(ctx, task, next)
+			var nextResults []WorkerTurnResult
+			var ok bool
+			if len(next.Workers) > 0 {
+				nextResults, ok, err = s.runInitialWorkerGraph(ctx, task, next)
+			} else {
+				var result WorkerTurnResult
+				result, err = s.runPlannedWorker(ctx, task, next)
+				if err == nil {
+					nextResults = append(nextResults, result)
+					ok = true
+				}
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return false, "", "", results
@@ -5225,18 +5286,22 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				stalledTurns++
 				continue
 			}
-			results = append(results, result)
-			if result.Status == core.WorkerFailed {
-				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
-					if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, next, result, blocker) {
+			if !ok {
+				results = append(results, nextResults...)
+				return false, "", "", results
+			}
+			results = append(results, nextResults...)
+			if failed := firstWorkerResultWithStatus(nextResults, core.WorkerFailed); failed.WorkerID != "" {
+				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failed.Error, failed.Summary)); ok {
+					if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, next, failed, blocker) {
 						stalledTurns++
 						continue
 					}
-					_ = s.waitForUserAction(ctx, task.ID, result.WorkerID, blocker.Reason, blocker.Question, map[string]any{
+					_ = s.waitForUserAction(ctx, task.ID, failed.WorkerID, blocker.Reason, blocker.Question, map[string]any{
 						"summary":    blocker.Summary,
-						"workerKind": result.Kind,
+						"workerKind": failed.Kind,
 						"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
-						"error":      result.Error,
+						"error":      failed.Error,
 					})
 					return false, "", "", results
 				}
@@ -5244,27 +5309,27 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					"kind":     "worker_failure_recovery",
 					"when":     "during_dynamic_replan",
 					"reason":   "Dynamic replan worker failed; continuing the replan loop with the failure as context.",
-					"workerId": result.WorkerID,
+					"workerId": failed.WorkerID,
 					"status":   "continued",
-					"error":    result.Error,
+					"error":    failed.Error,
 				})
 				stalledTurns++
 				continue
 			}
-			if !s.finishOrContinueTask(ctx, task.ID, result) {
+			if !s.finishOrContinueResults(ctx, task.ID, nextResults) {
 				return false, "", "", results
 			}
+			latest := latestWorkerResult(nextResults)
 			if options.FinalizationRecovery {
-				reason := nonEmpty(result.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
-				return true, result.WorkerID, reason, results
+				reason := nonEmpty(latest.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
+				return true, latest.WorkerID, reason, results
 			}
-			var ok bool
-			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, result.NodeID)
+			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, latest.NodeID)
 			if err != nil {
 				if ctx.Err() != nil {
 					return false, "", "", results
 				}
-				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+				if s.waitForRecoverableError(ctx, task.ID, latest.WorkerID, err) {
 					return false, "", "", results
 				}
 				_ = s.failTask(ctx, task.ID, err)
@@ -5277,7 +5342,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				if ctx.Err() != nil {
 					return false, "", "", results
 				}
-				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
+				if s.waitForRecoverableError(ctx, task.ID, latest.WorkerID, err) {
 					return false, "", "", results
 				}
 				_ = s.failTask(ctx, task.ID, err)
@@ -5470,6 +5535,238 @@ type followUpNode struct {
 	index int
 	spawn SpawnRequest
 	deps  []string
+}
+
+type initialWorkerNode struct {
+	id     string
+	index  int
+	worker WorkerRequest
+	deps   []string
+}
+
+func (s *Service) runInitialWorkerGraph(ctx context.Context, task core.Task, plan Plan) ([]WorkerTurnResult, bool, error) {
+	pending, err := initialWorkerNodes(plan.Workers)
+	if err != nil {
+		return nil, false, err
+	}
+	results := []WorkerTurnResult{}
+	completed := map[string]WorkerTurnResult{}
+	for len(pending) > 0 {
+		ready := readyInitialWorkers(pending, completed)
+		if len(ready) == 0 {
+			return results, false, fmt.Errorf("initial worker dependency cycle or missing dependency")
+		}
+		waveResults, ok, err := s.runInitialWorkerWave(ctx, task, plan, ready, results)
+		results = append(results, waveResults...)
+		for index, result := range waveResults {
+			completed[ready[index].id] = result
+			delete(pending, ready[index].id)
+		}
+		if err != nil {
+			return results, false, err
+		}
+		if !ok {
+			return results, false, nil
+		}
+	}
+	return results, true, nil
+}
+
+func initialWorkerNodes(workers []WorkerRequest) (map[string]initialWorkerNode, error) {
+	nodes := map[string]initialWorkerNode{}
+	for index, worker := range workers {
+		id := workerRequestID(worker, index)
+		if _, ok := nodes[id]; ok {
+			return nil, fmt.Errorf("duplicate worker id %q", id)
+		}
+		deps := make([]string, 0, len(worker.DependsOn))
+		for _, dep := range worker.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep != "" {
+				deps = append(deps, dep)
+			}
+		}
+		nodes[id] = initialWorkerNode{id: id, index: index, worker: worker, deps: deps}
+	}
+	for _, node := range nodes {
+		for _, dep := range node.deps {
+			if _, ok := nodes[dep]; !ok {
+				return nil, fmt.Errorf("worker %q depends on unknown worker %q", node.id, dep)
+			}
+			if dep == node.id {
+				return nil, fmt.Errorf("worker %q depends on itself", node.id)
+			}
+		}
+	}
+	return nodes, nil
+}
+
+func readyInitialWorkers(pending map[string]initialWorkerNode, completed map[string]WorkerTurnResult) []initialWorkerNode {
+	ready := []initialWorkerNode{}
+	for _, node := range pending {
+		blocked := false
+		for _, dep := range node.deps {
+			if _, ok := completed[dep]; !ok {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			ready = append(ready, node)
+		}
+	}
+	sort.Slice(ready, func(i, j int) bool {
+		return ready[i].index < ready[j].index
+	})
+	return ready
+}
+
+func (s *Service) runInitialWorkerWave(ctx context.Context, task core.Task, initial Plan, nodes []initialWorkerNode, priorResults []WorkerTurnResult) ([]WorkerTurnResult, bool, error) {
+	waveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type outcome struct {
+		index  int
+		plan   Plan
+		result WorkerTurnResult
+		err    error
+	}
+	outcomes := make(chan outcome, len(nodes))
+	for index, node := range nodes {
+		workerPlan := s.initialWorkerPlan(initial, node.worker, priorResults, node.index+1, node.id, node.deps)
+		if workerPlan.Metadata == nil {
+			workerPlan.Metadata = map[string]any{}
+		}
+		if stringMetadata(workerPlan.Metadata, "nodeID") == "" {
+			workerPlan.Metadata["nodeID"] = uuid.NewString()
+		}
+		if stringMetadata(workerPlan.Metadata, "planID") == "" {
+			workerPlan.Metadata["planID"] = uuid.NewString()
+		}
+		go func(index int, plan Plan) {
+			result, err := s.runPlannedWorker(waveCtx, task, plan)
+			outcomes <- outcome{index: index, plan: plan, result: result, err: err}
+		}(index, workerPlan)
+	}
+
+	ordered := make([]WorkerTurnResult, len(nodes))
+	plans := make([]Plan, len(nodes))
+	for range nodes {
+		outcome := <-outcomes
+		plans[outcome.index] = outcome.plan
+		if outcome.err != nil {
+			ordered[outcome.index] = failedFollowUpResult(outcome.plan, outcome.err)
+			continue
+		}
+		ordered[outcome.index] = outcome.result
+	}
+	allResults := append(append([]WorkerTurnResult{}, priorResults...), ordered...)
+	for index, result := range ordered {
+		if result.Status == core.WorkerCanceled {
+			_ = s.setTaskStatus(ctx, task.ID, core.TaskCanceled)
+			return ordered, false, nil
+		}
+		if result.Status == core.WorkerWaiting {
+			s.handleWorkerQuestion(ctx, task, plans[index], allResults, result)
+			return ordered, false, nil
+		}
+	}
+	return ordered, true, nil
+}
+
+func (s *Service) initialWorkerPlan(initial Plan, worker WorkerRequest, results []WorkerTurnResult, turn int, workerID string, dependsOn []string) Plan {
+	reasoningEffort := normalizeReasoningEffort(nonEmpty(worker.ReasoningEffort, initial.ReasoningEffort))
+	role := nonEmpty(worker.Role, workerID)
+	reason := nonEmpty(worker.Reason, "initial worker scheduled by the scheduler")
+	metadata := copyPlanMetadata(initial.Metadata)
+	metadata["initialWorker"] = true
+	metadata["scheduledWorkerID"] = workerID
+	metadata["spawnID"] = workerID
+	metadata["spawnRole"] = role
+	metadata["spawnReason"] = reason
+	metadata["dependsOn"] = dependsOn
+	metadata["turn"] = turn
+	metadata["parentRationale"] = initial.Rationale
+	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
+		metadata["baseWorkerID"] = baseWorkerID
+	}
+	if reasoningEffort != "" {
+		metadata["reasoningEffort"] = reasoningEffort
+	}
+	return Plan{
+		WorkerKind:      worker.WorkerKind,
+		Prompt:          buildInitialWorkerPrompt(worker.Prompt, results, dependsOn),
+		ReasoningEffort: reasoningEffort,
+		Rationale:       "initial worker scheduled from plan: " + reason,
+		Steps: []PlanStep{{
+			Title:       "Run " + role,
+			Description: reason,
+		}},
+		RequiredApprovals: []ApprovalRequest{},
+		Spawns:            []SpawnRequest{},
+		Metadata:          metadata,
+	}
+}
+
+func buildInitialWorkerPrompt(prompt string, results []WorkerTurnResult, dependsOn []string) string {
+	if len(dependsOn) == 0 {
+		return prompt
+	}
+	deps := map[string]bool{}
+	for _, dep := range dependsOn {
+		deps[strings.TrimSpace(dep)] = true
+	}
+	var builder strings.Builder
+	builder.WriteString("Dependency worker results:\n")
+	for _, result := range results {
+		if !deps[result.SpawnID] {
+			continue
+		}
+		builder.WriteString("\n- ")
+		builder.WriteString(nonEmpty(result.SpawnID, result.WorkerID))
+		builder.WriteString(" status: ")
+		builder.WriteString(string(result.Status))
+		if result.Summary != "" {
+			builder.WriteString("\n  Summary: ")
+			builder.WriteString(result.Summary)
+		}
+		if result.Error != "" {
+			builder.WriteString("\n  Error: ")
+			builder.WriteString(result.Error)
+		}
+		if len(result.Changes.ChangedFiles) > 0 {
+			builder.WriteString("\n  Changed files:")
+			for _, file := range result.Changes.ChangedFiles {
+				builder.WriteString("\n  - ")
+				if file.Status != "" {
+					builder.WriteString(file.Status)
+					builder.WriteString(" ")
+				}
+				builder.WriteString(file.Path)
+			}
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\nWorker instructions:\n")
+	builder.WriteString(prompt)
+	return builder.String()
+}
+
+func latestCandidateWorkerIDForDependencies(results []WorkerTurnResult, dependsOn []string) string {
+	if len(dependsOn) == 0 {
+		return ""
+	}
+	deps := map[string]bool{}
+	for _, dep := range dependsOn {
+		deps[strings.TrimSpace(dep)] = true
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if deps[result.SpawnID] && result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
+			return result.WorkerID
+		}
+	}
+	return ""
 }
 
 func (s *Service) runFollowUpWorkers(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
@@ -6328,6 +6625,15 @@ func latestWorkerResult(results []WorkerTurnResult) WorkerTurnResult {
 	return results[len(results)-1]
 }
 
+func firstWorkerResultWithStatus(results []WorkerTurnResult, status core.WorkerStatus) WorkerTurnResult {
+	for _, result := range results {
+		if result.Status == status {
+			return result
+		}
+	}
+	return WorkerTurnResult{}
+}
+
 func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []WorkerTurnResult, error) {
 	var initial Plan
 	haveInitial := false
@@ -6869,6 +7175,15 @@ func (s *Service) updateTaskObjective(ctx context.Context, taskID string, status
 	return err
 }
 
+func (s *Service) updateTaskWorkPlan(ctx context.Context, taskID string, workPlan core.WorkPlan) error {
+	_, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskWorkPlan,
+		TaskID:  taskID,
+		Payload: core.MustJSON(workPlan),
+	})
+	return err
+}
+
 func (s *Service) recordTaskMilestone(ctx context.Context, taskID string, name string, phase string, summary string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -7092,6 +7407,8 @@ func planMetadata(plan Plan) map[string]any {
 		"remoteSession",
 		"remoteRunDir",
 		"remoteWorkDir",
+		"initialWorker",
+		"scheduledWorkerID",
 		"spawnID",
 		"spawnReason",
 		"spawnRole",
@@ -7121,16 +7438,30 @@ func planMetadata(plan Plan) map[string]any {
 	if plan.Rationale != "" {
 		metadata["rationale"] = plan.Rationale
 	}
+	if plan.WorkPlan != nil {
+		metadata["workPlan"] = plan.WorkPlan
+	}
 	if len(plan.Steps) > 0 {
 		metadata["steps"] = plan.Steps
 	}
 	if len(plan.RequiredApprovals) > 0 {
 		metadata["requiredApprovals"] = plan.RequiredApprovals
 	}
+	if len(plan.Workers) > 0 {
+		metadata["workers"] = plan.Workers
+	}
 	if len(plan.Spawns) > 0 {
 		metadata["spawns"] = plan.Spawns
 	}
 	return metadata
+}
+
+func copyPlanMetadata(source map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
 }
 
 func normalizeReasoningEffort(value string) string {

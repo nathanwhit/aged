@@ -166,6 +166,7 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 		if err := s.waitDurableLoopInterval(ctx, task.ID, config.Interval); err != nil {
 			return
 		}
+		config = s.latestDurableLoopConfig(ctx, task, config)
 	}
 }
 

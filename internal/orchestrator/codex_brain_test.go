@@ -165,6 +165,19 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 		InitialPlan: Plan{
 			WorkerKind: "codex",
 			Prompt:     strings.Repeat("initial plan ", 5000),
+			WorkPlan: &core.WorkPlan{
+				Summary: strings.Repeat("initial work plan ", 5000),
+			},
+		},
+		WorkPlan: &core.WorkPlan{
+			Summary: strings.Repeat("current work plan ", 5000),
+			Workstreams: []core.WorkPlanItem{{
+				ID:       "slice-1",
+				Goal:     strings.Repeat("large workstream ", 5000),
+				Status:   "running",
+				DoneWhen: strings.Repeat("done when ", 5000),
+			}},
+			Risks: []string{strings.Repeat("risk ", 5000)},
 		},
 		ContextLedger: []ContextLedgerEntry{{
 			Kind:     "worker_result",
@@ -267,14 +280,62 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 	}
 }
 
+func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
+	plan, err := decodeCodexPlan([]byte(`{
+		"rationale": "Split independent work up front.",
+		"reasoningEffort": "medium",
+		"workPlan": {
+			"summary": "Audit the API and UI independently, then consolidate.",
+			"workstreams": [{"id": "api", "goal": "Inspect API paths.", "status": "pending", "doneWhen": "API findings are reported.", "dependsOn": []}],
+			"validation": [{"id": "validate", "goal": "Check proposed fixes.", "status": "pending", "doneWhen": "Validation command is reported.", "dependsOn": ["api"]}],
+			"risks": ["The two audits may find overlapping issues."]
+		},
+		"steps": [{"title": "Audit", "description": "Run parallel audits."}],
+		"requiredApprovals": [],
+		"actions": [],
+		"workers": [
+			{"id": "api", "role": "auditor", "reason": "Inspect API paths.", "workerKind": "claude", "workerPrompt": "Inspect the API paths.", "reasoningEffort": "low", "dependsOn": []},
+			{"id": "ui", "role": "auditor", "reason": "Inspect UI paths.", "workerKind": "codex", "workerPrompt": "Inspect the UI paths.", "reasoningEffort": "low", "dependsOn": []}
+		],
+		"spawns": []
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Workers) != 2 {
+		t.Fatalf("workers = %+v", plan.Workers)
+	}
+	if plan.WorkPlan == nil || plan.WorkPlan.Workstreams[0].ID != "api" {
+		t.Fatalf("workPlan = %+v", plan.WorkPlan)
+	}
+	if plan.Workers[0].ID != "api" || plan.Workers[0].Prompt != "Inspect the API paths." {
+		t.Fatalf("first worker = %+v", plan.Workers[0])
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecodeReplanDecisionContinue(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "continue",
 		"rationale": "review found a missing case",
 		"message": "run an incorporation worker",
+		"workPlan": {
+			"summary": "Initial implementation needs a feedback incorporation turn.",
+			"workstreams": [{"id": "implement", "goal": "Incorporate reviewer feedback.", "status": "running", "doneWhen": "The missing case is fixed.", "dependsOn": []}],
+			"validation": [],
+			"risks": []
+		},
 		"plan": {
 			"workerKind": "codex",
 			"workerPrompt": "incorporate review feedback",
+			"workPlan": {
+				"summary": "Initial implementation needs a feedback incorporation turn.",
+				"workstreams": [{"id": "implement", "goal": "Incorporate reviewer feedback.", "status": "running", "doneWhen": "The missing case is fixed.", "dependsOn": []}],
+				"validation": [],
+				"risks": []
+			},
 			"rationale": "review found a missing case",
 			"steps": [{"title": "Fix", "description": "Patch the missing case"}],
 			"requiredApprovals": [],
@@ -292,6 +353,9 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 	}
 	if decision.Plan == nil || decision.Plan.Prompt != "incorporate review feedback" {
 		t.Fatalf("plan = %+v", decision.Plan)
+	}
+	if decision.WorkPlan == nil || decision.WorkPlan.Workstreams[0].Status != "running" {
+		t.Fatalf("workPlan = %+v", decision.WorkPlan)
 	}
 }
 
@@ -409,6 +473,68 @@ func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 		if !strings.Contains(body, "## Test plan") && !strings.Contains(body, "## Validation") {
 			t.Fatalf("%s does not require a Test plan / Validation section", path)
 		}
+	}
+}
+
+func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
+	tests := []struct {
+		path      string
+		required  []string
+		forbidden []string
+	}{
+		{
+			path: "../../prompts/default/system.md",
+			required: []string{
+				`"workers": [`,
+				"Use `workers` for initial execution",
+				"Root workers with empty `dependsOn` can run in parallel immediately",
+				"Workers with dependencies wait until all dependency worker ids finish",
+				"legacy compatibility fallback fields only when `workers` is absent",
+				"Never return arrays of strings for `steps`, `requiredApprovals`, `workers`, or `spawns`",
+			},
+			forbidden: []string{
+				"Choose the worker and shape the initial execution plan",
+				"one primary worker establish",
+				"Spawns with no `dependsOn` can run in parallel after the initial worker succeeds",
+				"Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`",
+			},
+		},
+		{
+			path: "../../prompts/default/replan.md",
+			required: []string{
+				`"workers": [`,
+				`"dependsOn": []`,
+				`"dependsOn": ["inspect"]`,
+				`same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns`,
+				`Root workers with empty dependsOn can run in parallel immediately`,
+				`legacy compatibility fallback fields only when workers is absent`,
+				`"steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects`,
+			},
+			forbidden: []string{
+				`same exact schema as the scheduler plan: workerKind, workerPrompt`,
+				`Use workerId "" to mean the latest successful candidate worker`,
+				`"steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.path), func(t *testing.T) {
+			data, err := os.ReadFile(tt.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.path, err)
+			}
+			body := string(data)
+			for _, want := range tt.required {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s missing required text %q", tt.path, want)
+				}
+			}
+			for _, stale := range tt.forbidden {
+				if strings.Contains(body, stale) {
+					t.Fatalf("%s still contains stale text %q", tt.path, stale)
+				}
+			}
+		})
 	}
 }
 

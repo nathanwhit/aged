@@ -3748,6 +3748,80 @@ func TestServiceUpdatesDurableLoopRequiredTargetID(t *testing.T) {
 	}
 }
 
+func TestDurableLoopUsesUpdatedConfigForNextIteration(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventResult, Text: "iteration 1 done"}},
+			{{Kind: worker.EventNeedsInput, Text: "pause after iteration 2"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Original loop objective.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 10,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasIterationCompletedAction(snapshot.Events, task.ID, 1)
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("iteration 1 did not complete; events = %+v", snapshot.Events)
+	})
+
+	if _, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{
+		LoopPrompt: ptrString("Updated loop objective for next iteration."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{
+		LoopIntervalSeconds: ptrInt(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if runner.callsValue() != 2 {
+		t.Fatalf("runner calls = %d, want 2", runner.callsValue())
+	}
+	if !strings.Contains(runner.promptValue(), "Updated loop objective for next iteration.") {
+		t.Fatalf("iteration 2 prompt did not use updated loopPrompt:\n%s", runner.promptValue())
+	}
+}
+
+func hasIterationCompletedAction(events []core.Event, taskID string, iteration int) bool {
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind      string `json:"kind"`
+			Status    string `json:"status"`
+			Iteration int    `json:"iteration"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == "durable_loop" && payload.Status == "iteration_completed" && payload.Iteration == iteration {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -7225,6 +7299,138 @@ func TestServiceRunsIndependentSpawnedWorkersInParallel(t *testing.T) {
 	}
 }
 
+func TestServiceRunsInitialWorkersInParallel(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "independent initial investigation can run in parallel",
+		Workers: []WorkerRequest{
+			{
+				ID:              "audit",
+				Role:            "auditor",
+				Reason:          "Inspect one side of the task.",
+				WorkerKind:      "left",
+				Prompt:          "Audit the left side.",
+				ReasoningEffort: "low",
+			},
+			{
+				ID:              "test",
+				Role:            "tester",
+				Reason:          "Inspect another side of the task.",
+				WorkerKind:      "right",
+				Prompt:          "Audit the right side.",
+				ReasoningEffort: "low",
+			},
+		},
+	}}, map[string]worker.Runner{
+		"left":  &blockingEventRunner{kind: "left", started: started, release: release, summary: "left done"},
+		"right": &blockingEventRunner{kind: "right", started: started, release: release, summary: "right done"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Parallel initial work",
+		Prompt: "Run independent audits in parallel.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	deadline := time.After(500 * time.Millisecond)
+	for len(got) < 2 {
+		select {
+		case kind := <-started:
+			got[kind] = true
+		case <-deadline:
+			t.Fatalf("initial workers did not start in parallel; started = %+v", got)
+		}
+	}
+	close(release)
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "left") || !hasWorkerCreated(snapshot.Events, task.ID, "right") {
+		t.Fatalf("missing initial workers")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 1 {
+		t.Fatalf("task.planned count = %d, want 1", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.SpawnID != "audit" && node.SpawnID != "test" {
+			t.Fatalf("unexpected initial worker node spawn id: %+v", node)
+		}
+	}
+}
+
+func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	firstStarted := make(chan string, 1)
+	secondStarted := make(chan string, 1)
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
+	second := &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "second done"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "initial worker graph has a dependency",
+		Workers: []WorkerRequest{
+			{
+				ID:         "inspect",
+				Role:       "inspector",
+				Reason:     "Inspect the current implementation.",
+				WorkerKind: "first",
+				Prompt:     "Inspect first.",
+			},
+			{
+				ID:         "repair",
+				Role:       "implementer",
+				Reason:     "Repair issues found by inspection.",
+				WorkerKind: "second",
+				Prompt:     "Repair after inspection.",
+				DependsOn:  []string{"inspect"},
+			},
+		},
+	}}, map[string]worker.Runner{
+		"first":  &blockingEventRunner{kind: "first", started: firstStarted, release: firstRelease, summary: "inspection summary"},
+		"second": second,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent initial graph",
+		Prompt: "Inspect, then repair.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first initial worker did not start")
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("dependent initial worker started before dependency completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(firstRelease)
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dependent initial worker did not start after dependency completed")
+	}
+	close(secondRelease)
+
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !strings.Contains(second.promptValue(), "inspection summary") {
+		t.Fatalf("dependent prompt missing dependency summary:\n%s", second.promptValue())
+	}
+}
+
 func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -7321,6 +7527,29 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			WorkerKind: "codex",
 			Prompt:     "implement first slice",
 			Rationale:  "start with implementation",
+			WorkPlan: &core.WorkPlan{
+				Summary: "Implement a first slice, review it, then incorporate feedback.",
+				Workstreams: []core.WorkPlanItem{{
+					ID:       "implement",
+					Goal:     "Implement the first slice.",
+					Status:   "running",
+					DoneWhen: "The first slice is implemented.",
+				}, {
+					ID:        "review",
+					Goal:      "Review the first slice.",
+					Status:    "pending",
+					DoneWhen:  "Review findings are reported.",
+					DependsOn: []string{"implement"},
+				}},
+				Validation: []core.WorkPlanItem{{
+					ID:        "validate",
+					Goal:      "Validate the incorporated result.",
+					Status:    "pending",
+					DoneWhen:  "Validation is reported.",
+					DependsOn: []string{"review"},
+				}},
+				Risks: []string{"Review may find a missing edge case."},
+			},
 			Spawns: []SpawnRequest{{
 				Role:   "reviewer",
 				Reason: "Review the initial implementation.",
@@ -7330,6 +7559,34 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			{
 				Action:    "continue",
 				Rationale: "review requested an incorporation turn",
+				WorkPlan: &core.WorkPlan{
+					Summary: "Implementation and review are done; feedback incorporation is running.",
+					Workstreams: []core.WorkPlanItem{{
+						ID:       "implement",
+						Goal:     "Implement the first slice.",
+						Status:   "done",
+						DoneWhen: "The first slice is implemented.",
+					}, {
+						ID:       "review",
+						Goal:     "Review the first slice.",
+						Status:   "done",
+						DoneWhen: "Review findings are reported.",
+					}, {
+						ID:        "incorporate",
+						Goal:      "Incorporate the reviewed edge case.",
+						Status:    "running",
+						DoneWhen:  "The reviewed edge case is fixed.",
+						DependsOn: []string{"review"},
+					}},
+					Validation: []core.WorkPlanItem{{
+						ID:        "validate",
+						Goal:      "Validate the incorporated result.",
+						Status:    "pending",
+						DoneWhen:  "Validation is reported.",
+						DependsOn: []string{"incorporate"},
+					}},
+					Risks: []string{"The incorporation turn may uncover more feedback."},
+				},
 				Plan: &Plan{
 					WorkerKind: "codex",
 					Prompt:     "incorporate reviewer feedback about the missing edge case",
@@ -7345,6 +7602,32 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			{
 				Action:    "complete",
 				Rationale: "incorporation turn completed",
+				WorkPlan: &core.WorkPlan{
+					Summary: "Implementation, review, and feedback incorporation are complete.",
+					Workstreams: []core.WorkPlanItem{{
+						ID:       "implement",
+						Goal:     "Implement the first slice.",
+						Status:   "done",
+						DoneWhen: "The first slice is implemented.",
+					}, {
+						ID:       "review",
+						Goal:     "Review the first slice.",
+						Status:   "done",
+						DoneWhen: "Review findings are reported.",
+					}, {
+						ID:       "incorporate",
+						Goal:     "Incorporate the reviewed edge case.",
+						Status:   "done",
+						DoneWhen: "The reviewed edge case is fixed.",
+					}},
+					Validation: []core.WorkPlanItem{{
+						ID:       "validate",
+						Goal:     "Validate the incorporated result.",
+						Status:   "done",
+						DoneWhen: "Validation is reported.",
+					}},
+					Risks: []string{},
+				},
 			},
 		},
 	}
@@ -7377,6 +7660,12 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 2 {
 		t.Fatalf("task.replanned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
 	}
+	if countEvents(snapshot.Events, core.EventTaskWorkPlan, task.ID) != 3 {
+		t.Fatalf("task.work_plan_updated count = %d, want 3", countEvents(snapshot.Events, core.EventTaskWorkPlan, task.ID))
+	}
+	if snapshot.Tasks[0].WorkPlan == nil || snapshot.Tasks[0].WorkPlan.Workstreams[2].Status != "done" {
+		t.Fatalf("final work plan = %+v", snapshot.Tasks[0].WorkPlan)
+	}
 	if !strings.Contains(implementer.promptValue(), "incorporate reviewer feedback") {
 		t.Fatalf("last implementer prompt = %q", implementer.promptValue())
 	}
@@ -7391,6 +7680,12 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 	if len(brain.states[1].Results) != 3 {
 		t.Fatalf("second replan results = %d, want 3", len(brain.states[1].Results))
+	}
+	if brain.states[0].WorkPlan == nil || brain.states[0].WorkPlan.Workstreams[0].Status != "running" {
+		t.Fatalf("first replan work plan = %+v", brain.states[0].WorkPlan)
+	}
+	if brain.states[1].WorkPlan == nil || brain.states[1].WorkPlan.Workstreams[2].Status != "running" {
+		t.Fatalf("second replan work plan = %+v", brain.states[1].WorkPlan)
 	}
 }
 

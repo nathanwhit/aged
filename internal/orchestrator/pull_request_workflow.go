@@ -183,6 +183,10 @@ func pullRequestFollowUpPrompt(pr core.PullRequest) string {
 	if comment != "" {
 		comment = "\nLatest PR feedback:\n" + comment + "\n"
 	}
+	checkFailure := pullRequestCheckFailurePromptContext(pr)
+	if checkFailure != "" {
+		checkFailure = "\nFailing check context:\n" + checkFailure + "\n"
+	}
 	autoMergeError := pullRequestAutoMergeError(pr)
 	if autoMergeError != "" {
 		autoMergeError = "\nAuto-merge failed:\n" + autoMergeError + "\n"
@@ -198,9 +202,55 @@ Merge status: %s
 Review status: %s
 %s
 %s
+%s
 
 Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should decide whether a GitHub PR comment is warranted, such as answering reviewer feedback, explaining that no code change is needed, or summarizing a completed fix; if so, it should leave a concise comment on the pull request and report what it posted. Keep this as the same long-running task objective; do not start a separate babysitter task.
-`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment, autoMergeError)
+`, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment, checkFailure, autoMergeError)
+}
+
+func pullRequestCheckFailurePromptContext(pr core.PullRequest) string {
+	if len(pr.Metadata) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(stringMetadataValue(metadata["latestFailingCheckName"]))
+	status := strings.TrimSpace(stringMetadataValue(metadata["latestFailingCheckStatus"]))
+	conclusion := strings.TrimSpace(stringMetadataValue(metadata["latestFailingCheckConclusion"]))
+	url := strings.TrimSpace(stringMetadataValue(metadata["latestFailingCheckURL"]))
+	summary := strings.TrimSpace(stringMetadataValue(metadata["latestFailingCheckSummary"]))
+	if name == "" && status == "" && conclusion == "" && url == "" && summary == "" {
+		return ""
+	}
+	var b strings.Builder
+	if name != "" {
+		b.WriteString(name)
+	}
+	state := nonEmpty(conclusion, status)
+	if state != "" {
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString("(")
+		b.WriteString(state)
+		b.WriteString(")")
+	}
+	if url != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("URL: ")
+		b.WriteString(url)
+	}
+	if summary != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(summary)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func pullRequestCommentPromptContext(pr core.PullRequest) string {

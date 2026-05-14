@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_task_idx ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS events_worker_idx ON events(worker_id, id);
 
+CREATE TABLE IF NOT EXISTS snapshot_projection (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	last_event_id INTEGER NOT NULL,
+	state TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS projects (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -416,7 +423,13 @@ func (s *SQLiteStore) Append(ctx context.Context, event core.Event) (core.Event,
 		event.Payload = json.RawMessage(`{}`)
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Event{}, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO events (at, type, task_id, worker_id, payload)
 VALUES (?, ?, ?, ?, ?)`,
 		event.At.Format(time.RFC3339Nano),
@@ -433,6 +446,12 @@ VALUES (?, ?, ?, ?, ?)`,
 		return core.Event{}, err
 	}
 	event.ID = id
+	if err := updateSnapshotProjectionTx(ctx, tx, event); err != nil {
+		return core.Event{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Event{}, err
+	}
 	return event, nil
 }
 
@@ -716,19 +735,11 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, nextID); err != nil {
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
-	events, err := s.allEvents(ctx)
-	if err != nil {
-		return core.Snapshot{}, err
-	}
-	return s.snapshotFromEvents(ctx, events, true)
+	return s.snapshotFromProjection(ctx, true)
 }
 
 func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
-	events, err := s.projectionEvents(ctx)
-	if err != nil {
-		return core.Snapshot{}, err
-	}
-	return s.snapshotFromEvents(ctx, events, false)
+	return s.snapshotFromProjection(ctx, false)
 }
 
 func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {
@@ -877,6 +888,15 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				At:       event.At,
 				Metadata: payload.Metadata,
 			})
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
+		case core.EventTaskWorkPlan:
+			var payload core.WorkPlan
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.work_plan_updated: %w", err)
+			}
+			task := tasks[event.TaskID]
+			task.WorkPlan = &payload
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
 		case core.EventTaskArtifact:
@@ -1533,6 +1553,7 @@ WHERE type IN (
 	'task.final_candidate_selected',
 	'task.objective_updated',
 	'task.milestone_reached',
+	'task.work_plan_updated',
 	'task.artifact_recorded',
 	'task.cleared',
 	'execution.node_planned',

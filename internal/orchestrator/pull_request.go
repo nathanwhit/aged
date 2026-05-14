@@ -539,7 +539,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	if err != nil {
 		return core.PullRequest{}, err
 	}
-	checked.Metadata = pullRequestMetadataWithFeedback(pr.Metadata, pullRequestFeedback(payload.Comments, payload.Reviews, threadFeedback), &checked)
+	checked.Metadata = pullRequestMetadataWithFeedback(checked.Metadata, pullRequestFeedback(payload.Comments, payload.Reviews, threadFeedback), &checked)
 	return checked, nil
 }
 
@@ -701,6 +701,7 @@ func (payload githubPullRequestPayload) pullRequest(pr core.PullRequest) core.Pu
 	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
 	pr.ChecksStatus = checks.Status
 	pr.ChecksConclusion = checks.Conclusion
+	pr.Metadata = pullRequestMetadataWithFailingChecks(pr.Metadata, checks.FailingChecks)
 	return pr
 }
 
@@ -1064,8 +1065,9 @@ func firstURL(value string) string {
 }
 
 type statusCheckRollupSummary struct {
-	Status     string
-	Conclusion string
+	Status        string
+	Conclusion    string
+	FailingChecks []pullRequestCheckFailure
 }
 
 func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
@@ -1073,9 +1075,23 @@ func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
 		return statusCheckRollupSummary{}
 	}
 	var checks []struct {
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		State      string `json:"state"`
+		Name        string `json:"name"`
+		Workflow    string `json:"workflowName"`
+		Context     string `json:"context"`
+		Status      string `json:"status"`
+		Conclusion  string `json:"conclusion"`
+		State       string `json:"state"`
+		DetailsURL  string `json:"detailsUrl"`
+		TargetURL   string `json:"targetUrl"`
+		URL         string `json:"url"`
+		Description string `json:"description"`
+		Summary     string `json:"summary"`
+		Text        string `json:"text"`
+		Output      struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+			Text    string `json:"text"`
+		} `json:"output"`
 	}
 	if err := json.Unmarshal(raw, &checks); err != nil {
 		return statusCheckRollupSummary{Status: "unknown", Conclusion: "unknown"}
@@ -1086,12 +1102,20 @@ func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
 	pending := 0
 	failing := 0
 	success := 0
+	var failingChecks []pullRequestCheckFailure
 	for _, check := range checks {
 		status := strings.ToUpper(check.Status)
 		conclusion := strings.ToUpper(nonEmpty(check.Conclusion, check.State))
 		switch {
 		case conclusion == "FAILURE" || conclusion == "ERROR" || conclusion == "CANCELLED" || conclusion == "TIMED_OUT" || conclusion == "ACTION_REQUIRED":
 			failing++
+			failingChecks = append(failingChecks, pullRequestCheckFailure{
+				Name:       checkFailureName(check.Name, check.Workflow, check.Context),
+				Status:     nonEmpty(check.Status, check.State),
+				Conclusion: nonEmpty(check.Conclusion, check.State),
+				URL:        nonEmpty(check.DetailsURL, check.TargetURL, check.URL),
+				Summary:    checkFailureSummary(check.Output.Title, check.Output.Summary, check.Output.Text, check.Description, check.Summary, check.Text),
+			})
 		case conclusion == "SUCCESS" || conclusion == "NEUTRAL" || conclusion == "SKIPPED":
 			success++
 		case status != "" && status != "COMPLETED":
@@ -1102,7 +1126,7 @@ func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
 	}
 	switch {
 	case failing > 0:
-		return statusCheckRollupSummary{Status: "failing", Conclusion: "failure"}
+		return statusCheckRollupSummary{Status: "failing", Conclusion: "failure", FailingChecks: failingChecks}
 	case pending > 0:
 		return statusCheckRollupSummary{Status: "pending", Conclusion: "pending"}
 	case success == len(checks):
@@ -1110,6 +1134,76 @@ func summarizeStatusCheckRollup(raw json.RawMessage) statusCheckRollupSummary {
 	default:
 		return statusCheckRollupSummary{Status: "unknown", Conclusion: "unknown"}
 	}
+}
+
+type pullRequestCheckFailure struct {
+	Name       string `json:"name,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Conclusion string `json:"conclusion,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+}
+
+func checkFailureName(name string, workflow string, context string) string {
+	name = strings.TrimSpace(name)
+	workflow = strings.TrimSpace(workflow)
+	context = strings.TrimSpace(context)
+	if name != "" && workflow != "" && !strings.Contains(name, workflow) {
+		return workflow + " / " + name
+	}
+	return nonEmpty(name, context, workflow)
+}
+
+func checkFailureSummary(values ...string) string {
+	var parts []string
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, value)
+	}
+	return truncatePRCheckSummary(strings.Join(parts, "\n\n"))
+}
+
+func truncatePRCheckSummary(summary string) string {
+	summary = strings.TrimSpace(summary)
+	const limit = 1000
+	if len(summary) <= limit {
+		return summary
+	}
+	return summary[:limit] + "\n[truncated]"
+}
+
+func pullRequestMetadataWithFailingChecks(raw json.RawMessage, checks []pullRequestCheckFailure) json.RawMessage {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if len(checks) == 0 {
+		delete(metadata, "latestFailingCheckName")
+		delete(metadata, "latestFailingCheckStatus")
+		delete(metadata, "latestFailingCheckConclusion")
+		delete(metadata, "latestFailingCheckURL")
+		delete(metadata, "latestFailingCheckSummary")
+		delete(metadata, "latestFailingChecks")
+		return core.MustJSON(metadata)
+	}
+	const limit = 3
+	if len(checks) > limit {
+		checks = checks[:limit]
+	}
+	metadata["latestFailingChecks"] = checks
+	first := checks[0]
+	metadata["latestFailingCheckName"] = first.Name
+	metadata["latestFailingCheckStatus"] = first.Status
+	metadata["latestFailingCheckConclusion"] = first.Conclusion
+	metadata["latestFailingCheckURL"] = first.URL
+	metadata["latestFailingCheckSummary"] = first.Summary
+	return core.MustJSON(metadata)
 }
 
 func pullRequestMergeStatus(mergeStateStatus string, mergeable string) string {
