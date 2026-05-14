@@ -420,6 +420,38 @@ func TestSSHRunnerInfersTerminalStatusWhenRemoteSessionDisappears(t *testing.T) 
 	}
 }
 
+func TestSSHRunnerRefreshesTerminalStatusWhenRemoteSessionDisappearsAfterRunningRead(t *testing.T) {
+	result := `{"type":"result","subtype":"success","result":"done"}`
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			"working\n",
+			"working\n" + result + "\n",
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"succeeded","exit":0}`,
+		},
+		sessionMissing: true,
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("claude"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" || status.InferredFromOutput {
+		t.Fatalf("status = %+v, want non-inferred succeeded", status)
+	}
+	if !sink.has(worker.EventResult, "stdout", "done") {
+		t.Fatalf("final result was not emitted after session exit refresh: %+v", sink.events)
+	}
+	if executor.commandContains("kill-session") {
+		t.Fatalf("remote session was killed after status.json succeeded: %+v", executor.commands)
+	}
+}
+
 func TestSSHRunnerCompletesWhenClaudeResultArrivesBeforeProcessExit(t *testing.T) {
 	executor := &scriptedPollExecutor{
 		stdout: []string{
