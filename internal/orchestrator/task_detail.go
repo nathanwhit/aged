@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"time"
 
 	"aged/internal/core"
 	"aged/internal/eventstore"
@@ -31,6 +32,7 @@ type TaskDetailWorker struct {
 	Completion       json.RawMessage        `json:"completion,omitempty"`
 	ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
 	Applied          bool                   `json:"applied"`
+	Staleness        *WorkerStaleness       `json:"staleness,omitempty"`
 	AvailableActions []AvailableAction      `json:"availableActions"`
 }
 
@@ -51,7 +53,7 @@ func (s *Service) TaskDetail(ctx context.Context, taskID string) (TaskDetail, er
 	if err != nil {
 		return TaskDetail{}, err
 	}
-	return BuildTaskDetail(snapshot, taskID, defaultTaskDetailEventLimit)
+	return BuildTaskDetailAt(snapshot, taskID, defaultTaskDetailEventLimit, time.Now().UTC(), LoadStaleWorkerThreshold())
 }
 
 func (s *Service) WorkerDetail(ctx context.Context, workerID string) (WorkerDetail, error) {
@@ -59,10 +61,17 @@ func (s *Service) WorkerDetail(ctx context.Context, workerID string) (WorkerDeta
 	if err != nil {
 		return WorkerDetail{}, err
 	}
-	return BuildWorkerDetail(snapshot, workerID, defaultTaskDetailEventLimit)
+	return BuildWorkerDetailAt(snapshot, workerID, defaultTaskDetailEventLimit, time.Now().UTC(), LoadStaleWorkerThreshold())
 }
 
+// BuildTaskDetail preserves the historical signature and uses the daemon's
+// configured stale-worker threshold. Tests that need deterministic timing
+// should call BuildTaskDetailAt directly.
 func BuildTaskDetail(snapshot core.Snapshot, taskID string, eventLimit int) (TaskDetail, error) {
+	return BuildTaskDetailAt(snapshot, taskID, eventLimit, time.Now().UTC(), LoadStaleWorkerThreshold())
+}
+
+func BuildTaskDetailAt(snapshot core.Snapshot, taskID string, eventLimit int, now time.Time, staleAfter time.Duration) (TaskDetail, error) {
 	task, ok := findTask(snapshot, taskID)
 	if !ok {
 		return TaskDetail{}, eventstore.ErrNotFound
@@ -81,7 +90,7 @@ func BuildTaskDetail(snapshot core.Snapshot, taskID string, eventLimit int) (Tas
 	}
 	detail := TaskDetail{
 		Task:               task,
-		Workers:            taskDetailWorkers(snapshot, taskID),
+		Workers:            taskDetailWorkersAt(snapshot, taskID, now, staleAfter),
 		ExecutionNodes:     executionNodes,
 		PullRequests:       pullRequests,
 		RecentEvents:       recentTaskEvents(snapshot.Events, taskID, eventLimit),
@@ -96,6 +105,10 @@ func BuildTaskDetail(snapshot core.Snapshot, taskID string, eventLimit int) (Tas
 }
 
 func BuildWorkerDetail(snapshot core.Snapshot, workerID string, eventLimit int) (WorkerDetail, error) {
+	return BuildWorkerDetailAt(snapshot, workerID, eventLimit, time.Now().UTC(), LoadStaleWorkerThreshold())
+}
+
+func BuildWorkerDetailAt(snapshot core.Snapshot, workerID string, eventLimit int, now time.Time, staleAfter time.Duration) (WorkerDetail, error) {
 	var worker core.Worker
 	for _, candidate := range snapshot.Workers {
 		if candidate.ID == workerID {
@@ -110,7 +123,7 @@ func BuildWorkerDetail(snapshot core.Snapshot, workerID string, eventLimit int) 
 	if !ok {
 		return WorkerDetail{}, eventstore.ErrNotFound
 	}
-	for _, item := range taskDetailWorkers(snapshot, worker.TaskID) {
+	for _, item := range taskDetailWorkersAt(snapshot, worker.TaskID, now, staleAfter) {
 		if item.Worker.ID == workerID {
 			return WorkerDetail{
 				Task:         task,
@@ -123,6 +136,10 @@ func BuildWorkerDetail(snapshot core.Snapshot, workerID string, eventLimit int) 
 }
 
 func taskDetailWorkers(snapshot core.Snapshot, taskID string) []TaskDetailWorker {
+	return taskDetailWorkersAt(snapshot, taskID, time.Now().UTC(), LoadStaleWorkerThreshold())
+}
+
+func taskDetailWorkersAt(snapshot core.Snapshot, taskID string, now time.Time, staleAfter time.Duration) []TaskDetailWorker {
 	nodesByWorker := map[string]core.ExecutionNode{}
 	for _, node := range snapshot.ExecutionNodes {
 		if node.TaskID == taskID && node.WorkerID != "" {
@@ -154,6 +171,7 @@ func taskDetailWorkers(snapshot core.Snapshot, taskID string) []TaskDetailWorker
 			item.Completion = completion
 			item.ChangedFiles = changedFiles
 		}
+		item.Staleness = EvaluateWorkerStaleness(worker, item.LatestEvent, now, staleAfter)
 		item.AvailableActions = workerAvailableActions(worker, applied[worker.ID], len(item.ChangedFiles) > 0)
 		workers = append(workers, item)
 	}
