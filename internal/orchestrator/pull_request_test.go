@@ -783,6 +783,33 @@ func assertCommandContains(t *testing.T, calls [][]string, want []string) {
 	t.Fatalf("missing command containing %v in calls %v", want, calls)
 }
 
+func TestPullRequestPublishPatchPrefersPublishDiffForSSHWorkspace(t *testing.T) {
+	workspace := PreparedWorkspace{VCSType: "ssh"}
+	changes := WorkspaceChanges{
+		Diff:        "per-worker delta\n",
+		PublishDiff: "cumulative from head\n",
+	}
+	patch, fromBase := pullRequestPublishPatch(workspace, changes)
+	if !fromBase {
+		t.Fatalf("expected fromBase=true for ssh workspace")
+	}
+	if patch != changes.PublishDiff {
+		t.Fatalf("expected publish diff %q, got %q", changes.PublishDiff, patch)
+	}
+}
+
+func TestPullRequestPublishPatchFallsBackToPerWorkerDiffWhenPublishDiffMissing(t *testing.T) {
+	workspace := PreparedWorkspace{VCSType: "ssh"}
+	changes := WorkspaceChanges{Diff: "per-worker delta\n"}
+	patch, fromBase := pullRequestPublishPatch(workspace, changes)
+	if !fromBase {
+		t.Fatalf("expected fromBase=true for ssh workspace")
+	}
+	if patch != changes.Diff {
+		t.Fatalf("expected fallback to %q, got %q", changes.Diff, patch)
+	}
+}
+
 func argAfter(args []string, flag string) string {
 	for i, arg := range args {
 		if arg == flag && i+1 < len(args) {

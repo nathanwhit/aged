@@ -453,6 +453,9 @@ func pullRequestPublishPatch(workspace PreparedWorkspace, changes WorkspaceChang
 	if workspace.VCSType != "ssh" {
 		return "", false
 	}
+	if strings.TrimSpace(changes.PublishDiff) != "" {
+		return changes.PublishDiff, true
+	}
 	return changes.Diff, true
 }
 
