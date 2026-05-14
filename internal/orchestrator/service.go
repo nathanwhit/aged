@@ -4982,7 +4982,7 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 		{
 			reason:  "repo_setup_required",
 			summary: "Repository checkout or access is missing on the target environment.",
-			any:     []string{"repository not found", "not a git repository", "workdir is not inside a supported vcs workspace", "missing repository", "remote checkout is dirty", "remote jj checkout is dirty", "clone"},
+			any:     []string{"repository not found", "not a git repository", "workdir is not inside a supported vcs workspace", "missing repository", "clone"},
 		},
 		{
 			reason:  "github_workflow_scope_required",
