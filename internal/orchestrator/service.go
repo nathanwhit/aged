@@ -2836,39 +2836,29 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			TaskID:  task.ID,
 			Payload: core.MustJSON(decision.Plan),
 		})
-		if result, err := s.runPlannedWorker(ctx, task, *decision.Plan); err != nil {
+		nextResults, ok, err := s.runPlanWorkerSet(ctx, task, *decision.Plan, results, waiting.NodeID)
+		if err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, waiting.WorkerID, err) {
 				return
 			}
 			_ = s.failTask(ctx, task.ID, err)
-		} else if result.Status == core.WorkerWaiting {
-			s.handleWorkerQuestion(ctx, task, *decision.Plan, append(results, result), result)
-		} else if s.finishOrContinueTask(ctx, task.ID, result) {
-			nextResults := append(results, result)
-			nextResults, ok, err := s.runFollowUpWorkers(ctx, task, *decision.Plan, nextResults, result.NodeID)
-			if err != nil {
-				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
-					return
-				}
-				_ = s.failTask(ctx, task.ID, err)
+			return
+		}
+		if !ok {
+			return
+		}
+		if ok, updatedResults, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
+			if s.waitForRecoverableError(ctx, task.ID, waiting.WorkerID, err) {
 				return
 			}
-			if !ok {
+			_ = s.failTask(ctx, task.ID, err)
+		} else if ok {
+			nextResults = updatedResults
+			replanOK, finalCandidateWorkerID, finalCandidateReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
+			if !replanOK {
 				return
 			}
-			if ok, updatedResults, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
-				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
-					return
-				}
-				_ = s.failTask(ctx, task.ID, err)
-			} else if ok {
-				nextResults = updatedResults
-				replanOK, finalCandidateWorkerID, finalCandidateReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
-				if !replanOK {
-					return
-				}
-				_ = s.completeTask(ctx, task.ID, nextResults, nonEmpty(decision.FinalCandidateWorkerID, finalCandidateWorkerID), nonEmpty(decision.Rationale, finalCandidateReason))
-			}
+			_ = s.completeTask(ctx, task.ID, nextResults, nonEmpty(decision.FinalCandidateWorkerID, finalCandidateWorkerID), nonEmpty(decision.Rationale, finalCandidateReason))
 		}
 	case "wait":
 		_ = s.waitForUserAction(ctx, task.ID, waiting.WorkerID, "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, question), map[string]any{
@@ -2940,41 +2930,26 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
-	result, err := s.runPlannedWorker(ctx, task, plan)
+	results, ok, err := s.runPlanWorkerSet(ctx, task, plan, nil, "")
 	if err != nil {
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
-	if result.Status == core.WorkerWaiting {
-		s.handleWorkerQuestion(ctx, task, plan, []WorkerTurnResult{result}, result)
+	if !ok {
 		return
 	}
-	if s.finishOrContinueTask(ctx, taskID, result) {
-		results := []WorkerTurnResult{result}
-		results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
-		if err != nil {
-			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
-				return
-			}
-			_ = s.failTask(ctx, taskID, err)
+	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		if s.waitForRecoverableError(ctx, taskID, "", err) {
 			return
 		}
-		if !ok {
+		_ = s.failTask(ctx, taskID, err)
+	} else if ok {
+		results = nextResults
+		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+		if !replanOK {
 			return
 		}
-		if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
-			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
-				return
-			}
-			_ = s.failTask(ctx, taskID, err)
-		} else if ok {
-			results = nextResults
-			replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
-			if !replanOK {
-				return
-			}
-			_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
-		}
+		_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 	}
 }
 
@@ -3034,23 +3009,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
-	result, err := s.runPlannedWorker(ctx, task, plan)
-	if err != nil {
-		if s.waitForRecoverableError(ctx, task.ID, "", err) {
-			return
-		}
-		_ = s.failTask(ctx, task.ID, err)
-		return
-	}
-	if result.Status == core.WorkerWaiting {
-		s.handleWorkerQuestion(ctx, task, plan, []WorkerTurnResult{result}, result)
-		return
-	}
-	if !s.finishOrContinueTask(ctx, task.ID, result) {
-		return
-	}
-	results := []WorkerTurnResult{result}
-	results, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+	results, ok, err := s.runPlanWorkerSet(ctx, task, plan, nil, "")
 	if err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
@@ -3077,6 +3036,31 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		return
 	}
 	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
+func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Plan, priorResults []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
+	results := append([]WorkerTurnResult{}, priorResults...)
+	if len(plan.Workers) > 0 {
+		graphResults, ok, err := s.runInitialWorkerGraph(ctx, task, plan)
+		results = append(results, graphResults...)
+		if err != nil || !ok {
+			return results, ok, err
+		}
+		return s.runFollowUpWorkers(ctx, task, plan, results, parentNodeID)
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		return results, false, err
+	}
+	results = append(results, result)
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(ctx, task, plan, results, result)
+		return results, false, nil
+	}
+	if !s.finishOrContinueTask(ctx, task.ID, result) {
+		return results, false, nil
+	}
+	return s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
 }
 
 func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) {

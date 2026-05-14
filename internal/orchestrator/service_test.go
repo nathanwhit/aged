@@ -6573,6 +6573,53 @@ func TestServiceResumeWaitingTaskRunsPlannedFollowUps(t *testing.T) {
 	}
 }
 
+func TestServiceResumeWaitingTaskRunsWorkerGraphPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &sequenceBrain{plans: []Plan{
+		{WorkerKind: "ask", Prompt: "ask for input"},
+		{
+			Rationale: "repair the existing pull request",
+			Workers: []WorkerRequest{{
+				ID:              "repair_pr_followup",
+				Role:            "repairer",
+				Reason:          "The PR needs one focused repair turn.",
+				WorkerKind:      "codex",
+				Prompt:          "inspect and repair the PR",
+				ReasoningEffort: "medium",
+			}},
+		},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "PR needs follow-up work.",
+		}}},
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "repaired PR metadata",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Babysit PR", Prompt: "Open and monitor the PR."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "GitHub pull request owner/repo#7 needs follow-up work."}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "codex") {
+		t.Fatalf("missing graph worker from resumed plan")
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, task.ID) != 2 {
+		t.Fatalf("worker.created count = %d, want 2", countEvents(snapshot.Events, core.EventWorkerCreated, task.ID))
+	}
+}
+
 func TestServiceAskUserActionMovesTaskToWaiting(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
