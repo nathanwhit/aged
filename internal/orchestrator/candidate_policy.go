@@ -2,11 +2,14 @@ package orchestrator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"aged/internal/core"
 )
+
+var errPullRequestWorkerNotPublishable = errors.New("pull request publishing requires a successful worker with candidate changes")
 
 func resolvePullRequestWorkerID(snapshot core.Snapshot, task core.Task, requestedWorkerID string) (string, error) {
 	workerID := strings.TrimSpace(requestedWorkerID)
@@ -38,7 +41,7 @@ func resolvePullRequestWorkerID(snapshot core.Snapshot, task core.Task, requeste
 		return "", fmt.Errorf("worker does not belong to task")
 	}
 	if !workerIsPublishableCandidate(snapshot, workerID) {
-		return "", fmt.Errorf("pull request publishing requires a successful worker with candidate changes")
+		return "", errPullRequestWorkerNotPublishable
 	}
 	return workerID, nil
 }
