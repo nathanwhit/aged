@@ -4774,6 +4774,33 @@ func workerResultByID(results []WorkerTurnResult, workerID string) (WorkerTurnRe
 	return WorkerTurnResult{}, false
 }
 
+func workerResultByReference(results []WorkerTurnResult, workerRef string) (WorkerTurnResult, bool) {
+	workerRef = strings.TrimSpace(workerRef)
+	if workerRef == "" {
+		return WorkerTurnResult{}, false
+	}
+	if result, ok := workerResultByID(results, workerRef); ok {
+		return result, true
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		if results[i].SpawnID == workerRef {
+			return results[i], true
+		}
+	}
+	return WorkerTurnResult{}, false
+}
+
+func planActionWorkerID(results []WorkerTurnResult, workerRef string) string {
+	workerRef = strings.TrimSpace(workerRef)
+	if workerRef == "" {
+		return latestCandidateWorkerID(results)
+	}
+	if result, ok := workerResultByReference(results, workerRef); ok {
+		return result.WorkerID
+	}
+	return workerRef
+}
+
 func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, plan Plan) (bool, error) {
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.When) != "immediate" {
@@ -4945,10 +4972,7 @@ func containsRequiredFollowUpPhrase(normalized string) bool {
 func (s *Service) executePlanAction(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) (bool, []WorkerTurnResult, error) {
 	switch strings.TrimSpace(action.Kind) {
 	case "publish_pull_request":
-		workerID := strings.TrimSpace(action.WorkerID)
-		if workerID == "" {
-			workerID = latestCandidateWorkerID(results)
-		}
+		workerID := planActionWorkerID(results, action.WorkerID)
 		if workerID == "" {
 			return false, results, s.waitForMissingPublishCandidate(ctx, task, action, results)
 		}
@@ -5025,10 +5049,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		return false, results, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "update_pull_request":
-		workerID := strings.TrimSpace(action.WorkerID)
-		if workerID == "" {
-			workerID = latestCandidateWorkerID(results)
-		}
+		workerID := planActionWorkerID(results, action.WorkerID)
 		if workerID == "" {
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 				"kind":   action.Kind,
