@@ -25,6 +25,10 @@ func isTerminalWorkerStatus(status core.WorkerStatus) bool {
 	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
 }
 
+func isTerminalTaskStatus(status core.TaskStatus) bool {
+	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
+}
+
 func jsonString(value any, nullDefault string) (string, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -789,6 +793,10 @@ func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 
 func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
 	return s.snapshotFromProjection(ctx, false)
+}
+
+func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, error) {
+	return s.snapshotTaskCardsFromProjection(ctx)
 }
 
 func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {

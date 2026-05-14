@@ -99,7 +99,9 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		snapshot core.Snapshot
 		err      error
 	)
-	if r.URL.Query().Get("events") == "none" {
+	if r.URL.Query().Get("events") == "none" && r.URL.Query().Get("tasks") == "cards" {
+		snapshot, err = s.service.SnapshotTaskCards(r.Context())
+	} else if r.URL.Query().Get("events") == "none" {
 		snapshot, err = s.service.SnapshotSummary(r.Context())
 	} else {
 		snapshot, err = s.service.Snapshot(r.Context())
@@ -108,33 +110,7 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if r.URL.Query().Get("tasks") == "cards" {
-		snapshot = taskCardSnapshot(snapshot)
-	}
 	writeJSON(w, http.StatusOK, snapshot)
-}
-
-func taskCardSnapshot(snapshot core.Snapshot) core.Snapshot {
-	hydratedTasks := make(map[string]bool, len(snapshot.Tasks))
-	for _, task := range snapshot.Tasks {
-		if !isTerminalTaskStatus(task.Status) {
-			hydratedTasks[task.ID] = true
-		}
-	}
-	for index := range snapshot.Tasks {
-		if !isTerminalTaskStatus(snapshot.Tasks[index].Status) {
-			continue
-		}
-		snapshot.Tasks[index].Prompt = ""
-		snapshot.Tasks[index].Milestones = nil
-		snapshot.Tasks[index].Artifacts = nil
-	}
-	snapshot.Workers = filterTaskScoped(snapshot.Workers, hydratedTasks, func(worker core.Worker) string { return worker.TaskID })
-	snapshot.ExecutionNodes = filterTaskScoped(snapshot.ExecutionNodes, hydratedTasks, func(node core.ExecutionNode) string { return node.TaskID })
-	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, hydratedTasks, func(pr core.PullRequest) string { return pr.TaskID })
-	snapshot.OrchestrationGraphs = filterTaskScoped(snapshot.OrchestrationGraphs, hydratedTasks, func(graph core.OrchestrationGraph) string { return graph.TaskID })
-	snapshot.Events = filterTaskScoped(snapshot.Events, hydratedTasks, func(event core.Event) string { return event.TaskID })
-	return snapshot
 }
 
 func taskScopedSnapshot(snapshot core.Snapshot, taskID string) (core.Snapshot, bool) {
