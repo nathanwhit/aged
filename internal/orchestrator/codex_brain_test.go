@@ -213,6 +213,38 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	}
 }
 
+func TestCodexBrainPromptsIncludeTaskBudget(t *testing.T) {
+	brain := &CodexBrain{template: "system"}
+	task := core.Task{
+		ID:     "task-budget",
+		Title:  "Budgeted task",
+		Prompt: "Do bounded work.",
+		Metadata: core.MustJSON(map[string]any{
+			"budget": map[string]any{
+				"maxWorkerTurns": 2,
+				"maxReplanTurns": 3,
+			},
+		}),
+	}
+
+	planPrompt := brain.taskMessage(task, nil)
+	if !strings.Contains(planPrompt, `"budget"`) ||
+		!strings.Contains(planPrompt, `"maxWorkerTurns": 2`) ||
+		!strings.Contains(planPrompt, `"maxReplanTurns": 3`) {
+		t.Fatalf("plan prompt missing budget context:\n%s", planPrompt)
+	}
+
+	replanPrompt := brain.replanPrompt(task, OrchestrationState{
+		Budget:  taskBudgetStatus(task, 1, 1),
+		Results: []WorkerTurnResult{},
+		Turn:    2,
+	})
+	if !strings.Contains(replanPrompt, `"workerTurnsRemaining": 1`) ||
+		!strings.Contains(replanPrompt, `"replanTurnsRemaining": 2`) {
+		t.Fatalf("replan prompt missing budget status:\n%s", replanPrompt)
+	}
+}
+
 func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	brain := newTestCodexBrain(t, "invalid", StaticBrain{WorkerKind: "mock"})
 	plan, err := brain.Plan(context.Background(), core.Task{

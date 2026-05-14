@@ -2555,6 +2555,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	} else if !ok {
 		return
 	}
+	if ok, err := s.ensurePlanWithinRemainingWorkerBudget(ctx, task, plan, 0, "before_initial_workers"); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	} else if !ok {
+		return
+	}
 
 	results := []WorkerTurnResult{}
 	var ok bool
@@ -2720,6 +2726,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 	}
 	decision, err := replanner.Replan(ctx, task, OrchestrationState{
 		InitialPlan:   initial,
+		Budget:        taskBudgetStatus(task, len(results), 0),
 		Results:       results,
 		ContextLedger: s.taskContextLedger(ctx, task.ID),
 		Turn:          1,
@@ -5579,6 +5586,138 @@ func taskCompletionModeFromTask(task core.Task) string {
 	}
 }
 
+func taskBudgetFromTask(task core.Task) core.TaskBudget {
+	var metadata map[string]any
+	if len(task.Metadata) > 0 {
+		_ = json.Unmarshal(task.Metadata, &metadata)
+	}
+	budget, _ := normalizeTaskBudgetMetadata(metadata)
+	return budget
+}
+
+func taskBudgetPayload(task core.Task) map[string]any {
+	budget := taskBudgetFromTask(task)
+	if budget.MaxWorkerTurns <= 0 && budget.MaxReplanTurns <= 0 {
+		return nil
+	}
+	payload := map[string]any{}
+	if budget.MaxWorkerTurns > 0 {
+		payload["maxWorkerTurns"] = budget.MaxWorkerTurns
+	}
+	if budget.MaxReplanTurns > 0 {
+		payload["maxReplanTurns"] = budget.MaxReplanTurns
+	}
+	return payload
+}
+
+func taskBudgetStatus(task core.Task, workerTurnsUsed int, replanTurnsUsed int) *TaskBudgetStatus {
+	budget := taskBudgetFromTask(task)
+	if budget.MaxWorkerTurns <= 0 && budget.MaxReplanTurns <= 0 {
+		return nil
+	}
+	status := &TaskBudgetStatus{
+		MaxWorkerTurns:  budget.MaxWorkerTurns,
+		MaxReplanTurns:  budget.MaxReplanTurns,
+		WorkerTurnsUsed: workerTurnsUsed,
+		ReplanTurnsUsed: replanTurnsUsed,
+	}
+	if budget.MaxWorkerTurns > 0 {
+		remaining := budget.MaxWorkerTurns - workerTurnsUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		status.WorkerTurnsRemaining = remaining
+		if remaining == 0 {
+			status.Exhausted = append(status.Exhausted, "maxWorkerTurns")
+		}
+	}
+	if budget.MaxReplanTurns > 0 {
+		remaining := budget.MaxReplanTurns - replanTurnsUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		status.ReplanTurnsRemaining = remaining
+		if remaining == 0 {
+			status.Exhausted = append(status.Exhausted, "maxReplanTurns")
+		}
+	}
+	return status
+}
+
+func taskBudgetExceeded(task core.Task, workerTurnsUsed int, replanTurnsUsed int) (bool, string, *TaskBudgetStatus) {
+	status := taskBudgetStatus(task, workerTurnsUsed, replanTurnsUsed)
+	if status == nil || len(status.Exhausted) == 0 {
+		return false, "", status
+	}
+	reasons := make([]string, 0, len(status.Exhausted))
+	for _, exhausted := range status.Exhausted {
+		switch exhausted {
+		case "maxWorkerTurns":
+			reasons = append(reasons, fmt.Sprintf("worker turn budget exhausted (%d/%d used)", status.WorkerTurnsUsed, status.MaxWorkerTurns))
+		case "maxReplanTurns":
+			reasons = append(reasons, fmt.Sprintf("replan turn budget exhausted (%d/%d used)", status.ReplanTurnsUsed, status.MaxReplanTurns))
+		}
+	}
+	return true, strings.Join(reasons, "; "), status
+}
+
+func plannedWorkerTurns(plan Plan) int {
+	count := len(plan.Spawns)
+	if len(plan.Workers) > 0 {
+		count += len(plan.Workers)
+	} else if strings.TrimSpace(plan.WorkerKind) != "" || strings.TrimSpace(plan.Prompt) != "" {
+		count++
+	}
+	return count
+}
+
+func (s *Service) ensurePlanWithinRemainingWorkerBudget(ctx context.Context, task core.Task, plan Plan, workerTurnsUsed int, when string) (bool, error) {
+	budget := taskBudgetFromTask(task)
+	if budget.MaxWorkerTurns <= 0 {
+		return true, nil
+	}
+	planned := plannedWorkerTurns(plan)
+	if planned == 0 || workerTurnsUsed+planned <= budget.MaxWorkerTurns {
+		return true, nil
+	}
+	status := taskBudgetStatus(task, workerTurnsUsed, 0)
+	reason := fmt.Sprintf("planned worker turns exceed task budget (%d used + %d planned > %d max)", workerTurnsUsed, planned, budget.MaxWorkerTurns)
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":               "budget_guard",
+		"when":               when,
+		"reason":             reason,
+		"status":             "blocked",
+		"plannedWorkerTurns": planned,
+		"budget":             status,
+	}); err != nil {
+		return false, err
+	}
+	return false, s.waitForUserAction(ctx, task.ID, "", "budget_guard", "The current plan would exceed the task worker-turn budget. Steer the task with a smaller plan, increase the budget, or stop.", map[string]any{
+		"summary": reason,
+		"budget":  status,
+	})
+}
+
+func (s *Service) stopForBudget(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, reason string, budget *TaskBudgetStatus) (bool, string, string, []WorkerTurnResult) {
+	reason = nonEmpty(reason, "task budget exhausted")
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":   "budget_exhausted",
+		"when":   "before_dynamic_replan",
+		"reason": reason,
+		"status": "stopped",
+		"turn":   turn,
+		"budget": budget,
+	})
+	if candidateWorkerID := latestCandidateWorkerID(results); candidateWorkerID != "" {
+		return true, candidateWorkerID, "budget exhausted; using latest successful changed candidate", results
+	}
+	_ = s.waitForUserAction(ctx, task.ID, "", "budget_exhausted", "The task budget is exhausted before another worker turn could produce a final candidate. Steer the task to continue with a larger budget, select an existing result, or stop.", map[string]any{
+		"summary": reason,
+		"budget":  budget,
+	})
+	return false, "", "", results
+}
+
 type replanLoopOptions struct {
 	BlockedFinalCandidates          map[string]string
 	AllowBlockedBasePatchConflicts  bool
@@ -5612,10 +5751,14 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			recoveryOptions.RecoveryHint = recoveryHint
 			return s.recoverReplanLimit(ctx, task, turn, results, recoveryOptions)
 		}
+		if exhausted, reason, budget := taskBudgetExceeded(task, len(results), turn-1); exhausted {
+			return s.stopForBudget(ctx, task, turn, results, reason, budget)
+		}
 		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
 			WorkPlan:                 currentWorkPlan,
+			Budget:                   taskBudgetStatus(task, len(results), turn-1),
 			Results:                  results,
 			ContextLedger:            s.taskContextLedger(ctx, task.ID),
 			Turn:                     turn,
@@ -5736,6 +5879,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				}
 			}
 			normalizePlanReasoning(&next)
+			if ok, err := s.ensurePlanWithinRemainingWorkerBudget(ctx, task, next, len(results), "before_dynamic_replan_workers"); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			} else if !ok {
+				return false, "", "", results
+			}
 			if _, err := s.append(ctx, core.Event{
 				Type:    core.EventTaskPlanned,
 				TaskID:  task.ID,
@@ -6851,6 +7000,10 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	mergeRequestBudget(metadata, req.Budget)
+	if _, err := normalizeTaskBudgetMetadata(metadata); err != nil {
+		return nil, err
+	}
 	if req.Source != "" {
 		metadata["source"] = strings.TrimSpace(req.Source)
 	}
@@ -6868,6 +7021,14 @@ func NormalizeCreateTaskRequest(req core.CreateTaskRequest) (core.CreateTaskRequ
 	if err != nil {
 		return core.CreateTaskRequest{}, err
 	}
+	mergeRequestBudget(metadata, req.Budget)
+	budget, err := normalizeTaskBudgetMetadata(metadata)
+	if err != nil {
+		return core.CreateTaskRequest{}, err
+	}
+	if budget.MaxWorkerTurns > 0 || budget.MaxReplanTurns > 0 {
+		req.Budget = &budget
+	}
 	ensureDefaultTaskCompletionMode(metadata, req.Prompt)
 	req.Metadata = core.MustJSON(metadata)
 	return req, nil
@@ -6884,6 +7045,122 @@ func createTaskMetadataMap(raw json.RawMessage) (map[string]any, error) {
 		}
 	}
 	return metadata, nil
+}
+
+func mergeRequestBudget(metadata map[string]any, budget *core.TaskBudget) {
+	if metadata == nil || budget == nil {
+		return
+	}
+	values := map[string]any{}
+	if raw, ok := metadata["budget"]; ok {
+		switch typed := raw.(type) {
+		case core.TaskBudget:
+			values["maxWorkerTurns"] = typed.MaxWorkerTurns
+			values["maxReplanTurns"] = typed.MaxReplanTurns
+		case map[string]any:
+			for key, value := range typed {
+				values[key] = value
+			}
+		}
+	}
+	if budget.MaxWorkerTurns != 0 {
+		values["maxWorkerTurns"] = budget.MaxWorkerTurns
+	}
+	if budget.MaxReplanTurns != 0 {
+		values["maxReplanTurns"] = budget.MaxReplanTurns
+	}
+	if len(values) > 0 {
+		metadata["budget"] = values
+	}
+}
+
+func normalizeTaskBudgetMetadata(metadata map[string]any) (core.TaskBudget, error) {
+	if metadata == nil {
+		return core.TaskBudget{}, nil
+	}
+	rawBudget, hasBudget := metadata["budget"]
+	budgetValues := map[string]any{}
+	if hasBudget && rawBudget != nil {
+		switch typed := rawBudget.(type) {
+		case core.TaskBudget:
+			budgetValues["maxWorkerTurns"] = typed.MaxWorkerTurns
+			budgetValues["maxReplanTurns"] = typed.MaxReplanTurns
+		case map[string]any:
+			for key, value := range typed {
+				budgetValues[key] = value
+			}
+		default:
+			return core.TaskBudget{}, errors.New("metadata.budget must be an object")
+		}
+	}
+	for _, key := range []string{"maxWorkerTurns", "maxReplanTurns"} {
+		if value, ok := metadata[key]; ok && budgetValues[key] == nil {
+			budgetValues[key] = value
+		}
+	}
+	var budget core.TaskBudget
+	var err error
+	if value, ok := budgetValues["maxWorkerTurns"]; ok {
+		budget.MaxWorkerTurns, err = positiveBudgetInt(value, "maxWorkerTurns")
+		if err != nil {
+			return core.TaskBudget{}, err
+		}
+	}
+	if value, ok := budgetValues["maxReplanTurns"]; ok {
+		budget.MaxReplanTurns, err = positiveBudgetInt(value, "maxReplanTurns")
+		if err != nil {
+			return core.TaskBudget{}, err
+		}
+	}
+	if budget.MaxWorkerTurns > 0 || budget.MaxReplanTurns > 0 {
+		canonical := map[string]any{}
+		if budget.MaxWorkerTurns > 0 {
+			canonical["maxWorkerTurns"] = budget.MaxWorkerTurns
+		}
+		if budget.MaxReplanTurns > 0 {
+			canonical["maxReplanTurns"] = budget.MaxReplanTurns
+		}
+		metadata["budget"] = canonical
+	} else if hasBudget {
+		delete(metadata, "budget")
+	}
+	return budget, nil
+}
+
+func positiveBudgetInt(value any, field string) (int, error) {
+	switch typed := value.(type) {
+	case nil:
+		return 0, nil
+	case int:
+		if typed < 0 {
+			return 0, fmt.Errorf("budget.%s must be >= 0", field)
+		}
+		return typed, nil
+	case int64:
+		if typed < 0 {
+			return 0, fmt.Errorf("budget.%s must be >= 0", field)
+		}
+		return int(typed), nil
+	case float64:
+		if typed < 0 {
+			return 0, fmt.Errorf("budget.%s must be >= 0", field)
+		}
+		if typed != float64(int(typed)) {
+			return 0, fmt.Errorf("budget.%s must be an integer", field)
+		}
+		return int(typed), nil
+	case json.Number:
+		number, err := typed.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("budget.%s must be an integer", field)
+		}
+		if number < 0 {
+			return 0, fmt.Errorf("budget.%s must be >= 0", field)
+		}
+		return int(number), nil
+	default:
+		return 0, fmt.Errorf("budget.%s must be an integer", field)
+	}
 }
 
 func ensureDefaultTaskCompletionMode(metadata map[string]any, prompt string) {

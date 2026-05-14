@@ -88,11 +88,22 @@ type SpawnRequest struct {
 type OrchestrationState struct {
 	InitialPlan              Plan                 `json:"initialPlan"`
 	WorkPlan                 *core.WorkPlan       `json:"workPlan,omitempty"`
+	Budget                   *TaskBudgetStatus    `json:"budget,omitempty"`
 	Results                  []WorkerTurnResult   `json:"results"`
 	ContextLedger            []ContextLedgerEntry `json:"contextLedger,omitempty"`
 	Turn                     int                  `json:"turn"`
 	BlockedFinalCandidateIDs []string             `json:"blockedFinalCandidateIds,omitempty"`
 	RecoveryHint             string               `json:"recoveryHint,omitempty"`
+}
+
+type TaskBudgetStatus struct {
+	MaxWorkerTurns       int      `json:"maxWorkerTurns,omitempty"`
+	MaxReplanTurns       int      `json:"maxReplanTurns,omitempty"`
+	WorkerTurnsUsed      int      `json:"workerTurnsUsed"`
+	ReplanTurnsUsed      int      `json:"replanTurnsUsed"`
+	WorkerTurnsRemaining int      `json:"workerTurnsRemaining,omitempty"`
+	ReplanTurnsRemaining int      `json:"replanTurnsRemaining,omitempty"`
+	Exhausted            []string `json:"exhausted,omitempty"`
 }
 
 type ContextLedgerEntry struct {

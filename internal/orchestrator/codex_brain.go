@@ -774,13 +774,17 @@ func (b *CodexBrain) prompt(task core.Task, steering []string) string {
 }
 
 func (b *CodexBrain) taskMessage(task core.Task, steering []string) string {
+	taskPayload := map[string]any{
+		"id":             task.ID,
+		"title":          task.Title,
+		"prompt":         task.Prompt,
+		"completionMode": taskCompletionModeFromTask(task),
+	}
+	if budget := taskBudgetPayload(task); budget != nil {
+		taskPayload["budget"] = budget
+	}
 	payload := map[string]any{
-		"task": map[string]any{
-			"id":             task.ID,
-			"title":          task.Title,
-			"prompt":         task.Prompt,
-			"completionMode": taskCompletionModeFromTask(task),
-		},
+		"task": taskPayload,
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
 			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
@@ -808,18 +812,22 @@ func (b *CodexBrain) customPrompts(task core.Task, templateNames []string, input
 	if b.promptSets == nil {
 		return nil
 	}
+	taskJSON := map[string]any{
+		"id":             task.ID,
+		"title":          task.Title,
+		"prompt":         task.Prompt,
+		"completionMode": taskCompletionModeFromTask(task),
+	}
+	if budget := taskBudgetPayload(task); budget != nil {
+		taskJSON["budget"] = budget
+	}
 	data := map[string]any{
 		"system":      strings.TrimSpace(b.template),
 		"input_json":  input,
 		"task_id":     task.ID,
 		"task_title":  task.Title,
 		"task_prompt": task.Prompt,
-		"task_json": map[string]any{
-			"id":             task.ID,
-			"title":          task.Title,
-			"prompt":         task.Prompt,
-			"completionMode": taskCompletionModeFromTask(task),
-		},
+		"task_json":   taskJSON,
 	}
 	var rendered []RenderedPrompt
 	for _, templateName := range templateNames {
@@ -851,13 +859,17 @@ func isGitHubReviewRequestTask(task core.Task) bool {
 }
 
 func replanPromptPayload(task core.Task, state OrchestrationState) map[string]any {
+	taskPayload := map[string]any{
+		"id":             task.ID,
+		"title":          task.Title,
+		"prompt":         task.Prompt,
+		"completionMode": taskCompletionModeFromTask(task),
+	}
+	if budget := taskBudgetPayload(task); budget != nil {
+		taskPayload["budget"] = budget
+	}
 	return map[string]any{
-		"task": map[string]any{
-			"id":             task.ID,
-			"title":          task.Title,
-			"prompt":         task.Prompt,
-			"completionMode": taskCompletionModeFromTask(task),
-		},
+		"task":  taskPayload,
 		"state": compactOrchestrationStateForPrompt(state),
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
@@ -940,6 +952,7 @@ Field rules:
 - When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
 - Use "continue" when another worker turn is needed.
 - Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The state.results list may omit routine old worker turns to keep the prompt bounded.
+- Use state.budget, when present, as a hard budget for active orchestration. Do not schedule a continue plan whose workers or spawns exceed the remaining worker turns. When the budget is exhausted and no existing candidate can satisfy the task, use "wait" with a clear message asking for more budget or steering. Do not fail a task merely because it is waiting on external pull request state; preserve PR monitoring and external wait states unless an existing policy says to stop.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.

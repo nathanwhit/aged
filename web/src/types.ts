@@ -68,6 +68,11 @@ export type TaskArtifact = {
   metadata?: Record<string, unknown>;
 };
 
+export type TaskBudget = {
+  maxWorkerTurns?: number;
+  maxReplanTurns?: number;
+};
+
 export type Project = {
   id: string;
   name: string;
