@@ -26,6 +26,10 @@ type PublicationReviewProvider interface {
 	ReviewPublication(ctx context.Context, task core.Task, candidate WorkerTurnResult, action PlanAction) (PublicationReview, error)
 }
 
+type CodeReviewPromptProvider interface {
+	CodeReviewPrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string
+}
+
 type AssistantProvider interface {
 	Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error)
 }

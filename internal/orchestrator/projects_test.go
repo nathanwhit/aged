@@ -65,6 +65,37 @@ func TestNewProjectRegistryNormalizesPullRequestMergeMethod(t *testing.T) {
 	}
 }
 
+func TestNewProjectRegistryNormalizesReviewPolicy(t *testing.T) {
+	dir := t.TempDir()
+	registry, err := NewProjectRegistry([]core.Project{{
+		ID:        "plain",
+		LocalPath: dir,
+		ReviewPolicy: core.ReviewPolicy{
+			Enabled:            true,
+			BlockingSeverities: []string{" p1 ", "P1", "p0"},
+			ReviewerKinds:      []string{" claude ", "codex", "claude"},
+			PromptSetID:        " project-review ",
+			Instructions:       " Check lifecycle edges. ",
+		},
+	}}, "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := registry.Default().ReviewPolicy
+	if !policy.BeforeCompletionPR || !policy.BeforeIntermediatePR {
+		t.Fatalf("review phases = completion %v intermediate %v, want defaults enabled", policy.BeforeCompletionPR, policy.BeforeIntermediatePR)
+	}
+	if strings.Join(policy.BlockingSeverities, ",") != "P1,P0" {
+		t.Fatalf("blocking severities = %+v", policy.BlockingSeverities)
+	}
+	if strings.Join(policy.ReviewerKinds, ",") != "claude,codex" {
+		t.Fatalf("reviewer kinds = %+v", policy.ReviewerKinds)
+	}
+	if policy.PromptSetID != "project-review" || policy.Instructions != "Check lifecycle edges." || policy.MaxAttempts != 2 {
+		t.Fatalf("policy = %+v", policy)
+	}
+}
+
 func TestNewProjectRegistryRejectsInvalidPullRequestMergeMethod(t *testing.T) {
 	_, err := NewProjectRegistry([]core.Project{{
 		ID:        "plain",

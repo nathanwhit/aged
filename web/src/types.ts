@@ -83,6 +83,7 @@ export type Project = {
   remoteCheckouts?: Record<string, string>;
   githubIssues?: GitHubIssuePolicy;
   githubMentions?: GitHubMentionPolicy;
+  reviewPolicy?: ReviewPolicy;
   pullRequestPolicy?: PullRequestPolicy;
 };
 
@@ -101,6 +102,7 @@ export type ProjectInput = {
   remoteCheckouts?: Record<string, string>;
   githubIssues?: GitHubIssuePolicy;
   githubMentions?: GitHubMentionPolicy;
+  reviewPolicy?: ReviewPolicy;
   pullRequestPolicy?: PullRequestPolicy;
 };
 
@@ -115,6 +117,17 @@ export type GitHubMentionPolicy = {
   enabled?: boolean;
   reasons?: string[];
   limit?: number;
+};
+
+export type ReviewPolicy = {
+  enabled?: boolean;
+  beforeCompletionPr?: boolean;
+  beforeIntermediatePr?: boolean;
+  blockingSeverities?: string[];
+  reviewerKinds?: string[];
+  promptSetId?: string;
+  maxAttempts?: number;
+  instructions?: string;
 };
 
 export type PullRequestPolicy = {

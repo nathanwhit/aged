@@ -2529,7 +2529,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 			return
 		}
 	}
-	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
 		}
@@ -2537,6 +2537,8 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		return
 	} else if !ok {
 		return
+	} else {
+		results = nextResults
 	}
 
 	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
@@ -2698,12 +2700,13 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			if !ok {
 				return
 			}
-			if ok, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
+			if ok, updatedResults, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
 				if s.waitForRecoverableError(ctx, task.ID, result.WorkerID, err) {
 					return
 				}
 				_ = s.failTask(ctx, task.ID, err)
 			} else if ok {
+				nextResults = updatedResults
 				replanOK, finalCandidateWorkerID, finalCandidateReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
 				if !replanOK {
 					return
@@ -2803,12 +2806,13 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		if !ok {
 			return
 		}
-		if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
 			if s.waitForRecoverableError(ctx, taskID, result.WorkerID, err) {
 				return
 			}
 			_ = s.failTask(ctx, taskID, err)
 		} else if ok {
+			results = nextResults
 			replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
 			if !replanOK {
 				return
@@ -2901,7 +2905,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	if !ok {
 		return
 	}
-	if ok, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
 		}
@@ -2909,6 +2913,8 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		return
 	} else if !ok {
 		return
+	} else {
+		results = nextResults
 	}
 	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
 	if !replanOK {
@@ -4029,6 +4035,17 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
 			return recoverErr
 		}
+		review, err := s.reviewCandidateBeforePullRequest(ctx, taskID, results, candidateWorkerID, "completion")
+		if err != nil {
+			return err
+		}
+		results = review.Results
+		if !review.Ready {
+			if handled, recoverErr := s.recoverCodeReviewBlockedCandidate(ctx, taskID, results, candidateWorkerID, review.Reason); handled {
+				return recoverErr
+			}
+			return nil
+		}
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
 			WorkerID: candidateWorkerID,
 			Body:     s.latestCompletionPullRequestBody(ctx, taskID),
@@ -4046,6 +4063,321 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+}
+
+type codeReviewGateResult struct {
+	Ready          bool
+	Results        []WorkerTurnResult
+	Reason         string
+	ReviewWorkerID string
+}
+
+func (s *Service) reviewCandidateBeforePullRequest(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, phase string) (codeReviewGateResult, error) {
+	out := codeReviewGateResult{Ready: true, Results: results}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return out, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return out, eventstore.ErrNotFound
+	}
+	project, err := s.projectForTask(task)
+	if err != nil {
+		return out, err
+	}
+	policy := normalizedReviewPolicy(project.ReviewPolicy)
+	if !reviewPolicyEnabledForPhase(policy, phase) {
+		return out, nil
+	}
+	if candidateAlreadyPassedCodeReview(snapshot, taskID, candidateWorkerID, phase) {
+		return out, nil
+	}
+	if attempts := codeReviewAttempts(snapshot, taskID, candidateWorkerID, phase); attempts >= policy.MaxAttempts {
+		reason := fmt.Sprintf("code review gate reached the configured max attempts (%d) for candidate %s", policy.MaxAttempts, candidateWorkerID)
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":              "code_review_gate",
+			"phase":             phase,
+			"status":            "waiting",
+			"candidateWorkerId": candidateWorkerID,
+			"reason":            reason,
+			"attempts":          attempts,
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "code_review_gate", reason, map[string]any{
+			"candidateWorkerId": candidateWorkerID,
+			"phase":             phase,
+			"attempts":          attempts,
+		})
+		out.Ready = false
+		out.Reason = reason
+		return out, nil
+	}
+	candidate, ok := workerResultByID(results, candidateWorkerID)
+	if !ok {
+		return out, nil
+	}
+	plan := Plan{
+		WorkerKind:      s.codeReviewWorkerKind(policy, task, candidate),
+		Prompt:          s.codeReviewGatePrompt(task, candidate, policy, phase),
+		ReasoningEffort: "high",
+		Rationale:       "project review policy requires code review before pull request publication",
+		Metadata: map[string]any{
+			"baseWorkerID":      candidateWorkerID,
+			"codeReviewGate":    true,
+			"reviewPhase":       phase,
+			"spawnID":           "code-review-gate",
+			"spawnRole":         "review",
+			"spawnReason":       "Project review policy requires an independent code review before publishing this candidate.",
+			"candidateWorkerID": candidateWorkerID,
+		},
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		return out, err
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		return out, err
+	}
+	out.Results = append(results, result)
+	out.ReviewWorkerID = result.WorkerID
+	if result.Status != core.WorkerSucceeded {
+		out.Ready = false
+		out.Reason = nonEmpty(result.Error, result.Summary, "code review worker did not complete successfully")
+		_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "failed", out.Reason)
+		return out, nil
+	}
+	if codeReviewBlocksPublication(result, policy) {
+		out.Ready = false
+		out.Reason = nonEmpty(result.Summary, "code review requested changes")
+		_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "blocked", out.Reason)
+		return out, nil
+	}
+	out.Ready = true
+	out.Reason = nonEmpty(result.Summary, "code review approved publication")
+	_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "passed", out.Reason)
+	return out, nil
+}
+
+func normalizedReviewPolicy(policy core.ReviewPolicy) core.ReviewPolicy {
+	policy.BlockingSeverities = normalizeReviewSeverities(policy.BlockingSeverities)
+	policy.ReviewerKinds = uniqueNonEmptyStrings(policy.ReviewerKinds)
+	policy.PromptSetID = strings.TrimSpace(policy.PromptSetID)
+	policy.Instructions = strings.TrimSpace(policy.Instructions)
+	if policy.Enabled {
+		if !policy.BeforeCompletionPR && !policy.BeforeIntermediatePR {
+			policy.BeforeCompletionPR = true
+			policy.BeforeIntermediatePR = true
+		}
+		if len(policy.BlockingSeverities) == 0 {
+			policy.BlockingSeverities = []string{"P0", "P1"}
+		}
+		if policy.MaxAttempts <= 0 {
+			policy.MaxAttempts = 2
+		}
+	}
+	return policy
+}
+
+func reviewPolicyEnabledForPhase(policy core.ReviewPolicy, phase string) bool {
+	if !policy.Enabled {
+		return false
+	}
+	switch phase {
+	case "completion":
+		return policy.BeforeCompletionPR
+	case "intermediate":
+		return policy.BeforeIntermediatePR
+	default:
+		return false
+	}
+}
+
+func (s *Service) codeReviewWorkerKind(policy core.ReviewPolicy, task core.Task, candidate WorkerTurnResult) string {
+	for _, kind := range policy.ReviewerKinds {
+		if _, ok := s.runners[kind]; ok {
+			return kind
+		}
+	}
+	for _, kind := range []string{"claude", "codex", candidate.Kind} {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		if _, ok := s.runners[kind]; ok {
+			return kind
+		}
+	}
+	for kind := range s.runners {
+		return kind
+	}
+	return candidate.Kind
+}
+
+func (s *Service) codeReviewGatePrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string {
+	if provider, ok := s.brain.(CodeReviewPromptProvider); ok {
+		if prompt := strings.TrimSpace(provider.CodeReviewPrompt(task, candidate, policy, phase)); prompt != "" {
+			return prompt
+		}
+	}
+	return buildCodeReviewGatePrompt(task, candidate, policy, phase)
+}
+
+func buildCodeReviewGatePrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string {
+	var builder strings.Builder
+	builder.WriteString("# Pre-publication Code Review\n\n")
+	builder.WriteString("Review the selected candidate before aged publishes it as a pull request. This is a blocking code review, not a task-completion readiness check.\n\n")
+	builder.WriteString("Original user request:\n")
+	builder.WriteString(task.Prompt)
+	builder.WriteString("\n\nCandidate worker:\n")
+	builder.WriteString(candidate.WorkerID)
+	builder.WriteString("\n\nPublication phase:\n")
+	builder.WriteString(phase)
+	builder.WriteString("\n\nBlocking severities:\n")
+	builder.WriteString(strings.Join(policy.BlockingSeverities, ", "))
+	if strings.TrimSpace(policy.Instructions) != "" {
+		builder.WriteString("\n\nProject-specific review instructions:\n")
+		builder.WriteString(policy.Instructions)
+	}
+	builder.WriteString("\n\nReview requirements:\n")
+	builder.WriteString("- Inspect the actual diff and surrounding code in the workspace.\n")
+	builder.WriteString("- Look for correctness bugs, lifecycle/state regressions, missing regression coverage, unsafe assumptions, and mismatches between the PR claim and the implemented/tested behavior.\n")
+	builder.WriteString("- Treat missing tests as blocking when the changed behavior is risky or the PR explicitly claims coverage for a path that is not actually tested.\n")
+	builder.WriteString("- Do not make code changes. Report findings only.\n\n")
+	builder.WriteString("Candidate summary:\n")
+	builder.WriteString(nonEmpty(candidate.Summary, "(none)"))
+	builder.WriteString("\n\nCandidate error:\n")
+	builder.WriteString(nonEmpty(candidate.Error, "(none)"))
+	builder.WriteString("\n\nChanged files:\n")
+	for _, file := range candidate.Changes.ChangedFiles {
+		builder.WriteString("- ")
+		if file.Status != "" {
+			builder.WriteString(file.Status)
+			builder.WriteString(" ")
+		}
+		builder.WriteString(file.Path)
+		builder.WriteString("\n")
+	}
+	if len(candidate.Changes.ChangedFiles) == 0 {
+		builder.WriteString("- (none reported)\n")
+	}
+	builder.WriteString("\nRespond in markdown with exactly these sections:\n")
+	builder.WriteString("Decision: approve OR request_changes\n")
+	builder.WriteString("Findings:\n")
+	builder.WriteString("Commands Run:\n")
+	builder.WriteString("Residual Risk:\n\n")
+	builder.WriteString("Use severity labels like P0, P1, P2, or P3. Any finding at a configured blocking severity should use `Decision: request_changes`.\n")
+	return builder.String()
+}
+
+func codeReviewBlocksPublication(result WorkerTurnResult, policy core.ReviewPolicy) bool {
+	text := strings.ToLower(strings.Join([]string{result.Summary, result.Error}, "\n"))
+	normalized := strings.Join(strings.Fields(text), " ")
+	if normalized == "" {
+		return false
+	}
+	if strings.Contains(normalized, "decision: request_changes") ||
+		strings.Contains(normalized, "decision: request changes") ||
+		strings.Contains(normalized, "changes requested") ||
+		strings.Contains(normalized, "request changes") {
+		return true
+	}
+	if strings.Contains(normalized, "decision: approve") &&
+		!containsBlockingSeverity(normalized, policy.BlockingSeverities) {
+		return false
+	}
+	return containsBlockingSeverity(normalized, policy.BlockingSeverities)
+}
+
+func containsBlockingSeverity(text string, severities []string) bool {
+	for _, severity := range severities {
+		severity = strings.ToLower(strings.TrimSpace(severity))
+		if severity == "" {
+			continue
+		}
+		pattern := regexp.MustCompile(`(^|[^a-z0-9])` + regexp.QuoteMeta(severity) + `([^a-z0-9]|$)`)
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) recordCodeReviewGateResult(ctx context.Context, taskID string, candidateWorkerID string, phase string, result WorkerTurnResult, status string, reason string) error {
+	return s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":              "code_review_gate",
+		"phase":             phase,
+		"status":            status,
+		"candidateWorkerId": candidateWorkerID,
+		"reviewWorkerId":    result.WorkerID,
+		"reason":            truncateStringForPrompt(reason, 2000),
+	})
+}
+
+func candidateAlreadyPassedCodeReview(snapshot core.Snapshot, taskID string, candidateWorkerID string, phase string) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.Type != core.EventTaskAction {
+			continue
+		}
+		var payload struct {
+			Kind              string `json:"kind"`
+			Phase             string `json:"phase"`
+			Status            string `json:"status"`
+			CandidateWorkerID string `json:"candidateWorkerId"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind != "code_review_gate" || payload.Phase != phase || payload.CandidateWorkerID != candidateWorkerID {
+			continue
+		}
+		return payload.Status == "passed"
+	}
+	return false
+}
+
+func codeReviewAttempts(snapshot core.Snapshot, taskID string, candidateWorkerID string, phase string) int {
+	attempts := 0
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventTaskAction {
+			continue
+		}
+		var payload struct {
+			Kind              string `json:"kind"`
+			Phase             string `json:"phase"`
+			Status            string `json:"status"`
+			CandidateWorkerID string `json:"candidateWorkerId"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == "code_review_gate" && payload.Phase == phase && payload.CandidateWorkerID == candidateWorkerID && (payload.Status == "blocked" || payload.Status == "failed") {
+			attempts++
+		}
+	}
+	return attempts
+}
+
+func (s *Service) recoverCodeReviewBlockedCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, reason string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return true, err
+	}
+	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason), "code_review_recovery", "before_completion_pr", "code review blocked publication", map[string]string{candidateWorkerID: reason})
+	if !recovery.Handled {
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "code_review_gate", "Code review blocked publication.\n\n"+reason+"\n\nSteer the task to fix the findings, select a different candidate, or publish manually.", map[string]any{
+			"error": reason,
+		})
+		return true, nil
+	}
+	if recovery.Err != nil || !recovery.Completed {
+		return true, recovery.Err
+	}
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
 }
 
 func (s *Service) retryingCompletionPullRequestPublication(ctx context.Context, taskID string) bool {
@@ -4357,7 +4689,7 @@ func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, p
 		if strings.TrimSpace(action.When) != "immediate" {
 			continue
 		}
-		keepGoing, err := s.executePlanAction(ctx, task, action, nil)
+		keepGoing, _, err := s.executePlanAction(ctx, task, action, nil)
 		if err != nil || !keepGoing {
 			return keepGoing, err
 		}
@@ -4365,7 +4697,7 @@ func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, p
 	return true, nil
 }
 
-func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) (bool, error) {
+func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) (bool, []WorkerTurnResult, error) {
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.When) == "immediate" {
 			continue
@@ -4383,17 +4715,18 @@ func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan,
 					"status":         "rejected",
 					"findingSummary": blocker.Summary,
 				}); err != nil {
-					return false, err
+					return false, results, err
 				}
 				continue
 			}
 		}
-		keepGoing, err := s.executePlanAction(ctx, task, action, results)
+		keepGoing, nextResults, err := s.executePlanAction(ctx, task, action, results)
+		results = nextResults
 		if err != nil || !keepGoing {
-			return keepGoing, err
+			return keepGoing, results, err
 		}
 	}
-	return true, nil
+	return true, results, nil
 }
 
 type followUpPublicationBlocker struct {
@@ -4519,7 +4852,7 @@ func containsRequiredFollowUpPhrase(normalized string) bool {
 	return false
 }
 
-func (s *Service) executePlanAction(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) (bool, error) {
+func (s *Service) executePlanAction(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult) (bool, []WorkerTurnResult, error) {
 	switch strings.TrimSpace(action.Kind) {
 	case "publish_pull_request":
 		workerID := strings.TrimSpace(action.WorkerID)
@@ -4527,14 +4860,35 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			workerID = latestCandidateWorkerID(results)
 		}
 		if workerID == "" {
-			return false, s.waitForMissingPublishCandidate(ctx, task, action, results)
+			return false, results, s.waitForMissingPublishCandidate(ctx, task, action, results)
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
 		if ready, err := s.reviewPlanPublicationReadiness(ctx, task, action, results, workerID); err != nil {
-			return false, err
+			return false, results, err
 		} else if !ready {
-			return true, nil
+			return true, results, nil
+		}
+		review, err := s.reviewCandidateBeforePullRequest(ctx, task.ID, results, workerID, "intermediate")
+		if err != nil {
+			return false, results, err
+		}
+		results = review.Results
+		if !review.Ready {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":              action.Kind,
+				"when":              nonEmpty(action.When, "after_success"),
+				"reason":            "project review policy blocked pull request publication",
+				"inputs":            action.Inputs,
+				"workerId":          workerID,
+				"reviewWorkerId":    review.ReviewWorkerID,
+				"status":            "skipped",
+				"candidateWorkerId": workerID,
+				"error":             review.Reason,
+			}); err != nil {
+				return false, results, err
+			}
+			return true, results, nil
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":     action.Kind,
@@ -4544,7 +4898,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"workerId": workerID,
 			"status":   "started",
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
 		recordCompletedAction := func(published core.PullRequest) error {
 			return s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -4557,7 +4911,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				"url":           published.URL,
 			})
 		}
-		_, err := s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
+		_, err = s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
 		if err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -4569,17 +4923,17 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 					"status":   "waiting",
 					"error":    err.Error(),
 				})
-				return false, nil
+				return false, results, nil
 			}
-			return false, err
+			return false, results, err
 		}
 		if boolMetadata(action.Inputs, "continueAfterPublish") {
 			if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "continuing_after_pr", "Pull request opened; objective continues looking for more results."); err != nil {
-				return false, err
+				return false, results, err
 			}
-			return true, nil
+			return true, results, nil
 		}
-		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		return false, results, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "update_pull_request":
 		workerID := strings.TrimSpace(action.WorkerID)
 		if workerID == "" {
@@ -4594,13 +4948,13 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				"status": "skipped",
 				"error":  "no successful changed candidate worker to update pull request",
 			}); err != nil {
-				return false, err
+				return false, results, err
 			}
-			return true, nil
+			return true, results, nil
 		}
 		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
 		if err != nil {
-			return false, err
+			return false, results, err
 		}
 		req := updatePullRequestRequestFromAction(action)
 		req.WorkerID = workerID
@@ -4613,7 +4967,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"pullRequestId": pr.ID,
 			"status":        "started",
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
 		updated, err := s.UpdateTaskPullRequest(ctx, task.ID, pr, req)
 		if err != nil {
@@ -4628,9 +4982,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 					"status":        "waiting",
 					"error":         err.Error(),
 				})
-				return false, nil
+				return false, results, nil
 			}
-			return false, err
+			return false, results, err
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":          action.Kind,
@@ -4641,9 +4995,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"pullRequestId": updated.ID,
 			"url":           updated.URL,
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
-		return true, nil
+		return true, results, nil
 	case "watch_pull_requests":
 		req := watchPullRequestsRequestFromAction(action)
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -4653,11 +5007,11 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"inputs": action.Inputs,
 			"status": "started",
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
 		prs, err := s.WatchPullRequests(ctx, task.ID, req)
 		if err != nil {
-			return false, err
+			return false, results, err
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":             action.Kind,
@@ -4666,9 +5020,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"inputs":           action.Inputs,
 			"pullRequestCount": len(prs),
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
-		return false, nil
+		return false, results, nil
 	case "wait_external":
 		phase := stringMetadata(action.Inputs, "phase")
 		if phase == "" {
@@ -4679,7 +5033,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			summary = action.Reason
 		}
 		if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, phase, summary); err != nil {
-			return false, err
+			return false, results, err
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":   action.Kind,
@@ -4687,9 +5041,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"reason": action.Reason,
 			"inputs": action.Inputs,
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
-		return false, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
+		return false, results, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "ask_user":
 		question := stringMetadata(action.Inputs, "question")
 		if question == "" {
@@ -4704,9 +5058,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"reason": action.Reason,
 			"inputs": action.Inputs,
 		}); err != nil {
-			return false, err
+			return false, results, err
 		}
-		return false, s.waitForUserAction(ctx, task.ID, strings.TrimSpace(action.WorkerID), "ask_user", question, map[string]any{
+		return false, results, s.waitForUserAction(ctx, task.ID, strings.TrimSpace(action.WorkerID), "ask_user", question, map[string]any{
 			"summary":    stringMetadata(action.Inputs, "summary"),
 			"target":     stringMetadata(action.Inputs, "target"),
 			"project":    stringMetadata(action.Inputs, "project"),
@@ -4714,7 +5068,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"commands":   stringSliceMetadata(action.Inputs, "commands"),
 		})
 	default:
-		return true, nil
+		return true, results, nil
 	}
 }
 
@@ -5336,7 +5690,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if !ok {
 				return false, "", "", results
 			}
-			if ok, err := s.runPlanActions(ctx, task, next, results); err != nil {
+			if ok, nextResults, err := s.runPlanActions(ctx, task, next, results); err != nil {
 				if ctx.Err() != nil {
 					return false, "", "", results
 				}
@@ -5347,6 +5701,8 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				return false, "", "", results
 			} else if !ok {
 				return false, "", "", results
+			} else {
+				results = nextResults
 			}
 			if replanMadeProgress(beforeResults, results) {
 				stalledTurns = 0

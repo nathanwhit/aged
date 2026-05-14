@@ -1691,6 +1691,107 @@ func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T)
 	}
 }
 
+func TestServiceProjectReviewPolicyBlocksIntermediatePublication(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectDir := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:        "reviewed",
+		LocalPath: projectDir,
+		ReviewPolicy: core.ReviewPolicy{
+			Enabled:              true,
+			BeforeIntermediatePR: true,
+			BlockingSeverities:   []string{"P1"},
+			ReviewerKinds:        []string{"reviewer"},
+			MaxAttempts:          1,
+			Instructions:         "Block lifecycle regressions.",
+		},
+	}}, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := &recordingEventRunner{
+		kind: "reviewer",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "Decision: request_changes\nFindings:\n- P1: missing regression coverage for the publication lifecycle.\nCommands Run:\n- Not run\nResidual Risk:\n- Publication should wait.",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"reviewer": reviewer,
+	}, projectDir, fakeWorkspaceManager{
+		cwd:        projectDir,
+		sourceRoot: projectDir,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+	service.SetProjects(projects)
+
+	taskID := "task-review-policy"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":     "Publish candidate",
+			"prompt":    "Implement and publish after review.",
+			"projectId": "reviewed",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: "candidate-1",
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:       projectDir,
+			CWD:        projectDir,
+			SourceRoot: projectDir,
+			Mode:       string(WorkspaceModeShared),
+			VCSType:    "jj",
+			WorkerID:   "candidate-1",
+			TaskID:     taskID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidate := WorkerTurnResult{
+		WorkerID: "candidate-1",
+		NodeID:   "candidate-node",
+		Kind:     "codex",
+		Status:   core.WorkerSucceeded,
+		Summary:  "implemented lifecycle change",
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	}
+	review, err := service.reviewCandidateBeforePullRequest(ctx, taskID, []WorkerTurnResult{candidate}, candidate.WorkerID, "intermediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if review.Ready {
+		t.Fatalf("review ready = true, want blocking review to stop publication")
+	}
+	if len(review.Results) != 2 || review.ReviewWorkerID == "" {
+		t.Fatalf("review result = %+v", review)
+	}
+	if !strings.Contains(reviewer.promptValue(), "Block lifecycle regressions.") {
+		t.Fatalf("review prompt did not include project instructions:\n%s", reviewer.promptValue())
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "code_review_gate", "blocked") {
+		t.Fatalf("missing blocked code_review_gate action")
+	}
+}
+
 func TestServicePlanActionPublishesAfterCleanReviewFinding(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

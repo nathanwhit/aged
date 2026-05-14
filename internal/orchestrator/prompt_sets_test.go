@@ -41,6 +41,7 @@ func TestLoadDefaultPromptSet(t *testing.T) {
 		"system.md":                "SYSTEM",
 		"plan.md":                  "{{system}}\n{{input_json}}",
 		"github_review_request.md": "review {{input_json}}",
+		"code_review.md":           "code review {{input_json}}",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
 			t.Fatal(err)
@@ -54,7 +55,7 @@ func TestLoadDefaultPromptSet(t *testing.T) {
 	if promptSet.ID != defaultPromptSetID || !promptSet.BuiltIn {
 		t.Fatalf("loaded prompt set = %+v", promptSet)
 	}
-	if promptSet.Templates[PromptTemplateSystem] != "SYSTEM" || promptSet.Templates[PromptTemplatePlan] == "" || promptSet.Templates[PromptTemplateGitHubReview] == "" {
+	if promptSet.Templates[PromptTemplateSystem] != "SYSTEM" || promptSet.Templates[PromptTemplatePlan] == "" || promptSet.Templates[PromptTemplateGitHubReview] == "" || promptSet.Templates[PromptTemplateCodeReview] == "" {
 		t.Fatalf("templates = %+v", promptSet.Templates)
 	}
 }
