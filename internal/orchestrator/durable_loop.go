@@ -300,6 +300,13 @@ func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int, 
 	builder.WriteString("Role: ")
 	builder.WriteString(config.Role)
 	builder.WriteString("\n\n")
+	builder.WriteString("# Loop Playbook\n\n")
+	builder.WriteString("- Inspect the current repository and workspace state before choosing the next work item.\n")
+	builder.WriteString("- Check existing task artifacts and any open pull request context when available or obvious from the workspace, prior output, or task instructions.\n")
+	builder.WriteString("- Prefer one bounded, coherent unit of progress for this iteration instead of starting several unrelated threads.\n")
+	builder.WriteString("- Publish an intermediate pull request through the provided `aged-publish-pr` helper only when this iteration produced a real material change worth review; do not publish for analysis-only or no-op turns.\n")
+	builder.WriteString("- After publishing, continue the durable objective in later iterations unless the loop is canceled or you are blocked.\n")
+	builder.WriteString("- Ask for user input only for user-owned blockers such as missing credentials, permissions, ambiguous scope, or risky setup choices.\n\n")
 	if rendered := renderContextLedgerForWorkerPrompt(ledger); rendered != "" {
 		builder.WriteString(rendered)
 	}
