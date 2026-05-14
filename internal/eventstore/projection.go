@@ -73,6 +73,57 @@ func (p *snapshotProjectionState) snapshot(lastEventID int64, events []core.Even
 	}
 }
 
+func (p *snapshotProjectionState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
+	p.ensure()
+	filteredTasks := filterClearedTasks(p.Tasks, p.ClearedTasks)
+	activeTasks := map[string]bool{}
+	taskCards := make(map[string]core.Task, len(filteredTasks))
+	for id, task := range filteredTasks {
+		if isTerminalTaskStatus(task.Status) {
+			task.Prompt = ""
+			task.Milestones = nil
+			task.Artifacts = nil
+		} else {
+			activeTasks[id] = true
+		}
+		taskCards[id] = task
+	}
+	workers := filterTasks(p.Workers, p.ClearedTasks, activeTasks, func(worker core.Worker) string { return worker.TaskID })
+	nodes := filterTasks(p.Nodes, p.ClearedTasks, activeTasks, func(node core.ExecutionNode) string { return node.TaskID })
+	pullRequests := filterTasks(p.PullRequests, p.ClearedTasks, activeTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	return core.Snapshot{
+		Tasks:               orderedTasks(taskCards),
+		Workers:             orderedWorkers(workers),
+		ExecutionNodes:      orderedExecutionNodes(nodes),
+		PullRequests:        orderedPullRequests(pullRequests),
+		OrchestrationGraphs: orchestrationGraphs(taskCards, nodes),
+		LastEventID:         lastEventID,
+	}
+}
+
+func activeProjectionTasks(tasks map[string]core.Task, cleared map[string]bool) map[string]bool {
+	active := map[string]bool{}
+	for id, task := range tasks {
+		if cleared[id] || isTerminalTaskStatus(task.Status) {
+			continue
+		}
+		active[id] = true
+	}
+	return active
+}
+
+func filterTasks[T any](values map[string]T, cleared map[string]bool, keptTasks map[string]bool, taskID func(T) string) map[string]T {
+	out := map[string]T{}
+	for id, value := range values {
+		task := taskID(value)
+		if cleared[task] || !keptTasks[task] {
+			continue
+		}
+		out[id] = value
+	}
+	return out
+}
+
 func (p *snapshotProjectionState) apply(event core.Event) error {
 	p.ensure()
 	switch event.Type {
@@ -513,7 +564,7 @@ func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents 
 			return core.Snapshot{}, err
 		}
 	}
-	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state); err != nil {
+	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state, nil); err != nil {
 		return core.Snapshot{}, err
 	}
 	var events []core.Event
@@ -524,6 +575,27 @@ func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents 
 		}
 	}
 	return state.snapshot(lastEventID, events, includeEvents), nil
+}
+
+func (s *SQLiteStore) snapshotTaskCardsFromProjection(ctx context.Context) (core.Snapshot, error) {
+	state, lastEventID, current, err := s.loadCurrentSnapshotProjection(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	if !current {
+		state, lastEventID, err = s.rebuildSnapshotProjection(ctx)
+		if err != nil {
+			return core.Snapshot{}, err
+		}
+	}
+	activeTasks := activeProjectionTasks(state.Tasks, state.ClearedTasks)
+	state.Workers = filterTasks(state.Workers, state.ClearedTasks, activeTasks, func(worker core.Worker) string { return worker.TaskID })
+	state.Nodes = filterTasks(state.Nodes, state.ClearedTasks, activeTasks, func(node core.ExecutionNode) string { return node.TaskID })
+	state.PullRequests = filterTasks(state.PullRequests, state.ClearedTasks, activeTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state, activeTasks); err != nil {
+		return core.Snapshot{}, err
+	}
+	return state.taskCardsSnapshot(lastEventID), nil
 }
 
 func (s *SQLiteStore) loadCurrentSnapshotProjection(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
@@ -676,9 +748,9 @@ WHERE excluded.event_id > snapshot_worker_outputs.event_id`,
 	return err
 }
 
-func applySnapshotWorkerOutputTimestamps(ctx context.Context, q snapshotProjectionQuerier, state *snapshotProjectionState) error {
+func applySnapshotWorkerOutputTimestamps(ctx context.Context, q snapshotProjectionQuerier, state *snapshotProjectionState, taskIDs map[string]bool) error {
 	rows, err := q.QueryContext(ctx, `
-SELECT worker_id, at
+SELECT worker_id, task_id, at
 FROM snapshot_worker_outputs
 ORDER BY event_id ASC`)
 	if err != nil {
@@ -687,9 +759,13 @@ ORDER BY event_id ASC`)
 	defer rows.Close()
 	for rows.Next() {
 		var workerID string
+		var taskID string
 		var atRaw string
-		if err := rows.Scan(&workerID, &atRaw); err != nil {
+		if err := rows.Scan(&workerID, &taskID, &atRaw); err != nil {
 			return err
+		}
+		if taskIDs != nil && !taskIDs[taskID] {
+			continue
 		}
 		at, err := time.Parse(time.RFC3339Nano, atRaw)
 		if err != nil {

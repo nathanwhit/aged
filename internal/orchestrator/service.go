@@ -885,6 +885,14 @@ func (s *Service) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
 	return s.decorateSnapshot(snapshot), nil
 }
 
+func (s *Service) SnapshotTaskCards(ctx context.Context) (core.Snapshot, error) {
+	snapshot, err := s.store.SnapshotTaskCards(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	return s.decorateSnapshot(snapshot), nil
+}
+
 func (s *Service) decorateSnapshot(snapshot core.Snapshot) core.Snapshot {
 	if s.targets != nil {
 		snapshot.Targets = s.targets.Snapshot()
