@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -963,6 +964,32 @@ func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPrepareCheckoutRejectsDirtyExistingJJCheckout(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:     "https://github.com/nathanwhit/aged.git",
+		WorkDir:     "/srv/aged/repos/aged",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing prepare command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		`[ -d "$work_dir/.jj" ]`,
+		"remote jj checkout is dirty",
+		"exit 20",
+		"jj git fetch",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestNewRemoteRunUsesSpecWorkDirWhenTargetOmitsWorkDir(t *testing.T) {
 	run := NewRemoteRun(TargetConfig{ID: "vm-1", Kind: TargetKindSSH, Host: "vm"}, testSSHSpec())
 	if run.WorkDir != "/repo" {
@@ -1070,6 +1097,54 @@ func TestServiceFallsBackToLocalWhenRemoteCheckoutIsDirty(t *testing.T) {
 	}
 	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "fallbackFromTargetID", "vm-dirty") {
 		t.Fatalf("missing fallback metadata")
+	}
+}
+
+func TestServiceWaitsForUserWhenRequiredRemoteCheckoutIsDirty(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "vm-dirty", Kind: TargetKindSSH, Host: "vm-dirty", WorkDir: "/home/exedev/deno", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+	})
+	executor := &fakeRemoteExecutor{
+		prepareOutput: "remote checkout is dirty: /home/exedev/deno",
+		prepareErr:    errors.New("exit status 20"),
+	}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run work",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Required remote dirty",
+		Prompt:   "Run on the required remote.",
+		Metadata: core.MustJSON(map[string]any{"requiredTargetID": "vm-dirty"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser || snapshot.Tasks[0].ObjectivePhase != "approval_needed" {
+		t.Fatalf("objective = %q/%q, want approval_needed", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
+	}
+	approval := latestEventOfType(snapshot.Events, core.EventApprovalNeeded, task.ID)
+	if approval.ID == 0 {
+		t.Fatalf("missing approval.needed event")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(approval.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["reason"] != "repo_setup_required" {
+		t.Fatalf("approval reason = %v", payload["reason"])
+	}
+	if question, _ := payload["question"].(string); !strings.Contains(question, "remote checkout is dirty") {
+		t.Fatalf("question = %q", question)
 	}
 }
 
