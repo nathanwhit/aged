@@ -203,6 +203,22 @@ func (b *CodexBrain) ReviewPublication(ctx context.Context, task core.Task, cand
 	return review, nil
 }
 
+func (b *CodexBrain) CodeReviewPrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string {
+	payload := codeReviewPromptPayload(task, candidate, policy, phase)
+	if promptSetID := strings.TrimSpace(policy.PromptSetID); promptSetID != "" {
+		metadata := map[string]any{}
+		if len(task.Metadata) > 0 {
+			_ = json.Unmarshal(task.Metadata, &metadata)
+		}
+		metadata["promptSetId"] = promptSetID
+		task.Metadata = core.MustJSON(metadata)
+	}
+	if rendered, custom := b.customPrompt(task, PromptTemplateCodeReview, payload); custom {
+		return rendered.Prompt
+	}
+	return b.codeReviewPrompt(task, candidate, policy, phase)
+}
+
 func (b *CodexBrain) Ask(ctx context.Context, req core.AssistantRequest) (core.AssistantResponse, error) {
 	runCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -875,6 +891,19 @@ func publicationReviewPayload(task core.Task, candidate WorkerTurnResult, action
 	}
 }
 
+func codeReviewPromptPayload(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) map[string]any {
+	return map[string]any{
+		"task": map[string]any{
+			"id":     task.ID,
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		},
+		"candidate":    candidate,
+		"reviewPolicy": policy,
+		"phase":        phase,
+	}
+}
+
 func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
 	payload := replanPromptPayload(task, state)
 	data, err := json.MarshalIndent(payload, "", "  ")
@@ -997,6 +1026,37 @@ Publication readiness rules:
 - Do not perform a general code review. Decide only whether opening a PR now matches the task, candidate, and planned publication action.
 
 Publication review input:
+
+	` + string(data)
+}
+
+func (b *CodexBrain) codeReviewPrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string {
+	payload := codeReviewPromptPayload(task, candidate, policy, phase)
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return buildCodeReviewGatePrompt(task, candidate, policy, phase)
+	}
+	return strings.TrimSpace(b.template) + `
+
+You are performing a blocking pre-publication code review for aged.
+
+Review the selected candidate before aged publishes it as a pull request. This is a code review, not a task-completion readiness check.
+
+Review rules:
+- Inspect the actual diff and surrounding code in the workspace.
+- Look for correctness bugs, lifecycle/state regressions, missing regression coverage, unsafe assumptions, and mismatches between the PR claim and the implemented/tested behavior.
+- Treat missing tests as blocking when the changed behavior is risky or the PR explicitly claims coverage for a path that is not actually tested.
+- Do not make code changes. Report findings only.
+- Use severity labels like P0, P1, P2, or P3. Any finding at a configured blocking severity must use "Decision: request_changes".
+- If the project instructions name additional checks, apply them.
+
+Respond in markdown with exactly these sections:
+Decision: approve OR request_changes
+Findings:
+Commands Run:
+Residual Risk:
+
+Code review input:
 
 ` + string(data)
 }

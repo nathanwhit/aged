@@ -427,6 +427,40 @@ func TestCodexBrainReviewPromptsRejectTestsOnlyFixCandidates(t *testing.T) {
 	}
 }
 
+func TestCodexBrainCodeReviewPromptUsesProjectPromptSet(t *testing.T) {
+	brain := &CodexBrain{
+		template: "schedule the work",
+		promptSets: NewPromptSetRegistry([]core.PromptSet{
+			{
+				ID: "default",
+				Templates: map[string]string{
+					PromptTemplateCodeReview: "default {{task_id}}",
+				},
+				BuiltIn: true,
+			},
+			{
+				ID: "project-review",
+				Templates: map[string]string{
+					PromptTemplateCodeReview: "custom {{input_json}}",
+				},
+			},
+		}, "default"),
+	}
+	prompt := brain.CodeReviewPrompt(
+		core.Task{ID: "task-1", Title: "Task", Prompt: "Ship it"},
+		WorkerTurnResult{WorkerID: "worker-1", Status: core.WorkerSucceeded},
+		core.ReviewPolicy{
+			Enabled:      true,
+			PromptSetID:  "project-review",
+			Instructions: "Check event replay.",
+		},
+		"completion",
+	)
+	if !strings.Contains(prompt, "custom {") || !strings.Contains(prompt, `"phase": "completion"`) || !strings.Contains(prompt, `"instructions": "Check event replay."`) {
+		t.Fatalf("prompt = %q", prompt)
+	}
+}
+
 func TestCodexBrainReplanPromptInstructsHumanStylePRBody(t *testing.T) {
 	brain := &CodexBrain{template: "schedule the work"}
 	prompt := brain.replanPrompt(core.Task{

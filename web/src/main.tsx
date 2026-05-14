@@ -224,6 +224,7 @@ function App() {
     element: (
       <ProjectPanel
         projects={snapshot.projects}
+        promptSets={snapshot.promptSets}
         onCreate={async (input) => {
           setError("");
           await createProject(input);
@@ -1181,6 +1182,7 @@ function requiredTargetIDFromMetadata(metadata: Record<string, unknown> | undefi
 
 function ProjectPanel({
   projects,
+  promptSets,
   onCreate,
   onUpdate,
   onDelete,
@@ -1188,6 +1190,7 @@ function ProjectPanel({
   onError,
 }: {
   projects: Project[];
+  promptSets: PromptSet[];
   onCreate: (input: ProjectInput) => Promise<void>;
   onUpdate: (id: string, input: ProjectInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -1212,6 +1215,14 @@ function ProjectPanel({
   const [pollGitHubMentions, setPollGitHubMentions] = useState(false);
   const [mentionReasons, setMentionReasons] = useState("mention, team_mention, review_requested");
   const [mentionLimit, setMentionLimit] = useState("20");
+  const [reviewGateEnabled, setReviewGateEnabled] = useState(false);
+  const [reviewBeforeCompletionPR, setReviewBeforeCompletionPR] = useState(true);
+  const [reviewBeforeIntermediatePR, setReviewBeforeIntermediatePR] = useState(true);
+  const [reviewBlockingSeverities, setReviewBlockingSeverities] = useState("P0, P1");
+  const [reviewerKinds, setReviewerKinds] = useState("claude, codex");
+  const [reviewPromptSetId, setReviewPromptSetId] = useState("");
+  const [reviewMaxAttempts, setReviewMaxAttempts] = useState("2");
+  const [reviewInstructions, setReviewInstructions] = useState("");
   const [draftPRs, setDraftPRs] = useState(false);
   const [allowMerge, setAllowMerge] = useState(false);
   const [autoMerge, setAutoMerge] = useState(false);
@@ -1241,6 +1252,14 @@ function ProjectPanel({
     setPollGitHubMentions(Boolean(project.githubMentions?.enabled));
     setMentionReasons((project.githubMentions?.reasons ?? ["mention", "team_mention", "review_requested"]).join(", "));
     setMentionLimit(project.githubMentions?.limit ? String(project.githubMentions.limit) : "20");
+    setReviewGateEnabled(Boolean(project.reviewPolicy?.enabled));
+    setReviewBeforeCompletionPR(project.reviewPolicy?.beforeCompletionPr ?? true);
+    setReviewBeforeIntermediatePR(project.reviewPolicy?.beforeIntermediatePr ?? true);
+    setReviewBlockingSeverities((project.reviewPolicy?.blockingSeverities ?? ["P0", "P1"]).join(", "));
+    setReviewerKinds((project.reviewPolicy?.reviewerKinds ?? ["claude", "codex"]).join(", "));
+    setReviewPromptSetId(project.reviewPolicy?.promptSetId ?? "");
+    setReviewMaxAttempts(project.reviewPolicy?.maxAttempts ? String(project.reviewPolicy.maxAttempts) : "2");
+    setReviewInstructions(project.reviewPolicy?.instructions ?? "");
     setDraftPRs(Boolean(project.pullRequestPolicy?.draft));
     setAllowMerge(Boolean(project.pullRequestPolicy?.allowMerge));
     setAutoMerge(Boolean(project.pullRequestPolicy?.autoMerge));
@@ -1268,6 +1287,14 @@ function ProjectPanel({
     setPollGitHubMentions(false);
     setMentionReasons("mention, team_mention, review_requested");
     setMentionLimit("20");
+    setReviewGateEnabled(false);
+    setReviewBeforeCompletionPR(true);
+    setReviewBeforeIntermediatePR(true);
+    setReviewBlockingSeverities("P0, P1");
+    setReviewerKinds("claude, codex");
+    setReviewPromptSetId("");
+    setReviewMaxAttempts("2");
+    setReviewInstructions("");
     setDraftPRs(false);
     setAllowMerge(false);
     setAutoMerge(false);
@@ -1283,6 +1310,7 @@ function ProjectPanel({
       const parsedRemoteCheckouts = remoteCheckoutRecordFromEntries(remoteCheckoutEntries);
       const parsedIssueLimit = Math.max(0, Number.parseInt(issueLimit, 10) || 0);
       const parsedMentionLimit = Math.max(0, Number.parseInt(mentionLimit, 10) || 0);
+      const parsedReviewMaxAttempts = Math.max(0, Number.parseInt(reviewMaxAttempts, 10) || 0);
       const input = {
         id,
         name: name || undefined,
@@ -1304,6 +1332,16 @@ function ProjectPanel({
           enabled: pollGitHubMentions,
           reasons: splitCommaList(mentionReasons),
           limit: parsedMentionLimit || undefined,
+        },
+        reviewPolicy: {
+          enabled: reviewGateEnabled,
+          beforeCompletionPr: reviewBeforeCompletionPR,
+          beforeIntermediatePr: reviewBeforeIntermediatePR,
+          blockingSeverities: splitCommaList(reviewBlockingSeverities),
+          reviewerKinds: splitCommaList(reviewerKinds),
+          promptSetId: reviewPromptSetId || undefined,
+          maxAttempts: parsedReviewMaxAttempts || undefined,
+          instructions: reviewInstructions || undefined,
         },
         pullRequestPolicy: {
           branchPrefix: branchPrefix || undefined,
@@ -1441,6 +1479,49 @@ function ProjectPanel({
               <label>
                 Mention limit
                 <input type="number" min="1" step="1" value={mentionLimit} onChange={(event) => setMentionLimit(event.target.value)} />
+              </label>
+            </div>
+          )}
+          <label className="checkbox-label">
+            <input type="checkbox" checked={reviewGateEnabled} onChange={(event) => setReviewGateEnabled(event.target.checked)} />
+            Require pre-publication code review
+          </label>
+          {reviewGateEnabled && (
+            <div className="loop-config">
+              <label className="checkbox-label">
+                <input type="checkbox" checked={reviewBeforeCompletionPR} onChange={(event) => setReviewBeforeCompletionPR(event.target.checked)} />
+                Review completion PRs
+              </label>
+              <label className="checkbox-label">
+                <input type="checkbox" checked={reviewBeforeIntermediatePR} onChange={(event) => setReviewBeforeIntermediatePR(event.target.checked)} />
+                Review intermediate PRs
+              </label>
+              <label>
+                Blocking severities
+                <input value={reviewBlockingSeverities} onChange={(event) => setReviewBlockingSeverities(event.target.value)} placeholder="P0, P1" />
+              </label>
+              <label>
+                Reviewer workers
+                <input value={reviewerKinds} onChange={(event) => setReviewerKinds(event.target.value)} placeholder="claude, codex" />
+              </label>
+              <label>
+                Review prompt set
+                <select value={reviewPromptSetId} onChange={(event) => setReviewPromptSetId(event.target.value)}>
+                  <option value="">Default</option>
+                  {promptSets.filter((promptSet) => !promptSet.builtIn).map((promptSet) => (
+                    <option key={promptSet.id} value={promptSet.id}>
+                      {promptSet.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Review attempts
+                <input type="number" min="1" step="1" value={reviewMaxAttempts} onChange={(event) => setReviewMaxAttempts(event.target.value)} />
+              </label>
+              <label>
+                Project review instructions
+                <textarea value={reviewInstructions} onChange={(event) => setReviewInstructions(event.target.value)} placeholder="Project-specific checks for the reviewer..." />
               </label>
             </div>
           )}

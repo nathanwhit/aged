@@ -271,6 +271,7 @@ type Project struct {
 	RemoteCheckouts   map[string]string   `json:"remoteCheckouts,omitempty"`
 	GitHubIssues      GitHubIssuePolicy   `json:"githubIssues,omitempty"`
 	GitHubMentions    GitHubMentionPolicy `json:"githubMentions,omitempty"`
+	ReviewPolicy      ReviewPolicy        `json:"reviewPolicy,omitempty"`
 	PullRequestPolicy PullRequestPolicy   `json:"pullRequestPolicy,omitempty"`
 }
 
@@ -285,6 +286,17 @@ type GitHubMentionPolicy struct {
 	Enabled bool     `json:"enabled,omitempty"`
 	Reasons []string `json:"reasons,omitempty"`
 	Limit   int      `json:"limit,omitempty"`
+}
+
+type ReviewPolicy struct {
+	Enabled              bool     `json:"enabled,omitempty"`
+	BeforeCompletionPR   bool     `json:"beforeCompletionPr,omitempty"`
+	BeforeIntermediatePR bool     `json:"beforeIntermediatePr,omitempty"`
+	BlockingSeverities   []string `json:"blockingSeverities,omitempty"`
+	ReviewerKinds        []string `json:"reviewerKinds,omitempty"`
+	PromptSetID          string   `json:"promptSetId,omitempty"`
+	MaxAttempts          int      `json:"maxAttempts,omitempty"`
+	Instructions         string   `json:"instructions,omitempty"`
 }
 
 type PullRequestPolicy struct {

@@ -293,6 +293,24 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	if project.GitHubMentions.Limit < 0 {
 		project.GitHubMentions.Limit = 0
 	}
+	project.ReviewPolicy.BlockingSeverities = normalizeReviewSeverities(project.ReviewPolicy.BlockingSeverities)
+	project.ReviewPolicy.ReviewerKinds = uniqueNonEmptyStrings(project.ReviewPolicy.ReviewerKinds)
+	project.ReviewPolicy.PromptSetID = strings.TrimSpace(project.ReviewPolicy.PromptSetID)
+	project.ReviewPolicy.Instructions = strings.TrimSpace(project.ReviewPolicy.Instructions)
+	if project.ReviewPolicy.Enabled {
+		if !project.ReviewPolicy.BeforeCompletionPR && !project.ReviewPolicy.BeforeIntermediatePR {
+			project.ReviewPolicy.BeforeCompletionPR = true
+			project.ReviewPolicy.BeforeIntermediatePR = true
+		}
+		if len(project.ReviewPolicy.BlockingSeverities) == 0 {
+			project.ReviewPolicy.BlockingSeverities = []string{"P0", "P1"}
+		}
+		if project.ReviewPolicy.MaxAttempts <= 0 {
+			project.ReviewPolicy.MaxAttempts = 2
+		}
+	} else if project.ReviewPolicy.MaxAttempts < 0 {
+		project.ReviewPolicy.MaxAttempts = 0
+	}
 	project.PullRequestPolicy.BranchPrefix = strings.TrimSpace(project.PullRequestPolicy.BranchPrefix)
 	project.PullRequestPolicy.MergeMethod = normalizePullRequestMergeMethod(project.PullRequestPolicy.MergeMethod)
 	if !validPullRequestMergeMethod(project.PullRequestPolicy.MergeMethod) {
@@ -337,6 +355,20 @@ func normalizeProject(project core.Project) (core.Project, error) {
 		project.PullRequestPolicy.BranchPrefix = "codex/aged-"
 	}
 	return project, nil
+}
+
+func normalizeReviewSeverities(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.ToUpper(strings.TrimSpace(value))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 func normalizePullRequestMergeMethod(method string) string {

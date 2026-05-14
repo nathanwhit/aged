@@ -1505,6 +1505,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"defaultBase": "main",
 		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5},
 		"githubMentions": {"enabled": true, "reasons": ["mention", "review_requested"], "limit": 8},
+		"reviewPolicy": {"enabled": true, "beforeCompletionPr": true, "beforeIntermediatePr": false, "blockingSeverities": ["p1"], "reviewerKinds": ["claude"], "promptSetId": "aged-review", "maxAttempts": 3, "instructions": "Check scheduler lifecycle."},
 		"pullRequestPolicy": {"mergeMethod": "merge"}
 	}`, projectDir)
 	res, err := http.Post(server.URL+"/api/projects", "application/json", strings.NewReader(body))
@@ -1520,7 +1521,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 || created.PullRequestPolicy.MergeMethod != "merge" {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 || !created.ReviewPolicy.Enabled || created.ReviewPolicy.BeforeIntermediatePR || created.ReviewPolicy.PromptSetID != "aged-review" || created.ReviewPolicy.MaxAttempts != 3 || created.PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -1528,7 +1529,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 || projects[0].PullRequestPolicy.MergeMethod != "merge" {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 || !projects[0].ReviewPolicy.Enabled || projects[0].ReviewPolicy.BeforeIntermediatePR || projects[0].ReviewPolicy.PromptSetID != "aged-review" || projects[0].ReviewPolicy.Instructions != "Check scheduler lifecycle." || projects[0].PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("projects = %+v", projects)
 	}
 }

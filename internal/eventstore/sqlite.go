@@ -84,12 +84,13 @@ CREATE TABLE IF NOT EXISTS projects (
 	vcs TEXT NOT NULL DEFAULT '',
 	default_base TEXT NOT NULL DEFAULT '',
 	workspace_root TEXT NOT NULL DEFAULT '',
-	target_labels TEXT NOT NULL DEFAULT '{}',
-	github_issues TEXT NOT NULL DEFAULT '{}',
-	github_mentions TEXT NOT NULL DEFAULT '{}',
-	pull_request_policy TEXT NOT NULL DEFAULT '{}',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
+		target_labels TEXT NOT NULL DEFAULT '{}',
+		github_issues TEXT NOT NULL DEFAULT '{}',
+		github_mentions TEXT NOT NULL DEFAULT '{}',
+		review_policy TEXT NOT NULL DEFAULT '{}',
+		pull_request_policy TEXT NOT NULL DEFAULT '{}',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS targets (
 		{"remote_checkouts", "TEXT NOT NULL DEFAULT '{}'"},
 		{"github_issues", "TEXT NOT NULL DEFAULT '{}'"},
 		{"github_mentions", "TEXT NOT NULL DEFAULT '{}'"},
+		{"review_policy", "TEXT NOT NULL DEFAULT '{}'"},
 		{"pull_request_policy", "TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		if err := s.ensureColumn(ctx, "projects", column.name, column.definition); err != nil {
@@ -563,9 +565,9 @@ func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 
 func (s *SQLiteStore) ListProjects(ctx context.Context) ([]core.Project, string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, pull_request_policy
-FROM projects
-ORDER BY id ASC`)
+	SELECT id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, review_policy, pull_request_policy
+	FROM projects
+	ORDER BY id ASC`)
 	if err != nil {
 		return nil, "", err
 	}
@@ -594,8 +596,8 @@ ORDER BY id ASC`)
 }
 
 const projectInsertSQL = `
-INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, pull_request_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	INSERT INTO projects (id, name, local_path, repo, upstream_repo, head_repo_owner, push_remote, vcs, default_base, workspace_root, target_labels, remote_checkouts, github_issues, github_mentions, review_policy, pull_request_policy, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 func projectInsertArgs(project core.Project, now string) ([]any, error) {
 	labels, err := jsonString(project.TargetLabels, "{}")
@@ -611,6 +613,10 @@ func projectInsertArgs(project core.Project, now string) ([]any, error) {
 		return nil, err
 	}
 	githubMentions, err := jsonString(project.GitHubMentions, "{}")
+	if err != nil {
+		return nil, err
+	}
+	reviewPolicy, err := jsonString(project.ReviewPolicy, "{}")
 	if err != nil {
 		return nil, err
 	}
@@ -633,6 +639,7 @@ func projectInsertArgs(project core.Project, now string) ([]any, error) {
 		remoteCheckouts,
 		githubIssues,
 		githubMentions,
+		reviewPolicy,
 		policy,
 		now,
 		now,
@@ -695,11 +702,12 @@ ON CONFLICT(id) DO UPDATE SET
 	default_base = excluded.default_base,
 	workspace_root = excluded.workspace_root,
 	target_labels = excluded.target_labels,
-	remote_checkouts = excluded.remote_checkouts,
-	github_issues = excluded.github_issues,
-	github_mentions = excluded.github_mentions,
-	pull_request_policy = excluded.pull_request_policy,
-	updated_at = excluded.updated_at`,
+		remote_checkouts = excluded.remote_checkouts,
+		github_issues = excluded.github_issues,
+		github_mentions = excluded.github_mentions,
+		review_policy = excluded.review_policy,
+		pull_request_policy = excluded.pull_request_policy,
+		updated_at = excluded.updated_at`,
 		args...,
 	); err != nil {
 		return core.Project{}, err
@@ -1714,6 +1722,7 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 	var remoteCheckouts string
 	var githubIssues string
 	var githubMentions string
+	var reviewPolicy string
 	var policy string
 	if err := scanner.Scan(
 		&project.ID,
@@ -1730,6 +1739,7 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 		&remoteCheckouts,
 		&githubIssues,
 		&githubMentions,
+		&reviewPolicy,
 		&policy,
 	); err != nil {
 		return core.Project{}, err
@@ -1751,6 +1761,11 @@ func scanProject(scanner eventScanner) (core.Project, error) {
 	}
 	if githubMentions != "" {
 		if err := json.Unmarshal([]byte(githubMentions), &project.GitHubMentions); err != nil {
+			return core.Project{}, err
+		}
+	}
+	if reviewPolicy != "" {
+		if err := json.Unmarshal([]byte(reviewPolicy), &project.ReviewPolicy); err != nil {
 			return core.Project{}, err
 		}
 	}

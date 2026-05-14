@@ -23,6 +23,7 @@ const (
 	PromptTemplatePlan              = "plan"
 	PromptTemplateGitHubReview      = "github_review_request"
 	PromptTemplateReplan            = "replan"
+	PromptTemplateCodeReview        = "code_review"
 	PromptTemplateCompletionReview  = "completion_review"
 	PromptTemplatePublicationReview = "publication_review"
 )
@@ -32,6 +33,7 @@ var promptTemplateFiles = map[string]string{
 	PromptTemplatePlan:              "plan.md",
 	PromptTemplateGitHubReview:      "github_review_request.md",
 	PromptTemplateReplan:            "replan.md",
+	PromptTemplateCodeReview:        "code_review.md",
 	PromptTemplateCompletionReview:  "completion_review.md",
 	PromptTemplatePublicationReview: "publication_review.md",
 }
