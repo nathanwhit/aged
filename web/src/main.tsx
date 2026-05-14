@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -125,12 +125,14 @@ function App() {
   const [error, setError] = useState<string>("");
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
+  const [hydratedTaskIds, setHydratedTaskIds] = useState<Set<string>>(() => new Set());
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
 
   async function refresh() {
-    const next = normalizeSnapshot(await getSnapshot({ events: "none" }));
+    const next = normalizeSnapshot(await getSnapshot({ events: "none", tasks: "cards" }));
     setSnapshot(next);
+    setHydratedTaskIds(new Set(next.tasks.filter((task) => !isTerminalTask(task)).map((task) => task.id)));
     setInitialSnapshotStatus("ready");
     setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : preferredTask(next.tasks)?.id || ""));
   }
@@ -166,6 +168,21 @@ function App() {
     if (!selectedTask?.id || initialSnapshotStatus !== "ready") {
       return;
     }
+    if (isTerminalTask(selectedTask) && !hydratedTaskIds.has(selectedTask.id)) {
+      let active = true;
+      getTaskSnapshot(selectedTask.id)
+        .then((taskSnapshot) => {
+          if (!active) return;
+          setSnapshot((current) => mergeTaskSnapshot(current, normalizeSnapshot(taskSnapshot)));
+          setHydratedTaskIds((current) => new Set(current).add(selectedTask.id));
+        })
+        .catch((err) => {
+          if (active) setError(errorMessage(err));
+        });
+      return () => {
+        active = false;
+      };
+    }
     let active = true;
     getTaskEvents(selectedTask.id, { limit: SELECTED_TASK_OUTPUT_EVENT_LIMIT })
       .then((events) => {
@@ -177,7 +194,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, [initialSnapshotStatus, selectedTask?.id, snapshot.snapshotEventId]);
+  }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
   const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
   const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
   const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
@@ -227,18 +244,20 @@ function App() {
         promptSets={snapshot.promptSets}
         onCreate={async (input) => {
           setError("");
-          await createProject(input);
-          await refresh();
+          const project = await createProject(input);
+          setSnapshot((current) => upsertProject(current, project));
+          return project;
         }}
         onUpdate={async (id, input) => {
           setError("");
-          await updateProject(id, input);
-          await refresh();
+          const project = await updateProject(id, input);
+          setSnapshot((current) => upsertProject(current, project));
+          return project;
         }}
         onDelete={async (id) => {
           setError("");
           await deleteProject(id);
-          await refresh();
+          setSnapshot((current) => removeProjectFromSnapshot(current, id));
         }}
         onHealth={getProjectHealth}
         onError={setError}
@@ -1191,8 +1210,8 @@ function ProjectPanel({
 }: {
   projects: Project[];
   promptSets: PromptSet[];
-  onCreate: (input: ProjectInput) => Promise<void>;
-  onUpdate: (id: string, input: ProjectInput) => Promise<void>;
+  onCreate: (input: ProjectInput) => Promise<Project>;
+  onUpdate: (id: string, input: ProjectInput) => Promise<Project>;
   onDelete: (id: string) => Promise<void>;
   onHealth: (id: string) => Promise<ProjectHealth>;
   onError: (message: string) => void;
@@ -4649,6 +4668,50 @@ function upsertTask(snapshot: AppSnapshot, task: Task): AppSnapshot {
     ? snapshot.tasks.map((candidate) => (candidate.id === task.id ? task : candidate))
     : [...snapshot.tasks, task];
   return { ...snapshot, tasks };
+}
+
+function upsertProject(snapshot: AppSnapshot, project: Project): AppSnapshot {
+  const projects = snapshot.projects.some((candidate) => candidate.id === project.id)
+    ? snapshot.projects.map((candidate) => (candidate.id === project.id ? project : candidate))
+    : [...snapshot.projects, project];
+  return { ...snapshot, projects };
+}
+
+function removeProjectFromSnapshot(snapshot: AppSnapshot, projectId: string): AppSnapshot {
+  return {
+    ...snapshot,
+    projects: snapshot.projects.filter((project) => project.id !== projectId),
+  };
+}
+
+function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): AppSnapshot {
+  const taskIds = new Set(taskSnapshot.tasks.map((task) => task.id));
+  if (taskIds.size === 0) return snapshot;
+  const tasks = [
+    ...snapshot.tasks.filter((task) => !taskIds.has(task.id)),
+    ...taskSnapshot.tasks,
+  ].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  return {
+    ...snapshot,
+    tasks,
+    workers: [
+      ...snapshot.workers.filter((worker) => !taskIds.has(worker.taskId)),
+      ...taskSnapshot.workers,
+    ],
+    executionNodes: [
+      ...snapshot.executionNodes.filter((node) => !taskIds.has(node.taskId)),
+      ...taskSnapshot.executionNodes,
+    ],
+    pullRequests: [
+      ...snapshot.pullRequests.filter((pr) => !taskIds.has(pr.taskId)),
+      ...taskSnapshot.pullRequests,
+    ],
+    orchestrationGraphs: [
+      ...snapshot.orchestrationGraphs.filter((graph) => !taskIds.has(graph.taskId)),
+      ...taskSnapshot.orchestrationGraphs,
+    ],
+    lastEventId: Math.max(snapshot.lastEventId, taskSnapshot.lastEventId),
+  };
 }
 
 function reduceEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {

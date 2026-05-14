@@ -22,9 +22,16 @@ function jsonInit(method: "POST" | "PUT", body: unknown): RequestInit {
   };
 }
 
-export async function getSnapshot(options: { events?: "all" | "none" } = {}): Promise<Snapshot> {
-  const query = options.events === "none" ? "?events=none" : "";
+export async function getSnapshot(options: { events?: "all" | "none"; tasks?: "all" | "cards" } = {}): Promise<Snapshot> {
+  const params = new URLSearchParams();
+  if (options.events === "none") params.set("events", "none");
+  if (options.tasks === "cards") params.set("tasks", "cards");
+  const query = params.size ? `?${params}` : "";
   return requestJSON(`/api/snapshot${query}`);
+}
+
+export async function getTaskSnapshot(taskId: string): Promise<Snapshot> {
+  return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}`);
 }
 
 export async function getTaskEvents(taskId: string, options: { limit?: number } = {}): Promise<EventRecord[]> {

@@ -282,6 +282,65 @@ func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) 
 	}
 }
 
+func TestSnapshotProjectionRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	startedAt := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			At:     startedAt,
+			Type:   core.EventTaskCreated,
+			TaskID: "task-output-rebuild",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Output rebuild",
+				"prompt": "Keep summary rebuilds bounded by worker count.",
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(time.Second),
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-output-rebuild",
+			WorkerID: "worker-output-rebuild",
+			Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+		},
+	)
+	for i := 0; i < 50; i++ {
+		appendSQLiteEvents(t, ctx, store, core.Event{
+			At:       startedAt.Add(time.Duration(i+2) * time.Second),
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-output-rebuild",
+			WorkerID: "worker-output-rebuild",
+			Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 512)}),
+		})
+	}
+
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_projection`); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Workers) != 1 || !summary.Workers[0].UpdatedAt.Equal(startedAt.Add(51*time.Second)) {
+		t.Fatalf("worker updatedAt = %+v, want latest output timestamp", summary.Workers)
+	}
+
+	events, err := projectionInputEvents(ctx, store.db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outputCount int
+	for _, event := range events {
+		if event.Type == core.EventWorkerOutput {
+			outputCount++
+		}
+	}
+	if outputCount != 1 {
+		t.Fatalf("worker.output projection inputs = %d, want 1", outputCount)
+	}
+}
+
 func TestSnapshotProjectionMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
