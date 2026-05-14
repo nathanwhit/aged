@@ -17,6 +17,42 @@ The JSON object must have exactly these top-level fields:
   "plan": null
 }
 
+When continuing, the nested "plan" object must use this worker graph shape:
+
+{
+  "reasoningEffort": "medium",
+  "rationale": "string",
+  "steps": [
+    {
+      "title": "string",
+      "description": "string"
+    }
+  ],
+  "requiredApprovals": [],
+  "actions": [],
+  "workers": [
+    {
+      "id": "inspect",
+      "role": "investigator",
+      "reason": "Inspect the relevant code paths first.",
+      "workerKind": "claude",
+      "workerPrompt": "Inspect the relevant code paths and report findings.",
+      "reasoningEffort": "medium",
+      "dependsOn": []
+    },
+    {
+      "id": "implement",
+      "role": "implementer",
+      "reason": "Make the code change after the investigation worker finishes.",
+      "workerKind": "codex",
+      "workerPrompt": "Use the investigation findings to implement the requested change and run focused tests.",
+      "reasoningEffort": "medium",
+      "dependsOn": ["inspect"]
+    }
+  ],
+  "spawns": []
+}
+
 Field rules:
 - "action" must be exactly one of "continue", "complete", "wait", or "fail".
 - Use "complete" when the task appears done.
@@ -29,14 +65,16 @@ Field rules:
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
-- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: workerKind, workerPrompt, reasoningEffort, rationale, steps, requiredApprovals, spawns.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns.
+- The continue plan must use top-level "workers" for initial execution. "workers" must contain at least one worker object. Each workers[] object must include id, role, reason, workerKind, workerPrompt, reasoningEffort, and dependsOn. Root workers with empty dependsOn can run in parallel immediately. Workers with dependencies wait until all dependency worker ids finish.
+- Top-level workerKind and workerPrompt are legacy compatibility fallback fields only when workers is absent. Do not use them for new continue plans.
 - The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. A publish_pull_request action must include inputs.body with the PR description to publish; do not rely on aged to generate one. Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use action kind "update_pull_request" when the latest candidate worker should update an existing PR branch or PR metadata before returning to monitoring. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
-- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed for non-publish actions.
+- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the final successful candidate worker when unambiguous; when multiple workers can produce competing candidates, schedule consolidation or validation before publishing. Use inputs {} when no extra inputs are needed for non-publish actions.
 - Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
 - When action is not "continue", "plan" must be null or omitted.
 - "reasoningEffort" inside plan must be one of "default", "low", "medium", "high", "xhigh", or "max".
-- "steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects, never arrays of strings.
+- "steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects, never arrays of strings.
 
 Dynamic replanning input:
 
