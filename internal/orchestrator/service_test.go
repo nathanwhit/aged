@@ -1350,6 +1350,60 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 }
 
+func TestServicePlanActionPublishesLogicalWorkerID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{
+			Actions: []PlanAction{{
+				Kind:     "publish_pull_request",
+				When:     "after_success",
+				Reason:   "publish the implementation worker after it succeeds",
+				WorkerID: "implement_adaptive_decomposition",
+				Inputs: map[string]any{
+					"repo": "owner/repo",
+					"base": "main",
+					"body": "## Summary\n- Implement adaptive decomposition.\n\n## Validation\n- Focused tests passed.",
+				},
+			}},
+			Workers: []WorkerRequest{{
+				ID:         "implement_adaptive_decomposition",
+				Role:       "implementer",
+				Reason:     "make the change",
+				WorkerKind: "change",
+				Prompt:     "make change",
+			}},
+		}},
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Adaptive decomposition", Prompt: "Do it and open a PR."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	if publisher.published.WorkerID == "" || publisher.published.WorkerID == "implement_adaptive_decomposition" {
+		t.Fatalf("published worker id = %q, want resolved runtime worker id", publisher.published.WorkerID)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "started") {
+		t.Fatalf("missing started publish action")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskAction, task.ID, `"workerId":"`+publisher.published.WorkerID+`"`) {
+		t.Fatalf("publish action did not record resolved runtime worker id")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskStatus, task.ID, "selected unknown worker") {
+		t.Fatalf("task failed with unknown worker: %+v", snapshot.Events)
+	}
+}
+
 func TestServicePlanActionPublishWithoutCandidateWaitsForUser(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
