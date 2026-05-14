@@ -3745,6 +3745,80 @@ func TestServiceUpdatesDurableLoopRequiredTargetID(t *testing.T) {
 	}
 }
 
+func TestDurableLoopUsesUpdatedConfigForNextIteration(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventResult, Text: "iteration 1 done"}},
+			{{Kind: worker.EventNeedsInput, Text: "pause after iteration 2"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Original loop objective.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 10,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasIterationCompletedAction(snapshot.Events, task.ID, 1)
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("iteration 1 did not complete; events = %+v", snapshot.Events)
+	})
+
+	if _, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{
+		LoopPrompt: ptrString("Updated loop objective for next iteration."),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{
+		LoopIntervalSeconds: ptrInt(0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if runner.callsValue() != 2 {
+		t.Fatalf("runner calls = %d, want 2", runner.callsValue())
+	}
+	if !strings.Contains(runner.promptValue(), "Updated loop objective for next iteration.") {
+		t.Fatalf("iteration 2 prompt did not use updated loopPrompt:\n%s", runner.promptValue())
+	}
+}
+
+func hasIterationCompletedAction(events []core.Event, taskID string, iteration int) bool {
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind      string `json:"kind"`
+			Status    string `json:"status"`
+			Iteration int    `json:"iteration"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == "durable_loop" && payload.Status == "iteration_completed" && payload.Iteration == iteration {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
