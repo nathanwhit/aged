@@ -2900,12 +2900,21 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["targetSelectionPolicy"] = "scheduler target labels are ignored; placement is selected by task or project policy"
 		delete(plan.Metadata, "targetLabels")
 	}
+	if requestedID := requiredTargetID(plan.Metadata); requestedID != "" {
+		plan.Metadata["ignoredRequiredTargetID"] = requestedID
+		plan.Metadata["targetSelectionPolicy"] = "scheduler required target id is ignored; placement is selected by task or project policy"
+		delete(plan.Metadata, "requiredTargetID")
+	}
 	if labels := taskTargetLabels(task); len(labels) > 0 {
 		plan.Metadata["targetLabels"] = labels
 		plan.Metadata["targetSelectionSource"] = "task"
 	} else if len(project.TargetLabels) > 0 {
 		plan.Metadata["targetLabels"] = project.TargetLabels
 		plan.Metadata["targetSelectionSource"] = "project"
+	}
+	if requiredID := taskRequiredTargetID(task); requiredID != "" {
+		plan.Metadata["requiredTargetID"] = requiredID
+		plan.Metadata["targetSelectionSource"] = "task_required"
 	}
 	target, err := s.selectExecutionTarget(ctx, plan)
 	if err != nil {
@@ -2918,6 +2927,9 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		result, err := s.runSSHPlannedWorker(ctx, task, plan, runner, target)
 		s.targets.Finish(target.ID)
 		if err == nil || !isRemotePreStartFallbackError(err) {
+			return result, err
+		}
+		if requiredTargetID(plan.Metadata) != "" {
 			return result, err
 		}
 		fallback, fallbackErr := s.targets.SelectLocalFallback()
@@ -3212,6 +3224,14 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 }
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
+	requiredID := requiredTargetID(plan.Metadata)
+	if requiredID != "" {
+		target, err := s.targets.SelectID(requiredID, plan.WorkerKind)
+		if err != nil {
+			return TargetConfig{}, fmt.Errorf("required execution target %q is unavailable: %w", requiredID, err)
+		}
+		return target, nil
+	}
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
 		target, err := s.targets.SelectID(retryTargetID, plan.WorkerKind)
 		if err == nil {
@@ -6076,6 +6096,17 @@ func taskTargetLabels(task core.Task) map[string]string {
 	return targetLabels(metadata)
 }
 
+func taskRequiredTargetID(task core.Task) string {
+	if len(task.Metadata) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return ""
+	}
+	return requiredTargetID(metadata)
+}
+
 func taskExternalRef(task core.Task) (string, string) {
 	if len(task.Metadata) == 0 {
 		return "", ""
@@ -6983,6 +7014,8 @@ func planMetadata(plan Plan) map[string]any {
 		"targetKind",
 		"targetLabels",
 		"ignoredTargetLabels",
+		"requiredTargetID",
+		"ignoredRequiredTargetID",
 		"targetSelectionPolicy",
 		"targetSelectionSource",
 		"fallbackFromTargetID",
