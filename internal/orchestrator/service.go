@@ -1427,8 +1427,8 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 }
 
 func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req core.UpdateLoopConfigRequest) (core.Task, error) {
-	if req.LoopIntervalSeconds == nil && req.LoopPrompt == nil {
-		return core.Task{}, errors.New("loop config update requires loopIntervalSeconds or loopPrompt")
+	if req.LoopIntervalSeconds == nil && req.LoopPrompt == nil && req.RequiredTargetID == nil {
+		return core.Task{}, errors.New("loop config update requires loopIntervalSeconds, loopPrompt, or requiredTargetID")
 	}
 	if req.LoopIntervalSeconds != nil && *req.LoopIntervalSeconds < 0 {
 		return core.Task{}, errors.New("loopIntervalSeconds must be >= 0")
@@ -1467,6 +1467,15 @@ func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req c
 		metadataPatch["loopPrompt"] = loopPrompt
 		action["loopPromptChanged"] = true
 		action["loopPromptPreview"] = truncateText(loopPrompt, 200)
+	}
+	if req.RequiredTargetID != nil {
+		requiredTargetID := strings.TrimSpace(*req.RequiredTargetID)
+		metadataPatch["requiredTargetID"] = requiredTargetID
+		if requiredTargetID == "" {
+			action["requiredTargetIDCleared"] = true
+		} else {
+			action["requiredTargetID"] = requiredTargetID
+		}
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskUpdated,

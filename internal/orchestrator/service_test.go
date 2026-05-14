@@ -3692,6 +3692,59 @@ func TestServiceUpdatesDurableLoopPrompt(t *testing.T) {
 	}
 }
 
+func TestServiceUpdatesDurableLoopRequiredTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &sequenceEventRunner{
+		kind: "loop",
+		events: [][]worker.Event{
+			{{Kind: worker.EventNeedsInput, Text: "pause after first iteration"}},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{err: errors.New("brain should not plan loop tasks")}, map[string]worker.Runner{
+		"loop": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Loop",
+		Prompt: "Keep making bounded progress.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "loop",
+			"loopIntervalSeconds": 300,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+
+	updated, err := service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{RequiredTargetID: ptrString("  vm-fast  ")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(updated.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringMetadataValue(metadata["requiredTargetID"]); got != "vm-fast" {
+		t.Fatalf("requiredTargetID = %q, want vm-fast", got)
+	}
+
+	updated, err = service.UpdateTaskLoopConfig(ctx, task.ID, core.UpdateLoopConfigRequest{RequiredTargetID: ptrString("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(updated.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringMetadataValue(metadata["requiredTargetID"]); got != "" {
+		t.Fatalf("requiredTargetID after clear = %q, want empty", got)
+	}
+}
+
 func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
