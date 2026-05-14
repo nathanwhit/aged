@@ -807,7 +807,11 @@ func mcpTools() []mcpTool {
 				"prompt":     stringSchema("Concrete work request for the orchestrator."),
 				"source":     stringSchema("Optional external source name for idempotency."),
 				"externalId": stringSchema("Optional external id paired with source."),
-				"metadata":   objectUntypedSchema("Optional structured metadata."),
+				"budget": objectSchema(map[string]any{
+					"maxWorkerTurns": map[string]any{"type": "integer", "description": "Optional cap on active worker turns for this task."},
+					"maxReplanTurns": map[string]any{"type": "integer", "description": "Optional cap on dynamic replanning turns for this task."},
+				}, nil),
+				"metadata": objectUntypedSchema("Optional structured metadata."),
 			}, []string{"prompt"}),
 		},
 		{

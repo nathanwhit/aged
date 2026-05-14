@@ -445,6 +445,44 @@ func TestNormalizeCreateTaskRequestDefaultsCompletionModeToGitHubAndPreservesExp
 	}
 }
 
+func TestNormalizeCreateTaskRequestNormalizesBudgetMetadata(t *testing.T) {
+	req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
+		Title:  "Budgeted",
+		Prompt: "Do bounded work.",
+		Budget: &core.TaskBudget{MaxWorkerTurns: 3},
+		Metadata: core.MustJSON(map[string]any{
+			"budget": map[string]any{"maxReplanTurns": 2},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Budget == nil || req.Budget.MaxWorkerTurns != 3 || req.Budget.MaxReplanTurns != 2 {
+		t.Fatalf("request budget = %+v", req.Budget)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(req.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	budget, ok := metadata["budget"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata budget = %+v", metadata["budget"])
+	}
+	if budget["maxWorkerTurns"] != float64(3) || budget["maxReplanTurns"] != float64(2) {
+		t.Fatalf("budget metadata = %+v", budget)
+	}
+
+	if _, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
+		Title:  "Invalid budget",
+		Prompt: "Do bounded work.",
+		Metadata: core.MustJSON(map[string]any{
+			"budget": map[string]any{"maxWorkerTurns": -1},
+		}),
+	}); err == nil {
+		t.Fatal("expected invalid negative budget to fail")
+	}
+}
+
 func TestServiceFallsBackWhenTitleGeneratorFails(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8278,6 +8316,60 @@ func TestServiceDoesNotExhaustTurnLimitWhileReplannerMakesProgress(t *testing.T)
 	}
 }
 
+func TestServiceStopsDynamicReplanWhenWorkerBudgetExhausted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement initial candidate",
+		},
+		decisions: []ReplanDecision{{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "follow",
+				Prompt:     "should not run after budget is exhausted",
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial implementation"}}},
+		"follow": eventRunner{kind: "follow", events: []worker.Event{{Kind: worker.EventResult, Text: "follow-up patch"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Budgeted replan",
+		Prompt: "Implement the first useful slice.",
+		Metadata: core.MustJSON(map[string]any{
+			"budget": map[string]any{"maxWorkerTurns": 1},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(brain.states) != 0 {
+		t.Fatalf("replan states = %d, want budget guard to stop before replanning", len(brain.states))
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "budget_exhausted", "stopped") {
+		t.Fatalf("missing budget exhausted task action")
+	}
+	if countWorkersByKind(snapshot.Workers, "follow") != 0 {
+		t.Fatalf("follow worker ran despite exhausted budget: %+v", snapshot.Workers)
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate after budget stop: %+v", snapshot.Tasks[0])
+	}
+}
+
 func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -11359,6 +11451,16 @@ func countTaskActions(events []core.Event, taskID string, kind string, status st
 			continue
 		}
 		if payload.Kind == kind && payload.Status == status {
+			count++
+		}
+	}
+	return count
+}
+
+func countWorkersByKind(workers []core.Worker, kind string) int {
+	count := 0
+	for _, worker := range workers {
+		if worker.Kind == kind {
 			count++
 		}
 	}

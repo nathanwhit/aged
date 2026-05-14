@@ -122,6 +122,11 @@ type TaskArtifact struct {
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
+type TaskBudget struct {
+	MaxWorkerTurns int `json:"maxWorkerTurns,omitempty"`
+	MaxReplanTurns int `json:"maxReplanTurns,omitempty"`
+}
+
 type WorkPlan struct {
 	Summary     string         `json:"summary,omitempty"`
 	Workstreams []WorkPlanItem `json:"workstreams,omitempty"`
@@ -387,6 +392,7 @@ type CreateTaskRequest struct {
 	Prompt     string          `json:"prompt"`
 	Source     string          `json:"source,omitempty"`
 	ExternalID string          `json:"externalId,omitempty"`
+	Budget     *TaskBudget     `json:"budget,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
 }
 

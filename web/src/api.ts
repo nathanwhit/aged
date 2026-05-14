@@ -1,4 +1,4 @@
-import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, TaskBudget, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
@@ -38,6 +38,7 @@ export async function createTask(input: {
   prompt: string;
   source?: string;
   externalId?: string;
+  budget?: TaskBudget;
   metadata?: Record<string, unknown>;
 }): Promise<Task> {
   return requestJSON("/api/tasks", jsonInit("POST", input));
