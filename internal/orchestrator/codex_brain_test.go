@@ -510,6 +510,26 @@ func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 	}
 }
 
+func TestDefaultPromptsRestrictMultiplePRsToCampaignTasks(t *testing.T) {
+	for _, path := range []string{"../../prompts/scheduler.md", "../../prompts/default/system.md", "../../prompts/default/replan.md"} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		if !strings.Contains(body, "Normal `completionMode=github` tasks should produce exactly one completion pull request") &&
+			!strings.Contains(body, "Normal GitHub-completion tasks should converge on one final candidate and one completion pull request") {
+			t.Fatalf("%s does not constrain normal GitHub-mode tasks to one completion PR:\n%s", path, body)
+		}
+		if !strings.Contains(body, "continueAfterPublish") || !strings.Contains(body, "campaign-style") {
+			t.Fatalf("%s does not reserve continueAfterPublish for campaign-style tasks:\n%s", path, body)
+		}
+		if !strings.Contains(body, "follow-up tasks") {
+			t.Fatalf("%s does not direct independent later slices to follow-up tasks:\n%s", path, body)
+		}
+	}
+}
+
 func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 	tests := []struct {
 		path      string
