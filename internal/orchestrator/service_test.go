@@ -2247,6 +2247,153 @@ func TestServicePullRequestFollowUpSuppressesPlanSpawnsWhenReturningToWatch(t *t
 	}
 }
 
+func TestServiceRetryPullRequestFollowUpRunsPersistedRepairPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-pr-followup"
+	initialWorkerID := "worker-initial"
+	followUpPlan := Plan{
+		Workers: []WorkerRequest{{
+			ID:         "repair_pr_followup",
+			Role:       "repair PR",
+			Reason:     "CI failed on the open pull request.",
+			WorkerKind: "codex",
+			Prompt:     "Fix the failing CI and keep watching the PR.",
+		}},
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return repaired PR to monitor",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+		Metadata: map[string]any{
+			"pullRequestID":        "pr-1",
+			"workspaceBaseRef":     "codex/aged-test",
+			"workspaceBaseRefKind": "pull_request_head",
+		},
+	}
+	events := []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Repair PR",
+				"prompt": "Fix the pull request and keep watching it.",
+				"metadata": map[string]any{
+					"completionMode": "github",
+				},
+			}),
+		},
+		{
+			Type:   core.EventTaskPlanned,
+			TaskID: taskID,
+			Payload: core.MustJSON(Plan{
+				WorkerKind: "codex",
+				Prompt:     "Implement the original change.",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: initialWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: initialWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "implemented original change",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "mod.ts", Status: "modified"}},
+				},
+			}),
+		},
+		{
+			Type:   core.EventTaskCandidate,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId": initialWorkerID,
+				"reason":   "original implementation was published",
+			}),
+		},
+		{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/aged-test",
+				"base":   "main",
+				"state":  "OPEN",
+			}),
+		},
+		{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":      "pr-1",
+				"attempt": 1,
+				"reason":  "pull_request_needs_work",
+			}),
+		},
+		{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(followUpPlan),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskFailed,
+				"error":  `unknown worker kind ""`,
+			}),
+		},
+	}
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingEventRunner{
+		kind:   "codex",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "repaired"}},
+	}
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if runner.callsValue() != 1 {
+		t.Fatalf("follow-up runner calls = %d, want 1", runner.callsValue())
+	}
+	if publisher.publishCalls != 0 || publisher.updateCalls != 0 {
+		t.Fatalf("publish calls = %d update calls = %d, want retry to run follow-up worker only", publisher.publishCalls, publisher.updateCalls)
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
+		t.Fatalf("list spec = %+v", publisher.listSpec)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"repair_pr_followup"`) {
+		t.Fatalf("missing retried pull request follow-up plan")
+	}
+}
+
 func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

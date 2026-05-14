@@ -1944,6 +1944,23 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		})
 		return task, nil
 	}
+	if task.Status == core.TaskFailed && taskFailureShouldRetryPullRequestFollowUp(snapshot, taskID) {
+		plan, err := retryPlanForTask(snapshot, taskID)
+		if err != nil {
+			return core.Task{}, err
+		}
+		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+			return core.Task{}, err
+		}
+		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
+		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			s.retryTask(taskCtx, task, plan)
+		})
+		return task, nil
+	}
 	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
 		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
 			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
@@ -7385,6 +7402,22 @@ func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
 	return latestTaskFailureMatches(snapshot, taskID, func(errorText string) bool {
 		return strings.Contains(errorText, "dynamic replan")
 	})
+}
+
+func taskFailureShouldRetryPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
+	if !latestTaskFailureMatches(snapshot, taskID, func(string) bool { return true }) {
+		return false
+	}
+	pr, ok := latestPullRequestFollowUp(snapshot, taskID)
+	if !ok {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(pr.State)) {
+	case "", "OPEN":
+		return true
+	default:
+		return false
+	}
 }
 
 func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, results []WorkerTurnResult) bool {
