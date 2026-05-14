@@ -189,7 +189,7 @@ function App() {
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
   const activeTasks = snapshot.tasks.filter((task) => !isTerminalTask(task));
-  const completedTasks = snapshot.tasks.filter(isTerminalTask);
+  const completedTasks = tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask));
 
   async function handleClearTask(taskId: string) {
     try {
@@ -889,6 +889,10 @@ function workProgress(task: Task | undefined, workers: Worker[], nodes: Executio
 
 function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
+}
+
+function tasksByNewestCompletion(tasks: Task[]): Task[] {
+  return [...tasks].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 }
 
 function preferredTask(tasks: Task[]): Task | undefined {
