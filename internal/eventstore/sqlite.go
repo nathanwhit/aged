@@ -1573,13 +1573,19 @@ func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
 
 func (s *SQLiteStore) projectionEvents(ctx context.Context) ([]core.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
+WITH latest_worker_output AS (
+	SELECT MAX(id) AS id
+	FROM events
+	WHERE type = 'worker.output'
+	GROUP BY worker_id
+)
 SELECT
 	id,
 	at,
 	type,
 	task_id,
 	worker_id,
-	CASE type WHEN 'worker.output' THEN '{}' ELSE payload END AS payload
+	payload
 FROM events
 WHERE type IN (
 	'task.created',
@@ -1596,7 +1602,6 @@ WHERE type IN (
 	'worker.workspace_prepared',
 	'worker.created',
 	'worker.started',
-	'worker.output',
 	'worker.completed',
 	'worker.changes_applied',
 	'pull_request.published',
@@ -1604,6 +1609,16 @@ WHERE type IN (
 	'pull_request.status_checked',
 	'pull_request.babysitter_started'
 )
+UNION ALL
+SELECT
+	id,
+	at,
+	type,
+	task_id,
+	worker_id,
+	'{}' AS payload
+FROM events
+WHERE id IN (SELECT id FROM latest_worker_output)
 ORDER BY id ASC`)
 	if err != nil {
 		return nil, err

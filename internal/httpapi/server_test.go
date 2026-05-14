@@ -200,6 +200,73 @@ func TestSnapshotCanOmitEventsAndExposeLastEventID(t *testing.T) {
 	}
 }
 
+func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "done", Payload: core.MustJSON(map[string]any{"title": "Done", "prompt": "large prompt"})},
+		{Type: core.EventWorkerCreated, TaskID: "done", WorkerID: "done-worker", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventTaskStatus, TaskID: "done", Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
+		{Type: core.EventTaskCreated, TaskID: "active", Payload: core.MustJSON(map[string]any{"title": "Active", "prompt": "active prompt"})},
+		{Type: core.EventWorkerCreated, TaskID: "active", WorkerID: "active-worker", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventTaskStatus, TaskID: "active", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/snapshot?events=none&tasks=cards")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var snapshot core.Snapshot
+	if err := json.NewDecoder(res.Body).Decode(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 2 {
+		t.Fatalf("tasks = %+v, want active and terminal task cards", snapshot.Tasks)
+	}
+	if taskByID(snapshot.Tasks, "done").Prompt != "" {
+		t.Fatalf("terminal task prompt = %q, want stripped card payload", taskByID(snapshot.Tasks, "done").Prompt)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].TaskID != "active" {
+		t.Fatalf("workers = %+v, want only active task workers", snapshot.Workers)
+	}
+
+	taskRes, err := http.Get(server.URL + "/api/tasks/done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taskRes.Body.Close()
+	if taskRes.StatusCode != http.StatusOK {
+		t.Fatalf("task status = %d", taskRes.StatusCode)
+	}
+	var taskSnapshot core.Snapshot
+	if err := json.NewDecoder(taskRes.Body).Decode(&taskSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(taskSnapshot.Tasks) != 1 || taskSnapshot.Tasks[0].Prompt != "large prompt" {
+		t.Fatalf("task snapshot tasks = %+v", taskSnapshot.Tasks)
+	}
+	if len(taskSnapshot.Workers) != 1 || taskSnapshot.Workers[0].ID != "done-worker" {
+		t.Fatalf("task snapshot workers = %+v", taskSnapshot.Workers)
+	}
+}
+
 func TestEventStreamUsesLastEventIDAndWritesSSEID(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
@@ -1747,4 +1814,13 @@ func countEventType(events []core.Event, eventType core.EventType) int {
 		}
 	}
 	return count
+}
+
+func taskByID(tasks []core.Task, id string) core.Task {
+	for _, task := range tasks {
+		if task.ID == id {
+			return task
+		}
+	}
+	return core.Task{}
 }

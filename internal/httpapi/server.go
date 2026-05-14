@@ -63,6 +63,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/assistant", s.assistant)
 	mux.HandleFunc("GET /api/tasks/lookup", s.lookupTask)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
+	mux.HandleFunc("GET /api/tasks/{id}", s.taskSnapshot)
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
@@ -107,7 +108,72 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if r.URL.Query().Get("tasks") == "cards" {
+		snapshot = taskCardSnapshot(snapshot)
+	}
 	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func taskCardSnapshot(snapshot core.Snapshot) core.Snapshot {
+	hydratedTasks := make(map[string]bool, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		if !isTerminalTaskStatus(task.Status) {
+			hydratedTasks[task.ID] = true
+		}
+	}
+	for index := range snapshot.Tasks {
+		if !isTerminalTaskStatus(snapshot.Tasks[index].Status) {
+			continue
+		}
+		snapshot.Tasks[index].Prompt = ""
+		snapshot.Tasks[index].Milestones = nil
+		snapshot.Tasks[index].Artifacts = nil
+	}
+	snapshot.Workers = filterTaskScoped(snapshot.Workers, hydratedTasks, func(worker core.Worker) string { return worker.TaskID })
+	snapshot.ExecutionNodes = filterTaskScoped(snapshot.ExecutionNodes, hydratedTasks, func(node core.ExecutionNode) string { return node.TaskID })
+	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, hydratedTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	snapshot.OrchestrationGraphs = filterTaskScoped(snapshot.OrchestrationGraphs, hydratedTasks, func(graph core.OrchestrationGraph) string { return graph.TaskID })
+	snapshot.Events = filterTaskScoped(snapshot.Events, hydratedTasks, func(event core.Event) string { return event.TaskID })
+	return snapshot
+}
+
+func taskScopedSnapshot(snapshot core.Snapshot, taskID string) (core.Snapshot, bool) {
+	keptTasks := map[string]bool{taskID: true}
+	var task core.Task
+	for _, candidate := range snapshot.Tasks {
+		if candidate.ID == taskID {
+			task = candidate
+			break
+		}
+	}
+	if task.ID == "" {
+		return core.Snapshot{}, false
+	}
+	snapshot.Tasks = []core.Task{task}
+	snapshot.Workers = filterTaskScoped(snapshot.Workers, keptTasks, func(worker core.Worker) string { return worker.TaskID })
+	snapshot.ExecutionNodes = filterTaskScoped(snapshot.ExecutionNodes, keptTasks, func(node core.ExecutionNode) string { return node.TaskID })
+	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, keptTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	snapshot.OrchestrationGraphs = filterTaskScoped(snapshot.OrchestrationGraphs, keptTasks, func(graph core.OrchestrationGraph) string { return graph.TaskID })
+	snapshot.Events = filterTaskScoped(snapshot.Events, keptTasks, func(event core.Event) string { return event.TaskID })
+	return snapshot, true
+}
+
+func filterTaskScoped[T any](items []T, keptTasks map[string]bool, taskID func(T) string) []T {
+	if len(items) == 0 {
+		return items
+	}
+	out := items[:0]
+	for _, item := range items {
+		id := taskID(item)
+		if id == "" || keptTasks[id] {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func isTerminalTaskStatus(status core.TaskStatus) bool {
+	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
 }
 
 func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +369,20 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 	limit := int(parseInt64(r.URL.Query().Get("limit")))
 	events, err := s.service.TaskEvents(r.Context(), r.PathValue("id"), limit)
 	writeResult(w, http.StatusOK, events, err)
+}
+
+func (s *Server) taskSnapshot(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := s.service.SnapshotSummary(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	taskSnapshot, ok := taskScopedSnapshot(snapshot, r.PathValue("id"))
+	if !ok {
+		writeError(w, eventstore.ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, taskSnapshot)
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {

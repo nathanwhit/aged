@@ -641,16 +641,32 @@ ON CONFLICT(id) DO UPDATE SET
 
 func projectionInputEvents(ctx context.Context, q snapshotProjectionQuerier, afterID int64) ([]core.Event, error) {
 	rows, err := q.QueryContext(ctx, `
+WITH latest_worker_output AS (
+	SELECT MAX(id) AS id
+	FROM events
+	WHERE id > ? AND type = 'worker.output'
+	GROUP BY worker_id
+)
 SELECT
 	id,
 	at,
 	type,
 	task_id,
 	worker_id,
-	CASE type WHEN 'worker.output' THEN '{}' ELSE payload END AS payload
+	payload
 FROM events
-WHERE id > ?
-ORDER BY id ASC`, afterID)
+WHERE id > ? AND type != 'worker.output'
+UNION ALL
+SELECT
+	id,
+	at,
+	type,
+	task_id,
+	worker_id,
+	'{}' AS payload
+FROM events
+WHERE id IN (SELECT id FROM latest_worker_output)
+ORDER BY id ASC`, afterID, afterID)
 	if err != nil {
 		return nil, err
 	}
