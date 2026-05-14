@@ -3583,6 +3583,7 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	if !strings.Contains(runner.promptValue(), "# Durable Agent Loop") {
 		t.Fatalf("runner prompt missing loop context:\n%s", runner.promptValue())
 	}
+	assertDurableLoopPlaybookGuidance(t, runner.promptValue())
 	if !strings.Contains(runner.promptValue(), "# Continuation Context") {
 		t.Fatalf("runner prompt missing loop continuation context:\n%s", runner.promptValue())
 	}
