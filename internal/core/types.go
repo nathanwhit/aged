@@ -50,6 +50,7 @@ const (
 	EventTaskCandidate     EventType = "task.final_candidate_selected"
 	EventTaskObjective     EventType = "task.objective_updated"
 	EventTaskMilestone     EventType = "task.milestone_reached"
+	EventTaskWorkPlan      EventType = "task.work_plan_updated"
 	EventTaskArtifact      EventType = "task.artifact_recorded"
 	EventTaskCleared       EventType = "task.cleared"
 	EventTaskAction        EventType = "task.action_executed"
@@ -98,6 +99,7 @@ type Task struct {
 	FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
 	AppliedWorkerID        string          `json:"appliedWorkerId,omitempty"`
 	Milestones             []TaskMilestone `json:"milestones,omitempty"`
+	WorkPlan               *WorkPlan       `json:"workPlan,omitempty"`
 	Artifacts              []TaskArtifact  `json:"artifacts,omitempty"`
 }
 
@@ -118,6 +120,21 @@ type TaskArtifact struct {
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+type WorkPlan struct {
+	Summary     string         `json:"summary,omitempty"`
+	Workstreams []WorkPlanItem `json:"workstreams,omitempty"`
+	Validation  []WorkPlanItem `json:"validation,omitempty"`
+	Risks       []string       `json:"risks,omitempty"`
+}
+
+type WorkPlanItem struct {
+	ID        string   `json:"id"`
+	Goal      string   `json:"goal"`
+	Status    string   `json:"status,omitempty"`
+	DoneWhen  string   `json:"doneWhen,omitempty"`
+	DependsOn []string `json:"dependsOn,omitempty"`
 }
 
 type Worker struct {

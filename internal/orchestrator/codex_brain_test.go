@@ -165,6 +165,19 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 		InitialPlan: Plan{
 			WorkerKind: "codex",
 			Prompt:     strings.Repeat("initial plan ", 5000),
+			WorkPlan: &core.WorkPlan{
+				Summary: strings.Repeat("initial work plan ", 5000),
+			},
+		},
+		WorkPlan: &core.WorkPlan{
+			Summary: strings.Repeat("current work plan ", 5000),
+			Workstreams: []core.WorkPlanItem{{
+				ID:       "slice-1",
+				Goal:     strings.Repeat("large workstream ", 5000),
+				Status:   "running",
+				DoneWhen: strings.Repeat("done when ", 5000),
+			}},
+			Risks: []string{strings.Repeat("risk ", 5000)},
 		},
 		Results:                  results,
 		Turn:                     2,
@@ -263,6 +276,12 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`{
 		"rationale": "Split independent work up front.",
 		"reasoningEffort": "medium",
+		"workPlan": {
+			"summary": "Audit the API and UI independently, then consolidate.",
+			"workstreams": [{"id": "api", "goal": "Inspect API paths.", "status": "pending", "doneWhen": "API findings are reported.", "dependsOn": []}],
+			"validation": [{"id": "validate", "goal": "Check proposed fixes.", "status": "pending", "doneWhen": "Validation command is reported.", "dependsOn": ["api"]}],
+			"risks": ["The two audits may find overlapping issues."]
+		},
 		"steps": [{"title": "Audit", "description": "Run parallel audits."}],
 		"requiredApprovals": [],
 		"actions": [],
@@ -278,6 +297,9 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 	if len(plan.Workers) != 2 {
 		t.Fatalf("workers = %+v", plan.Workers)
 	}
+	if plan.WorkPlan == nil || plan.WorkPlan.Workstreams[0].ID != "api" {
+		t.Fatalf("workPlan = %+v", plan.WorkPlan)
+	}
 	if plan.Workers[0].ID != "api" || plan.Workers[0].Prompt != "Inspect the API paths." {
 		t.Fatalf("first worker = %+v", plan.Workers[0])
 	}
@@ -291,9 +313,21 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 		"action": "continue",
 		"rationale": "review found a missing case",
 		"message": "run an incorporation worker",
+		"workPlan": {
+			"summary": "Initial implementation needs a feedback incorporation turn.",
+			"workstreams": [{"id": "implement", "goal": "Incorporate reviewer feedback.", "status": "running", "doneWhen": "The missing case is fixed.", "dependsOn": []}],
+			"validation": [],
+			"risks": []
+		},
 		"plan": {
 			"workerKind": "codex",
 			"workerPrompt": "incorporate review feedback",
+			"workPlan": {
+				"summary": "Initial implementation needs a feedback incorporation turn.",
+				"workstreams": [{"id": "implement", "goal": "Incorporate reviewer feedback.", "status": "running", "doneWhen": "The missing case is fixed.", "dependsOn": []}],
+				"validation": [],
+				"risks": []
+			},
 			"rationale": "review found a missing case",
 			"steps": [{"title": "Fix", "description": "Patch the missing case"}],
 			"requiredApprovals": [],
@@ -311,6 +345,9 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 	}
 	if decision.Plan == nil || decision.Plan.Prompt != "incorporate review feedback" {
 		t.Fatalf("plan = %+v", decision.Plan)
+	}
+	if decision.WorkPlan == nil || decision.WorkPlan.Workstreams[0].Status != "running" {
+		t.Fatalf("workPlan = %+v", decision.WorkPlan)
 	}
 }
 

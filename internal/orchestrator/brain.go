@@ -35,6 +35,7 @@ type Plan struct {
 	Prompt            string            `json:"workerPrompt"`
 	ReasoningEffort   string            `json:"reasoningEffort,omitempty"`
 	Rationale         string            `json:"rationale,omitempty"`
+	WorkPlan          *core.WorkPlan    `json:"workPlan,omitempty"`
 	Steps             []PlanStep        `json:"steps,omitempty"`
 	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
 	Actions           []PlanAction      `json:"actions,omitempty"`
@@ -82,6 +83,7 @@ type SpawnRequest struct {
 
 type OrchestrationState struct {
 	InitialPlan              Plan               `json:"initialPlan"`
+	WorkPlan                 *core.WorkPlan     `json:"workPlan,omitempty"`
 	Results                  []WorkerTurnResult `json:"results"`
 	Turn                     int                `json:"turn"`
 	BlockedFinalCandidateIDs []string           `json:"blockedFinalCandidateIds,omitempty"`
@@ -95,6 +97,7 @@ type ReplanDecision struct {
 	PullRequestBody        string         `json:"pullRequestBody,omitempty"`
 	Rationale              string         `json:"rationale,omitempty"`
 	Message                string         `json:"message,omitempty"`
+	WorkPlan               *core.WorkPlan `json:"workPlan,omitempty"`
 	Metadata               map[string]any `json:"metadata,omitempty"`
 }
 
