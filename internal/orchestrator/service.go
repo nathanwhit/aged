@@ -3823,6 +3823,11 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 		return fmt.Errorf("%s worker callback %s has empty pull request body", source, callback.ID)
 	}
 	publishWorkerID := nonEmpty(callback.ParentWorkerID, workerID)
+	if ready, err := s.workerPublishCallbackCandidateReady(ctx, taskID, publishWorkerID, callback, source); err != nil {
+		return err
+	} else if !ready {
+		return nil
+	}
 	pr, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
 		WorkerID: publishWorkerID,
 		Repo:     strings.TrimSpace(callback.Repo),
@@ -3860,6 +3865,59 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 		return err
 	}
 	return nil
+}
+
+func (s *Service) workerPublishCallbackCandidateReady(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return false, eventstore.ErrNotFound
+	}
+	resolvedWorkerID, err := resolvePullRequestWorkerID(snapshot, task, workerID)
+	if err == nil && strings.TrimSpace(resolvedWorkerID) != "" {
+		return true, nil
+	}
+	if err != nil && !errors.Is(err, errPullRequestWorkerNotPublishable) {
+		return false, err
+	}
+	reason := "worker callback requested pull request publication, but the selected worker is not a successful changed candidate"
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":       "publish_pull_request",
+		"when":       "worker_callback",
+		"source":     source,
+		"callbackId": callback.ID,
+		"workerId":   workerID,
+		"status":     "skipped",
+		"error":      reason,
+		"inputs": map[string]any{
+			"repo":                 strings.TrimSpace(callback.Repo),
+			"base":                 strings.TrimSpace(callback.Base),
+			"branch":               strings.TrimSpace(callback.Branch),
+			"title":                strings.TrimSpace(callback.Title),
+			"draft":                callback.Draft,
+			"continueAfterPublish": callback.ContinueAfterPublish,
+		},
+	}); err != nil {
+		return false, err
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":       "log",
+			"stream":     "stdout",
+			"text":       source + " worker skipped pull request publication: no successful worker with candidate changes",
+			"callbackId": callback.ID,
+			"reason":     reason,
+		}),
+	}); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, result WorkerTurnResult) bool {

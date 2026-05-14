@@ -5318,6 +5318,74 @@ func TestLocalWorkerCallbackPublishesPullRequestThroughOriginalOrchestrator(t *t
 	}
 }
 
+func TestRemoteWorkerPublishPullRequestCallbackWithoutCandidateIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-callback-no-candidate"
+	workerID := "worker-callback-no-candidate"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Remote parent",
+			"prompt": "try to publish",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "inspected the workspace but found no changes to publish",
+			"workspaceChanges": WorkspaceChanges{
+				Status: "The working copy has no changes.",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	err := service.handleRemoteWorkerCallbacks(ctx, remoteRun{
+		TaskID:   taskID,
+		WorkerID: workerID,
+	}, []RemoteWorkerCallback{{
+		ID:             "publish-pr.test",
+		Type:           "publish_pull_request",
+		ParentWorkerID: workerID,
+		Title:          "Remote callback PR",
+		Body:           "Callback PR body",
+		Repo:           "owner/repo",
+	}})
+	if err != nil {
+		t.Fatalf("handle remote callbacks returned error: %v", err)
+	}
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want none without candidate changes", publisher.publishCalls)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "publish_pull_request", "skipped") {
+		t.Fatalf("missing skipped publish_pull_request callback action")
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "remote worker skipped pull request publication") {
+		t.Fatalf("missing worker output explaining skipped PR callback")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventWorkerOutput, taskID, "failed to drain terminal remote worker callbacks") {
+		t.Fatalf("callback was reported as a terminal drain failure")
+	}
+}
+
 func TestRecoverRemoteWorkerResumesTaskAfterCompletion(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
