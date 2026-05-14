@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -439,6 +440,132 @@ func TestSSHRunnerCompletesWhenClaudeResultArrivesBeforeProcessExit(t *testing.T
 	}
 	if !sink.has(worker.EventResult, "stdout", "done") {
 		t.Fatalf("result was not emitted: %+v", sink.events)
+	}
+	if !executor.commandContains("kill-session") {
+		t.Fatalf("remote session was not cleaned up: %+v", executor.commands)
+	}
+}
+
+func TestSSHRunnerPollsRemoteLogsFromLastOffset(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			"one\n",
+			"one\ntwo\n",
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"succeeded","exit":0}`,
+		},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("mock"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	if got := sink.count(worker.EventLog, "stdout", "one"); got != 1 {
+		t.Fatalf("one event count = %d, want 1; events = %+v", got, sink.events)
+	}
+	if got := sink.count(worker.EventLog, "stdout", "two"); got != 1 {
+		t.Fatalf("two event count = %d, want 1; events = %+v", got, sink.events)
+	}
+	if got, want := executor.stdoutReads, []remoteLogReadRecord{{Offset: 0, Start: 0, Size: 4, Bytes: 4}, {Offset: 4, Start: 4, Size: 8, Bytes: 4}}; !equalRemoteLogReadRecords(got, want) {
+		t.Fatalf("stdout reads = %+v, want %+v", got, want)
+	}
+}
+
+func TestSSHRunnerPollResetsOffsetAfterRemoteLogTruncation(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			"old\nlong\n",
+			"new\n",
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"succeeded","exit":0}`,
+		},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("mock"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	for _, text := range []string{"old", "long", "new"} {
+		if !sink.has(worker.EventLog, "stdout", text) {
+			t.Fatalf("missing %q after truncation: %+v", text, sink.events)
+		}
+	}
+	if got, want := executor.stdoutReads, []remoteLogReadRecord{{Offset: 0, Start: 0, Size: 9, Bytes: 9}, {Offset: 9, Start: 0, Size: 4, Bytes: 4}}; !equalRemoteLogReadRecords(got, want) {
+		t.Fatalf("stdout reads = %+v, want %+v", got, want)
+	}
+}
+
+func TestSSHRunnerBuffersPartialRemoteLogLinesAcrossPolls(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			"hel",
+			"hello\n",
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"succeeded","exit":0}`,
+		},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("mock"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v", status)
+	}
+	if sink.has(worker.EventLog, "stdout", "hel") {
+		t.Fatalf("partial line was emitted before completion: %+v", sink.events)
+	}
+	if got := sink.count(worker.EventLog, "stdout", "hello"); got != 1 {
+		t.Fatalf("hello event count = %d, want 1; events = %+v", got, sink.events)
+	}
+}
+
+func TestSSHRunnerInfersTerminalStatusFromBufferedRemoteResultWithoutTrailingNewline(t *testing.T) {
+	result := `{"type":"result","subtype":"success","result":"done"}`
+	executor := &scriptedPollExecutor{
+		stdout: []string{
+			result[:15],
+			result,
+		},
+		status: []string{
+			`{"status":"running"}`,
+			`{"status":"running"}`,
+		},
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("claude"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "succeeded" {
+		t.Fatalf("status = %+v, want succeeded", status)
+	}
+	if !sink.has(worker.EventResult, "stdout", "done") {
+		t.Fatalf("buffered terminal result was not emitted: %+v", sink.events)
 	}
 	if !executor.commandContains("kill-session") {
 		t.Fatalf("remote session was not cleaned up: %+v", executor.commands)
@@ -1138,6 +1265,15 @@ type scriptedPollExecutor struct {
 	status         []string
 	poll           int
 	sessionMissing bool
+	stdoutReads    []remoteLogReadRecord
+	stderrReads    []remoteLogReadRecord
+}
+
+type remoteLogReadRecord struct {
+	Offset int
+	Start  int
+	Size   int
+	Bytes  int
 }
 
 func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, error) {
@@ -1149,9 +1285,9 @@ func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, er
 	}
 	switch {
 	case strings.Contains(joined, "stdout.log"):
-		return valueAt(e.stdout, index), nil
+		return e.remoteLogChunk("stdout", valueAt(e.stdout, index), joined), nil
 	case strings.Contains(joined, "stderr.log"):
-		return valueAt(e.stderr, index), nil
+		return e.remoteLogChunk("stderr", valueAt(e.stderr, index), joined), nil
 	case strings.Contains(joined, "status.json"):
 		out := valueAt(e.status, index)
 		if e.poll < len(e.status)-1 {
@@ -1166,6 +1302,55 @@ func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, er
 	default:
 		return "", nil
 	}
+}
+
+func (e *scriptedPollExecutor) remoteLogChunk(stream string, content string, command string) string {
+	offset := scriptedLogOffset(command)
+	start := offset
+	if start > len(content) {
+		start = 0
+	}
+	record := remoteLogReadRecord{
+		Offset: offset,
+		Start:  start,
+		Size:   len(content),
+		Bytes:  len(content) - start,
+	}
+	if stream == "stdout" {
+		e.stdoutReads = append(e.stdoutReads, record)
+	} else {
+		e.stderrReads = append(e.stderrReads, record)
+	}
+	return fmt.Sprintf("%s %d %d\n%s", remoteLogChunkHeader, start, len(content), content[start:])
+}
+
+func scriptedLogOffset(command string) int {
+	const prefix = "aged_log_offset="
+	index := strings.Index(command, prefix)
+	if index < 0 {
+		return 0
+	}
+	value := command[index+len(prefix):]
+	end := strings.IndexFunc(value, func(r rune) bool {
+		return r < '0' || r > '9'
+	})
+	if end >= 0 {
+		value = value[:end]
+	}
+	offset, _ := strconv.Atoi(value)
+	return offset
+}
+
+func equalRemoteLogReadRecords(got []remoteLogReadRecord, want []remoteLogReadRecord) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *scriptedPollExecutor) commandContains(pattern string) bool {
