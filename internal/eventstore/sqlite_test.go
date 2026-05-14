@@ -494,6 +494,42 @@ func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 	}
 }
 
+func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	taskID := "ledger-task"
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Ledger", "prompt": "Bounded query"})},
+		core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"text": strings.Repeat("output-payload", 100)})},
+		core.Event{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded, "summary": "decision: keep the bounded ledger query"})},
+		core.Event{Type: core.EventWorkerCompleted, TaskID: "other-task", WorkerID: "other-worker", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded, "summary": "decision: should not leak"})},
+	)
+
+	events, err := store.ListTaskLedgerEvents(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2; events = %+v", len(events), events)
+	}
+	for _, event := range events {
+		if event.TaskID != taskID {
+			t.Fatalf("event task id = %q, want %q", event.TaskID, taskID)
+		}
+		if event.Type == core.EventWorkerOutput {
+			t.Fatalf("ledger events included worker.output payload: %+v", event)
+		}
+		if strings.Contains(string(event.Payload), "output-payload") || strings.Contains(string(event.Payload), "should not leak") {
+			t.Fatalf("ledger event query included unrelated payload: %+v", event)
+		}
+	}
+	if events[0].Type != core.EventWorkerCreated || events[1].Type != core.EventWorkerCompleted {
+		t.Fatalf("event types = %q, %q; want worker.created, worker.completed", events[0].Type, events[1].Type)
+	}
+}
+
 func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(b, ctx)

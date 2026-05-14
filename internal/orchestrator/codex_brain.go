@@ -910,6 +910,7 @@ Field rules:
 - When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty; do not set it to a no-change review or validation worker unless the correct final result is to complete without publishing changes.
 - When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
 - Use "continue" when another worker turn is needed.
+- Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The state.results list may omit routine old worker turns to keep the prompt bounded.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
@@ -1017,6 +1018,7 @@ func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationS
 	state.InitialPlan = compactPlanForPrompt(state.InitialPlan)
 	state.WorkPlan = compactWorkPlanForPrompt(state.WorkPlan)
 	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
+	state.ContextLedger = compactContextLedgerForPrompt(state.ContextLedger)
 
 	blocked := map[string]bool{}
 	for _, id := range state.BlockedFinalCandidateIDs {

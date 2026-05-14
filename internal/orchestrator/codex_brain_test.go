@@ -179,6 +179,11 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 			}},
 			Risks: []string{strings.Repeat("risk ", 5000)},
 		},
+		ContextLedger: []ContextLedgerEntry{{
+			Kind:     "worker_result",
+			WorkerID: "ancient-worker",
+			Summary:  "LEDGER_FACT: preserve the old architecture decision while routine old worker results are trimmed" + strings.Repeat("l", 50000),
+		}},
 		Results:                  results,
 		Turn:                     2,
 		BlockedFinalCandidateIDs: []string{"worker-1"},
@@ -196,6 +201,9 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	}
 	if strings.Contains(prompt, `"workerId": "worker-0"`) {
 		t.Fatalf("prompt kept older non-blocked result")
+	}
+	if !strings.Contains(prompt, "ancient-worker") || !strings.Contains(prompt, "LEDGER_FACT") {
+		t.Fatalf("prompt dropped older high-value ledger fact")
 	}
 	if strings.Contains(prompt, "DIFF_SHOULD_NOT_BE_INCLUDED") {
 		t.Fatalf("prompt included raw diff")

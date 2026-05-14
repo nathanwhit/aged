@@ -2717,9 +2717,10 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		return
 	}
 	decision, err := replanner.Replan(ctx, task, OrchestrationState{
-		InitialPlan: initial,
-		Results:     results,
-		Turn:        1,
+		InitialPlan:   initial,
+		Results:       results,
+		ContextLedger: s.taskContextLedger(ctx, task.ID),
+		Turn:          1,
 	})
 	if err != nil {
 		_ = s.failTask(ctx, task.ID, fmt.Errorf("question replan failed: %w", err))
@@ -5262,6 +5263,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			InitialPlan:              initial,
 			WorkPlan:                 currentWorkPlan,
 			Results:                  results,
+			ContextLedger:            s.taskContextLedger(ctx, task.ID),
 			Turn:                     turn,
 			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
 			RecoveryHint:             recoveryHint,

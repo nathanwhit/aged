@@ -82,12 +82,29 @@ type SpawnRequest struct {
 }
 
 type OrchestrationState struct {
-	InitialPlan              Plan               `json:"initialPlan"`
-	WorkPlan                 *core.WorkPlan     `json:"workPlan,omitempty"`
-	Results                  []WorkerTurnResult `json:"results"`
-	Turn                     int                `json:"turn"`
-	BlockedFinalCandidateIDs []string           `json:"blockedFinalCandidateIds,omitempty"`
-	RecoveryHint             string             `json:"recoveryHint,omitempty"`
+	InitialPlan              Plan                 `json:"initialPlan"`
+	WorkPlan                 *core.WorkPlan       `json:"workPlan,omitempty"`
+	Results                  []WorkerTurnResult   `json:"results"`
+	ContextLedger            []ContextLedgerEntry `json:"contextLedger,omitempty"`
+	Turn                     int                  `json:"turn"`
+	BlockedFinalCandidateIDs []string             `json:"blockedFinalCandidateIds,omitempty"`
+	RecoveryHint             string               `json:"recoveryHint,omitempty"`
+}
+
+type ContextLedgerEntry struct {
+	Kind         string                 `json:"kind"`
+	SourceEvent  string                 `json:"sourceEvent,omitempty"`
+	WorkerID     string                 `json:"workerId,omitempty"`
+	NodeID       string                 `json:"nodeId,omitempty"`
+	WorkerKind   string                 `json:"workerKind,omitempty"`
+	Role         string                 `json:"role,omitempty"`
+	SpawnID      string                 `json:"spawnId,omitempty"`
+	BaseWorkerID string                 `json:"baseWorkerId,omitempty"`
+	Status       string                 `json:"status,omitempty"`
+	Summary      string                 `json:"summary,omitempty"`
+	Error        string                 `json:"error,omitempty"`
+	ChangedFiles []WorkspaceChangedFile `json:"changedFiles,omitempty"`
+	Metadata     map[string]any         `json:"metadata,omitempty"`
 }
 
 type ReplanDecision struct {
