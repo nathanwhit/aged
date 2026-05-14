@@ -5152,28 +5152,6 @@ func validatesBlockedCandidate(results []WorkerTurnResult, selectedWorkerID stri
 	return false
 }
 
-func validatesOnlyBlockedCandidate(results []WorkerTurnResult, selectedWorkerID string, blocked map[string]string) (string, bool) {
-	if len(blocked) != 1 {
-		return "", false
-	}
-	selectedWorkerID = strings.TrimSpace(selectedWorkerID)
-	if selectedWorkerID == "" {
-		return "", false
-	}
-	var blockedWorkerID string
-	for workerID := range blocked {
-		blockedWorkerID = strings.TrimSpace(workerID)
-	}
-	if blockedWorkerID == "" || selectedWorkerID == blockedWorkerID {
-		return "", false
-	}
-	selected, ok := workerResultByID(results, selectedWorkerID)
-	if !ok || selected.Status != core.WorkerSucceeded || resultHasCandidateChanges(selected) {
-		return "", false
-	}
-	return blockedWorkerID, true
-}
-
 func sortedMapKeys(values map[string]string) []string {
 	if len(values) == 0 {
 		return nil
@@ -5332,9 +5310,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 							if validatesBlockedCandidate(results, decision.FinalCandidateWorkerID, blockedWorkerID) {
 								return true, blockedWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
 							}
-						}
-						if blockedWorkerID, ok := validatesOnlyBlockedCandidate(results, decision.FinalCandidateWorkerID, blockedFinalCandidates); ok {
-							return true, blockedWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
 						}
 					}
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {

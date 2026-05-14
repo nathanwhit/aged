@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1201,6 +1202,41 @@ func TestServiceCompletionReadinessRecoveryAcceptsValidationWorker(t *testing.T)
 	}
 	if hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
 		t.Fatalf("completion readiness recovery asked for approval instead of accepting validation")
+	}
+}
+
+func TestValidatesBlockedCandidateRequiresLineage(t *testing.T) {
+	results := []WorkerTurnResult{
+		{
+			WorkerID: "blocked-impl",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+			},
+		},
+		{
+			WorkerID: "unrelated-validation",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+		{
+			WorkerID:     "related-validation",
+			BaseWorkerID: "blocked-impl",
+			Status:       core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+	}
+
+	if validatesBlockedCandidate(results, "unrelated-validation", "blocked-impl") {
+		t.Fatalf("unrelated no-change worker validated blocked candidate without lineage")
+	}
+	if !validatesBlockedCandidate(results, "related-validation", "blocked-impl") {
+		t.Fatalf("related no-change worker did not validate blocked candidate through BaseWorkerID lineage")
 	}
 }
 
@@ -5190,17 +5226,19 @@ func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, spec := range []struct {
-		workerID string
-		nodeID   string
-		targetID string
-		kind     string
-		payload  map[string]any
+		workerID     string
+		nodeID       string
+		targetID     string
+		kind         string
+		workerEvents bool
+		payload      map[string]any
 	}{
 		{
-			workerID: remoteWorkerID,
-			nodeID:   "node-recovered-remote",
-			targetID: "vm-1",
-			kind:     "ssh",
+			workerID:     remoteWorkerID,
+			nodeID:       "node-recovered-remote",
+			targetID:     "vm-1",
+			kind:         "ssh",
+			workerEvents: true,
 			payload: map[string]any{
 				"remoteSession": "aged-recovered",
 				"remoteRunDir":  "/runs/aged-recovered",
@@ -5231,6 +5269,9 @@ func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
 			Payload:  core.MustJSON(payload),
 		}); err != nil {
 			t.Fatal(err)
+		}
+		if !spec.workerEvents {
+			continue
 		}
 		if _, err := store.Append(ctx, core.Event{
 			Type:     core.EventWorkerCreated,
@@ -5267,6 +5308,23 @@ func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
 	}
 	delete(service.tasks, remoteWorkerID)
 
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !taskHasActiveWorkers(snapshot, taskID) {
+		t.Fatalf("taskHasActiveWorkers before cancel = false, want true")
+	}
+	workerIDs := activeTaskWorkerIDs(snapshot, taskID)
+	if !reflect.DeepEqual(workerIDs, []string{persistedWorkerID, remoteWorkerID}) {
+		t.Fatalf("activeTaskWorkerIDs before cancel = %+v, want persisted and remote worker IDs", workerIDs)
+	}
+	for _, worker := range snapshot.Workers {
+		if worker.ID == persistedWorkerID {
+			t.Fatalf("persisted worker unexpectedly has worker row before cancel: %+v", worker)
+		}
+	}
+
 	if err := service.CancelTask(ctx, taskID); err != nil {
 		t.Fatal(err)
 	}
@@ -5285,7 +5343,7 @@ func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
 		t.Fatalf("expected remote tmux kill command, got %+v", executor.commands)
 	}
 
-	snapshot, err := store.Snapshot(ctx)
+	snapshot, err = store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
