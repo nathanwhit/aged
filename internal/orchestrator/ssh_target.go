@@ -604,6 +604,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	nameStatus := readRaw("name-status.z")
 	diffStat := readRaw("diffstat.txt")
 	diff := normalizePatchText(readRaw("diff.patch"))
+	publishDiff := normalizePatchText(readRaw("publish-diff.patch"))
 	stdout := readRaw("stdout.log")
 	stderr := readRaw("stderr.log")
 	changes := WorkspaceChanges{
@@ -615,6 +616,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		Status:        status,
 		DiffStat:      nonEmpty(diffStat, status),
 		Diff:          diff,
+		PublishDiff:   publishDiff,
 		Dirty:         strings.TrimSpace(status) != "",
 		Artifacts:     remoteLogArtifacts(run, stdout, stderr),
 	}
@@ -1057,7 +1059,11 @@ func remoteShellCommand(script string) string {
 
 func remoteChangeScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
-	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; if [ -s %[1]s/git-baseline-status.txt ]; then %[2]s
+	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; cp %[1]s/diff.patch %[1]s/publish-diff.patch 2>/dev/null || true; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; %[2]s
+  git diff --binary HEAD > %[1]s/publish-diff.patch 2>/dev/null || true
+  printf '\n' >> %[1]s/publish-diff.patch
+  git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/publish-diff.patch 2>/dev/null || true; done
+  if [ -s %[1]s/git-baseline-status.txt ]; then
     baseline_tree=$(cat %[1]s/git-baseline.tree 2>/dev/null || true)
     if current_tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$baseline_tree" ] && [ -n "$current_tree" ]; then
       git diff --name-status "$baseline_tree" "$current_tree" > %[1]s/changes.txt 2>&1 || true

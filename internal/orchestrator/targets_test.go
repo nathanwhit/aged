@@ -785,6 +785,61 @@ func TestRemoteChangeScriptFiltersPreExistingDirtyGitWorkspace(t *testing.T) {
 	}
 }
 
+func TestRemoteChangeScriptEmitsCumulativePublishDiffForReusedGitWorkspace(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	run := NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker", WorkDir: repo})
+	run.RunDir = t.TempDir()
+
+	writeTestFile(t, repo, "tracked.txt", "base\n")
+	runTestGit(t, repo, "add", "tracked.txt")
+	runTestGit(t, repo, "commit", "-m", "base")
+
+	// Simulate state left behind by a previous worker in a reused workspace:
+	// a tracked file is modified and a brand-new untracked file is added.
+	// These represent the prior worker's uncommitted contribution.
+	writeTestFile(t, repo, "tracked.txt", "base\nprior worker\n")
+	writeTestFile(t, repo, "new-file.txt", "prior worker added\n")
+
+	runRemoteTestScript(t, ctx, repo, remoteBaselineScript(run))
+
+	// The follow-up worker modifies only the previously-untracked file.
+	writeTestFile(t, repo, "new-file.txt", "prior worker added\nthis worker tweak\n")
+
+	runRemoteTestScript(t, ctx, repo, remoteChangeScript(run))
+
+	diff := readTestRunFile(t, run.RunDir, "diff.patch")
+	publishDiff := readTestRunFile(t, run.RunDir, "publish-diff.patch")
+
+	// Per-worker diff isolates only this worker's tweak.
+	if !strings.Contains(diff, "new-file.txt") || !strings.Contains(diff, "+this worker tweak") {
+		t.Fatalf("per-worker diff missing this worker's tweak:\n%s", diff)
+	}
+	if strings.Contains(diff, "tracked.txt") {
+		t.Fatalf("per-worker diff leaked prior-worker change to tracked.txt:\n%s", diff)
+	}
+
+	// Publish diff is cumulative from HEAD: it must include both the prior
+	// worker's contribution AND this worker's tweak. Otherwise applying it to
+	// the project's base ref would fail with "does not exist in index" for
+	// new-file.txt — the original bug behind task e794b639.
+	if !strings.Contains(publishDiff, "tracked.txt") {
+		t.Fatalf("publish diff missing prior-worker modification to tracked.txt:\n%s", publishDiff)
+	}
+	if !strings.Contains(publishDiff, "+prior worker") {
+		t.Fatalf("publish diff missing prior-worker hunk:\n%s", publishDiff)
+	}
+	if !strings.Contains(publishDiff, "new-file.txt") {
+		t.Fatalf("publish diff missing new-file.txt addition:\n%s", publishDiff)
+	}
+	if !strings.Contains(publishDiff, "+this worker tweak") {
+		t.Fatalf("publish diff missing this worker's tweak:\n%s", publishDiff)
+	}
+	if strings.Contains(publishDiff, "diff --git a/new-file.txt b/new-file.txt\nindex ") {
+		t.Fatalf("publish diff treats new-file.txt as a modification of an existing blob instead of an addition; it will not apply to HEAD:\n%s", publishDiff)
+	}
+}
+
 func TestRemoteChangeScriptPreservesCleanGitWorkspaceCapture(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
@@ -1470,6 +1525,8 @@ func (e *timeoutDiffPatchExecutor) Run(ctx context.Context, argv []string) (stri
 		return " M main.go\n", nil
 	case strings.Contains(joined, "diffstat.txt"):
 		return " main.go | 2 +-\n", nil
+	case strings.Contains(joined, "publish-diff.patch"):
+		return "", nil
 	case strings.Contains(joined, "diff.patch"):
 		e.diffPatchCalls++
 		<-ctx.Done()
