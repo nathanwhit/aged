@@ -158,14 +158,13 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
-	stdoutOffset := 0
-	stderrOffset := 0
+	pollState := remotePollState{}
 	filter := worker.NewOutputFilter(parser)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	consecutivePollTimeouts := 0
 	for {
-		status, err := r.pollOnce(ctx, run, parser, filter, sink, &stdoutOffset, &stderrOffset)
+		status, err := r.pollOnce(ctx, run, parser, filter, sink, &pollState)
 		if err != nil {
 			if errors.Is(err, errSSHPollCommandTimeout) && consecutivePollTimeouts < 1 {
 				consecutivePollTimeouts++
@@ -186,6 +185,9 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 			if status.InferredFromOutput {
 				_ = r.Cancel(ctx, run)
 			}
+			if err := pollState.FlushPartials(ctx, parser, filter, sink); err != nil {
+				return status, err
+			}
 			if err := filter.Flush(ctx, sink); err != nil {
 				return status, err
 			}
@@ -202,12 +204,28 @@ func (r SSHRunner) Poll(ctx context.Context, run remoteRun, parser worker.Parser
 
 func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Parser, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
 	filter := worker.NewOutputFilter(parser)
-	status, err := r.pollOnce(ctx, run, parser, filter, sink, stdoutOffset, stderrOffset)
+	pollState := remotePollState{}
+	if stdoutOffset != nil {
+		pollState.stdout.Offset = *stdoutOffset
+	}
+	if stderrOffset != nil {
+		pollState.stderr.Offset = *stderrOffset
+	}
+	status, err := r.pollOnce(ctx, run, parser, filter, sink, &pollState)
+	if stdoutOffset != nil {
+		*stdoutOffset = pollState.stdout.Offset
+	}
+	if stderrOffset != nil {
+		*stderrOffset = pollState.stderr.Offset
+	}
 	if err != nil {
 		_ = filter.Flush(ctx, sink)
 		return status, err
 	}
 	if status.Status == "succeeded" || status.Status == "failed" || status.Status == "canceled" {
+		if err := pollState.FlushPartials(ctx, parser, filter, sink); err != nil {
+			return status, err
+		}
 		if err := filter.Flush(ctx, sink); err != nil {
 			return status, err
 		}
@@ -215,11 +233,9 @@ func (r SSHRunner) PollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 	return status, nil
 }
 
-func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, stdoutOffset *int, stderrOffset *int) (remoteStatus, error) {
-	stdout, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stdout.log"))+" 2>/dev/null || true")
-	emitNewRemoteLines(ctx, filter, sink, "stdout", stdout, stdoutOffset)
-	stderr, _ := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "stderr.log"))+" 2>/dev/null || true")
-	emitNewRemoteLines(ctx, filter, sink, "stderr", stderr, stderrOffset)
+func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, pollState *remotePollState) (remoteStatus, error) {
+	_ = r.pollRemoteLog(ctx, run, parser, filter, sink, "stdout", "stdout.log", &pollState.stdout)
+	_ = r.pollRemoteLog(ctx, run, parser, filter, sink, "stderr", "stderr.log", &pollState.stderr)
 	rawStatus, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "status.json"))+" 2>/dev/null || printf '{\"status\":\"running\"}'")
 	if err != nil {
 		return remoteStatus{Status: "unreachable", Error: strings.TrimSpace(rawStatus)}, err
@@ -237,12 +253,12 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 		status.Status = "running"
 	}
 	if status.Status == "running" {
-		if terminal, ok := terminalRemoteStatusFromResultLog(stdout); ok {
+		if terminal, ok := pollState.stdout.TerminalStatus(); ok {
 			return terminal, nil
 		}
 		active, activeErr := r.remoteSessionActive(ctx, run)
 		if activeErr == nil && !active {
-			return inferTerminalRemoteStatus(parser, stdout, stderr), nil
+			return pollState.InferTerminalStatus(parser), nil
 		}
 	}
 	return status, nil
@@ -1207,16 +1223,183 @@ func shortWorkerID(id string) string {
 	return id
 }
 
-func emitNewRemoteLines(ctx context.Context, filter *worker.OutputFilter, sink worker.Sink, stream string, content string, offset *int) {
-	if *offset > len(content) {
-		*offset = 0
+const remoteLogChunkHeader = "AGED-LOG-CHUNK"
+
+type remotePollState struct {
+	stdout remoteLogPollState
+	stderr remoteLogPollState
+}
+
+func (s *remotePollState) FlushPartials(ctx context.Context, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink) error {
+	if err := s.stdout.FlushPartial(ctx, parser, filter, sink, "stdout"); err != nil {
+		return err
 	}
-	next := content[*offset:]
-	*offset = len(content)
-	_ = worker.StreamReaderLines(ctx, stream, strings.NewReader(next), func(line string) error {
+	return s.stderr.FlushPartial(ctx, parser, filter, sink, "stderr")
+}
+
+func (s *remotePollState) TerminalStatus() (remoteStatus, bool) {
+	return s.stdout.TerminalStatus()
+}
+
+func (s *remotePollState) InferTerminalStatus(parser worker.Parser) remoteStatus {
+	if status, ok := s.stdout.TerminalStatus(); ok {
+		return status
+	}
+	status := remoteStatus{
+		Status:             "failed",
+		Error:              "remote worker session ended before writing terminal status",
+		InferredFromOutput: true,
+	}
+	if s.stdout.HasInferred {
+		status = s.stdout.Inferred
+	}
+	if line := strings.TrimSpace(s.stdout.Partial); line != "" {
+		status = inferredStatusFromLine(parser, "stdout", line, status)
+	}
+	if s.stderr.HasInferred {
+		status = s.stderr.Inferred
+	}
+	if line := strings.TrimSpace(s.stderr.Partial); line != "" {
+		status = inferredStatusFromLine(parser, "stderr", line, status)
+	}
+	return status
+}
+
+type remoteLogPollState struct {
+	Offset      int
+	Partial     string
+	Terminal    remoteStatus
+	HasTerminal bool
+	Inferred    remoteStatus
+	HasInferred bool
+}
+
+func (s *remoteLogPollState) Reset() {
+	s.Partial = ""
+	s.Terminal = remoteStatus{}
+	s.HasTerminal = false
+	s.Inferred = remoteStatus{}
+	s.HasInferred = false
+}
+
+func (s *remoteLogPollState) TerminalStatus() (remoteStatus, bool) {
+	return s.Terminal, s.HasTerminal
+}
+
+func (s *remoteLogPollState) FlushPartial(ctx context.Context, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, stream string) error {
+	line := s.Partial
+	s.Partial = ""
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	updateRemoteLogInference(parser, stream, line, s)
+	return filter.EmitLine(ctx, sink, stream, line)
+}
+
+type remoteLogChunk struct {
+	Content   string
+	Offset    int
+	Truncated bool
+}
+
+func (r SSHRunner) pollRemoteLog(ctx context.Context, run remoteRun, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, stream string, name string, state *remoteLogPollState) error {
+	chunk, err := r.readRemoteLogChunk(ctx, run, name, state.Offset)
+	if err != nil {
+		return err
+	}
+	if chunk.Truncated {
+		state.Reset()
+	}
+	state.Offset = chunk.Offset
+	return emitRemoteLogChunk(ctx, parser, filter, sink, stream, chunk.Content, state)
+}
+
+func (r SSHRunner) readRemoteLogChunk(ctx context.Context, run remoteRun, name string, offset int) (remoteLogChunk, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	raw, err := r.runPollCommand(ctx, run.Target, remoteIncrementalLogReadScript(path.Join(run.RunDir, name), offset))
+	if err != nil {
+		return remoteLogChunk{}, err
+	}
+	return parseRemoteLogChunk(raw, offset), nil
+}
+
+func parseRemoteLogChunk(raw string, offset int) remoteLogChunk {
+	originalOffset := offset
+	line, content, ok := strings.Cut(raw, "\n")
+	if ok {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == remoteLogChunkHeader {
+			start, startErr := strconv.Atoi(fields[1])
+			size, sizeErr := strconv.Atoi(fields[2])
+			if startErr == nil && sizeErr == nil {
+				if size < start {
+					size = start
+				}
+				expected := size - start
+				if len(content) > expected {
+					content = content[:expected]
+				}
+				return remoteLogChunk{
+					Content:   content,
+					Offset:    start + len(content),
+					Truncated: start != offset,
+				}
+			}
+		}
+	}
+	if offset > len(raw) {
+		offset = 0
+	}
+	return remoteLogChunk{
+		Content:   raw[offset:],
+		Offset:    len(raw),
+		Truncated: offset != originalOffset,
+	}
+}
+
+func remoteIncrementalLogReadScript(file string, offset int) string {
+	return fmt.Sprintf(`aged_log_file=%s
+aged_log_offset=%d
+if [ ! -f "$aged_log_file" ]; then
+  printf '%s 0 0\n'
+  exit 0
+fi
+aged_log_size=$(wc -c < "$aged_log_file" 2>/dev/null || printf 0)
+set -- $aged_log_size
+aged_log_size=${1:-0}
+case "$aged_log_size" in ''|*[!0-9]*) aged_log_size=0;; esac
+aged_log_start=$aged_log_offset
+if [ "$aged_log_size" -lt "$aged_log_start" ]; then
+  aged_log_start=0
+fi
+aged_log_count=$((aged_log_size - aged_log_start))
+printf '%s %%s %%s\n' "$aged_log_start" "$aged_log_size"
+if [ "$aged_log_count" -gt 0 ]; then
+  dd if="$aged_log_file" bs=1 skip="$aged_log_start" count="$aged_log_count" 2>/dev/null || true
+fi`, shellQuote(file), offset, remoteLogChunkHeader, remoteLogChunkHeader)
+}
+
+func emitRemoteLogChunk(ctx context.Context, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, stream string, content string, state *remoteLogPollState) error {
+	if content == "" {
+		updateRemoteLogPartialTerminalStatus(state)
+		return nil
+	}
+	content = state.Partial + content
+	lastNewline := strings.LastIndexByte(content, '\n')
+	if lastNewline < 0 {
+		state.Partial = content
+		updateRemoteLogPartialTerminalStatus(state)
+		return nil
+	}
+	complete := content[:lastNewline+1]
+	state.Partial = content[lastNewline+1:]
+	if err := worker.StreamReaderLines(ctx, stream, strings.NewReader(complete), func(line string) error {
 		if strings.TrimSpace(line) == "" {
 			return nil
 		}
+		updateRemoteLogInference(parser, stream, line, state)
 		return filter.EmitLine(ctx, sink, stream, line)
 	}, func(stream string, discarded int) error {
 		return sink.Event(ctx, worker.Event{
@@ -1224,7 +1407,46 @@ func emitNewRemoteLines(ctx context.Context, filter *worker.OutputFilter, sink w
 			Stream: stream,
 			Text:   fmt.Sprintf("discarded oversized JSON event line from remote %s log after %d bytes", stream, discarded),
 		})
-	})
+	}); err != nil {
+		return err
+	}
+	updateRemoteLogPartialTerminalStatus(state)
+	return nil
+}
+
+func updateRemoteLogPartialTerminalStatus(state *remoteLogPollState) {
+	if line := strings.TrimSpace(state.Partial); line != "" {
+		if status, ok := terminalRemoteStatusFromResultLog(line); ok {
+			state.Terminal = status
+			state.HasTerminal = true
+		}
+	}
+}
+
+func updateRemoteLogInference(parser worker.Parser, stream string, line string, state *remoteLogPollState) {
+	if stream == "stdout" {
+		if status, ok := terminalRemoteStatusFromResultLog(line); ok {
+			state.Terminal = status
+			state.HasTerminal = true
+		}
+	}
+	state.Inferred = inferredStatusFromLine(parser, stream, line, state.Inferred)
+	switch state.Inferred.Status {
+	case "succeeded", "failed":
+		state.HasInferred = true
+	}
+}
+
+func inferredStatusFromLine(parser worker.Parser, stream string, line string, fallback remoteStatus) remoteStatus {
+	event := parser.ParseLine(stream, strings.TrimSpace(line))
+	switch event.Kind {
+	case worker.EventResult:
+		return remoteStatus{Status: "succeeded", Exit: 0, InferredFromOutput: true}
+	case worker.EventError:
+		return remoteStatus{Status: "failed", Error: nonEmpty(event.Text, fallback.Error), InferredFromOutput: true}
+	default:
+		return fallback
+	}
 }
 
 func remoteStatusToWorkerStatus(status remoteStatus) (core.WorkerStatus, error) {
