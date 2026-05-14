@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1147,6 +1148,95 @@ func TestServiceUsesCompletionReviewBeforePublishingFinalCandidate(t *testing.T)
 	}
 	if baseBrain.states[1].RecoveryHint == "" {
 		t.Fatalf("missing recovery hint after rejected completion")
+	}
+}
+
+func TestServiceCompletionReadinessRecoveryAcceptsValidationWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &completionValidationBrain{}
+	publisher := &fakePullRequestPublisher{}
+	workspaces := &sequencingWorkspaceManager{
+		fakeWorkspaceManager: fakeWorkspaceManager{
+			cwd:        t.TempDir(),
+			sourceRoot: t.TempDir(),
+		},
+		changes: []WorkspaceChanges{
+			{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+			},
+			{},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change":   eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented cancellation fix"}}},
+		"validate": eventRunner{kind: "validate", events: []worker.Event{{Kind: worker.EventResult, Text: "validated existing candidate without changes"}}},
+	}, t.TempDir(), workspaces)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Harden task cancellation",
+		Prompt: "Fix cancellation and validate it.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1; events: %s", publisher.publishCalls, taskEventSummary(snapshot.Events, task.ID))
+	}
+	if len(brain.states) < 3 {
+		t.Fatalf("replan states = %d, want initial completion, validation, and completion", len(brain.states))
+	}
+	if got := brain.states[1].BlockedFinalCandidateIDs; len(got) != 1 || got[0] != publisher.publishedWorkers[0] {
+		t.Fatalf("blocked candidates during validation = %+v, published = %+v", got, publisher.publishedWorkers)
+	}
+	if task := snapshot.Tasks[0]; task.FinalCandidateWorkerID != publisher.publishedWorkers[0] {
+		t.Fatalf("final candidate = %q, published worker = %q", task.FinalCandidateWorkerID, publisher.publishedWorkers[0])
+	}
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("completion readiness recovery asked for approval instead of accepting validation")
+	}
+}
+
+func TestValidatesBlockedCandidateRequiresLineage(t *testing.T) {
+	results := []WorkerTurnResult{
+		{
+			WorkerID: "blocked-impl",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "internal/orchestrator/service.go", Status: "modified"}},
+			},
+		},
+		{
+			WorkerID: "unrelated-validation",
+			Status:   core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+		{
+			WorkerID:     "related-validation",
+			BaseWorkerID: "blocked-impl",
+			Status:       core.WorkerSucceeded,
+			Changes: WorkspaceChanges{
+				DiffStat: "0 files changed, 0 insertions(+), 0 deletions(-)",
+			},
+		},
+	}
+
+	if validatesBlockedCandidate(results, "unrelated-validation", "blocked-impl") {
+		t.Fatalf("unrelated no-change worker validated blocked candidate without lineage")
+	}
+	if !validatesBlockedCandidate(results, "related-validation", "blocked-impl") {
+		t.Fatalf("related no-change worker did not validate blocked candidate through BaseWorkerID lineage")
 	}
 }
 
@@ -5077,6 +5167,185 @@ func TestCancelTaskCancelsPersistedActiveWorkers(t *testing.T) {
 	}
 	if taskHasActiveWorkers(snapshot, taskID) {
 		t.Fatalf("taskHasActiveWorkers after cancel = true, want false")
+	}
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID == taskID && worker.Status != core.WorkerCanceled {
+			t.Fatalf("worker %s status = %q, want canceled", worker.ID, worker.Status)
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && node.Status != core.WorkerCanceled {
+			t.Fatalf("node %s status = %q, want canceled", node.ID, node.Status)
+		}
+	}
+	if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", status)
+	}
+}
+
+func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-restarted"
+	remoteWorkerID := "worker-recovered-remote"
+	persistedWorkerID := "worker-persisted-local"
+	remoteTarget := TargetConfig{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1},
+	}
+	targets := NewTargetRegistry([]TargetConfig{remoteTarget})
+	executor := &fakeRemoteExecutor{}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "run after restart",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Restarted task",
+			"prompt": "Was running before daemon restart",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range []struct {
+		workerID     string
+		nodeID       string
+		targetID     string
+		kind         string
+		workerEvents bool
+		payload      map[string]any
+	}{
+		{
+			workerID:     remoteWorkerID,
+			nodeID:       "node-recovered-remote",
+			targetID:     "vm-1",
+			kind:         "ssh",
+			workerEvents: true,
+			payload: map[string]any{
+				"remoteSession": "aged-recovered",
+				"remoteRunDir":  "/runs/aged-recovered",
+				"remoteWorkDir": "/repo",
+			},
+		},
+		{
+			workerID: persistedWorkerID,
+			nodeID:   "node-persisted-local",
+			targetID: "local",
+			kind:     "local",
+		},
+	} {
+		payload := map[string]any{
+			"nodeId":     spec.nodeID,
+			"workerId":   spec.workerID,
+			"workerKind": "codex",
+			"targetId":   spec.targetID,
+			"targetKind": spec.kind,
+		}
+		for key, value := range spec.payload {
+			payload[key] = value
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: spec.workerID,
+			Payload:  core.MustJSON(payload),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !spec.workerEvents {
+			continue
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: spec.workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, core.Event{
+			Type:     core.EventWorkerStarted,
+			TaskID:   taskID,
+			WorkerID: spec.workerID,
+			Payload:  core.MustJSON(map[string]any{}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	liveCancelCalled := false
+	service.cancels[remoteWorkerID] = func() {
+		liveCancelCalled = true
+	}
+	service.remoteRuns[remoteWorkerID] = remoteRun{
+		Target:   remoteTarget,
+		Session:  "aged-recovered",
+		RunDir:   "/runs/aged-recovered",
+		WorkDir:  "/repo",
+		TaskID:   taskID,
+		WorkerID: remoteWorkerID,
+		Status:   "running",
+	}
+	delete(service.tasks, remoteWorkerID)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !taskHasActiveWorkers(snapshot, taskID) {
+		t.Fatalf("taskHasActiveWorkers before cancel = false, want true")
+	}
+	workerIDs := activeTaskWorkerIDs(snapshot, taskID)
+	if !reflect.DeepEqual(workerIDs, []string{persistedWorkerID, remoteWorkerID}) {
+		t.Fatalf("activeTaskWorkerIDs before cancel = %+v, want persisted and remote worker IDs", workerIDs)
+	}
+	for _, worker := range snapshot.Workers {
+		if worker.ID == persistedWorkerID {
+			t.Fatalf("persisted worker unexpectedly has worker row before cancel: %+v", worker)
+		}
+	}
+
+	if err := service.CancelTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if !liveCancelCalled {
+		t.Fatalf("recovered remote worker cancel func was not called")
+	}
+	foundKill := false
+	for _, command := range executor.commands {
+		joined := strings.Join(command, " ")
+		if strings.Contains(joined, "kill-session") && strings.Contains(joined, "aged-recovered") {
+			foundKill = true
+			break
+		}
+	}
+	if !foundKill {
+		t.Fatalf("expected remote tmux kill command, got %+v", executor.commands)
+	}
+
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, worker := range snapshot.Workers {
 		if worker.TaskID == taskID && worker.Status != core.WorkerCanceled {
@@ -10012,6 +10281,48 @@ func (b *completionReviewBrain) ReviewCompletion(context.Context, core.Task, Wor
 	return review, nil
 }
 
+type completionValidationBrain struct {
+	states      []OrchestrationState
+	reviewCalls int
+}
+
+func (b *completionValidationBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return Plan{WorkerKind: "change", Prompt: "make change"}, nil
+}
+
+func (b *completionValidationBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	switch len(b.states) {
+	case 1:
+		return ReplanDecision{Action: "complete", Rationale: "initial implementation is ready"}, nil
+	case 2:
+		return ReplanDecision{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "validate",
+				Prompt:     "validate the existing candidate without making changes",
+			},
+			Rationale: "validate the blocked candidate",
+		}, nil
+	default:
+		latest := latestWorkerResult(state.Results)
+		return ReplanDecision{
+			Action:                 "complete",
+			FinalCandidateWorkerID: latest.WorkerID,
+			Rationale:              "validation worker confirmed the base candidate",
+			PullRequestBody:        "## Summary\n- Implement cancellation fix.\n\n## Validation\n- go test ./internal/orchestrator",
+		}, nil
+	}
+}
+
+func (b *completionValidationBrain) ReviewCompletion(context.Context, core.Task, WorkerTurnResult, string) (CompletionReview, error) {
+	b.reviewCalls++
+	if b.reviewCalls == 1 {
+		return CompletionReview{Ready: false, Reason: "candidate needs independent validation"}, nil
+	}
+	return CompletionReview{Ready: true}, nil
+}
+
 type publicationReviewBrain struct {
 	BrainProvider
 	ReplanProvider
@@ -10615,6 +10926,13 @@ type fakeWorkspaceManager struct {
 	failApplyUntil   int
 }
 
+type sequencingWorkspaceManager struct {
+	fakeWorkspaceManager
+	mu      sync.Mutex
+	changes []WorkspaceChanges
+	calls   int
+}
+
 type recordingWorkspaceManager struct {
 	workDir      string
 	baseWorkDir  string
@@ -10751,6 +11069,19 @@ func (m fakeWorkspaceManager) DescribeChanges(_ context.Context, workspace Prepa
 		changes.VCSType = workspace.VCSType
 	}
 	return changes, nil
+}
+
+func (m *sequencingWorkspaceManager) DescribeChanges(ctx context.Context, workspace PreparedWorkspace) (WorkspaceChanges, error) {
+	m.mu.Lock()
+	index := m.calls
+	m.calls++
+	m.mu.Unlock()
+	if index < len(m.changes) {
+		base := m.fakeWorkspaceManager
+		base.changes = m.changes[index]
+		return base.DescribeChanges(ctx, workspace)
+	}
+	return m.fakeWorkspaceManager.DescribeChanges(ctx, workspace)
 }
 
 func (m fakeWorkspaceManager) DescribeDiff(context.Context, PreparedWorkspace) (string, error) {
@@ -10949,6 +11280,20 @@ func latestEventOfType(events []core.Event, eventType core.EventType, taskID str
 		}
 	}
 	return core.Event{}
+}
+
+func taskEventSummary(events []core.Event, taskID string) string {
+	var parts []string
+	for _, event := range events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskAction, core.EventTaskReplanned, core.EventApprovalNeeded, core.EventTaskStatus, core.EventTaskCandidate:
+			parts = append(parts, fmt.Sprintf("%s:%s", event.Type, truncateStringForPrompt(string(event.Payload), 400)))
+		}
+	}
+	return strings.Join(parts, " | ")
 }
 
 func hasMilestone(milestones []core.TaskMilestone, name string) bool {

@@ -1159,6 +1159,27 @@ func taskCanceledByUserAfterLatestSteeringRestart(snapshot core.Snapshot, taskID
 	return latestRestart > 0 && latestUserCancel > latestRestart
 }
 
+func taskCanceledByUser(snapshot core.Snapshot, taskID string) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.Type != core.EventTaskStatus {
+			continue
+		}
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+			Reason string          `json:"reason,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Status == core.TaskCanceled {
+			return payload.Reason == taskCancelReasonUser
+		}
+		return false
+	}
+	return false
+}
+
 func latestStartupCanceledWorkerEvent(snapshot core.Snapshot, taskID string) int64 {
 	var latest int64
 	for _, event := range snapshot.Events {
@@ -1766,7 +1787,7 @@ func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID str
 		})
 		return
 	}
-	if task.Status == core.TaskSucceeded || taskCanceledByUserAfterLatestSteeringRestart(snapshot, taskID) {
+	if task.Status == core.TaskSucceeded || taskCanceledByUser(snapshot, taskID) || taskCanceledByUserAfterLatestSteeringRestart(snapshot, taskID) {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":   "steering_restart",
 			"status": "skipped",
@@ -1972,7 +1993,50 @@ func taskHasActiveWorkers(snapshot core.Snapshot, taskID string) bool {
 			return true
 		}
 	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && !isTerminalWorkerStatus(node.Status) {
+			return true
+		}
+	}
 	return false
+}
+
+func activeTaskWorkerIDs(snapshot core.Snapshot, taskID string) []string {
+	seen := map[string]bool{}
+	var workerIDs []string
+	add := func(workerID string) {
+		if workerID == "" || seen[workerID] {
+			return
+		}
+		seen[workerID] = true
+		workerIDs = append(workerIDs, workerID)
+	}
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.TaskID == taskID && !isTerminalWorkerStatus(activeWorker.Status) {
+			add(activeWorker.ID)
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && !isTerminalWorkerStatus(node.Status) {
+			add(node.WorkerID)
+		}
+	}
+	sort.Strings(workerIDs)
+	return workerIDs
+}
+
+func taskIDForWorker(snapshot core.Snapshot, workerID string) string {
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.ID == workerID && activeWorker.TaskID != "" {
+			return activeWorker.TaskID
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID == workerID && node.TaskID != "" {
+			return node.TaskID
+		}
+	}
+	return ""
 }
 
 func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
@@ -1990,6 +2054,11 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	s.mu.Unlock()
 	if cancel == nil {
 		return s.cancelPersistedWorker(ctx, workerID)
+	}
+	if strings.TrimSpace(taskID) == "" {
+		if snapshot, err := s.store.Snapshot(ctx); err == nil {
+			taskID = taskIDForWorker(snapshot, workerID)
+		}
 	}
 	if remote.Session != "" {
 		_ = s.sshRunner.Cancel(ctx, remote)
@@ -2077,6 +2146,25 @@ func (s *Service) cancelPersistedWorker(ctx context.Context, workerID string) er
 		}
 		return nil
 	}
+
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID != workerID || isTerminalWorkerStatus(node.Status) {
+			continue
+		}
+		if _, err := s.append(ctx, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   node.TaskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerCanceled,
+				"summary": "Worker was canceled from persisted execution node state.",
+				"error":   "worker did not have a live local cancellation handle",
+			}),
+		}); err != nil {
+			return err
+		}
+		return nil
+	}
 	return eventstore.ErrNotFound
 }
 
@@ -2131,11 +2219,11 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	for _, workerID := range workerIDs {
 		_ = s.CancelWorker(ctx, workerID)
 	}
-	for _, activeWorker := range snapshot.Workers {
-		if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) || canceledWorkers[activeWorker.ID] {
+	for _, workerID := range activeTaskWorkerIDs(snapshot, taskID) {
+		if canceledWorkers[workerID] {
 			continue
 		}
-		_ = s.CancelWorker(ctx, activeWorker.ID)
+		_ = s.CancelWorker(ctx, workerID)
 	}
 
 	_, err = s.append(ctx, core.Event{
@@ -4148,8 +4236,9 @@ func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, task
 	}
 	blockedFinalCandidates := map[string]string{candidateWorkerID: failureErr.Error()}
 	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
-		BlockedFinalCandidates: blockedFinalCandidates,
-		RecoveryHint:           fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
+		BlockedFinalCandidates:          blockedFinalCandidates,
+		AllowBlockedCandidateValidation: true,
+		RecoveryHint:                    fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate unless a successful validation worker confirms it. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
 	})
 	if !ok {
 		return finalCandidateRecoveryResult{Handled: true, Results: results}
@@ -5035,6 +5124,40 @@ func replanMadeProgress(before []WorkerTurnResult, after []WorkerTurnResult) boo
 	return false
 }
 
+func validatesBlockedCandidate(results []WorkerTurnResult, selectedWorkerID string, blockedWorkerID string) bool {
+	selectedWorkerID = strings.TrimSpace(selectedWorkerID)
+	blockedWorkerID = strings.TrimSpace(blockedWorkerID)
+	if selectedWorkerID == "" || blockedWorkerID == "" || selectedWorkerID == blockedWorkerID {
+		return false
+	}
+	byID := map[string]WorkerTurnResult{}
+	for _, result := range results {
+		byID[result.WorkerID] = result
+	}
+	selected, ok := byID[selectedWorkerID]
+	if !ok || selected.Status != core.WorkerSucceeded || resultHasCandidateChanges(selected) {
+		return false
+	}
+	seen := map[string]bool{selectedWorkerID: true}
+	current := selected
+	for strings.TrimSpace(current.BaseWorkerID) != "" {
+		parentID := current.BaseWorkerID
+		if seen[parentID] {
+			return false
+		}
+		seen[parentID] = true
+		if parentID == blockedWorkerID {
+			return true
+		}
+		parent, ok := byID[parentID]
+		if !ok {
+			return false
+		}
+		current = parent
+	}
+	return false
+}
+
 func sortedMapKeys(values map[string]string) []string {
 	if len(values) == 0 {
 		return nil
@@ -5102,12 +5225,13 @@ func taskCompletionModeFromTask(task core.Task) string {
 }
 
 type replanLoopOptions struct {
-	BlockedFinalCandidates         map[string]string
-	AllowBlockedBasePatchConflicts bool
-	RecoveryHint                   string
-	RequiredRepairWorkerID         string
-	RequiredRepairReason           string
-	FinalizationRecovery           bool
+	BlockedFinalCandidates          map[string]string
+	AllowBlockedBasePatchConflicts  bool
+	AllowBlockedCandidateValidation bool
+	RecoveryHint                    string
+	RequiredRepairWorkerID          string
+	RequiredRepairReason            string
+	FinalizationRecovery            bool
 }
 
 func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
@@ -5196,6 +5320,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if len(blockedFinalCandidates) > 0 {
 				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
 				if candidateErr != nil || candidateWorkerID == "" {
+					if options.AllowBlockedCandidateValidation {
+						for blockedWorkerID := range blockedFinalCandidates {
+							if validatesBlockedCandidate(results, decision.FinalCandidateWorkerID, blockedWorkerID) {
+								return true, blockedWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
+							}
+						}
+					}
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
@@ -5204,6 +5335,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 					continue
 				}
 				if reason := blockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
+					if options.AllowBlockedCandidateValidation && validatesBlockedCandidate(results, decision.FinalCandidateWorkerID, candidateWorkerID) {
+						return true, candidateWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
+					}
 					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "blocked final candidate "+candidateWorkerID+" already failed finalization: "+reason); err != nil {
 						_ = s.failTask(ctx, task.ID, err)
 						return false, "", "", results
