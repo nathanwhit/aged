@@ -402,6 +402,49 @@ func TestInspectPullRequestPopulatesStatusAliasesFromGitHubPayload(t *testing.T)
 	}
 }
 
+func TestInspectPullRequestRecordsFailingCheckContext(t *testing.T) {
+	publisher := LocalPullRequestPublisher{
+		exec: func(_ context.Context, _ string, name string, args ...string) (string, error) {
+			if name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+				return `{}`, nil
+			}
+			if name != "gh" || !containsSubsequence(args, []string{"pr", "view"}) {
+				t.Fatalf("unexpected command %s %v", name, args)
+			}
+			return `{"number":22,"url":"https://github.com/owner/repo/pull/22","state":"OPEN","title":"CI","isDraft":false,"headRefName":"feature","baseRefName":"main","mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","name":"unit","workflowName":"Go","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.com/owner/repo/actions/runs/1/job/2","output":{"title":"go test failed","summary":"TestFoo failed at internal/foo_test.go:42"}},{"__typename":"StatusContext","context":"lint","state":"SUCCESS","targetUrl":"https://example.test/lint"}],"reviewDecision":"APPROVED","comments":[]}`, nil
+		},
+	}
+
+	pr, err := publisher.Inspect(context.Background(), core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 22,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.ChecksStatus != "failing" || pr.ChecksConclusion != "failure" {
+		t.Fatalf("checks = status %q conclusion %q", pr.ChecksStatus, pr.ChecksConclusion)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringMetadataValue(metadata["latestFailingCheckName"]); got != "Go / unit" {
+		t.Fatalf("latest failing check name = %q", got)
+	}
+	if got := stringMetadataValue(metadata["latestFailingCheckConclusion"]); got != "FAILURE" {
+		t.Fatalf("latest failing check conclusion = %q", got)
+	}
+	if got := stringMetadataValue(metadata["latestFailingCheckURL"]); got != "https://github.com/owner/repo/actions/runs/1/job/2" {
+		t.Fatalf("latest failing check url = %q", got)
+	}
+	if got := stringMetadataValue(metadata["latestFailingCheckSummary"]); !strings.Contains(got, "internal/foo_test.go:42") {
+		t.Fatalf("latest failing check summary = %q", got)
+	}
+}
+
 func TestMaterializeGitPullRequestChangesIgnoresDirtySubmoduleOnlyStatus(t *testing.T) {
 	ctx := context.Background()
 	var calls [][]string

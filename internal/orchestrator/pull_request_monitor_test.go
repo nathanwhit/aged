@@ -73,6 +73,40 @@ func TestServiceDefaultPullRequestMonitorContinuesTasksForPRsNeedingAttention(t 
 	}
 }
 
+func TestServiceDefaultPullRequestMonitorSteersWithFailingCheckContext(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	metadata := core.MustJSON(map[string]any{
+		"latestFailingCheckName":       "Go / unit",
+		"latestFailingCheckStatus":     "COMPLETED",
+		"latestFailingCheckConclusion": "FAILURE",
+		"latestFailingCheckURL":        "https://github.com/owner/repo/actions/runs/1/job/2",
+		"latestFailingCheckSummary":    "TestFoo failed at internal/foo_test.go:42",
+	})
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatusWithMetadata("failing", "CLEAN", "APPROVED", metadata)}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventTaskSteered, "task-1")
+	steering := latestTaskSteering(snapshot, "task-1")
+	for _, want := range []string{
+		"Failing check context:",
+		"Go / unit (FAILURE)",
+		"https://github.com/owner/repo/actions/runs/1/job/2",
+		"internal/foo_test.go:42",
+	} {
+		if !strings.Contains(steering, want) {
+			t.Fatalf("steering prompt missing %q:\n%s", want, steering)
+		}
+	}
+}
+
 func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
