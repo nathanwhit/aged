@@ -513,6 +513,9 @@ func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents 
 			return core.Snapshot{}, err
 		}
 	}
+	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state); err != nil {
+		return core.Snapshot{}, err
+	}
 	var events []core.Event
 	if includeEvents {
 		events, err = s.eventsUpTo(ctx, lastEventID)
@@ -566,6 +569,12 @@ func updateSnapshotProjectionTx(ctx context.Context, tx *sql.Tx, event core.Even
 	if !ok || lastEventID != event.ID-1 {
 		_, _, err := rebuildSnapshotProjectionTx(ctx, tx)
 		return err
+	}
+	if event.Type == core.EventWorkerOutput {
+		if err := saveSnapshotWorkerOutput(ctx, tx, event); err != nil {
+			return err
+		}
+		return advanceSnapshotProjection(ctx, tx, event.ID)
 	}
 	if err := state.apply(event); err != nil {
 		return err
@@ -637,6 +646,69 @@ ON CONFLICT(id) DO UPDATE SET
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	return err
+}
+
+func advanceSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
+	_, err := q.ExecContext(ctx, `
+UPDATE snapshot_projection
+SET last_event_id = ?, updated_at = ?
+WHERE id = 1`,
+		lastEventID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func saveSnapshotWorkerOutput(ctx context.Context, q snapshotProjectionQuerier, event core.Event) error {
+	_, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_worker_outputs (worker_id, task_id, event_id, at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(worker_id) DO UPDATE SET
+	task_id = excluded.task_id,
+	event_id = excluded.event_id,
+	at = excluded.at
+WHERE excluded.event_id > snapshot_worker_outputs.event_id`,
+		event.WorkerID,
+		event.TaskID,
+		event.ID,
+		event.At.Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func applySnapshotWorkerOutputTimestamps(ctx context.Context, q snapshotProjectionQuerier, state *snapshotProjectionState) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT worker_id, at
+FROM snapshot_worker_outputs
+ORDER BY event_id ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var workerID string
+		var atRaw string
+		if err := rows.Scan(&workerID, &atRaw); err != nil {
+			return err
+		}
+		at, err := time.Parse(time.RFC3339Nano, atRaw)
+		if err != nil {
+			continue
+		}
+		worker := state.Workers[workerID]
+		if worker.ID != "" && !isTerminalWorkerStatus(worker.Status) && at.After(worker.UpdatedAt) {
+			worker.UpdatedAt = at
+			state.Workers[workerID] = worker
+		}
+		if nodeID := state.WorkerNodes[workerID]; nodeID != "" {
+			node := state.Nodes[nodeID]
+			if node.ID != "" && !isTerminalWorkerStatus(node.Status) && at.After(node.UpdatedAt) {
+				node.UpdatedAt = at
+				state.Nodes[nodeID] = node
+			}
+		}
+	}
+	return rows.Err()
 }
 
 func projectionInputEvents(ctx context.Context, q snapshotProjectionQuerier, afterID int64) ([]core.Event, error) {

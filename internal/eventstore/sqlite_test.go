@@ -416,6 +416,86 @@ func TestSnapshotProjectionMatchesReplayAndTracksNonProjectionEvents(t *testing.
 	assertSnapshotsEqual(t, projected, replayed)
 }
 
+func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	startedAt := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			At:     startedAt,
+			Type:   core.EventTaskCreated,
+			TaskID: "task-output-watermark",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Output watermark",
+				"prompt": "Avoid rewriting the snapshot blob for output events.",
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(time.Second),
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-output-watermark",
+			WorkerID: "worker-output-watermark",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-output-watermark",
+				"workerId":   "worker-output-watermark",
+				"workerKind": "codex",
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(2 * time.Second),
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-output-watermark",
+			WorkerID: "worker-output-watermark",
+			Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+		},
+		core.Event{
+			At:       startedAt.Add(3 * time.Second),
+			Type:     core.EventWorkerStarted,
+			TaskID:   "task-output-watermark",
+			WorkerID: "worker-output-watermark",
+			Payload:  core.MustJSON(map[string]any{}),
+		},
+	)
+
+	var stateBefore string
+	if err := store.db.QueryRowContext(ctx, `SELECT state FROM snapshot_projection WHERE id = 1`).Scan(&stateBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	outputAt := startedAt.Add(4 * time.Second)
+	appendSQLiteEvents(t, ctx, store, core.Event{
+		At:       outputAt,
+		Type:     core.EventWorkerOutput,
+		TaskID:   "task-output-watermark",
+		WorkerID: "worker-output-watermark",
+		Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 4096)}),
+	})
+
+	var lastEventID int64
+	var stateAfter string
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id, state FROM snapshot_projection WHERE id = 1`).Scan(&lastEventID, &stateAfter); err != nil {
+		t.Fatal(err)
+	}
+	if lastEventID != 5 {
+		t.Fatalf("last event id = %d, want 5", lastEventID)
+	}
+	if stateAfter != stateBefore {
+		t.Fatal("worker output rewrote snapshot projection state")
+	}
+
+	snapshot, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 || !snapshot.Workers[0].UpdatedAt.Equal(outputAt) {
+		t.Fatalf("worker updatedAt = %+v, want %s", snapshot.Workers, outputAt)
+	}
+	if len(snapshot.ExecutionNodes) != 1 || !snapshot.ExecutionNodes[0].UpdatedAt.Equal(outputAt) {
+		t.Fatalf("node updatedAt = %+v, want %s", snapshot.ExecutionNodes, outputAt)
+	}
+}
+
 func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)

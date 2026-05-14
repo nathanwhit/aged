@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"aged/internal/core"
@@ -16,7 +17,8 @@ import (
 )
 
 type SQLiteStore struct {
-	db *sql.DB
+	db      *sql.DB
+	appends atomic.Uint64
 }
 
 func isTerminalWorkerStatus(status core.WorkerStatus) bool {
@@ -52,6 +54,10 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 func (s *SQLiteStore) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA busy_timeout = 5000;
+PRAGMA wal_autocheckpoint = 256;
+PRAGMA journal_size_limit = 67108864;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS events (
@@ -71,6 +77,13 @@ CREATE TABLE IF NOT EXISTS snapshot_projection (
 	last_event_id INTEGER NOT NULL,
 	state TEXT NOT NULL,
 	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_worker_outputs (
+	worker_id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL DEFAULT '',
+	event_id INTEGER NOT NULL,
+	at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -454,6 +467,7 @@ VALUES (?, ?, ?, ?, ?)`,
 	if err := tx.Commit(); err != nil {
 		return core.Event{}, err
 	}
+	s.maybeCheckpointWAL()
 	return event, nil
 }
 
@@ -1724,7 +1738,29 @@ func projectIDFromMetadata(metadata json.RawMessage) string {
 }
 
 func (s *SQLiteStore) Close() error {
+	_ = s.checkpointWAL(context.Background())
 	return s.db.Close()
+}
+
+func (s *SQLiteStore) maybeCheckpointWAL() {
+	if s.appends.Add(1)%500 != 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.checkpointWAL(ctx)
+}
+
+func (s *SQLiteStore) checkpointWAL(ctx context.Context) error {
+	row := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	var busy, logFrames, checkpointedFrames int
+	if err := row.Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint busy: log=%d checkpointed=%d", logFrames, checkpointedFrames)
+	}
+	return nil
 }
 
 type eventScanner interface {
