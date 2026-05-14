@@ -232,6 +232,37 @@ func TestCommandRunnerSummarizesClaudeToolEvents(t *testing.T) {
 	}
 }
 
+func TestCommandRunnerPreservesClaudeMultiContentLongTaskStream(t *testing.T) {
+	runner := NewCommandRunner("claude", func(spec Spec) []string {
+		return spec.Command
+	})
+	sink := &recordingSink{}
+
+	err := runner.Run(context.Background(), Spec{
+		Command: []string{"/bin/sh", "-c", "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"session-long\"}' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"checking\"},{\"type\":\"text\",\"text\":\"first result line\\n\"},{\"type\":\"text\",\"text\":\"second result line\"}]}}' '{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"done\",\"is_error\":false}]},\"tool_use_result\":{\"stdout\":\"tests still running\",\"stderr\":\"\",\"is_error\":false}}' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"final summary\"}'"},
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sink.has(EventLog, "stdout", "Claude init") {
+		t.Fatalf("missing claude init log event: %+v", sink.events)
+	}
+	if !sink.has(EventLog, "stdout", "first result line\nsecond result line") {
+		t.Fatalf("missing combined claude assistant text event: %+v", sink.events)
+	}
+	if !sink.has(EventLog, "stdout", "tests still running") {
+		t.Fatalf("missing claude tool progress event: %+v", sink.events)
+	}
+	if !sink.has(EventResult, "stdout", "final summary") {
+		t.Fatalf("missing claude final result event: %+v", sink.events)
+	}
+	for _, event := range sink.events {
+		if event.Kind == EventError {
+			t.Fatalf("successful claude stream produced error event: %+v", sink.events)
+		}
+	}
+}
+
 func TestSteerableCommandRunnerForwardsSteeringToStdin(t *testing.T) {
 	runner := NewSteerableCommandRunner("codex", func(spec Spec) []string {
 		return spec.Command
