@@ -258,7 +258,7 @@ func (s *Service) waitDurableLoopInterval(ctx context.Context, taskID string, in
 func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, config durableLoopConfig, iteration int, previousWorkerID string) (WorkerTurnResult, error) {
 	plan := Plan{
 		WorkerKind:      config.WorkerKind,
-		Prompt:          durableLoopPrompt(task, config, iteration),
+		Prompt:          durableLoopPrompt(task, config, iteration, s.taskContextLedger(ctx, task.ID)),
 		ReasoningEffort: config.Reasoning,
 		Rationale:       "durable loop iteration",
 		Metadata: map[string]any{
@@ -290,7 +290,7 @@ func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, c
 	return s.runPlannedWorker(ctx, task, plan)
 }
 
-func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int) string {
+func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int, ledger []ContextLedgerEntry) string {
 	var builder strings.Builder
 	builder.WriteString("# Durable Agent Loop\n\n")
 	builder.WriteString("You are running iteration ")
@@ -299,6 +299,9 @@ func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int) 
 	builder.WriteString("Role: ")
 	builder.WriteString(config.Role)
 	builder.WriteString("\n\n")
+	if rendered := renderContextLedgerForWorkerPrompt(ledger); rendered != "" {
+		builder.WriteString(rendered)
+	}
 	builder.WriteString("# Task Objective\n\n")
 	builder.WriteString(strings.TrimSpace(config.Prompt))
 	return builder.String()

@@ -3361,7 +3361,7 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	runner := &sequenceEventRunner{
 		kind: "loop",
 		events: [][]worker.Event{
-			{{Kind: worker.EventResult, Text: "loop iteration done"}},
+			{{Kind: worker.EventResult, Text: "LEDGER_FACT: loop learned the repo uses generated fixtures"}},
 			{{Kind: worker.EventNeedsInput, Text: "need user input"}},
 		},
 	}
@@ -3397,6 +3397,9 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	}
 	if strings.Contains(runner.promptValue(), "previously failed or canceled") {
 		t.Fatalf("runner prompt used retry wording for loop continuation:\n%s", runner.promptValue())
+	}
+	if !strings.Contains(runner.promptValue(), "# Context Ledger") || !strings.Contains(runner.promptValue(), "generated fixtures") {
+		t.Fatalf("runner prompt missing durable context ledger:\n%s", runner.promptValue())
 	}
 	if !hasTaskAction(snapshot.Events, task.ID, "durable_loop", "waiting_for_input") {
 		t.Fatalf("missing durable loop waiting action")
@@ -5855,6 +5858,9 @@ func TestServiceAutonomouslyContinuesWhenReplannerAnswersWorkerQuestion(t *testi
 	if !hasWorkerCreated(snapshot.Events, task.ID, "answer") {
 		t.Fatalf("missing continuation worker")
 	}
+	if len(brain.states) == 0 || !ledgerContainsSummary(brain.states[0].ContextLedger, "Which dependency should I use?") {
+		t.Fatalf("worker-question replan state missing context ledger: %+v", brain.states)
+	}
 }
 
 func TestServiceAutonomousQuestionContinuationRunsPlannedFollowUps(t *testing.T) {
@@ -7379,6 +7385,9 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 	if len(brain.states[0].Results) != 2 {
 		t.Fatalf("first replan results = %d, want 2", len(brain.states[0].Results))
+	}
+	if !ledgerContainsWorker(brain.states[0].ContextLedger, brain.states[0].Results[0].WorkerID) {
+		t.Fatalf("first replan state missing projected context ledger: %+v", brain.states[0].ContextLedger)
 	}
 	if len(brain.states[1].Results) != 3 {
 		t.Fatalf("second replan results = %d, want 3", len(brain.states[1].Results))
