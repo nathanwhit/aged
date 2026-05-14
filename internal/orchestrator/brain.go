@@ -107,6 +107,7 @@ type ContextLedgerEntry struct {
 	Status       string                 `json:"status,omitempty"`
 	Summary      string                 `json:"summary,omitempty"`
 	Error        string                 `json:"error,omitempty"`
+	Checkpoint   *WorkerCheckpoint      `json:"checkpoint,omitempty"`
 	ChangedFiles []WorkspaceChangedFile `json:"changedFiles,omitempty"`
 	Metadata     map[string]any         `json:"metadata,omitempty"`
 }

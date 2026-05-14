@@ -143,6 +143,8 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 		b.WriteString(helper)
 		b.WriteString(" --title \"Short PR title\"`. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
 	}
+	b.WriteString("# Worker Checkpoint\n\n")
+	b.WriteString("When useful for later workers, include one compact machine-readable checkpoint in your final answer as JSON under `checkpoint` with any of: `currentHypothesis`, `touchedSubsystems`, `commandsRun`, `pendingChecks`, `risks`, `recommendedNextWorkerPrompts`. Keep it concise; aged will preserve it separately from the human summary.\n\n")
 	b.WriteString("# Worker Task\n\n")
 	b.WriteString(strings.TrimSpace(prompt))
 	return b.String()
@@ -300,6 +302,7 @@ type WorkerTurnResult struct {
 	BaseWorkerID string            `json:"baseWorkerId,omitempty"`
 	Summary      string            `json:"summary,omitempty"`
 	Error        string            `json:"error,omitempty"`
+	Checkpoint   *WorkerCheckpoint `json:"checkpoint,omitempty"`
 	Changes      WorkspaceChanges  `json:"changes"`
 }
 
@@ -6224,6 +6227,10 @@ func buildInitialWorkerPrompt(prompt string, results []WorkerTurnResult, depends
 			builder.WriteString("\n  Error: ")
 			builder.WriteString(result.Error)
 		}
+		if rendered := renderWorkerCheckpointForPrompt(result.Checkpoint); rendered != "" {
+			builder.WriteString("\n  Checkpoint:\n")
+			builder.WriteString(rendered)
+		}
 		if len(result.Changes.ChangedFiles) > 0 {
 			builder.WriteString("\n  Changed files:")
 			for _, file := range result.Changes.ChangedFiles {
@@ -6499,6 +6506,10 @@ func buildFollowUpPrompt(task core.Task, spawn SpawnRequest, results []WorkerTur
 			builder.WriteString("Error: ")
 			builder.WriteString(result.Error)
 			builder.WriteString("\n")
+		}
+		if rendered := renderWorkerCheckpointForPrompt(result.Checkpoint); rendered != "" {
+			builder.WriteString("Checkpoint:\n")
+			builder.WriteString(rendered)
 		}
 		if len(result.Changes.ChangedFiles) > 0 {
 			builder.WriteString("Changed files:\n")
@@ -7164,6 +7175,7 @@ func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []Work
 				Status           core.WorkerStatus `json:"status"`
 				Summary          string            `json:"summary"`
 				Error            string            `json:"error"`
+				Checkpoint       *WorkerCheckpoint `json:"checkpoint"`
 				WorkspaceChanges WorkspaceChanges  `json:"workspaceChanges"`
 			}
 			if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -7171,12 +7183,13 @@ func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []Work
 			}
 			metadata := workerMetadata[event.WorkerID]
 			result := WorkerTurnResult{
-				WorkerID: event.WorkerID,
-				Status:   payload.Status,
-				Kind:     stringMetadata(metadata, "workerKind"),
-				Summary:  payload.Summary,
-				Error:    payload.Error,
-				Changes:  payload.WorkspaceChanges,
+				WorkerID:   event.WorkerID,
+				Status:     payload.Status,
+				Kind:       stringMetadata(metadata, "workerKind"),
+				Summary:    payload.Summary,
+				Error:      payload.Error,
+				Checkpoint: compactOptionalWorkerCheckpoint(payload.Checkpoint),
+				Changes:    payload.WorkspaceChanges,
 			}
 			result.NodeID = stringMetadata(metadata, "nodeID")
 			result.Role = stringMetadata(metadata, "spawnRole")
@@ -7727,6 +7740,15 @@ func (s *Service) recordWorkerArtifacts(ctx context.Context, taskID string, work
 			return err
 		}
 	}
+	if checkpoint := state.checkpointSnapshot(); checkpoint != nil {
+		if err := s.recordTaskArtifact(ctx, taskID, workerID+"-checkpoint", "worker_checkpoint", "Worker checkpoint", "", "", map[string]any{
+			"workerId":   workerID,
+			"workerKind": workerKind,
+			"checkpoint": *checkpoint,
+		}); err != nil {
+			return err
+		}
+	}
 	summary := state.summaryText()
 	if strings.TrimSpace(summary) == "" {
 		return nil
@@ -8088,6 +8110,7 @@ type workerRunState struct {
 	lastError  string
 	needsInput bool
 	rawResult  []byte
+	checkpoint *WorkerCheckpoint
 }
 
 func (s *workerRunState) observe(event worker.Event) {
@@ -8099,6 +8122,9 @@ func (s *workerRunState) observe(event worker.Event) {
 		s.summary = event.Text
 		if len(event.Raw) > 0 {
 			s.rawResult = append(s.rawResult[:0], event.Raw...)
+		}
+		if checkpoint, ok := parseWorkerCheckpointText(event.Text); ok {
+			s.checkpoint = &checkpoint
 		}
 	case worker.EventError:
 		s.lastError = event.Text
@@ -8122,6 +8148,16 @@ func (s *workerRunState) summaryText() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.summary
+}
+
+func (s *workerRunState) checkpointSnapshot() *WorkerCheckpoint {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checkpoint == nil || s.checkpoint.empty() {
+		return nil
+	}
+	checkpoint := compactWorkerCheckpoint(*s.checkpoint)
+	return &checkpoint
 }
 
 func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr error, changes WorkspaceChanges) map[string]any {
@@ -8148,6 +8184,9 @@ func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr erro
 	if len(s.rawResult) > 0 {
 		payload["rawResult"] = core.MustJSON(jsonRawMessage(s.rawResult))
 	}
+	if s.checkpoint != nil && !s.checkpoint.empty() {
+		payload["checkpoint"] = compactWorkerCheckpoint(*s.checkpoint)
+	}
 	return payload
 }
 
@@ -8161,6 +8200,10 @@ func (s *workerRunState) turnResult(workerID string, plan Plan, status core.Work
 		Kind:     plan.WorkerKind,
 		Summary:  s.summary,
 		Changes:  changes,
+	}
+	if s.checkpoint != nil && !s.checkpoint.empty() {
+		checkpoint := compactWorkerCheckpoint(*s.checkpoint)
+		result.Checkpoint = &checkpoint
 	}
 	if plan.Metadata != nil {
 		if nodeID, ok := plan.Metadata["nodeID"].(string); ok {

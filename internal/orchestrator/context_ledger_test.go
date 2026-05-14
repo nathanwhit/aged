@@ -118,6 +118,66 @@ func TestProjectTaskContextLedgerKeepsOldHighValueFactAcrossManyChangedResults(t
 	}
 }
 
+func TestProjectTaskContextLedgerKeepsWorkerCheckpointAndBoundsIt(t *testing.T) {
+	events := []core.Event{
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-1",
+			WorkerID: "checkpoint-worker",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+				"metadata": map[string]any{
+					"spawnRole": "investigator",
+				},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   "task-1",
+			WorkerID: "checkpoint-worker",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "routine completion without changed files",
+				"checkpoint": WorkerCheckpoint{
+					CurrentHypothesis: "checkpoint projection should survive routine summaries",
+					CommandsRun:       []string{"go test ./internal/orchestrator -run TestProjectTaskContextLedger"},
+					PendingChecks:     []string{"verify prompt render"},
+				},
+			}),
+		},
+	}
+	for index := 0; index < maxContextLedgerEntries*2; index++ {
+		events = append(events, core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   "task-1",
+			WorkerID: fmt.Sprintf("routine-worker-%02d", index),
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": fmt.Sprintf("routine result %02d", index),
+			}),
+		})
+	}
+
+	ledger := projectTaskContextLedger(events, "task-1")
+	if len(ledger) > maxContextLedgerEntries {
+		t.Fatalf("ledger entries = %d, want bounded to %d", len(ledger), maxContextLedgerEntries)
+	}
+	var checkpointEntry ContextLedgerEntry
+	for _, entry := range ledger {
+		if entry.WorkerID == "checkpoint-worker" {
+			checkpointEntry = entry
+			break
+		}
+	}
+	if checkpointEntry.Kind != "worker_checkpoint" || checkpointEntry.Checkpoint == nil {
+		t.Fatalf("missing checkpoint ledger entry: %+v", ledger)
+	}
+	rendered := renderContextLedgerForWorkerPrompt(ledger)
+	if !strings.Contains(rendered, "checkpoint projection should survive routine summaries") || !strings.Contains(rendered, "Commands run") {
+		t.Fatalf("rendered ledger missing checkpoint view:\n%s", rendered)
+	}
+}
+
 func ledgerContainsSummary(entries []ContextLedgerEntry, needle string) bool {
 	for _, entry := range entries {
 		if strings.Contains(entry.Summary, needle) {
