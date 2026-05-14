@@ -259,6 +259,33 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 	}
 }
 
+func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
+	plan, err := decodeCodexPlan([]byte(`{
+		"rationale": "Split independent work up front.",
+		"reasoningEffort": "medium",
+		"steps": [{"title": "Audit", "description": "Run parallel audits."}],
+		"requiredApprovals": [],
+		"actions": [],
+		"workers": [
+			{"id": "api", "role": "auditor", "reason": "Inspect API paths.", "workerKind": "claude", "workerPrompt": "Inspect the API paths.", "reasoningEffort": "low", "dependsOn": []},
+			{"id": "ui", "role": "auditor", "reason": "Inspect UI paths.", "workerKind": "codex", "workerPrompt": "Inspect the UI paths.", "reasoningEffort": "low", "dependsOn": []}
+		],
+		"spawns": []
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Workers) != 2 {
+		t.Fatalf("workers = %+v", plan.Workers)
+	}
+	if plan.Workers[0].ID != "api" || plan.Workers[0].Prompt != "Inspect the API paths." {
+		t.Fatalf("first worker = %+v", plan.Workers[0])
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecodeReplanDecisionContinue(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "continue",

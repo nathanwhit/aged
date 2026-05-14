@@ -7219,6 +7219,138 @@ func TestServiceRunsIndependentSpawnedWorkersInParallel(t *testing.T) {
 	}
 }
 
+func TestServiceRunsInitialWorkersInParallel(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "independent initial investigation can run in parallel",
+		Workers: []WorkerRequest{
+			{
+				ID:              "audit",
+				Role:            "auditor",
+				Reason:          "Inspect one side of the task.",
+				WorkerKind:      "left",
+				Prompt:          "Audit the left side.",
+				ReasoningEffort: "low",
+			},
+			{
+				ID:              "test",
+				Role:            "tester",
+				Reason:          "Inspect another side of the task.",
+				WorkerKind:      "right",
+				Prompt:          "Audit the right side.",
+				ReasoningEffort: "low",
+			},
+		},
+	}}, map[string]worker.Runner{
+		"left":  &blockingEventRunner{kind: "left", started: started, release: release, summary: "left done"},
+		"right": &blockingEventRunner{kind: "right", started: started, release: release, summary: "right done"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Parallel initial work",
+		Prompt: "Run independent audits in parallel.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]bool{}
+	deadline := time.After(500 * time.Millisecond)
+	for len(got) < 2 {
+		select {
+		case kind := <-started:
+			got[kind] = true
+		case <-deadline:
+			t.Fatalf("initial workers did not start in parallel; started = %+v", got)
+		}
+	}
+	close(release)
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "left") || !hasWorkerCreated(snapshot.Events, task.ID, "right") {
+		t.Fatalf("missing initial workers")
+	}
+	if countEvents(snapshot.Events, core.EventTaskPlanned, task.ID) != 1 {
+		t.Fatalf("task.planned count = %d, want 1", countEvents(snapshot.Events, core.EventTaskPlanned, task.ID))
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.SpawnID != "audit" && node.SpawnID != "test" {
+			t.Fatalf("unexpected initial worker node spawn id: %+v", node)
+		}
+	}
+}
+
+func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	firstStarted := make(chan string, 1)
+	secondStarted := make(chan string, 1)
+	firstRelease := make(chan struct{})
+	secondRelease := make(chan struct{})
+	second := &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "second done"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "initial worker graph has a dependency",
+		Workers: []WorkerRequest{
+			{
+				ID:         "inspect",
+				Role:       "inspector",
+				Reason:     "Inspect the current implementation.",
+				WorkerKind: "first",
+				Prompt:     "Inspect first.",
+			},
+			{
+				ID:         "repair",
+				Role:       "implementer",
+				Reason:     "Repair issues found by inspection.",
+				WorkerKind: "second",
+				Prompt:     "Repair after inspection.",
+				DependsOn:  []string{"inspect"},
+			},
+		},
+	}}, map[string]worker.Runner{
+		"first":  &blockingEventRunner{kind: "first", started: firstStarted, release: firstRelease, summary: "inspection summary"},
+		"second": second,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent initial graph",
+		Prompt: "Inspect, then repair.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first initial worker did not start")
+	}
+	select {
+	case <-secondStarted:
+		t.Fatal("dependent initial worker started before dependency completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(firstRelease)
+	select {
+	case <-secondStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dependent initial worker did not start after dependency completed")
+	}
+	close(secondRelease)
+
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !strings.Contains(second.promptValue(), "inspection summary") {
+		t.Fatalf("dependent prompt missing dependency summary:\n%s", second.promptValue())
+	}
+}
+
 func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
