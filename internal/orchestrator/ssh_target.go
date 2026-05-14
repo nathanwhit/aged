@@ -1067,8 +1067,7 @@ if [ -d "$work_dir/.git" ]; then
 elif [ -d "$work_dir/.jj" ] && [ ! -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(jj diff --stat)" ]; then
-    echo "remote jj checkout is dirty: $work_dir"
-    exit 20
+    echo "remote jj checkout is dirty; preserving current checkout: $work_dir"
   fi
   jj git fetch || true
   echo "prepared jj checkout $work_dir"

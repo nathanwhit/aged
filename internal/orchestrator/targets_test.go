@@ -957,13 +957,9 @@ func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 			t.Fatalf("prepare command missing %q:\n%s", want, joined)
 		}
 	}
-	gitBranch := joined
-	if idx := strings.Index(gitBranch, `elif [ -d "$work_dir/.jj" ]`); idx >= 0 {
-		gitBranch = gitBranch[:idx]
-	}
 	for _, blocked := range []string{"remote checkout is dirty", "exit 20", `[ -z "${dirty:-}" ]`} {
-		if strings.Contains(gitBranch, blocked) {
-			t.Fatalf("git branch of prepare command still rejects dirty checkout with %q:\n%s", blocked, gitBranch)
+		if strings.Contains(joined, blocked) {
+			t.Fatalf("prepare command still rejects dirty checkout with %q:\n%s", blocked, joined)
 		}
 	}
 }
