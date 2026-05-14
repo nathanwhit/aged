@@ -468,6 +468,68 @@ func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 	}
 }
 
+func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
+	tests := []struct {
+		path      string
+		required  []string
+		forbidden []string
+	}{
+		{
+			path: "../../prompts/default/system.md",
+			required: []string{
+				`"workers": [`,
+				"Use `workers` for initial execution",
+				"Root workers with empty `dependsOn` can run in parallel immediately",
+				"Workers with dependencies wait until all dependency worker ids finish",
+				"legacy compatibility fallback fields only when `workers` is absent",
+				"Never return arrays of strings for `steps`, `requiredApprovals`, `workers`, or `spawns`",
+			},
+			forbidden: []string{
+				"Choose the worker and shape the initial execution plan",
+				"one primary worker establish",
+				"Spawns with no `dependsOn` can run in parallel after the initial worker succeeds",
+				"Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`",
+			},
+		},
+		{
+			path: "../../prompts/default/replan.md",
+			required: []string{
+				`"workers": [`,
+				`"dependsOn": []`,
+				`"dependsOn": ["inspect"]`,
+				`same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns`,
+				`Root workers with empty dependsOn can run in parallel immediately`,
+				`legacy compatibility fallback fields only when workers is absent`,
+				`"steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects`,
+			},
+			forbidden: []string{
+				`same exact schema as the scheduler plan: workerKind, workerPrompt`,
+				`Use workerId "" to mean the latest successful candidate worker`,
+				`"steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(filepath.Base(tt.path), func(t *testing.T) {
+			data, err := os.ReadFile(tt.path)
+			if err != nil {
+				t.Fatalf("read %s: %v", tt.path, err)
+			}
+			body := string(data)
+			for _, want := range tt.required {
+				if !strings.Contains(body, want) {
+					t.Fatalf("%s missing required text %q", tt.path, want)
+				}
+			}
+			for _, stale := range tt.forbidden {
+				if strings.Contains(body, stale) {
+					t.Fatalf("%s still contains stale text %q", tt.path, stale)
+				}
+			}
+		})
+	}
+}
+
 func TestDecodeCodexPlanExtractsObjectFromProse(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`Here is the plan:
 	{
