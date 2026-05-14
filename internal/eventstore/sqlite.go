@@ -522,6 +522,33 @@ ORDER BY id ASC`, taskID, limit, taskID)
 	return scanEvents(rows)
 }
 
+func (s *SQLiteStore) ListTaskLedgerEvents(ctx context.Context, taskID string) ([]core.Event, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, errors.New("task id is required")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE task_id = ?
+	AND type IN (
+		'execution.node_planned',
+		'worker.created',
+		'worker.completed',
+		'approval.needed',
+		'approval.decided',
+		'task.action_executed',
+		'task.milestone_reached',
+		'task.replanned'
+	)
+ORDER BY id ASC`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 	var events []core.Event
 	for rows.Next() {

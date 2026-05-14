@@ -14,6 +14,9 @@ const (
 	maxContextLedgerEntries      = 24
 	maxContextLedgerTextBytes    = 900
 	maxContextLedgerChangedFiles = 12
+	contextLedgerScoreHighValue  = 120
+	contextLedgerScoreCandidate  = 100
+	contextLedgerScoreTerminal   = 92
 )
 
 type projectedLedgerEntry struct {
@@ -31,11 +34,11 @@ type contextLedgerWorkerInfo struct {
 }
 
 func (s *Service) taskContextLedger(ctx context.Context, taskID string) []ContextLedgerEntry {
-	snapshot, err := s.store.Snapshot(ctx)
+	events, err := s.store.ListTaskLedgerEvents(ctx, taskID)
 	if err != nil {
 		return nil
 	}
-	return projectTaskContextLedger(snapshot.Events, taskID)
+	return projectTaskContextLedger(events, taskID)
 }
 
 func projectTaskContextLedger(events []core.Event, taskID string) []ContextLedgerEntry {
@@ -84,11 +87,11 @@ func projectTaskContextLedger(events []core.Event, taskID string) []ContextLedge
 			}
 		case core.EventApprovalNeeded:
 			if ledgerEntry, ok := contextLedgerApprovalNeeded(event); ok {
-				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: 95, order: index})
+				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: contextLedgerScoreHighValue, order: index})
 			}
 		case core.EventApprovalDecided:
 			if ledgerEntry, ok := contextLedgerApprovalDecided(event); ok {
-				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: 90, order: index})
+				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: contextLedgerScoreHighValue, order: index})
 			}
 		case core.EventTaskAction:
 			if ledgerEntry, score, ok := contextLedgerTaskAction(event); ok {
@@ -96,7 +99,7 @@ func projectTaskContextLedger(events []core.Event, taskID string) []ContextLedge
 			}
 		case core.EventTaskMilestone:
 			if ledgerEntry, ok := contextLedgerTaskMilestone(event); ok {
-				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: 85, order: index})
+				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: contextLedgerScoreHighValue, order: index})
 			}
 		case core.EventTaskReplanned:
 			if ledgerEntry, score, ok := contextLedgerTaskReplanned(event); ok {
@@ -146,17 +149,22 @@ func contextLedgerWorkerCompletion(event core.Event, info contextLedgerWorkerInf
 		changes.ChangedFiles = changedFiles
 	}
 	result := WorkerTurnResult{Status: payload.Status, Summary: payload.Summary, Error: payload.Error, Changes: changes}
+	candidateChanges := resultHasCandidateChanges(result)
 	score := 0
 	kind := "worker_result"
+	highValue := highValueLedgerText(payload.Summary) || highValueLedgerText(payload.Error)
 	switch {
-	case resultHasCandidateChanges(result):
-		score = 100
+	case highValue:
+		score = contextLedgerScoreHighValue
+		if candidateChanges {
+			kind = "candidate_result"
+		}
+	case candidateChanges:
+		score = contextLedgerScoreCandidate
 		kind = "candidate_result"
 	case payload.Status == core.WorkerFailed || payload.Status == core.WorkerCanceled || payload.Status == core.WorkerWaiting:
-		score = 92
+		score = contextLedgerScoreTerminal
 		kind = "worker_terminal_state"
-	case highValueLedgerText(payload.Summary) || highValueLedgerText(payload.Error):
-		score = 82
 	default:
 		return ContextLedgerEntry{}, 0, false
 	}
@@ -238,8 +246,8 @@ func contextLedgerTaskAction(event core.Event) (ContextLedgerEntry, int, bool) {
 		return ContextLedgerEntry{}, 0, false
 	}
 	score := 84
-	if payload.Status == "rejected" || payload.Status == "failed" {
-		score = 90
+	if highValueLedgerText(text) || payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" {
+		score = contextLedgerScoreHighValue
 	}
 	return ContextLedgerEntry{
 		Kind:        nonEmpty(payload.Kind, "task_action"),
@@ -285,8 +293,8 @@ func contextLedgerTaskReplanned(event core.Event) (ContextLedgerEntry, int, bool
 		return ContextLedgerEntry{}, 0, false
 	}
 	score := 80
-	if payload.Fallback || action == "wait" || action == "fail" {
-		score = 88
+	if payload.Fallback || action == "wait" || action == "fail" || highValueLedgerText(text) {
+		score = contextLedgerScoreHighValue
 	}
 	return ContextLedgerEntry{
 		Kind:        "replan_decision",
