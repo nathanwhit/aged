@@ -496,6 +496,7 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		PullRequestBody        string          `json:"pullRequestBody,omitempty"`
 		Rationale              string          `json:"rationale,omitempty"`
 		Message                string          `json:"message,omitempty"`
+		WorkPlan               *core.WorkPlan  `json:"workPlan,omitempty"`
 		Metadata               map[string]any  `json:"metadata,omitempty"`
 	}
 	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
@@ -507,6 +508,7 @@ func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 		PullRequestBody:        raw.PullRequestBody,
 		Rationale:              raw.Rationale,
 		Message:                raw.Message,
+		WorkPlan:               raw.WorkPlan,
 		Metadata:               raw.Metadata,
 	}
 	if len(raw.Plan) > 0 && string(raw.Plan) != "null" {
@@ -557,6 +559,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Prompt            string          `json:"workerPrompt"`
 		ReasoningEffort   string          `json:"reasoningEffort,omitempty"`
 		Rationale         string          `json:"rationale,omitempty"`
+		WorkPlan          *core.WorkPlan  `json:"workPlan,omitempty"`
 		Steps             json.RawMessage `json:"steps,omitempty"`
 		RequiredApprovals json.RawMessage `json:"requiredApprovals,omitempty"`
 		Actions           json.RawMessage `json:"actions,omitempty"`
@@ -592,6 +595,7 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 		Prompt:            raw.Prompt,
 		ReasoningEffort:   raw.ReasoningEffort,
 		Rationale:         raw.Rationale,
+		WorkPlan:          raw.WorkPlan,
 		Steps:             steps,
 		RequiredApprovals: approvals,
 		Actions:           actions,
@@ -893,6 +897,7 @@ The JSON object must have exactly these top-level fields:
   "pullRequestBody": "string",
   "rationale": "string",
   "message": "string",
+  "workPlan": null,
   "plan": null
 }
 
@@ -908,7 +913,10 @@ Field rules:
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
-- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns.
+- Use "workPlan" for the durable engineering decomposition of the whole objective. Set it to null when the existing work plan is still accurate. Include a full updated work plan when worker results change progress, split the task differently, reveal a blocker, finish a stream, add validation work, or change risks. The updated work plan should include summary, workstreams, validation, and risks.
+- "workPlan" item statuses should usually be "pending", "running", "blocked", "done", or "dropped". Keep ids stable across turns when they still refer to the same workstream.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workers, spawns.
+- The top-level "workPlan" is the durable task update. The continue plan's "workPlan" exists because continue plans use the scheduler schema; it should match the top-level "workPlan" when you are changing the durable plan for the next turn. If the current durable plan remains accurate, include the current work plan in plan.workPlan and set top-level "workPlan" to null.
 - The continue plan must use workers for initial execution. Each workers[] object must include id, role, reason, workerKind, workerPrompt, reasoningEffort, and dependsOn. Root workers with empty dependsOn can run in parallel immediately. Workers with dependencies wait until all dependency worker ids finish.
 - The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact, then wait for GitHub state. A publish_pull_request action must include inputs.body with the PR description to publish; do not rely on aged to generate one. Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use action kind "update_pull_request" when the latest candidate worker should update an existing PR branch or PR metadata before returning to monitoring. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
 - Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the latest successful candidate worker. Use inputs {} when no extra inputs are needed for non-publish actions.
@@ -1006,6 +1014,7 @@ const (
 
 func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationState {
 	state.InitialPlan = compactPlanForPrompt(state.InitialPlan)
+	state.WorkPlan = compactWorkPlanForPrompt(state.WorkPlan)
 	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
 
 	blocked := map[string]bool{}
@@ -1030,6 +1039,7 @@ func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationS
 func compactPlanForPrompt(plan Plan) Plan {
 	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
 	plan.Rationale = truncateStringForPrompt(plan.Rationale, maxPromptRationaleBytes)
+	plan.WorkPlan = compactWorkPlanForPrompt(plan.WorkPlan)
 	for index := range plan.Steps {
 		plan.Steps[index].Title = truncateStringForPrompt(plan.Steps[index].Title, maxPromptRationaleBytes)
 		plan.Steps[index].Description = truncateStringForPrompt(plan.Steps[index].Description, maxPromptRationaleBytes)
@@ -1041,11 +1051,62 @@ func compactPlanForPrompt(plan Plan) Plan {
 	for index := range plan.Actions {
 		plan.Actions[index].Reason = truncateStringForPrompt(plan.Actions[index].Reason, maxPromptRationaleBytes)
 	}
+	for index := range plan.Workers {
+		plan.Workers[index].Role = truncateStringForPrompt(plan.Workers[index].Role, maxPromptRationaleBytes)
+		plan.Workers[index].Reason = truncateStringForPrompt(plan.Workers[index].Reason, maxPromptRationaleBytes)
+		plan.Workers[index].Prompt = truncateStringForPrompt(plan.Workers[index].Prompt, maxPromptPlanTextBytes)
+	}
 	for index := range plan.Spawns {
 		plan.Spawns[index].Role = truncateStringForPrompt(plan.Spawns[index].Role, maxPromptRationaleBytes)
 		plan.Spawns[index].Reason = truncateStringForPrompt(plan.Spawns[index].Reason, maxPromptRationaleBytes)
 	}
 	return plan
+}
+
+func compactWorkPlanForPrompt(workPlan *core.WorkPlan) *core.WorkPlan {
+	if workPlan == nil {
+		return nil
+	}
+	compact := &core.WorkPlan{
+		Summary:     truncateStringForPrompt(workPlan.Summary, maxPromptRationaleBytes),
+		Workstreams: compactWorkPlanItemsForPrompt(workPlan.Workstreams),
+		Validation:  compactWorkPlanItemsForPrompt(workPlan.Validation),
+	}
+	if len(workPlan.Risks) > maxPromptArtifacts {
+		compact.Risks = append([]string{}, workPlan.Risks[:maxPromptArtifacts]...)
+		compact.Risks = append(compact.Risks, fmt.Sprintf("... %d additional risks omitted ...", len(workPlan.Risks)-maxPromptArtifacts))
+	} else {
+		compact.Risks = append([]string{}, workPlan.Risks...)
+	}
+	for index := range compact.Risks {
+		compact.Risks[index] = truncateStringForPrompt(compact.Risks[index], maxPromptRationaleBytes)
+	}
+	return compact
+}
+
+func compactWorkPlanItemsForPrompt(items []core.WorkPlanItem) []core.WorkPlanItem {
+	const maxPromptWorkPlanItems = 30
+	if len(items) > maxPromptWorkPlanItems {
+		omitted := len(items) - maxPromptWorkPlanItems
+		items = append(append([]core.WorkPlanItem{}, items[:maxPromptWorkPlanItems]...), core.WorkPlanItem{
+			ID:     "omitted",
+			Goal:   fmt.Sprintf("... %d additional work plan items omitted ...", omitted),
+			Status: "omitted",
+		})
+	} else {
+		items = append([]core.WorkPlanItem{}, items...)
+	}
+	for index := range items {
+		items[index].ID = truncateStringForPrompt(items[index].ID, maxPromptRationaleBytes)
+		items[index].Goal = truncateStringForPrompt(items[index].Goal, maxPromptRationaleBytes)
+		items[index].Status = truncateStringForPrompt(items[index].Status, maxPromptRationaleBytes)
+		items[index].DoneWhen = truncateStringForPrompt(items[index].DoneWhen, maxPromptRationaleBytes)
+		items[index].DependsOn = append([]string{}, items[index].DependsOn...)
+		for depIndex := range items[index].DependsOn {
+			items[index].DependsOn[depIndex] = truncateStringForPrompt(items[index].DependsOn[depIndex], maxPromptRationaleBytes)
+		}
+	}
+	return items
 }
 
 func compactWorkerTurnResultForPrompt(result WorkerTurnResult) WorkerTurnResult {

@@ -7521,6 +7521,29 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			WorkerKind: "codex",
 			Prompt:     "implement first slice",
 			Rationale:  "start with implementation",
+			WorkPlan: &core.WorkPlan{
+				Summary: "Implement a first slice, review it, then incorporate feedback.",
+				Workstreams: []core.WorkPlanItem{{
+					ID:       "implement",
+					Goal:     "Implement the first slice.",
+					Status:   "running",
+					DoneWhen: "The first slice is implemented.",
+				}, {
+					ID:        "review",
+					Goal:      "Review the first slice.",
+					Status:    "pending",
+					DoneWhen:  "Review findings are reported.",
+					DependsOn: []string{"implement"},
+				}},
+				Validation: []core.WorkPlanItem{{
+					ID:        "validate",
+					Goal:      "Validate the incorporated result.",
+					Status:    "pending",
+					DoneWhen:  "Validation is reported.",
+					DependsOn: []string{"review"},
+				}},
+				Risks: []string{"Review may find a missing edge case."},
+			},
 			Spawns: []SpawnRequest{{
 				Role:   "reviewer",
 				Reason: "Review the initial implementation.",
@@ -7530,6 +7553,34 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			{
 				Action:    "continue",
 				Rationale: "review requested an incorporation turn",
+				WorkPlan: &core.WorkPlan{
+					Summary: "Implementation and review are done; feedback incorporation is running.",
+					Workstreams: []core.WorkPlanItem{{
+						ID:       "implement",
+						Goal:     "Implement the first slice.",
+						Status:   "done",
+						DoneWhen: "The first slice is implemented.",
+					}, {
+						ID:       "review",
+						Goal:     "Review the first slice.",
+						Status:   "done",
+						DoneWhen: "Review findings are reported.",
+					}, {
+						ID:        "incorporate",
+						Goal:      "Incorporate the reviewed edge case.",
+						Status:    "running",
+						DoneWhen:  "The reviewed edge case is fixed.",
+						DependsOn: []string{"review"},
+					}},
+					Validation: []core.WorkPlanItem{{
+						ID:        "validate",
+						Goal:      "Validate the incorporated result.",
+						Status:    "pending",
+						DoneWhen:  "Validation is reported.",
+						DependsOn: []string{"incorporate"},
+					}},
+					Risks: []string{"The incorporation turn may uncover more feedback."},
+				},
 				Plan: &Plan{
 					WorkerKind: "codex",
 					Prompt:     "incorporate reviewer feedback about the missing edge case",
@@ -7545,6 +7596,32 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 			{
 				Action:    "complete",
 				Rationale: "incorporation turn completed",
+				WorkPlan: &core.WorkPlan{
+					Summary: "Implementation, review, and feedback incorporation are complete.",
+					Workstreams: []core.WorkPlanItem{{
+						ID:       "implement",
+						Goal:     "Implement the first slice.",
+						Status:   "done",
+						DoneWhen: "The first slice is implemented.",
+					}, {
+						ID:       "review",
+						Goal:     "Review the first slice.",
+						Status:   "done",
+						DoneWhen: "Review findings are reported.",
+					}, {
+						ID:       "incorporate",
+						Goal:     "Incorporate the reviewed edge case.",
+						Status:   "done",
+						DoneWhen: "The reviewed edge case is fixed.",
+					}},
+					Validation: []core.WorkPlanItem{{
+						ID:       "validate",
+						Goal:     "Validate the incorporated result.",
+						Status:   "done",
+						DoneWhen: "Validation is reported.",
+					}},
+					Risks: []string{},
+				},
 			},
 		},
 	}
@@ -7577,6 +7654,12 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 2 {
 		t.Fatalf("task.replanned count = %d, want 2", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
 	}
+	if countEvents(snapshot.Events, core.EventTaskWorkPlan, task.ID) != 3 {
+		t.Fatalf("task.work_plan_updated count = %d, want 3", countEvents(snapshot.Events, core.EventTaskWorkPlan, task.ID))
+	}
+	if snapshot.Tasks[0].WorkPlan == nil || snapshot.Tasks[0].WorkPlan.Workstreams[2].Status != "done" {
+		t.Fatalf("final work plan = %+v", snapshot.Tasks[0].WorkPlan)
+	}
 	if !strings.Contains(implementer.promptValue(), "incorporate reviewer feedback") {
 		t.Fatalf("last implementer prompt = %q", implementer.promptValue())
 	}
@@ -7588,6 +7671,12 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 	if len(brain.states[1].Results) != 3 {
 		t.Fatalf("second replan results = %d, want 3", len(brain.states[1].Results))
+	}
+	if brain.states[0].WorkPlan == nil || brain.states[0].WorkPlan.Workstreams[0].Status != "running" {
+		t.Fatalf("first replan work plan = %+v", brain.states[0].WorkPlan)
+	}
+	if brain.states[1].WorkPlan == nil || brain.states[1].WorkPlan.Workstreams[2].Status != "running" {
+		t.Fatalf("second replan work plan = %+v", brain.states[1].WorkPlan)
 	}
 }
 

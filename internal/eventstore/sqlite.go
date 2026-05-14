@@ -890,6 +890,15 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 			})
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
+		case core.EventTaskWorkPlan:
+			var payload core.WorkPlan
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.work_plan_updated: %w", err)
+			}
+			task := tasks[event.TaskID]
+			task.WorkPlan = &payload
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
 		case core.EventTaskArtifact:
 			var payload struct {
 				ID       string          `json:"id"`
@@ -1544,6 +1553,7 @@ WHERE type IN (
 	'task.final_candidate_selected',
 	'task.objective_updated',
 	'task.milestone_reached',
+	'task.work_plan_updated',
 	'task.artifact_recorded',
 	'task.cleared',
 	'execution.node_planned',

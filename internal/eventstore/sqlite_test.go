@@ -821,6 +821,26 @@ func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 			}),
 		},
 		core.Event{
+			Type:   core.EventTaskWorkPlan,
+			TaskID: taskID,
+			Payload: core.MustJSON(core.WorkPlan{
+				Summary: "Open the PR and monitor it through merge.",
+				Workstreams: []core.WorkPlanItem{{
+					ID:       "publish",
+					Goal:     "Publish a coherent PR.",
+					Status:   "done",
+					DoneWhen: "A PR is open.",
+				}},
+				Validation: []core.WorkPlanItem{{
+					ID:       "monitor",
+					Goal:     "Monitor checks and review state.",
+					Status:   "running",
+					DoneWhen: "The PR is merged or no longer needs babysitting.",
+				}},
+				Risks: []string{"CI may fail after publication."},
+			}),
+		},
+		core.Event{
 			Type:   core.EventTaskObjective,
 			TaskID: taskID,
 			Payload: core.MustJSON(map[string]any{
@@ -850,6 +870,9 @@ func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 	}
 	if len(task.Artifacts) != 1 || task.Artifacts[0].ID != "pr-1" {
 		t.Fatalf("artifacts = %+v", task.Artifacts)
+	}
+	if task.WorkPlan == nil || task.WorkPlan.Validation[0].ID != "monitor" {
+		t.Fatalf("work plan = %+v", task.WorkPlan)
 	}
 }
 

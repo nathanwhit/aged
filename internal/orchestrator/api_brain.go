@@ -244,7 +244,7 @@ func planResponseFormat() map[string]any {
 			"schema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"reasoningEffort", "rationale", "steps", "requiredApprovals", "actions", "workers", "spawns"},
+				"required":             []string{"reasoningEffort", "rationale", "workPlan", "steps", "requiredApprovals", "actions", "workers", "spawns"},
 				"properties": map[string]any{
 					"workerKind": map[string]any{
 						"type":        "string",
@@ -261,6 +261,7 @@ func planResponseFormat() map[string]any {
 					"rationale": map[string]any{
 						"type": "string",
 					},
+					"workPlan": workPlanSchema(),
 					"steps": map[string]any{
 						"type": "array",
 						"items": map[string]any{
@@ -346,6 +347,44 @@ func planResponseFormat() map[string]any {
 							},
 						},
 					},
+				},
+			},
+		},
+	}
+}
+
+func workPlanSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"summary", "workstreams", "validation", "risks"},
+		"properties": map[string]any{
+			"summary":     map[string]any{"type": "string"},
+			"workstreams": workPlanItemArraySchema(),
+			"validation":  workPlanItemArraySchema(),
+			"risks": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+		},
+	}
+}
+
+func workPlanItemArraySchema() map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"id", "goal", "status", "doneWhen", "dependsOn"},
+			"properties": map[string]any{
+				"id":       map[string]any{"type": "string"},
+				"goal":     map[string]any{"type": "string"},
+				"status":   map[string]any{"type": "string"},
+				"doneWhen": map[string]any{"type": "string"},
+				"dependsOn": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "string"},
 				},
 			},
 		},

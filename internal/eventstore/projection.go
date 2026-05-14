@@ -203,6 +203,15 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 		})
 		task.UpdatedAt = event.At
 		p.Tasks[event.TaskID] = task
+	case core.EventTaskWorkPlan:
+		var payload core.WorkPlan
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode task.work_plan_updated: %w", err)
+		}
+		task := p.Tasks[event.TaskID]
+		task.WorkPlan = &payload
+		task.UpdatedAt = event.At
+		p.Tasks[event.TaskID] = task
 	case core.EventTaskArtifact:
 		var payload struct {
 			ID       string          `json:"id"`

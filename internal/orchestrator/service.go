@@ -2455,6 +2455,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
+	if plan.WorkPlan != nil {
+		if err := s.updateTaskWorkPlan(ctx, task.ID, *plan.WorkPlan); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+			return
+		}
+	}
 	if ok, err := s.runImmediatePlanActions(ctx, task, plan); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 		return
@@ -5119,6 +5125,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	}
 	recoveryHint := options.RecoveryHint
 	stalledTurns := 0
+	currentWorkPlan := initial.WorkPlan
 	for turn := 1; ; turn++ {
 		if stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
@@ -5129,6 +5136,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
+			WorkPlan:                 currentWorkPlan,
 			Results:                  results,
 			Turn:                     turn,
 			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
@@ -5159,6 +5167,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
 			return false, "", "", results
+		}
+		if decision.WorkPlan != nil {
+			if err := s.updateTaskWorkPlan(ctx, task.ID, *decision.WorkPlan); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			}
+			currentWorkPlan = decision.WorkPlan
 		}
 		switch decision.Action {
 		case "complete":
@@ -7158,6 +7173,15 @@ func (s *Service) updateTaskObjective(ctx context.Context, taskID string, status
 	return err
 }
 
+func (s *Service) updateTaskWorkPlan(ctx context.Context, taskID string, workPlan core.WorkPlan) error {
+	_, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskWorkPlan,
+		TaskID:  taskID,
+		Payload: core.MustJSON(workPlan),
+	})
+	return err
+}
+
 func (s *Service) recordTaskMilestone(ctx context.Context, taskID string, name string, phase string, summary string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
@@ -7411,6 +7435,9 @@ func planMetadata(plan Plan) map[string]any {
 	}
 	if plan.Rationale != "" {
 		metadata["rationale"] = plan.Rationale
+	}
+	if plan.WorkPlan != nil {
+		metadata["workPlan"] = plan.WorkPlan
 	}
 	if len(plan.Steps) > 0 {
 		metadata["steps"] = plan.Steps
