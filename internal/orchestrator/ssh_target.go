@@ -258,10 +258,35 @@ func (r SSHRunner) pollOnce(ctx context.Context, run remoteRun, parser worker.Pa
 		}
 		active, activeErr := r.remoteSessionActive(ctx, run)
 		if activeErr == nil && !active {
+			if refreshed, ok := r.refreshAfterRemoteSessionExit(ctx, run, parser, filter, sink, pollState); ok {
+				return refreshed, nil
+			}
 			return pollState.InferTerminalStatus(parser), nil
 		}
 	}
 	return status, nil
+}
+
+func (r SSHRunner) refreshAfterRemoteSessionExit(ctx context.Context, run remoteRun, parser worker.Parser, filter *worker.OutputFilter, sink worker.Sink, pollState *remotePollState) (remoteStatus, bool) {
+	_ = r.pollRemoteLog(ctx, run, parser, filter, sink, "stdout", "stdout.log", &pollState.stdout)
+	_ = r.pollRemoteLog(ctx, run, parser, filter, sink, "stderr", "stderr.log", &pollState.stderr)
+	rawStatus, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(path.Join(run.RunDir, "status.json"))+" 2>/dev/null || printf '{\"status\":\"running\"}'")
+	if err == nil {
+		var status remoteStatus
+		if json.Unmarshal([]byte(strings.TrimSpace(rawStatus)), &status) == nil {
+			if status.Status == "" {
+				status.Status = "running"
+			}
+			switch status.Status {
+			case "succeeded", "failed", "canceled":
+				return status, true
+			}
+		}
+	}
+	if terminal, ok := pollState.stdout.TerminalStatus(); ok {
+		return terminal, true
+	}
+	return remoteStatus{}, false
 }
 
 func (r SSHRunner) remoteSessionActive(ctx context.Context, run remoteRun) (bool, error) {
