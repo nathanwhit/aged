@@ -74,6 +74,74 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestCampaignContextIsSharedWithChildTaskWorkers(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &recordingEventRunner{
+		kind: "codex",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "## Findings\nImplemented the child task slice.",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "Use the prior triage.",
+		Rationale:  "run child task",
+	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
+		Title:  "Improve startup",
+		Prompt: "Find and ship independent startup improvements.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordCampaignArtifact(ctx, campaign.ID, "triage", "investigation_summary", "Initial triage", "", "", map[string]any{
+		"content": "Triage found task detail hydration as the first slice.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		CampaignID:   campaign.ID,
+		WorkstreamID: "detail-hydration",
+		Title:        "Defer task details",
+		Prompt:       "Implement the first startup slice.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode":             "local",
+			"campaignContextArtifactIds": []string{"triage"},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if prompt := runner.promptValue(); !strings.Contains(prompt, "# Campaign Context") || !strings.Contains(prompt, "task detail hydration") {
+		t.Fatalf("worker prompt missing campaign context:\n%s", prompt)
+	}
+	campaign, ok := findCampaign(snapshot, campaign.ID)
+	if !ok {
+		t.Fatalf("missing campaign in snapshot")
+	}
+	if !reflect.DeepEqual(campaign.ChildTaskIDs, []string{task.ID}) {
+		t.Fatalf("campaign child tasks = %+v, want %s", campaign.ChildTaskIDs, task.ID)
+	}
+	foundWorkerSummary := false
+	for _, artifact := range campaign.Artifacts {
+		if artifact.Kind == "worker_summary" {
+			foundWorkerSummary = true
+			break
+		}
+	}
+	if !foundWorkerSummary {
+		t.Fatalf("campaign artifacts did not include promoted worker summary: %+v", campaign.Artifacts)
+	}
+}
+
 func TestProjectHealthCatchesGitHubGraphQLBadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

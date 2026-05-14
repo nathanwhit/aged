@@ -22,6 +22,13 @@ export type ObjectiveStatus =
   | "satisfied"
   | "abandoned";
 
+export type CampaignStatus =
+  | "active"
+  | "waiting"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
 export type EventRecord = {
   id: number;
   at: string;
@@ -34,6 +41,8 @@ export type EventRecord = {
 export type Task = {
   id: string;
   projectId?: string;
+  campaignId?: string;
+  workstreamId?: string;
   title: string;
   prompt: string;
   status: TaskStatus;
@@ -46,7 +55,39 @@ export type Task = {
   finalCandidateWorkerId?: string;
   appliedWorkerId?: string;
   milestones?: TaskMilestone[];
+  workPlan?: WorkPlan;
   artifacts?: TaskArtifact[];
+};
+
+export type WorkPlan = {
+  summary?: string;
+  workstreams?: WorkPlanItem[];
+  validation?: WorkPlanItem[];
+  risks?: string[];
+};
+
+export type WorkPlanItem = {
+  id: string;
+  goal: string;
+  status?: string;
+  doneWhen?: string;
+  dependsOn?: string[];
+};
+
+export type Campaign = {
+  id: string;
+  projectId?: string;
+  title: string;
+  prompt: string;
+  status: CampaignStatus;
+  objectiveStatus?: ObjectiveStatus;
+  objectivePhase?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+  workPlan?: WorkPlan;
+  artifacts?: TaskArtifact[];
+  childTaskIds?: string[];
 };
 
 export type TaskMilestone = {
@@ -421,6 +462,7 @@ export type WatchPullRequestsInput = {
 };
 
 export type Snapshot = {
+  campaigns?: Campaign[] | null;
   tasks: Task[] | null;
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;

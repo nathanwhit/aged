@@ -24,10 +24,11 @@ import {
 } from "lucide-react";
 import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Campaign, EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
+  campaigns: Campaign[];
   tasks: Task[];
   workers: Worker[];
   executionNodes: ExecutionNode[];
@@ -54,6 +55,7 @@ type RunMode = "one-shot" | "loop";
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
 const emptySnapshot: AppSnapshot = {
+  campaigns: [],
   tasks: [],
   workers: [],
   executionNodes: [],
@@ -4648,6 +4650,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
   const tasks = snapshot.tasks ?? [];
   const lastEventId = snapshot.lastEventId ?? snapshot.events?.at(-1)?.id ?? 0;
   return {
+    campaigns: snapshot.campaigns ?? [],
     tasks,
     workers: snapshot.workers ?? [],
     executionNodes,
@@ -4693,6 +4696,7 @@ function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): Ap
   ].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   return {
     ...snapshot,
+    campaigns: mergeById(snapshot.campaigns, taskSnapshot.campaigns),
     tasks,
     workers: [
       ...snapshot.workers.filter((worker) => !taskIds.has(worker.taskId)),
@@ -4758,6 +4762,8 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const task: Task = {
       id: event.taskId,
       projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
+      campaignId: isRecord(payload.metadata) ? String(payload.metadata.campaignId ?? "") || undefined : undefined,
+      workstreamId: isRecord(payload.metadata) ? String(payload.metadata.workstreamId ?? "") || undefined : undefined,
       title: String(payload.title ?? "Untitled task"),
       prompt: String(payload.prompt ?? ""),
       status: "queued",
@@ -4970,6 +4976,14 @@ function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
     : [...items, next];
 }
 
+function mergeById<T extends { id: string }>(left: T[], right: T[]): T[] {
+  let merged = left;
+  for (const item of right) {
+    merged = upsertById(merged, item);
+  }
+  return merged;
+}
+
 function objectiveStatusForTaskStatus(status: Task["status"]): Task["objectiveStatus"] {
   if (status === "succeeded") return "satisfied";
   if (status === "failed" || status === "canceled") return "abandoned";
@@ -5015,6 +5029,8 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       tasks.set(event.taskId, {
         id: event.taskId,
         projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
+        campaignId: isRecord(payload.metadata) ? String(payload.metadata.campaignId ?? "") || undefined : undefined,
+        workstreamId: isRecord(payload.metadata) ? String(payload.metadata.workstreamId ?? "") || undefined : undefined,
         title: String(payload.title ?? "Untitled task"),
         prompt: String(payload.prompt ?? ""),
         status: "queued",
@@ -5174,6 +5190,7 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   }
 
   return {
+    campaigns: snapshot.campaigns,
     tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
     workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
     executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),

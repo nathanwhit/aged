@@ -11,6 +11,7 @@ import (
 )
 
 type snapshotProjectionState struct {
+	Campaigns             map[string]core.Campaign      `json:"campaigns"`
 	Tasks                 map[string]core.Task          `json:"tasks"`
 	Workers               map[string]core.Worker        `json:"workers"`
 	Nodes                 map[string]core.ExecutionNode `json:"nodes"`
@@ -29,6 +30,9 @@ func newSnapshotProjectionState() snapshotProjectionState {
 }
 
 func (p *snapshotProjectionState) ensure() {
+	if p.Campaigns == nil {
+		p.Campaigns = map[string]core.Campaign{}
+	}
 	if p.Tasks == nil {
 		p.Tasks = map[string]core.Task{}
 	}
@@ -62,7 +66,9 @@ func (p *snapshotProjectionState) snapshot(lastEventID int64, events []core.Even
 	p.ensure()
 	filteredTasks := filterClearedTasks(p.Tasks, p.ClearedTasks)
 	filteredNodes := filterClearedExecutionNodes(p.Nodes, p.ClearedTasks)
+	campaigns := campaignsWithChildTasks(p.Campaigns, filteredTasks)
 	return core.Snapshot{
+		Campaigns:           orderedCampaigns(campaigns),
 		Tasks:               orderedTasks(filteredTasks),
 		Workers:             orderedWorkers(filterClearedWorkers(p.Workers, p.ClearedTasks)),
 		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
@@ -91,7 +97,9 @@ func (p *snapshotProjectionState) taskCardsSnapshot(lastEventID int64) core.Snap
 	workers := filterTasks(p.Workers, p.ClearedTasks, activeTasks, func(worker core.Worker) string { return worker.TaskID })
 	nodes := filterTasks(p.Nodes, p.ClearedTasks, activeTasks, func(node core.ExecutionNode) string { return node.TaskID })
 	pullRequests := filterTasks(p.PullRequests, p.ClearedTasks, activeTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	campaigns := campaignsWithChildTasks(p.Campaigns, taskCards)
 	return core.Snapshot{
+		Campaigns:           orderedCampaigns(campaigns),
 		Tasks:               orderedTasks(taskCards),
 		Workers:             orderedWorkers(workers),
 		ExecutionNodes:      orderedExecutionNodes(nodes),
@@ -127,6 +135,120 @@ func filterTasks[T any](values map[string]T, cleared map[string]bool, keptTasks 
 func (p *snapshotProjectionState) apply(event core.Event) error {
 	p.ensure()
 	switch event.Type {
+	case core.EventCampaignCreated:
+		var payload struct {
+			ProjectID string          `json:"projectId,omitempty"`
+			Title     string          `json:"title"`
+			Prompt    string          `json:"prompt"`
+			Metadata  json.RawMessage `json:"metadata,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode campaign.created: %w", err)
+		}
+		projectID := payload.ProjectID
+		if projectID == "" {
+			projectID = projectIDFromMetadata(payload.Metadata)
+		}
+		p.Campaigns[event.TaskID] = core.Campaign{
+			ID:              event.TaskID,
+			ProjectID:       projectID,
+			Title:           payload.Title,
+			Prompt:          payload.Prompt,
+			Status:          core.CampaignActive,
+			ObjectiveStatus: core.ObjectiveActive,
+			ObjectivePhase:  "active",
+			CreatedAt:       event.At,
+			UpdatedAt:       event.At,
+			Metadata:        payload.Metadata,
+		}
+	case core.EventCampaignUpdated:
+		var payload struct {
+			Title         string          `json:"title,omitempty"`
+			Prompt        string          `json:"prompt,omitempty"`
+			MetadataPatch json.RawMessage `json:"metadataPatch,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode campaign.updated: %w", err)
+		}
+		campaign := p.Campaigns[event.TaskID]
+		if campaign.ID == "" {
+			return nil
+		}
+		if payload.Title != "" {
+			campaign.Title = payload.Title
+		}
+		if payload.Prompt != "" {
+			campaign.Prompt = payload.Prompt
+		}
+		campaign.Metadata = mergeMetadataPatch(campaign.Metadata, payload.MetadataPatch)
+		campaign.UpdatedAt = event.At
+		p.Campaigns[event.TaskID] = campaign
+	case core.EventCampaignStatus:
+		var payload struct {
+			Status          core.CampaignStatus  `json:"status"`
+			ObjectiveStatus core.ObjectiveStatus `json:"objectiveStatus,omitempty"`
+			Phase           string               `json:"phase,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode campaign.status: %w", err)
+		}
+		campaign := p.Campaigns[event.TaskID]
+		if campaign.ID == "" {
+			return nil
+		}
+		if payload.Status != "" {
+			campaign.Status = payload.Status
+		}
+		if payload.ObjectiveStatus != "" {
+			campaign.ObjectiveStatus = payload.ObjectiveStatus
+		} else {
+			campaign.ObjectiveStatus = objectiveStatusForCampaignStatus(payload.Status)
+		}
+		if payload.Phase != "" {
+			campaign.ObjectivePhase = payload.Phase
+		}
+		campaign.UpdatedAt = event.At
+		p.Campaigns[event.TaskID] = campaign
+	case core.EventCampaignWorkPlan:
+		var payload core.WorkPlan
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode campaign.work_plan_updated: %w", err)
+		}
+		campaign := p.Campaigns[event.TaskID]
+		if campaign.ID == "" {
+			return nil
+		}
+		campaign.WorkPlan = &payload
+		campaign.UpdatedAt = event.At
+		p.Campaigns[event.TaskID] = campaign
+	case core.EventCampaignArtifact:
+		var payload struct {
+			ID       string          `json:"id"`
+			Kind     string          `json:"kind"`
+			Name     string          `json:"name,omitempty"`
+			URL      string          `json:"url,omitempty"`
+			Ref      string          `json:"ref,omitempty"`
+			Metadata json.RawMessage `json:"metadata,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode campaign.artifact_recorded: %w", err)
+		}
+		campaign := p.Campaigns[event.TaskID]
+		if campaign.ID == "" {
+			return nil
+		}
+		campaign.Artifacts = upsertTaskArtifact(campaign.Artifacts, core.TaskArtifact{
+			ID:        payload.ID,
+			Kind:      payload.Kind,
+			Name:      payload.Name,
+			URL:       payload.URL,
+			Ref:       payload.Ref,
+			CreatedAt: event.At,
+			UpdatedAt: event.At,
+			Metadata:  payload.Metadata,
+		})
+		campaign.UpdatedAt = event.At
+		p.Campaigns[event.TaskID] = campaign
 	case core.EventTaskCreated:
 		var payload struct {
 			ProjectID string          `json:"projectId,omitempty"`
@@ -144,6 +266,8 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 		p.Tasks[event.TaskID] = core.Task{
 			ID:              event.TaskID,
 			ProjectID:       projectID,
+			CampaignID:      campaignIDFromMetadata(payload.Metadata),
+			WorkstreamID:    workstreamIDFromMetadata(payload.Metadata),
 			Title:           payload.Title,
 			Prompt:          payload.Prompt,
 			Status:          core.TaskQueued,
@@ -173,6 +297,8 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 			task.Prompt = payload.Prompt
 		}
 		task.Metadata = mergeMetadataPatch(task.Metadata, payload.MetadataPatch)
+		task.CampaignID = campaignIDFromMetadata(task.Metadata)
+		task.WorkstreamID = workstreamIDFromMetadata(task.Metadata)
 		task.UpdatedAt = event.At
 		p.Tasks[event.TaskID] = task
 	case core.EventTaskStatus:

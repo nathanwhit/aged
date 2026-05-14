@@ -293,7 +293,7 @@ func planResponseFormat() map[string]any {
 							"additionalProperties": false,
 							"required":             []string{"kind", "when", "reason", "workerId", "inputs"},
 							"properties": map[string]any{
-								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user"}},
+								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "create_tasks"}},
 								"when":     map[string]any{"type": "string", "enum": []string{"immediate", "after_success"}},
 								"reason":   map[string]any{"type": "string"},
 								"workerId": map[string]any{"type": "string"},

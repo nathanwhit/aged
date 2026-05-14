@@ -195,9 +195,9 @@ func workerRequestID(worker WorkerRequest, index int) string {
 
 func (a PlanAction) Validate() error {
 	switch strings.TrimSpace(a.Kind) {
-	case "publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user":
+	case "publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "create_tasks":
 	default:
-		return errors.New("kind must be one of publish_pull_request, update_pull_request, watch_pull_requests, wait_external, or ask_user")
+		return errors.New("kind must be one of publish_pull_request, update_pull_request, watch_pull_requests, wait_external, ask_user, or create_tasks")
 	}
 	switch strings.TrimSpace(a.When) {
 	case "", "after_success", "immediate":
@@ -209,6 +209,9 @@ func (a PlanAction) Validate() error {
 	}
 	if strings.TrimSpace(a.Kind) == "publish_pull_request" && strings.TrimSpace(stringMetadata(a.Inputs, "body")) == "" {
 		return errors.New("publish_pull_request inputs.body is required")
+	}
+	if strings.TrimSpace(a.Kind) == "create_tasks" && len(anySliceMetadata(a.Inputs, "tasks")) == 0 {
+		return errors.New("create_tasks inputs.tasks is required")
 	}
 	return nil
 }
