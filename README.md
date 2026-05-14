@@ -129,6 +129,8 @@ SSH targets are configured with `-targets` / `AGED_TARGETS` or through `/api/tar
 
 SSH targets need `ssh` and `tmux`. `identityFile` is optional; leave it unset to use normal OpenSSH behavior. Remote workers run in detached tmux sessions, publish logs/status back into the event stream, and write VCS summaries plus `diff.patch` for review/apply.
 
+Placement is selected by the orchestrator service. By default it filters configured targets by `targetLabels` (task metadata wins over project policy), scores by health and capacity, and falls back to the `local` target when no labels are set. To pin a task to a specific machine, set `metadata.requiredTargetID` on the task to the target id (for example `"local"`); the scheduler honors it as a hard constraint and surfaces a clear error when that target is not configured, not available, or does not support the planned worker kind.
+
 ## Task Model
 
 A task is not just a worker run. It has execution status plus objective state.

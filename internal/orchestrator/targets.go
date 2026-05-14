@@ -240,6 +240,20 @@ func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if requiredID := requiredTargetID(plan.Metadata); requiredID != "" {
+		target, ok := r.targets[requiredID]
+		if !ok {
+			return TargetConfig{}, fmt.Errorf("required execution target %q is not configured", requiredID)
+		}
+		if !r.isAvailableLocked(target) {
+			return TargetConfig{}, fmt.Errorf("required execution target %q is not available", requiredID)
+		}
+		if !r.supportsWorkerLocked(target, plan.WorkerKind) {
+			return TargetConfig{}, fmt.Errorf("required execution target %q does not support worker kind %q", requiredID, plan.WorkerKind)
+		}
+		return target, nil
+	}
+
 	required := targetLabels(plan.Metadata)
 	size := workerSize(plan.Metadata, plan.Prompt)
 	candidates := make([]TargetConfig, 0, len(r.targets))
@@ -459,6 +473,17 @@ func labelsMatch(labels map[string]string, required map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func requiredTargetID(metadata map[string]any) string {
+	if metadata == nil {
+		return ""
+	}
+	value, ok := metadata["requiredTargetID"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func targetLabels(metadata map[string]any) map[string]string {

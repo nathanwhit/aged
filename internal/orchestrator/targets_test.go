@@ -111,6 +111,61 @@ func TestTargetRegistrySelectIDRejectsSSHWorkerWhenToolProbeIsMissing(t *testing
 	}
 }
 
+func TestTargetRegistrySelectHonorsRequiredTargetID(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Labels: map[string]string{"role": "general"}, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+		{ID: "pinned", Kind: TargetKindLocal, Labels: map[string]string{"role": "pinned"}, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "run on pinned host",
+		Metadata:   map[string]any{"requiredTargetID": "pinned"},
+	}
+	target, err := registry.Select(plan)
+	if err != nil {
+		t.Fatalf("Select err = %v, want nil", err)
+	}
+	if target.ID != "pinned" {
+		t.Fatalf("target = %q, want pinned (required hard constraint should win over higher-scoring local)", target.ID)
+	}
+}
+
+func TestTargetRegistrySelectFailsWhenRequiredTargetMissing(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	_, err := registry.Select(Plan{
+		WorkerKind: "mock",
+		Prompt:     "run on missing host",
+		Metadata:   map[string]any{"requiredTargetID": "absent"},
+	})
+	if err == nil {
+		t.Fatal("Select with unknown requiredTargetID succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), `required execution target "absent" is not configured`) {
+		t.Fatalf("Select error = %v, want hard error mentioning absent target", err)
+	}
+}
+
+func TestTargetRegistrySelectFailsWhenRequiredTargetUnavailable(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "pinned", Kind: TargetKindSSH, Host: "pinned", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	registry.UpdateHealth("pinned", core.TargetHealth{Status: "unhealthy", Reachable: false}, core.TargetResources{})
+	_, err := registry.Select(Plan{
+		WorkerKind: "mock",
+		Prompt:     "run on unhealthy host",
+		Metadata:   map[string]any{"requiredTargetID": "pinned"},
+	})
+	if err == nil {
+		t.Fatal("Select with unavailable requiredTargetID succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), `required execution target "pinned" is not available`) {
+		t.Fatalf("Select error = %v, want unavailable hard error", err)
+	}
+}
+
 func TestTargetRegistrySkipsSSHWithoutRemoteCheckoutRoot(t *testing.T) {
 	registry := NewTargetRegistry([]TargetConfig{
 		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},

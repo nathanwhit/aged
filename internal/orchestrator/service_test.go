@@ -8635,6 +8635,78 @@ func TestServiceIgnoresSchedulerTargetLabels(t *testing.T) {
 	}
 }
 
+func TestServiceIgnoresSchedulerRequiredTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+		{ID: "pinned", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run normal work",
+		Metadata: map[string]any{
+			"requiredTargetID": "pinned",
+		},
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Normal", Prompt: "Run normally."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].TargetID != "local" {
+		t.Fatalf("nodes = %+v, want scheduler requiredTargetID ignored and local selected", snapshot.ExecutionNodes)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "ignoredRequiredTargetID", "pinned") {
+		t.Fatalf("missing ignored required target metadata")
+	}
+}
+
+func TestServiceTaskRequiredTargetIDWinsOverSchedulerRequiredTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+		{ID: "scheduler-pinned", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+		{ID: "task-pinned", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run pinned work",
+		Metadata: map[string]any{
+			"requiredTargetID": "scheduler-pinned",
+		},
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Pinned",
+		Prompt:   "Run on task-pinned.",
+		Metadata: core.MustJSON(map[string]any{"requiredTargetID": "task-pinned"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].TargetID != "task-pinned" {
+		t.Fatalf("nodes = %+v, want task requiredTargetID to win", snapshot.ExecutionNodes)
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "ignoredRequiredTargetID", "scheduler-pinned") {
+		t.Fatalf("missing ignored scheduler required target metadata")
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "requiredTargetID", "task-pinned") {
+		t.Fatalf("missing task required target metadata")
+	}
+}
+
 func TestServiceUsesTaskTargetLabels(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8999,6 +9071,57 @@ func TestServiceRetryTargetReuseFallsBackWhenTargetLacksRequestedWorkerTool(t *t
 	}
 	if reason, _ := plan.Metadata["retryTargetFallbackReason"].(string); !strings.Contains(reason, `execution target "vm-previous" does not support worker kind "codex"`) {
 		t.Fatalf("fallback reason = %q, want unsupported worker kind", reason)
+	}
+}
+
+func TestServiceSelectExecutionTargetEnforcesRequiredTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+		{ID: "pinned", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	target, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "mock",
+		Prompt:     "must run pinned",
+		Metadata:   map[string]any{"requiredTargetID": "pinned"},
+	})
+	if err != nil {
+		t.Fatalf("selectExecutionTarget err = %v, want nil", err)
+	}
+	if target.ID != "pinned" {
+		t.Fatalf("target = %q, want pinned", target.ID)
+	}
+}
+
+func TestServiceSelectExecutionTargetFailsWhenRequiredTargetUnknown(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+	})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	_, err := service.selectExecutionTarget(ctx, Plan{
+		WorkerKind: "mock",
+		Prompt:     "must run pinned",
+		Metadata:   map[string]any{"requiredTargetID": "missing"},
+	})
+	if err == nil {
+		t.Fatal("selectExecutionTarget with unknown requiredTargetID succeeded, want hard error (no local fallback)")
+	}
+	if !strings.Contains(err.Error(), `required execution target "missing"`) {
+		t.Fatalf("err = %v, want error mentioning required target", err)
 	}
 }
 
