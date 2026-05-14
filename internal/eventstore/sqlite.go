@@ -540,8 +540,13 @@ WHERE task_id = ?
 		'approval.needed',
 		'approval.decided',
 		'task.action_executed',
+		'task.artifact_recorded',
 		'task.milestone_reached',
-		'task.replanned'
+		'task.memory_updated',
+		'task.replanned',
+		'pull_request.published',
+		'pull_request.updated',
+		'pull_request.status_checked'
 	)
 ORDER BY id ASC`, taskID)
 	if err != nil {
@@ -957,6 +962,16 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				UpdatedAt: event.At,
 				Metadata:  payload.Metadata,
 			})
+			task.UpdatedAt = event.At
+			tasks[event.TaskID] = task
+		case core.EventTaskMemoryUpdated:
+			var payload core.TaskMemory
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Snapshot{}, fmt.Errorf("decode task.memory_updated: %w", err)
+			}
+			task := tasks[event.TaskID]
+			memory := payload
+			task.Memory = &memory
 			task.UpdatedAt = event.At
 			tasks[event.TaskID] = task
 		case core.EventTaskCleared:

@@ -88,6 +88,7 @@ type SpawnRequest struct {
 type OrchestrationState struct {
 	InitialPlan              Plan                 `json:"initialPlan"`
 	WorkPlan                 *core.WorkPlan       `json:"workPlan,omitempty"`
+	Memory                   *core.TaskMemory     `json:"memory,omitempty"`
 	Results                  []WorkerTurnResult   `json:"results"`
 	ContextLedger            []ContextLedgerEntry `json:"contextLedger,omitempty"`
 	Turn                     int                  `json:"turn"`

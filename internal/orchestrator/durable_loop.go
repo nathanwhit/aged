@@ -134,6 +134,7 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 				"iteration": iteration,
 				"error":     err.Error(),
 			})
+			_ = s.maybeRefreshLoopTaskMemory(context.Background(), task, iteration, "iteration_failed")
 		} else {
 			if result.WorkerID != "" {
 				previousWorkerID = result.WorkerID
@@ -146,6 +147,7 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 					"workerId":  result.WorkerID,
 					"summary":   result.Summary,
 				})
+				_ = s.maybeRefreshLoopTaskMemory(ctx, task, iteration, "waiting_for_input")
 				_ = s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 				return
 			}
@@ -161,6 +163,7 @@ func (s *Service) runDurableLoopTask(ctx context.Context, task core.Task) {
 				"summary":   result.Summary,
 				"error":     result.Error,
 			})
+			_ = s.maybeRefreshLoopTaskMemory(ctx, task, iteration, status)
 		}
 		config = s.latestDurableLoopConfig(ctx, task, config)
 		if err := s.waitDurableLoopInterval(ctx, task.ID, config.Interval); err != nil {
@@ -257,9 +260,15 @@ func (s *Service) waitDurableLoopInterval(ctx context.Context, taskID string, in
 }
 
 func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, config durableLoopConfig, iteration int, previousWorkerID string) (WorkerTurnResult, error) {
+	promptTask := task
+	if snapshot, err := s.store.Snapshot(ctx); err == nil {
+		if latest, ok := findTask(snapshot, task.ID); ok {
+			promptTask = latest
+		}
+	}
 	plan := Plan{
 		WorkerKind:      config.WorkerKind,
-		Prompt:          durableLoopPrompt(task, config, iteration, s.taskContextLedger(ctx, task.ID)),
+		Prompt:          durableLoopPrompt(promptTask, config, iteration, s.taskContextLedger(ctx, task.ID)),
 		ReasoningEffort: config.Reasoning,
 		Rationale:       "durable loop iteration",
 		Metadata: map[string]any{
@@ -307,6 +316,9 @@ func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int, 
 	builder.WriteString("- Publish an intermediate pull request through the provided `aged-publish-pr` helper only when this iteration produced a real material change worth review; do not publish for analysis-only or no-op turns.\n")
 	builder.WriteString("- After publishing, continue the durable objective in later iterations unless the loop is canceled or you are blocked.\n")
 	builder.WriteString("- Ask for user input only for user-owned blockers such as missing credentials, permissions, ambiguous scope, or risky setup choices.\n\n")
+	if rendered := renderTaskMemoryForWorkerPrompt(task.Memory); rendered != "" {
+		builder.WriteString(rendered)
+	}
 	if rendered := renderContextLedgerForWorkerPrompt(ledger); rendered != "" {
 		builder.WriteString(rendered)
 	}

@@ -25,6 +25,54 @@ func TestDurableLoopPromptIncludesGenericLoopPlaybook(t *testing.T) {
 	}
 }
 
+func TestDurableLoopPromptIncludesTaskMemoryWhenPresent(t *testing.T) {
+	task := core.Task{
+		Prompt: "Keep improving the product.",
+		Memory: &core.TaskMemory{
+			Objective: "Long-horizon objective",
+			Decisions: []core.TaskMemoryNote{{
+				Text:               "decision: keep deterministic loop memory",
+				FirstSeenIteration: 2,
+				LastSeenIteration:  4,
+				Count:              2,
+			}},
+			Blockers: []core.TaskMemoryNote{{
+				Text:              "Need credentials before checking external status.",
+				LastSeenIteration: 5,
+			}},
+			Artifacts: []core.TaskMemoryArtifact{{
+				ID:                   "pr-1",
+				Title:                "Loop memory PR",
+				URL:                  "https://github.com/acme/repo/pull/1",
+				State:                "open",
+				ChecksConclusion:     "success",
+				MergeStatus:          "CLEAN",
+				PublishedAtIteration: 3,
+			}},
+		},
+	}
+	prompt := durableLoopPrompt(task, durableLoopConfig{
+		Role:   "generalist",
+		Prompt: "Keep improving the product.",
+	}, 6, nil)
+
+	for _, want := range []string{
+		"# Task Memory",
+		"Long-horizon objective",
+		"decision: keep deterministic loop memory (iter 2-4, count 2)",
+		"Need credentials before checking external status. (iter 5)",
+		"Loop memory PR https://github.com/acme/repo/pull/1 (state=open, checks=success, merge=CLEAN, iter=3)",
+		"# Task Objective",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing memory content %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Index(prompt, "# Task Memory") > strings.Index(prompt, "# Task Objective") {
+		t.Fatalf("task memory should render before task objective:\n%s", prompt)
+	}
+}
+
 func assertDurableLoopPlaybookGuidance(t *testing.T, prompt string) {
 	t.Helper()
 	for _, want := range []string{

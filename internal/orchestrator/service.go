@@ -2720,6 +2720,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 	}
 	decision, err := replanner.Replan(ctx, task, OrchestrationState{
 		InitialPlan:   initial,
+		Memory:        task.Memory,
 		Results:       results,
 		ContextLedger: s.taskContextLedger(ctx, task.ID),
 		Turn:          1,
@@ -5616,6 +5617,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:              initial,
 			WorkPlan:                 currentWorkPlan,
+			Memory:                   task.Memory,
 			Results:                  results,
 			ContextLedger:            s.taskContextLedger(ctx, task.ID),
 			Turn:                     turn,
