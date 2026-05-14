@@ -46,6 +46,7 @@ export async function createTask(input: {
 export async function updateTaskLoopConfig(taskId: string, input: {
   loopIntervalSeconds?: number;
   loopPrompt?: string;
+  requiredTargetID?: string;
 }): Promise<Task> {
   return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/loop-config`, jsonInit("PUT", input));
 }

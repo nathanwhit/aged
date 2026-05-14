@@ -431,6 +431,10 @@ button {
   grid-column: 1 / -1;
 }
 
+.loop-target-field {
+  grid-column: 1 / -1;
+}
+
 .loop-settings {
   align-items: end;
   display: grid;

@@ -311,7 +311,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -482,6 +482,7 @@ function App() {
             onError={setError}
             projects={snapshot.projects}
             promptSets={snapshot.promptSets}
+            targets={snapshot.targets}
           />
         </section>
 
@@ -969,6 +970,7 @@ function TaskComposer({
   onError,
   projects,
   promptSets,
+  targets,
 }: {
   onCreate: (input: TaskStartInput) => Promise<Task>;
   onStartPending: (input: TaskStartInput) => void;
@@ -976,9 +978,11 @@ function TaskComposer({
   onError: (message: string) => void;
   projects: Project[];
   promptSets: PromptSet[];
+  targets: TargetState[];
 }) {
   const [projectId, setProjectId] = useState("");
   const [promptSetId, setPromptSetId] = useState("");
+  const [requiredTargetID, setRequiredTargetID] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [runMode, setRunMode] = useState<RunMode>("one-shot");
@@ -1002,6 +1006,9 @@ function TaskComposer({
     if (promptSetId) {
       metadata.promptSetId = promptSetId;
     }
+    if (requiredTargetID) {
+      metadata.requiredTargetID = requiredTargetID;
+    }
     const input = { projectId: projectId || undefined, title, prompt, metadata };
     setBusy(true);
     onStartPending(input);
@@ -1010,6 +1017,7 @@ function TaskComposer({
       setTitle("");
       setPrompt("");
       setPromptSetId("");
+      setRequiredTargetID("");
       setRunMode("one-shot");
       setCompletionMode("github");
       setLoopWorkerKind("codex");
@@ -1054,6 +1062,7 @@ function TaskComposer({
           ))}
         </select>
       </label>
+      <TargetPinSelect value={requiredTargetID} targets={targets} onChange={setRequiredTargetID} />
       <label>
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
@@ -1131,6 +1140,39 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
       </div>
     </div>
   );
+}
+
+function TargetPinSelect({
+  value,
+  targets,
+  onChange,
+}: {
+  value: string;
+  targets: TargetState[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label>
+      Execution target
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        <option value="">Auto-select target</option>
+        {targets.map((target) => (
+          <option key={target.id} value={target.id}>
+            {targetOptionLabel(target)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function targetOptionLabel(target: TargetState): string {
+  const details = [target.kind, target.host, target.health?.status && `health ${target.health.status}`].filter(Boolean).join(" · ");
+  return details ? `${target.id} (${details})` : target.id;
+}
+
+function requiredTargetIDFromMetadata(metadata: Record<string, unknown> | undefined): string {
+  return String(metadata?.requiredTargetID ?? "").trim();
 }
 
 function ProjectPanel({
@@ -1523,6 +1565,7 @@ function TaskDetail({
   task,
   workers,
   nodes,
+  targets,
   events,
   onCancel,
   onRetry,
@@ -1538,6 +1581,7 @@ function TaskDetail({
   task: Task;
   workers: Worker[];
   nodes: ExecutionNode[];
+  targets: TargetState[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
@@ -1545,7 +1589,7 @@ function TaskDetail({
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
-  onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string }) => Promise<Task>;
+  onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
   retrying: boolean;
   onError: (message: string) => void;
@@ -1554,12 +1598,14 @@ function TaskDetail({
   const [applying, setApplying] = useState(false);
   const [loopIntervalInput, setLoopIntervalInput] = useState("");
   const [loopPromptInput, setLoopPromptInput] = useState("");
+  const [loopTargetInput, setLoopTargetInput] = useState("");
   const [savingLoopConfig, setSavingLoopConfig] = useState(false);
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
   const currentLoopPrompt = durableLoopPromptValue(task);
+  const requiredTargetID = requiredTargetIDFromMetadata(task.metadata);
   const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
@@ -1577,7 +1623,8 @@ function TaskDetail({
   useEffect(() => {
     setLoopIntervalInput(String(loopInterval));
     setLoopPromptInput(currentLoopPrompt);
-  }, [currentLoopPrompt, loopInterval, task.id]);
+    setLoopTargetInput(requiredTargetID);
+  }, [currentLoopPrompt, loopInterval, requiredTargetID, task.id]);
 
   async function steer(event: React.FormEvent) {
     event.preventDefault();
@@ -1609,14 +1656,17 @@ function TaskDetail({
       onError("Loop prompt must not be empty.");
       return;
     }
-    const input: { loopIntervalSeconds?: number; loopPrompt?: string } = {};
+    const input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string } = {};
     if (nextInterval !== loopInterval) {
       input.loopIntervalSeconds = nextInterval;
     }
     if (nextPrompt !== currentLoopPrompt) {
       input.loopPrompt = nextPrompt;
     }
-    if (input.loopIntervalSeconds === undefined && input.loopPrompt === undefined) {
+    if (loopTargetInput !== requiredTargetID) {
+      input.requiredTargetID = loopTargetInput;
+    }
+    if (input.loopIntervalSeconds === undefined && input.loopPrompt === undefined && input.requiredTargetID === undefined) {
       onError("No loop config changes to save.");
       return;
     }
@@ -1664,6 +1714,7 @@ function TaskDetail({
           <div className="task-detail-meta">
             {task.projectId && <span>Project {task.projectId}</span>}
             <span>{task.id.slice(0, 8)}</span>
+            {requiredTargetID && <span>Target {requiredTargetID}</span>}
             <span>{completionMode === "github" ? "GitHub completion" : "Local completion"}</span>
             {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
@@ -1728,6 +1779,9 @@ function TaskDetail({
             Loop prompt
             <textarea value={loopPromptInput} onChange={(event) => setLoopPromptInput(event.target.value)} rows={4} />
           </label>
+          <div className="loop-target-field">
+            <TargetPinSelect value={loopTargetInput} targets={targets} onChange={setLoopTargetInput} />
+          </div>
           <button className="secondary compact" disabled={savingLoopConfig} title="Update durable loop settings">
             <RefreshCw size={16} />
             {savingLoopConfig ? "Saving" : "Update Loop"}
@@ -4828,6 +4882,19 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
           ...task,
           status: String(payload.status) as Task["status"],
           error: payloadValue(payload.error) || undefined,
+          updatedAt: event.at,
+        });
+      }
+    }
+    if (event.type === "task.updated" && event.taskId) {
+      const task = tasks.get(event.taskId);
+      if (task) {
+        const metadataPatch = asRecord(payload.metadataPatch);
+        tasks.set(event.taskId, {
+          ...task,
+          title: payloadValue(payload.title) || task.title,
+          prompt: payloadValue(payload.prompt) || task.prompt,
+          metadata: Object.keys(metadataPatch).length > 0 ? { ...(task.metadata ?? {}), ...metadataPatch } : task.metadata,
           updatedAt: event.at,
         });
       }
