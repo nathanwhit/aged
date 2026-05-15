@@ -274,6 +274,12 @@ func normalizeProject(project core.Project) (core.Project, error) {
 	project.VCS = strings.TrimSpace(project.VCS)
 	project.DefaultBase = strings.TrimSpace(project.DefaultBase)
 	project.WorkspaceRoot = strings.TrimSpace(project.WorkspaceRoot)
+	if project.Requirements.MemoryMB < 0 {
+		return core.Project{}, fmt.Errorf("project %q requirements.memoryMb must be non-negative", project.ID)
+	}
+	if project.Requirements.StorageMB < 0 {
+		return core.Project{}, fmt.Errorf("project %q requirements.storageMb must be non-negative", project.ID)
+	}
 	if project.RemoteCheckouts != nil {
 		remoteCheckouts := map[string]string{}
 		for targetID, checkout := range project.RemoteCheckouts {

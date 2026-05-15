@@ -1143,6 +1143,10 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 		DefaultBase:   "main",
 		WorkspaceRoot: ".aged/workspaces",
 		TargetLabels:  map[string]string{"pool": "local"},
+		Requirements: core.ProjectRequirements{
+			MemoryMB:  16_384,
+			StorageMB: 100_000,
+		},
 		RemoteCheckouts: map[string]string{
 			"vm-1": "/srv/aged/checkouts/aged",
 		},
@@ -1167,7 +1171,7 @@ func TestProjectsPersistInSQLite(t *testing.T) {
 	if len(projects) != 1 {
 		t.Fatalf("projects = %d, want 1", len(projects))
 	}
-	if projects[0].Repo != "owner/aged" || projects[0].UpstreamRepo != "upstream/aged" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || projects[0].TargetLabels["pool"] != "local" || projects[0].RemoteCheckouts["vm-1"] != "/srv/aged/checkouts/aged" {
+	if projects[0].Repo != "owner/aged" || projects[0].UpstreamRepo != "upstream/aged" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || projects[0].TargetLabels["pool"] != "local" || projects[0].Requirements.MemoryMB != 16_384 || projects[0].Requirements.StorageMB != 100_000 || projects[0].RemoteCheckouts["vm-1"] != "/srv/aged/checkouts/aged" {
 		t.Fatalf("project = %+v", projects[0])
 	}
 }

@@ -592,7 +592,17 @@ func (s *Service) ProjectHealth(ctx context.Context, id string) (core.ProjectHea
 		health.DefaultBaseStatus = "mismatch"
 	}
 	if len(project.TargetLabels) > 0 && s.targets != nil {
-		_, err := s.targets.Select(Plan{Metadata: map[string]any{"targetLabels": project.TargetLabels}})
+		metadata := map[string]any{"targetLabels": project.TargetLabels}
+		applyRequirementsMetadata(metadata, project.Requirements)
+		_, err := s.targets.Select(Plan{Metadata: metadata})
+		if err != nil {
+			health.TargetStatus = "no_matching_target"
+			addError(err.Error())
+		}
+	} else if hasRequirements(project.Requirements) && s.targets != nil {
+		metadata := map[string]any{}
+		applyRequirementsMetadata(metadata, project.Requirements)
+		_, err := s.targets.Select(Plan{Metadata: metadata})
 		if err != nil {
 			health.TargetStatus = "no_matching_target"
 			addError(err.Error())
@@ -3162,12 +3172,27 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		plan.Metadata["targetSelectionPolicy"] = "scheduler required target id is ignored; placement is selected by task or project policy"
 		delete(plan.Metadata, "requiredTargetID")
 	}
+	if requestedRequirements := targetRequirements(plan.Metadata); hasRequirements(requestedRequirements) {
+		plan.Metadata["ignoredRequiredMemoryMB"] = requestedRequirements.MemoryMB
+		plan.Metadata["ignoredRequiredStorageMB"] = requestedRequirements.StorageMB
+		plan.Metadata["targetSelectionPolicy"] = "scheduler target requirements are ignored; placement is selected by task or project policy"
+		delete(plan.Metadata, "requiredMemoryMB")
+		delete(plan.Metadata, "requiredStorageMB")
+		delete(plan.Metadata, "requiredDiskMB")
+	}
 	if labels := taskTargetLabels(task); len(labels) > 0 {
 		plan.Metadata["targetLabels"] = labels
 		plan.Metadata["targetSelectionSource"] = "task"
 	} else if len(project.TargetLabels) > 0 {
 		plan.Metadata["targetLabels"] = project.TargetLabels
 		plan.Metadata["targetSelectionSource"] = "project"
+	}
+	if requirements := taskTargetRequirements(task); hasRequirements(requirements) {
+		applyRequirementsMetadata(plan.Metadata, requirements)
+		plan.Metadata["targetRequirementsSource"] = "task"
+	} else if hasRequirements(project.Requirements) {
+		applyRequirementsMetadata(plan.Metadata, project.Requirements)
+		plan.Metadata["targetRequirementsSource"] = "project"
 	}
 	if requiredID := taskRequiredTargetID(task); requiredID != "" {
 		plan.Metadata["requiredTargetID"] = requiredID
@@ -3472,14 +3497,17 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
 	requiredID := requiredTargetID(plan.Metadata)
 	if requiredID != "" {
-		target, err := s.targets.SelectID(requiredID, plan.WorkerKind)
+		target, err := s.targets.Select(plan)
 		if err != nil {
 			return TargetConfig{}, fmt.Errorf("required execution target %q is unavailable: %w", requiredID, err)
 		}
 		return target, nil
 	}
 	if retryTargetID := stringMetadata(plan.Metadata, "retryTargetID"); retryTargetID != "" {
-		target, err := s.targets.SelectID(retryTargetID, plan.WorkerKind)
+		retryPlan := plan
+		retryPlan.Metadata = copyPlanMetadata(plan.Metadata)
+		retryPlan.Metadata["requiredTargetID"] = retryTargetID
+		target, err := s.targets.Select(retryPlan)
 		if err == nil {
 			return target, nil
 		}
@@ -3491,7 +3519,7 @@ func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetC
 		return fallback, nil
 	}
 	if retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID"); retryFromWorkerID != "" {
-		lookup, lookupErr := s.executionTargetForWorker(ctx, retryFromWorkerID, plan.WorkerKind)
+		lookup, lookupErr := s.executionTargetForWorker(ctx, retryFromWorkerID, plan)
 		if lookupErr != nil {
 			return TargetConfig{}, lookupErr
 		}
@@ -3526,7 +3554,7 @@ type previousTargetLookup struct {
 	selectErr error
 }
 
-func (s *Service) executionTargetForWorker(ctx context.Context, workerID string, workerKind string) (previousTargetLookup, error) {
+func (s *Service) executionTargetForWorker(ctx context.Context, workerID string, plan Plan) (previousTargetLookup, error) {
 	var result previousTargetLookup
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
@@ -3541,7 +3569,7 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string,
 		if node.WorkerID != workerID || strings.TrimSpace(node.TargetID) == "" {
 			continue
 		}
-		target, selectErr := s.targets.SelectID(node.TargetID, workerKind)
+		target, selectErr := s.selectTargetIDWithPlan(node.TargetID, plan)
 		result.target = target
 		result.targetID = node.TargetID
 		result.selectErr = selectErr
@@ -3559,11 +3587,18 @@ func (s *Service) executionTargetForWorker(ctx context.Context, workerID string,
 	if targetID == "" {
 		return result, nil
 	}
-	target, selectErr := s.targets.SelectID(targetID, workerKind)
+	target, selectErr := s.selectTargetIDWithPlan(targetID, plan)
 	result.target = target
 	result.targetID = targetID
 	result.selectErr = selectErr
 	return result, nil
+}
+
+func (s *Service) selectTargetIDWithPlan(targetID string, plan Plan) (TargetConfig, error) {
+	targetPlan := plan
+	targetPlan.Metadata = copyPlanMetadata(plan.Metadata)
+	targetPlan.Metadata["requiredTargetID"] = targetID
+	return s.targets.Select(targetPlan)
 }
 
 func recordRetryTargetFallback(plan Plan, fromTargetID, toTargetID string, cause error) {
@@ -7367,6 +7402,17 @@ func taskTargetLabels(task core.Task) map[string]string {
 	return targetLabels(metadata)
 }
 
+func taskTargetRequirements(task core.Task) core.ProjectRequirements {
+	if len(task.Metadata) == 0 {
+		return core.ProjectRequirements{}
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
+		return core.ProjectRequirements{}
+	}
+	return targetRequirements(metadata)
+}
+
 func taskRequiredTargetID(task core.Task) string {
 	if len(task.Metadata) == 0 {
 		return ""
@@ -7376,6 +7422,24 @@ func taskRequiredTargetID(task core.Task) string {
 		return ""
 	}
 	return requiredTargetID(metadata)
+}
+
+func applyRequirementsMetadata(metadata map[string]any, requirements core.ProjectRequirements) {
+	if requirements.MemoryMB > 0 {
+		metadata["requiredMemoryMB"] = requirements.MemoryMB
+	} else {
+		delete(metadata, "requiredMemoryMB")
+	}
+	if requirements.StorageMB > 0 {
+		metadata["requiredStorageMB"] = requirements.StorageMB
+	} else {
+		delete(metadata, "requiredStorageMB")
+	}
+	delete(metadata, "requiredDiskMB")
+}
+
+func hasRequirements(requirements core.ProjectRequirements) bool {
+	return requirements.MemoryMB > 0 || requirements.StorageMB > 0
 }
 
 func taskExternalRef(task core.Task) (string, string) {
@@ -8508,10 +8572,15 @@ func planMetadata(plan Plan) map[string]any {
 		"targetKind",
 		"targetLabels",
 		"ignoredTargetLabels",
+		"requiredMemoryMB",
+		"requiredStorageMB",
+		"ignoredRequiredMemoryMB",
+		"ignoredRequiredStorageMB",
 		"requiredTargetID",
 		"ignoredRequiredTargetID",
 		"targetSelectionPolicy",
 		"targetSelectionSource",
+		"targetRequirementsSource",
 		"fallbackFromTargetID",
 		"fallbackFromTargetKind",
 		"remoteSession",

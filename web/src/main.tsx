@@ -1228,6 +1228,8 @@ function ProjectPanel({
   const [pushRemote, setPushRemote] = useState("");
   const [defaultBase, setDefaultBase] = useState("main");
   const [branchPrefix, setBranchPrefix] = useState("codex/aged-");
+  const [requiredMemoryMb, setRequiredMemoryMb] = useState("");
+  const [requiredStorageMb, setRequiredStorageMb] = useState("");
   const [remoteCheckoutEntries, setRemoteCheckoutEntries] = useState<PluginConfigEntry[]>([]);
   const [pollGitHubIssues, setPollGitHubIssues] = useState(false);
   const [issueLabels, setIssueLabels] = useState("aged");
@@ -1265,6 +1267,8 @@ function ProjectPanel({
     setPushRemote(project.pushRemote ?? "");
     setDefaultBase(project.defaultBase ?? "main");
     setBranchPrefix(project.pullRequestPolicy?.branchPrefix ?? "codex/aged-");
+    setRequiredMemoryMb(project.requirements?.memoryMb ? String(project.requirements.memoryMb) : "");
+    setRequiredStorageMb(project.requirements?.storageMb ? String(project.requirements.storageMb) : "");
     setRemoteCheckoutEntries(configEntriesFromRecord(project.remoteCheckouts));
     setPollGitHubIssues(Boolean(project.githubIssues?.enabled));
     setIssueLabels((project.githubIssues?.labels ?? []).join(", "));
@@ -1300,6 +1304,8 @@ function ProjectPanel({
     setPushRemote("");
     setDefaultBase("main");
     setBranchPrefix("codex/aged-");
+    setRequiredMemoryMb("");
+    setRequiredStorageMb("");
     setRemoteCheckoutEntries([]);
     setPollGitHubIssues(false);
     setIssueLabels("aged");
@@ -1332,6 +1338,8 @@ function ProjectPanel({
       const parsedIssueLimit = Math.max(0, Number.parseInt(issueLimit, 10) || 0);
       const parsedMentionLimit = Math.max(0, Number.parseInt(mentionLimit, 10) || 0);
       const parsedReviewMaxAttempts = Math.max(0, Number.parseInt(reviewMaxAttempts, 10) || 0);
+      const parsedRequiredMemoryMb = Math.max(0, Number.parseInt(requiredMemoryMb, 10) || 0);
+      const parsedRequiredStorageMb = Math.max(0, Number.parseInt(requiredStorageMb, 10) || 0);
       const input = {
         id,
         name: name || undefined,
@@ -1342,6 +1350,10 @@ function ProjectPanel({
         pushRemote: pushRemote || undefined,
         vcs: "auto",
         defaultBase: defaultBase || undefined,
+        requirements: parsedRequiredMemoryMb || parsedRequiredStorageMb ? {
+          memoryMb: parsedRequiredMemoryMb || undefined,
+          storageMb: parsedRequiredStorageMb || undefined,
+        } : undefined,
         remoteCheckouts: Object.keys(parsedRemoteCheckouts).length ? parsedRemoteCheckouts : undefined,
         githubIssues: {
           enabled: pollGitHubIssues,
@@ -1463,6 +1475,19 @@ function ProjectPanel({
             PR branch prefix
             <input value={branchPrefix} onChange={(event) => setBranchPrefix(event.target.value)} placeholder="codex/aged-" />
           </label>
+          <fieldset className="target-label-field">
+            <legend>Minimum resources</legend>
+            <div className="loop-config">
+              <label>
+                Memory MiB
+                <input type="number" min="0" step="1" value={requiredMemoryMb} onChange={(event) => setRequiredMemoryMb(event.target.value)} placeholder="16384" />
+              </label>
+              <label>
+                Storage MiB
+                <input type="number" min="0" step="1" value={requiredStorageMb} onChange={(event) => setRequiredStorageMb(event.target.value)} placeholder="102400" />
+              </label>
+            </div>
+          </fieldset>
           <fieldset className="target-label-field">
             <legend>Remote checkouts</legend>
             <KeyValueRows entries={remoteCheckoutEntries} setEntries={setRemoteCheckoutEntries} emptyText="No checkout overrides" keyPlaceholder="perf-1" valuePlaceholder="/srv/aged/checkouts/node" removeTitle="Remove checkout override" addLabel="Add checkout" />

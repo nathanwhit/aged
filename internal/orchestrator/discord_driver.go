@@ -112,6 +112,7 @@ type discordProjectPatch struct {
 	DefaultBase       *string                        `json:"defaultBase"`
 	WorkspaceRoot     *string                        `json:"workspaceRoot"`
 	TargetLabels      *map[string]string             `json:"targetLabels"`
+	Requirements      *core.ProjectRequirements      `json:"requirements"`
 	RemoteCheckouts   *map[string]string             `json:"remoteCheckouts"`
 	PullRequestPolicy *discordPullRequestPolicyPatch `json:"pullRequestPolicy"`
 }
@@ -2093,6 +2094,9 @@ func mergeDiscordProjectPatch(current core.Project, _ core.Project, patch discor
 	}
 	if patch.TargetLabels != nil {
 		updated.TargetLabels = *patch.TargetLabels
+	}
+	if patch.Requirements != nil {
+		updated.Requirements = *patch.Requirements
 	}
 	if patch.RemoteCheckouts != nil {
 		updated.RemoteCheckouts = *patch.RemoteCheckouts

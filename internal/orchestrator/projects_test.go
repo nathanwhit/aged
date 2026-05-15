@@ -65,6 +65,30 @@ func TestNewProjectRegistryNormalizesPullRequestMergeMethod(t *testing.T) {
 	}
 }
 
+func TestNewProjectRegistryRejectsNegativeRequirements(t *testing.T) {
+	_, err := NewProjectRegistry([]core.Project{{
+		ID:        "plain",
+		LocalPath: t.TempDir(),
+		Requirements: core.ProjectRequirements{
+			MemoryMB: -1,
+		},
+	}}, "plain")
+	if err == nil || !strings.Contains(err.Error(), "requirements.memoryMb") {
+		t.Fatalf("err = %v, want memory requirement validation error", err)
+	}
+
+	_, err = NewProjectRegistry([]core.Project{{
+		ID:        "plain",
+		LocalPath: t.TempDir(),
+		Requirements: core.ProjectRequirements{
+			StorageMB: -1,
+		},
+	}}, "plain")
+	if err == nil || !strings.Contains(err.Error(), "requirements.storageMb") {
+		t.Fatalf("err = %v, want storage requirement validation error", err)
+	}
+}
+
 func TestNewProjectRegistryNormalizesReviewPolicy(t *testing.T) {
 	dir := t.TempDir()
 	registry, err := NewProjectRegistry([]core.Project{{

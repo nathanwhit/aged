@@ -10121,6 +10121,54 @@ func TestServiceUsesTaskTargetLabels(t *testing.T) {
 	}
 }
 
+func TestServiceUsesProjectTargetRequirements(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "small", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "large", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("small", core.TargetHealth{}, core.TargetResources{MemoryAvailableMB: 4096, DiskAvailableMB: 50_000})
+	targets.UpdateHealth("large", core.TargetHealth{}, core.TargetResources{MemoryAvailableMB: 32_768, DiskAvailableMB: 200_000})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run resource-heavy work",
+	}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	project, err := service.CreateProject(ctx, core.Project{
+		ID:        "heavy",
+		LocalPath: t.TempDir(),
+		Requirements: core.ProjectRequirements{
+			MemoryMB:  16_384,
+			StorageMB: 100_000,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: project.ID, Title: "Heavy", Prompt: "Run heavy work."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].TargetID != "large" {
+		t.Fatalf("nodes = %+v, want large target", snapshot.ExecutionNodes)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"requiredMemoryMB":16384`) {
+		t.Fatalf("missing required memory metadata")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, `"requiredStorageMB":100000`) {
+		t.Fatalf("missing required storage metadata")
+	}
+	if !hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "targetRequirementsSource", "project") {
+		t.Fatalf("missing project requirements source metadata")
+	}
+}
+
 func TestServiceFollowUpCanMoveAwayFromBaseWorkerTarget(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -10161,6 +10209,41 @@ func TestServiceFollowUpCanMoveAwayFromBaseWorkerTarget(t *testing.T) {
 	}
 	if target.ID != "vm-fast" {
 		t.Fatalf("target = %q, want vm-fast", target.ID)
+	}
+}
+
+func TestServiceSelectExecutionTargetFallsBackLocalAfterRequirementsFail(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	targets := NewTargetRegistry([]TargetConfig{
+		{ID: "local", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100}},
+		{ID: "vm-small", Kind: TargetKindSSH, Host: "vm-small", WorkDir: "/repo", Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1}},
+	})
+	targets.UpdateHealth("local", core.TargetHealth{}, core.TargetResources{MemoryAvailableMB: 1024, DiskAvailableMB: 1024})
+	targets.UpdateHealth("vm-small", core.TargetHealth{Status: "ok", Reachable: true, Tmux: true, RepoPresent: true}, core.TargetResources{MemoryAvailableMB: 1024, DiskAvailableMB: 1024})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "noop"}}, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{})
+
+	plan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "needs resources",
+		Metadata: map[string]any{
+			"requiredMemoryMB":  int64(16_384),
+			"requiredStorageMB": int64(100_000),
+		},
+	}
+	target, err := service.selectExecutionTarget(ctx, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "local" || target.Kind != TargetKindLocal {
+		t.Fatalf("target = %+v, want local fallback", target)
+	}
+	if plan.Metadata["retryTargetFallbackToID"] != "local" {
+		t.Fatalf("fallback to = %v, want local", plan.Metadata["retryTargetFallbackToID"])
 	}
 }
 
