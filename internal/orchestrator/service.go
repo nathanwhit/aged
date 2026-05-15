@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
@@ -103,6 +104,17 @@ const (
 	maxCompletionPublishRecoveryAttempts  = 4
 	maxConsecutiveUnproductiveReplanTurns = 4
 )
+
+var workerCompletedAppendRetryDelays = []time.Duration{
+	0,
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+}
 
 func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	cwd := strings.TrimSpace(workspace.CWD)
@@ -3377,13 +3389,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		if s.workerCompleted(context.Background(), task.ID, workerID) {
 			status = core.WorkerCanceled
 			err = context.Canceled
-		} else {
-			_, _ = s.append(ctx, core.Event{
-				Type:     core.EventWorkerCompleted,
-				TaskID:   task.ID,
-				WorkerID: workerID,
-				Payload:  core.MustJSON(runState.completionPayload(status, err, changes)),
-			})
+		} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(status, err, changes)); completionErr != nil {
+			return WorkerTurnResult{}, completionErr
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
@@ -3398,13 +3405,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		if s.workerCompleted(context.Background(), task.ID, workerID) {
 			status = core.WorkerCanceled
 			statusErr = context.Canceled
-		} else {
-			_, _ = s.append(ctx, core.Event{
-				Type:     core.EventWorkerCompleted,
-				TaskID:   task.ID,
-				WorkerID: workerID,
-				Payload:  core.MustJSON(runState.completionPayload(status, statusErr, changes)),
-			})
+		} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(status, statusErr, changes)); completionErr != nil {
+			return WorkerTurnResult{}, completionErr
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
@@ -3417,13 +3419,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		status = core.WorkerCanceled
 		statusErr = context.Canceled
-	} else {
-		_, _ = s.append(ctx, core.Event{
-			Type:     core.EventWorkerCompleted,
-			TaskID:   task.ID,
-			WorkerID: workerID,
-			Payload:  core.MustJSON(runState.completionPayload(status, statusErr, changes)),
-		})
+	} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(status, statusErr, changes)); completionErr != nil {
+		return WorkerTurnResult{}, completionErr
 	}
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
@@ -3766,12 +3763,20 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	sink := eventSink{service: s, taskID: task.ID, workerID: workerID, state: runState}
 	stdin, err := sshWorkerStdin(runner, spec, command, capabilities)
 	if err != nil {
-		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
-		return WorkerTurnResult{}, err
+		changes := remoteWorkerStartFailureChanges(workspace)
+		if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(core.WorkerFailed, err, changes)); completionErr != nil {
+			return WorkerTurnResult{}, completionErr
+		}
+		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {
-		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
-		return WorkerTurnResult{}, err
+		changes := remoteWorkerStartFailureChanges(workspace)
+		if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(core.WorkerFailed, err, changes)); completionErr != nil {
+			return WorkerTurnResult{}, completionErr
+		}
+		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	sshRunner := s.sshRunner
 	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
@@ -3789,13 +3794,8 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		workerStatus = core.WorkerCanceled
 		statusErr = context.Canceled
-	} else {
-		_, _ = s.append(ctx, core.Event{
-			Type:     core.EventWorkerCompleted,
-			TaskID:   task.ID,
-			WorkerID: workerID,
-			Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
-		})
+	} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(workerStatus, statusErr, changes)); completionErr != nil {
+		return WorkerTurnResult{}, completionErr
 	}
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
@@ -3847,6 +3847,57 @@ func (s *Service) workerCompleted(ctx context.Context, taskID string, workerID s
 		}
 	}
 	return false
+}
+
+func (s *Service) appendWorkerCompleted(ctx context.Context, taskID string, workerID string, payload map[string]any) error {
+	if s.workerCompleted(context.Background(), taskID, workerID) {
+		return nil
+	}
+	event := core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(payload),
+	}
+	var lastErr error
+	for attempt, delay := range workerCompletedAppendRetryDelays {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return fmt.Errorf("append worker.completed for worker %s: %w", workerID, ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if s.workerCompleted(context.Background(), taskID, workerID) {
+			return nil
+		}
+		if _, err := s.append(ctx, event); err != nil {
+			lastErr = err
+			if attempt < len(workerCompletedAppendRetryDelays)-1 {
+				slog.Warn("failed to append worker.completed; retrying", "taskID", taskID, "workerID", workerID, "attempt", attempt+1, "error", err)
+			}
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("append worker.completed for worker %s: %w", workerID, lastErr)
+}
+
+func remoteWorkerStartFailureChanges(workspace PreparedWorkspace) WorkspaceChanges {
+	return WorkspaceChanges{
+		Root:          workspace.Root,
+		CWD:           workspace.CWD,
+		WorkspaceName: workspace.WorkspaceName,
+		Mode:          workspace.Mode,
+		VCSType:       workspace.VCSType,
+	}
 }
 
 func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remoteRun, callback RemoteWorkerCallback) error {
