@@ -6488,6 +6488,97 @@ func TestServiceAddsWorkerCompletionSummaryFromResultEvent(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesTransientFailedWorkerCompletedAppendFailure(t *testing.T) {
+	ctx := context.Background()
+	baseStore := openTestStore(t)
+	defer baseStore.Close()
+	store := &transientAppendErrorStore{
+		Store:        baseStore,
+		eventType:    core.EventWorkerCompleted,
+		failuresLeft: 1,
+		err:          errors.New("temporary sqlite write failure"),
+	}
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "completion-retry",
+		Prompt:     "worker prompt",
+	}}, map[string]worker.Runner{"completion-retry": eventThenFailRunner{
+		kind: "completion-retry",
+		events: []worker.Event{{
+			Kind:   worker.EventLog,
+			Stream: "stderr",
+			Text:   "cargo test failed: No space left on device",
+		}},
+		err: errors.New("No space left on device (os error 28)"),
+	}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	if got := store.failureCount(); got != 1 {
+		t.Fatalf("transient append failures = %d, want 1", got)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCompleted, task.ID) != 1 {
+		t.Fatalf("worker.completed count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCompleted, task.ID))
+	}
+	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
+	if payload.Status != core.WorkerFailed || payload.LogCount != 1 || !strings.Contains(payload.Error, "No space left on device") {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestServiceRemoteWorkerStartFailureCompletesWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &startFailRemoteExecutor{err: errors.New("tmux launch failed")}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:           "vm-1",
+		Kind:         TargetKindSSH,
+		Host:         "vm",
+		CheckoutRoot: "/repo",
+		WorkRoot:     "/runs",
+		Capacity:     TargetCapacity{MaxWorkers: 1, CPUWeight: 100},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "remote-start",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"remote-start": eventRunner{kind: "remote-start"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Remote work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskFailed)
+	if countEvents(snapshot.Events, core.EventWorkerStarted, task.ID) != 1 {
+		t.Fatalf("worker.started count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerStarted, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCompleted, task.ID) != 1 {
+		t.Fatalf("worker.completed count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCompleted, task.ID))
+	}
+	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
+	if payload.Status != core.WorkerFailed || !strings.Contains(payload.Error, "tmux launch failed") {
+		t.Fatalf("payload = %+v", payload)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Status != core.WorkerFailed {
+		t.Fatalf("workers = %+v, want failed worker", snapshot.Workers)
+	}
+	if len(snapshot.ExecutionNodes) != 1 || snapshot.ExecutionNodes[0].Status != core.WorkerFailed {
+		t.Fatalf("execution nodes = %+v, want failed node", snapshot.ExecutionNodes)
+	}
+}
+
 func TestServiceMovesTaskToWaitingWhenWorkerNeedsInput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -10892,6 +10983,12 @@ type eventRunner struct {
 	events []worker.Event
 }
 
+type eventThenFailRunner struct {
+	kind   string
+	events []worker.Event
+	err    error
+}
+
 type failingRunner struct {
 	kind string
 	err  error
@@ -10978,6 +11075,23 @@ func (r eventRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) e
 		}
 	}
 	return nil
+}
+
+func (r eventThenFailRunner) Kind() string {
+	return r.kind
+}
+
+func (r eventThenFailRunner) BuildCommand(worker.Spec) []string {
+	return nil
+}
+
+func (r eventThenFailRunner) Run(ctx context.Context, _ worker.Spec, sink worker.Sink) error {
+	for _, event := range r.events {
+		if err := sink.Event(ctx, event); err != nil {
+			return err
+		}
+	}
+	return r.err
 }
 
 func (r failingRunner) Kind() string {
@@ -11351,6 +11465,47 @@ type fakeWorkspaceManager struct {
 	failPrepareAfter int
 	failPrepareUntil int
 	failApplyUntil   int
+}
+
+type transientAppendErrorStore struct {
+	eventstore.Store
+	mu           sync.Mutex
+	eventType    core.EventType
+	failuresLeft int
+	failures     int
+	err          error
+}
+
+func (s *transientAppendErrorStore) Append(ctx context.Context, event core.Event) (core.Event, error) {
+	s.mu.Lock()
+	if event.Type == s.eventType && s.failuresLeft > 0 {
+		s.failuresLeft--
+		s.failures++
+		err := s.err
+		s.mu.Unlock()
+		return core.Event{}, err
+	}
+	s.mu.Unlock()
+	return s.Store.Append(ctx, event)
+}
+
+func (s *transientAppendErrorStore) failureCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failures
+}
+
+type startFailRemoteExecutor struct {
+	fakeRemoteExecutor
+	err error
+}
+
+func (e *startFailRemoteExecutor) Run(ctx context.Context, argv []string) (string, error) {
+	joined := strings.Join(argv, " ")
+	if strings.Contains(joined, "tmux new-session") {
+		return "", e.err
+	}
+	return e.fakeRemoteExecutor.Run(ctx, argv)
 }
 
 type sequencingWorkspaceManager struct {
@@ -11806,6 +11961,7 @@ func hasWorkerCreated(events []core.Event, taskID string, kind string) bool {
 func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) struct {
 	Status           core.WorkerStatus      `json:"status"`
 	Summary          string                 `json:"summary"`
+	Error            string                 `json:"error"`
 	NeedsInput       bool                   `json:"needsInput"`
 	LogCount         int                    `json:"logCount"`
 	ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
@@ -11819,6 +11975,7 @@ func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) st
 		var payload struct {
 			Status           core.WorkerStatus      `json:"status"`
 			Summary          string                 `json:"summary"`
+			Error            string                 `json:"error"`
 			NeedsInput       bool                   `json:"needsInput"`
 			LogCount         int                    `json:"logCount"`
 			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
@@ -11833,6 +11990,7 @@ func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) st
 	return struct {
 		Status           core.WorkerStatus      `json:"status"`
 		Summary          string                 `json:"summary"`
+		Error            string                 `json:"error"`
 		NeedsInput       bool                   `json:"needsInput"`
 		LogCount         int                    `json:"logCount"`
 		ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
