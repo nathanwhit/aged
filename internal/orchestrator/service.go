@@ -1053,6 +1053,28 @@ func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot
 		if !taskLatestStatusIs(snapshot, task.ID, core.TaskRunning) {
 			continue
 		}
+		if plan, ok, planErr := retryPullRequestFollowUpPlan(snapshot, task.ID); planErr != nil {
+			return planErr
+		} else if ok {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   "startup_running_recovery",
+				"status": "resumed",
+				"reason": "daemon restarted while pull request follow-up was running with no active worker; retrying the follow-up plan",
+			}); err != nil {
+				return err
+			}
+			if err := s.markTaskRetryPlanning(ctx, task.ID); err != nil {
+				return err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
+			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				s.retryTask(taskCtx, task, plan)
+			})
+			continue
+		}
 		initial, results, err := retryGraphStateForTask(snapshot, task.ID)
 		if err != nil || len(candidateResults(results)) == 0 {
 			if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -1956,22 +1978,24 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		})
 		return task, nil
 	}
-	if task.Status == core.TaskFailed && taskFailureShouldRetryPullRequestFollowUp(snapshot, taskID) {
-		plan, err := retryPlanForTask(snapshot, taskID)
+	if task.Status == core.TaskFailed {
+		plan, ok, err := retryPullRequestFollowUpPlan(snapshot, taskID)
 		if err != nil {
 			return core.Task{}, err
 		}
-		if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
-			return core.Task{}, err
+		if ok {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+				return core.Task{}, err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
+			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+				s.retryTask(taskCtx, task, plan)
+			})
+			return task, nil
 		}
-		task.Status = core.TaskPlanning
-		task.Error = ""
-		task.ObjectiveStatus = core.ObjectiveActive
-		task.ObjectivePhase = "retrying"
-		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
-			s.retryTask(taskCtx, task, plan)
-		})
-		return task, nil
 	}
 	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
 		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
@@ -2055,6 +2079,23 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 	}
 	if taskExecutionMode(task) == executionModeLoop {
 		s.runDurableLoopTask(ctx, task)
+		return
+	}
+	if plan, ok, err := retryPullRequestFollowUpPlan(snapshot, taskID); err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	} else if ok {
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "recovering", "Resuming interrupted pull request follow-up work."); err != nil {
+			return
+		}
+		if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+			return
+		}
+		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "recovering"
+		s.retryTask(ctx, task, plan)
 		return
 	}
 	initial, results, err := retryGraphStateForTask(snapshot, taskID)
@@ -7455,20 +7496,69 @@ func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
 	})
 }
 
-func taskFailureShouldRetryPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
-	if !latestTaskFailureMatches(snapshot, taskID, func(string) bool { return true }) {
-		return false
-	}
-	pr, ok := latestPullRequestFollowUp(snapshot, taskID)
+func retryPullRequestFollowUpPlan(snapshot core.Snapshot, taskID string) (Plan, bool, error) {
+	latestFollowUpID, ok := latestOpenPullRequestFollowUpEvent(snapshot, taskID)
 	if !ok {
-		return false
+		return Plan{}, false, nil
 	}
-	switch strings.ToUpper(strings.TrimSpace(pr.State)) {
-	case "", "OPEN":
-		return true
-	default:
-		return false
+	var plan Plan
+	havePlan := false
+	terminalWorkerID := ""
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.ID <= latestFollowUpID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskPlanned:
+			if err := json.Unmarshal(event.Payload, &plan); err != nil {
+				return Plan{}, false, fmt.Errorf("decode pull request follow-up plan: %w", err)
+			}
+			havePlan = true
+		case core.EventWorkerCompleted:
+			var payload struct {
+				Status core.WorkerStatus `json:"status"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return Plan{}, false, fmt.Errorf("decode pull request follow-up worker completion: %w", err)
+			}
+			if payload.Status == core.WorkerFailed || payload.Status == core.WorkerCanceled {
+				terminalWorkerID = event.WorkerID
+			}
+		}
 	}
+	if !havePlan {
+		return Plan{}, false, nil
+	}
+	return retryPlanWithResume(snapshot, plan, taskID, terminalWorkerID), true, nil
+}
+
+func latestOpenPullRequestFollowUpEvent(snapshot core.Snapshot, taskID string) (int64, bool) {
+	latestFollowUp := int64(0)
+	latestPullRequestID := ""
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
+			continue
+		}
+		if event.ID >= latestFollowUp {
+			latestFollowUp = event.ID
+			latestPullRequestID = strings.TrimSpace(payload.ID)
+		}
+	}
+	if latestPullRequestID == "" {
+		return 0, false
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == latestPullRequestID && !isTerminalPullRequestState(pr.State) {
+			return latestFollowUp, true
+		}
+	}
+	return 0, false
 }
 
 func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, results []WorkerTurnResult) bool {
