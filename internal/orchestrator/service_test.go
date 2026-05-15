@@ -5382,6 +5382,187 @@ func TestRecoverRemoteWorkersResumesRunningTaskWithTerminalGraph(t *testing.T) {
 	}
 }
 
+func TestRecoverRemoteWorkersRetriesOrphanedPullRequestFollowUpPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-orphan-pr-followup"
+	initialWorkerID := "worker-original"
+	followUpWorkerID := "worker-followup"
+	followUpPlan := Plan{
+		Workers: []WorkerRequest{{
+			ID:         "respond_review",
+			Role:       "repair or respond",
+			Reason:     "Address the latest PR review thread.",
+			WorkerKind: "codex",
+			Prompt:     "Inspect the PR thread, fix code if needed, otherwise reply.",
+		}},
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return PR to monitoring",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}},
+		Metadata: map[string]any{
+			"pullRequestID":        "pr-1",
+			"workspaceBaseRef":     "codex/aged-test",
+			"workspaceBaseRefKind": "pull_request_head",
+		},
+	}
+	events := []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Repair PR",
+				"prompt": "Fix the pull request and keep watching it.",
+				"metadata": map[string]any{
+					"completionMode": "github",
+				},
+			}),
+		},
+		{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "Implement the original change."}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskRunning,
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: initialWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: initialWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "implemented original change",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "mod.ts", Status: "modified"}},
+				},
+			}),
+		},
+		{
+			Type:   core.EventTaskCandidate,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId": initialWorkerID,
+				"reason":   "original implementation was published",
+			}),
+		},
+		{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/aged-test",
+				"base":   "main",
+				"state":  "OPEN",
+			}),
+		},
+		{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":      "pr-1",
+				"attempt": 1,
+				"reason":  "pull_request_needs_work",
+			}),
+		},
+		{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(followUpPlan),
+		},
+		{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: followUpWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId":   followUpWorkerID,
+				"workerKind": "codex",
+				"nodeId":     "node-followup",
+				"targetId":   "local",
+				"targetKind": "local",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: followUpWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+				"metadata": map[string]any{
+					"nodeID":  "node-followup",
+					"spawnID": "respond_review",
+				},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: followUpWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerCanceled,
+				"summary": "Worker was canceled from persisted daemon state.",
+				"error":   "worker did not have a live local cancellation handle",
+			}),
+		},
+	}
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner := &recordingEventRunner{
+		kind:   "codex",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "rechecked review thread"}},
+	}
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if runner.callsValue() != 1 {
+		t.Fatalf("follow-up runner calls = %d, want 1", runner.callsValue())
+	}
+	if publisher.publishCalls != 0 || publisher.updateCalls != 0 {
+		t.Fatalf("publish calls = %d update calls = %d, want no final candidate publication", publisher.publishCalls, publisher.updateCalls)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "startup_running_recovery", "resumed") {
+		t.Fatalf("missing startup running recovery action")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"retryFromWorkerID":"`+followUpWorkerID+`"`) {
+		t.Fatalf("missing follow-up retry metadata")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskCandidate, taskID, "retry final candidate publication") {
+		t.Fatalf("startup recovery retried final candidate publication")
+	}
+}
+
 func TestRecoverRemoteWorkersResumesOrphanedPullRequestFollowUpPlanning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
