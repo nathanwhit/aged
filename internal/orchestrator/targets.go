@@ -251,19 +251,24 @@ func (r *TargetRegistry) Select(plan Plan) (TargetConfig, error) {
 		if !r.supportsWorkerLocked(target, plan.WorkerKind) {
 			return TargetConfig{}, fmt.Errorf("required execution target %q does not support worker kind %q", requiredID, plan.WorkerKind)
 		}
+		requiredResources := targetRequirements(plan.Metadata)
+		if !r.meetsRequirementsLocked(target, requiredResources) {
+			return TargetConfig{}, fmt.Errorf("required execution target %q does not meet requirements %+v", requiredID, requiredResources)
+		}
 		return target, nil
 	}
 
 	required := targetLabels(plan.Metadata)
+	requiredResources := targetRequirements(plan.Metadata)
 	size := workerSize(plan.Metadata, plan.Prompt)
 	candidates := make([]TargetConfig, 0, len(r.targets))
 	for _, target := range r.targets {
-		if labelsMatch(target.Labels, required) && r.isAvailableLocked(target) && r.supportsWorkerLocked(target, plan.WorkerKind) {
+		if labelsMatch(target.Labels, required) && r.meetsRequirementsLocked(target, requiredResources) && r.isAvailableLocked(target) && r.supportsWorkerLocked(target, plan.WorkerKind) {
 			candidates = append(candidates, target)
 		}
 	}
 	if len(candidates) == 0 {
-		return TargetConfig{}, fmt.Errorf("no execution target matches labels %v and worker kind %q", required, plan.WorkerKind)
+		return TargetConfig{}, fmt.Errorf("no execution target matches labels %v, requirements %+v, and worker kind %q", required, requiredResources, plan.WorkerKind)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return r.scoreLocked(candidates[i], size) > r.scoreLocked(candidates[j], size)
@@ -285,6 +290,20 @@ func (r *TargetRegistry) supportsWorkerLocked(target TargetConfig, workerKind st
 	}
 	available, known := health.Tools[workerKind]
 	return !known || available
+}
+
+func (r *TargetRegistry) meetsRequirementsLocked(target TargetConfig, required core.ProjectRequirements) bool {
+	if required.MemoryMB <= 0 && required.StorageMB <= 0 {
+		return true
+	}
+	resources := r.resource[target.ID]
+	if required.MemoryMB > 0 && resources.MemoryAvailableMB < required.MemoryMB {
+		return false
+	}
+	if required.StorageMB > 0 && resources.DiskAvailableMB < required.StorageMB {
+		return false
+	}
+	return true
 }
 
 func (r *TargetRegistry) SelectID(id string, workerKind string) (TargetConfig, error) {
@@ -502,6 +521,45 @@ func targetLabels(metadata map[string]any) map[string]string {
 		}
 	}
 	return out
+}
+
+func targetRequirements(metadata map[string]any) core.ProjectRequirements {
+	if metadata == nil {
+		return core.ProjectRequirements{}
+	}
+	return core.ProjectRequirements{
+		MemoryMB:  int64Metadata(metadata, "requiredMemoryMB"),
+		StorageMB: nonZeroInt64(int64Metadata(metadata, "requiredStorageMB"), int64Metadata(metadata, "requiredDiskMB")),
+	}
+}
+
+func int64Metadata(metadata map[string]any, key string) int64 {
+	switch value := metadata[key].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case int32:
+		return int64(value)
+	case float64:
+		return int64(value)
+	case float32:
+		return int64(value)
+	case json.Number:
+		number, _ := value.Int64()
+		return number
+	default:
+		return 0
+	}
+}
+
+func nonZeroInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func workerSize(metadata map[string]any, prompt string) string {

@@ -38,6 +38,48 @@ func TestTargetRegistrySelectsMatchingLeastLoadedTarget(t *testing.T) {
 	}
 }
 
+func TestTargetRegistrySelectPreservesZeroRequirements(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "small", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
+		{ID: "fast", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 8}},
+	})
+
+	target, err := registry.Select(Plan{
+		Metadata: map[string]any{
+			"requiredMemoryMB":  int64(0),
+			"requiredStorageMB": int64(0),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "fast" {
+		t.Fatalf("target = %q, want fast", target.ID)
+	}
+}
+
+func TestTargetRegistrySelectFiltersByRequirements(t *testing.T) {
+	registry := NewTargetRegistry([]TargetConfig{
+		{ID: "low", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 100}},
+		{ID: "enough", Kind: TargetKindLocal, Capacity: TargetCapacity{MaxWorkers: 2, CPUWeight: 1}},
+	})
+	registry.UpdateHealth("low", core.TargetHealth{}, core.TargetResources{MemoryAvailableMB: 4096, DiskAvailableMB: 50_000})
+	registry.UpdateHealth("enough", core.TargetHealth{}, core.TargetResources{MemoryAvailableMB: 32_768, DiskAvailableMB: 200_000})
+
+	target, err := registry.Select(Plan{
+		Metadata: map[string]any{
+			"requiredMemoryMB":  int64(16_384),
+			"requiredStorageMB": int64(100_000),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ID != "enough" {
+		t.Fatalf("target = %q, want enough", target.ID)
+	}
+}
+
 func TestTargetRegistryDeleteMissingWrapsNotFound(t *testing.T) {
 	registry := NewLocalTargetRegistry()
 

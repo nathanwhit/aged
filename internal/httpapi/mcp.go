@@ -63,6 +63,7 @@ type mcpProjectPatch struct {
 	DefaultBase       *string                    `json:"defaultBase"`
 	WorkspaceRoot     *string                    `json:"workspaceRoot"`
 	TargetLabels      *map[string]string         `json:"targetLabels"`
+	Requirements      *core.ProjectRequirements  `json:"requirements"`
 	RemoteCheckouts   *map[string]string         `json:"remoteCheckouts"`
 	PullRequestPolicy *mcpPullRequestPolicyPatch `json:"pullRequestPolicy"`
 }
@@ -481,6 +482,9 @@ func mergeMCPProjectPatch(current core.Project, patch mcpProjectPatch) core.Proj
 	}
 	if patch.TargetLabels != nil {
 		updated.TargetLabels = *patch.TargetLabels
+	}
+	if patch.Requirements != nil {
+		updated.Requirements = *patch.Requirements
 	}
 	if patch.RemoteCheckouts != nil {
 		updated.RemoteCheckouts = *patch.RemoteCheckouts
@@ -1067,9 +1071,17 @@ func projectMCPProperties(idDescription string) map[string]any {
 		"defaultBase":       stringSchema("Default PR base branch."),
 		"workspaceRoot":     stringSchema("Optional workspace root override."),
 		"targetLabels":      objectUntypedSchema("Optional target label policy."),
+		"requirements":      projectRequirementsMCPSchema(),
 		"remoteCheckouts":   objectUntypedSchema("Optional map of SSH target id to project checkout path override."),
 		"pullRequestPolicy": pullRequestPolicyMCPSchema(),
 	}
+}
+
+func projectRequirementsMCPSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"memoryMb":  map[string]any{"type": "integer", "minimum": 0, "description": "Minimum available memory in MiB for normal target selection."},
+		"storageMb": map[string]any{"type": "integer", "minimum": 0, "description": "Minimum available storage in MiB for normal target selection."},
+	}, nil)
 }
 
 func pullRequestPolicyMCPSchema() map[string]any {

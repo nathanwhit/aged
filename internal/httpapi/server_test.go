@@ -975,6 +975,7 @@ func TestMCPProjectTools(t *testing.T) {
 				"vcs": "auto",
 				"defaultBase": "main",
 				"targetLabels": {"role": "ci"},
+				"requirements": {"memoryMb": 8192, "storageMb": 50000},
 				"pullRequestPolicy": {
 					"branchPrefix": "aged/",
 					"draft": true,
@@ -1050,7 +1051,7 @@ func TestMCPProjectTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(updateContent["text"].(string)), &updatedProject); err != nil {
 		t.Fatal(err)
 	}
-	if updatedProject.Name != "Node Runtime" || updatedProject.DefaultBase != "trunk" || updatedProject.LocalPath != projectDir || updatedProject.Repo != "nodejs/node" || updatedProject.TargetLabels["role"] != "ci" || updatedProject.PullRequestPolicy.BranchPrefix != "aged/" || !updatedProject.PullRequestPolicy.Draft || !updatedProject.PullRequestPolicy.AllowMerge || !updatedProject.PullRequestPolicy.AutoMerge || updatedProject.PullRequestPolicy.MergeMethod != "rebase" {
+	if updatedProject.Name != "Node Runtime" || updatedProject.DefaultBase != "trunk" || updatedProject.LocalPath != projectDir || updatedProject.Repo != "nodejs/node" || updatedProject.TargetLabels["role"] != "ci" || updatedProject.Requirements.MemoryMB != 8192 || updatedProject.Requirements.StorageMB != 50_000 || updatedProject.PullRequestPolicy.BranchPrefix != "aged/" || !updatedProject.PullRequestPolicy.Draft || !updatedProject.PullRequestPolicy.AllowMerge || !updatedProject.PullRequestPolicy.AutoMerge || updatedProject.PullRequestPolicy.MergeMethod != "rebase" {
 		t.Fatalf("update project result = %+v", updatedProject)
 	}
 
@@ -1065,6 +1066,7 @@ func TestMCPProjectTools(t *testing.T) {
 				"repo": "",
 				"defaultBase": "",
 				"targetLabels": {},
+				"requirements": {},
 				"pullRequestPolicy": {
 					"branchPrefix": "",
 					"draft": false,
@@ -1080,7 +1082,7 @@ func TestMCPProjectTools(t *testing.T) {
 	if err := json.Unmarshal([]byte(clearContent["text"].(string)), &clearedProject); err != nil {
 		t.Fatal(err)
 	}
-	if clearedProject.Repo != "" || clearedProject.DefaultBase != "main" || len(clearedProject.TargetLabels) != 0 || clearedProject.PullRequestPolicy.BranchPrefix != "codex/aged-" || clearedProject.PullRequestPolicy.Draft || clearedProject.PullRequestPolicy.AllowMerge || clearedProject.PullRequestPolicy.AutoMerge || clearedProject.PullRequestPolicy.MergeMethod != "squash" {
+	if clearedProject.Repo != "" || clearedProject.DefaultBase != "main" || len(clearedProject.TargetLabels) != 0 || clearedProject.Requirements.MemoryMB != 0 || clearedProject.Requirements.StorageMB != 0 || clearedProject.PullRequestPolicy.BranchPrefix != "codex/aged-" || clearedProject.PullRequestPolicy.Draft || clearedProject.PullRequestPolicy.AllowMerge || clearedProject.PullRequestPolicy.AutoMerge || clearedProject.PullRequestPolicy.MergeMethod != "squash" {
 		t.Fatalf("cleared project result = %+v", clearedProject)
 	}
 
@@ -1570,6 +1572,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 		"pushRemote": "fork",
 		"vcs": "git",
 		"defaultBase": "main",
+		"requirements": {"memoryMb": 16384, "storageMb": 100000},
 		"githubIssues": {"enabled": true, "labels": ["aged"], "issueLimit": 5},
 		"githubMentions": {"enabled": true, "reasons": ["mention", "review_requested"], "limit": 8},
 		"reviewPolicy": {"enabled": true, "beforeCompletionPr": true, "beforeIntermediatePr": false, "blockingSeverities": ["p1"], "reviewerKinds": ["claude"], "promptSetId": "aged-review", "maxAttempts": 3, "instructions": "Check scheduler lifecycle."},
@@ -1588,7 +1591,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 || !created.ReviewPolicy.Enabled || created.ReviewPolicy.BeforeIntermediatePR || created.ReviewPolicy.PromptSetID != "aged-review" || created.ReviewPolicy.MaxAttempts != 3 || created.PullRequestPolicy.MergeMethod != "merge" {
+	if created.ID != "other" || created.LocalPath != projectDir || created.UpstreamRepo != "upstream/other" || created.HeadRepoOwner != "owner" || created.PushRemote != "fork" || created.Requirements.MemoryMB != 16_384 || created.Requirements.StorageMB != 100_000 || !created.GitHubIssues.Enabled || created.GitHubIssues.IssueLimit != 5 || !created.GitHubMentions.Enabled || created.GitHubMentions.Limit != 8 || !created.ReviewPolicy.Enabled || created.ReviewPolicy.BeforeIntermediatePR || created.ReviewPolicy.PromptSetID != "aged-review" || created.ReviewPolicy.MaxAttempts != 3 || created.PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("created = %+v", created)
 	}
 
@@ -1596,7 +1599,7 @@ func TestCreateProjectEndpointPersistsProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 || !projects[0].ReviewPolicy.Enabled || projects[0].ReviewPolicy.BeforeIntermediatePR || projects[0].ReviewPolicy.PromptSetID != "aged-review" || projects[0].ReviewPolicy.Instructions != "Check scheduler lifecycle." || projects[0].PullRequestPolicy.MergeMethod != "merge" {
+	if len(projects) != 1 || projects[0].ID != "other" || projects[0].UpstreamRepo != "upstream/other" || projects[0].HeadRepoOwner != "owner" || projects[0].PushRemote != "fork" || projects[0].Requirements.MemoryMB != 16_384 || projects[0].Requirements.StorageMB != 100_000 || !projects[0].GitHubIssues.Enabled || len(projects[0].GitHubIssues.Labels) != 1 || !projects[0].GitHubMentions.Enabled || len(projects[0].GitHubMentions.Reasons) != 2 || !projects[0].ReviewPolicy.Enabled || projects[0].ReviewPolicy.BeforeIntermediatePR || projects[0].ReviewPolicy.PromptSetID != "aged-review" || projects[0].ReviewPolicy.Instructions != "Check scheduler lifecycle." || projects[0].PullRequestPolicy.MergeMethod != "merge" {
 		t.Fatalf("projects = %+v", projects)
 	}
 }

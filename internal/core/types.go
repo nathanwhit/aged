@@ -301,11 +301,17 @@ type Project struct {
 	DefaultBase       string              `json:"defaultBase,omitempty"`
 	WorkspaceRoot     string              `json:"workspaceRoot,omitempty"`
 	TargetLabels      map[string]string   `json:"targetLabels,omitempty"`
+	Requirements      ProjectRequirements `json:"requirements,omitempty"`
 	RemoteCheckouts   map[string]string   `json:"remoteCheckouts,omitempty"`
 	GitHubIssues      GitHubIssuePolicy   `json:"githubIssues,omitempty"`
 	GitHubMentions    GitHubMentionPolicy `json:"githubMentions,omitempty"`
 	ReviewPolicy      ReviewPolicy        `json:"reviewPolicy,omitempty"`
 	PullRequestPolicy PullRequestPolicy   `json:"pullRequestPolicy,omitempty"`
+}
+
+type ProjectRequirements struct {
+	MemoryMB  int64 `json:"memoryMb,omitempty"`
+	StorageMB int64 `json:"storageMb,omitempty"`
 }
 
 type GitHubIssuePolicy struct {

@@ -121,6 +121,7 @@ export type Project = {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  requirements?: ProjectRequirements;
   remoteCheckouts?: Record<string, string>;
   githubIssues?: GitHubIssuePolicy;
   githubMentions?: GitHubMentionPolicy;
@@ -140,11 +141,17 @@ export type ProjectInput = {
   defaultBase?: string;
   workspaceRoot?: string;
   targetLabels?: Record<string, string>;
+  requirements?: ProjectRequirements;
   remoteCheckouts?: Record<string, string>;
   githubIssues?: GitHubIssuePolicy;
   githubMentions?: GitHubMentionPolicy;
   reviewPolicy?: ReviewPolicy;
   pullRequestPolicy?: PullRequestPolicy;
+};
+
+export type ProjectRequirements = {
+  memoryMb?: number;
+  storageMb?: number;
 };
 
 export type GitHubIssuePolicy = {
