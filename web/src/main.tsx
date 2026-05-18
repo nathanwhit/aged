@@ -604,6 +604,7 @@ function TaskRow({
           {task.error && <small className="task-row-error">{task.error}</small>}
         </span>
         <span className="task-row-status">
+          {isBroadObjectiveMetadata(task.metadata) && <span className="pill subtle">Objective</span>}
           {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
           <Status value={task.status} />
           {task.objectiveStatus && String(task.objectiveStatus) !== task.status && <span className="pill subtle">{humanizeKey(task.objectiveStatus)}</span>}
@@ -927,6 +928,10 @@ function isRetryableTask(task: Task): boolean {
 function isDurableLoopMetadata(metadata: Record<string, unknown> | undefined): boolean {
   const mode = String(metadata?.executionMode ?? "").trim().toLowerCase();
   return mode === "loop" || mode === "durable_loop" || mode === "agent_loop";
+}
+
+function isBroadObjectiveMetadata(metadata: Record<string, unknown> | undefined): boolean {
+  return String(metadata?.objectiveMode ?? "").trim().toLowerCase() === "broad";
 }
 
 function durableLoopIntervalSeconds(metadata: Record<string, unknown> | undefined): number {
@@ -1741,6 +1746,7 @@ function TaskDetail({
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
+  const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
   const currentLoopPrompt = durableLoopPromptValue(task);
   const requiredTargetID = requiredTargetIDFromMetadata(task.metadata);
@@ -1861,6 +1867,7 @@ function TaskDetail({
           <Status value={task.status} />
           {task.objectiveStatus && <Status value={task.objectiveStatus} />}
           {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
+          {broadObjective && <span className="pill">Objective mode</span>}
           {durableLoop && <span className="pill">Loop mode</span>}
           {!durableLoop && completionMode === "github" && <span className="pill">GitHub mode</span>}
           {canApplyResult && (
@@ -2100,7 +2107,8 @@ function PullRequestPanel({
   const [watchRepo, setWatchRepo] = useState("");
   const [watchNumber, setWatchNumber] = useState("");
   const [watchUrl, setWatchUrl] = useState("");
-  const canPublish = canPublishPullRequest(task) && pullRequests.length === 0;
+  const broadObjective = isBroadObjectiveMetadata(task.metadata);
+  const canPublish = canPublishPullRequest(task) && (broadObjective || pullRequests.length === 0);
 
   async function run(action: string, fn: () => Promise<unknown>) {
     setBusy(action);
@@ -2121,7 +2129,7 @@ function PullRequestPanel({
         </span>
         <button className="secondary compact" disabled={!canPublish || busy === "publish"} onClick={() => run("publish", () => onPublish(task.id))}>
           <GitPullRequest size={16} />
-          {busy === "publish" ? "Opening" : "Open PR"}
+          {busy === "publish" ? "Opening" : broadObjective && pullRequests.length > 0 ? "Open PR Output" : "Open PR"}
         </button>
       </div>
       <form
