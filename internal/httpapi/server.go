@@ -37,6 +37,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /mcp", s.mcpInfo)
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
 	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
+	mux.HandleFunc("POST /api/campaigns/{id}/cancel", s.cancelCampaign)
 	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
@@ -374,6 +375,10 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	campaign, err := s.service.StartCampaign(r.Context(), req)
 	writeResult(w, http.StatusAccepted, campaign, err)
+}
+
+func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
+	writeNoContent(w, s.service.CancelCampaign(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {

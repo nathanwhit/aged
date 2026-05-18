@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createCampaign, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelCampaign, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createCampaign, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { Campaign, EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -225,6 +225,14 @@ function App() {
     try {
       setError("");
       await clearFinishedTasks();
+      await refresh();
+    } catch (err) { setError(errorMessage(err)); }
+  }
+
+  async function handleCancelCampaign(campaignId: string) {
+    try {
+      setError("");
+      await cancelCampaign(campaignId);
       await refresh();
     } catch (err) { setError(errorMessage(err)); }
   }
@@ -450,6 +458,7 @@ function App() {
                     rootTask={campaign.rootTaskId ? taskById.get(campaign.rootTaskId) : undefined}
                     selectedTaskId={selectedTask?.id ?? ""}
                     onSelectTask={setSelectedTaskId}
+                    onCancel={handleCancelCampaign}
                   />
                 ))}
               </div>
@@ -624,11 +633,13 @@ function CampaignRow({
   rootTask,
   selectedTaskId,
   onSelectTask,
+  onCancel,
 }: {
   campaign: Campaign;
   rootTask?: Task;
   selectedTaskId: string;
   onSelectTask: (id: string) => void;
+  onCancel: (id: string) => void;
 }) {
   const childTaskIds = campaign.childTaskIds ?? [];
   const implementationChildren = Math.max(0, childTaskIds.length - (campaign.rootTaskId ? 1 : 0));
@@ -656,6 +667,11 @@ function CampaignRow({
           <span className="pill subtle">{implementationChildren === 1 ? "1 child" : `${implementationChildren} children`}</span>
         </span>
       </button>
+      {!isTerminalCampaign(campaign) && (
+        <button className="icon-button danger task-action" onClick={() => onCancel(campaign.id)} title="Cancel campaign" type="button">
+          <CircleStop size={16} />
+        </button>
+      )}
     </div>
   );
 }

@@ -61,6 +61,10 @@ export async function createCampaign(input: {
   return requestJSON("/api/campaigns", jsonInit("POST", input));
 }
 
+export async function cancelCampaign(campaignId: string): Promise<void> {
+  return requestVoid(`/api/campaigns/${encodeURIComponent(campaignId)}/cancel`, { method: "POST" });
+}
+
 export async function updateTaskLoopConfig(taskId: string, input: {
   loopIntervalSeconds?: number;
   loopPrompt?: string;

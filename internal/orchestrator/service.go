@@ -2486,7 +2486,33 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 			"reason": taskCancelReasonUser,
 		}),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return s.refreshCampaignStatusForTask(ctx, taskID)
+}
+
+func (s *Service) CancelCampaign(ctx context.Context, campaignID string) error {
+	campaignID = strings.TrimSpace(campaignID)
+	if campaignID == "" {
+		return eventstore.ErrNotFound
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if _, ok := findCampaign(snapshot, campaignID); !ok {
+		return eventstore.ErrNotFound
+	}
+	for _, task := range snapshot.Tasks {
+		if task.CampaignID != campaignID || isTerminalTaskStatus(task.Status) {
+			continue
+		}
+		if err := s.CancelTask(ctx, task.ID); err != nil {
+			return err
+		}
+	}
+	return s.updateCampaignStatus(ctx, campaignID, core.CampaignCanceled, "user_canceled")
 }
 
 func (s *Service) ClearTask(ctx context.Context, taskID string) error {
@@ -5617,12 +5643,14 @@ func (s *Service) createCampaignChildTasksFromAction(ctx context.Context, parent
 			metadata["campaignContextArtifactIds"] = spec.CampaignContextArtifactIDs
 		}
 		switch strings.ToLower(strings.TrimSpace(spec.CompletionMode)) {
-		case "", "github":
+		case "", "campaign":
+			metadata["completionMode"] = "campaign"
+		case "github":
 			metadata["completionMode"] = "github"
 		case "local":
 			metadata["completionMode"] = "local"
 		default:
-			return nil, fmt.Errorf("completionMode must be github or local")
+			return nil, fmt.Errorf("completionMode must be campaign, github, or local")
 		}
 		req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
 			ProjectID:    parent.ProjectID,
