@@ -27,16 +27,6 @@ const (
 	ObjectiveAbandoned       ObjectiveStatus = "abandoned"
 )
 
-type CampaignStatus string
-
-const (
-	CampaignActive    CampaignStatus = "active"
-	CampaignWaiting   CampaignStatus = "waiting"
-	CampaignSucceeded CampaignStatus = "succeeded"
-	CampaignFailed    CampaignStatus = "failed"
-	CampaignCanceled  CampaignStatus = "canceled"
-)
-
 type WorkerStatus string
 
 const (
@@ -64,11 +54,6 @@ const (
 	EventTaskArtifact      EventType = "task.artifact_recorded"
 	EventTaskCleared       EventType = "task.cleared"
 	EventTaskAction        EventType = "task.action_executed"
-	EventCampaignCreated   EventType = "campaign.created"
-	EventCampaignUpdated   EventType = "campaign.updated"
-	EventCampaignStatus    EventType = "campaign.status"
-	EventCampaignWorkPlan  EventType = "campaign.work_plan_updated"
-	EventCampaignArtifact  EventType = "campaign.artifact_recorded"
 	EventExecutionPlanned  EventType = "execution.node_planned"
 	EventExecutionStatus   EventType = "execution.node_status"
 	EventApplyPolicy       EventType = "apply.policy_recommended"
@@ -102,7 +87,6 @@ type Event struct {
 type Task struct {
 	ID                     string          `json:"id"`
 	ProjectID              string          `json:"projectId,omitempty"`
-	CampaignID             string          `json:"campaignId,omitempty"`
 	WorkstreamID           string          `json:"workstreamId,omitempty"`
 	Title                  string          `json:"title"`
 	Prompt                 string          `json:"prompt"`
@@ -118,23 +102,6 @@ type Task struct {
 	Milestones             []TaskMilestone `json:"milestones,omitempty"`
 	WorkPlan               *WorkPlan       `json:"workPlan,omitempty"`
 	Artifacts              []TaskArtifact  `json:"artifacts,omitempty"`
-}
-
-type Campaign struct {
-	ID              string          `json:"id"`
-	ProjectID       string          `json:"projectId,omitempty"`
-	RootTaskID      string          `json:"rootTaskId,omitempty"`
-	Title           string          `json:"title"`
-	Prompt          string          `json:"prompt"`
-	Status          CampaignStatus  `json:"status"`
-	ObjectiveStatus ObjectiveStatus `json:"objectiveStatus,omitempty"`
-	ObjectivePhase  string          `json:"objectivePhase,omitempty"`
-	CreatedAt       time.Time       `json:"createdAt"`
-	UpdatedAt       time.Time       `json:"updatedAt"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	WorkPlan        *WorkPlan       `json:"workPlan,omitempty"`
-	Artifacts       []TaskArtifact  `json:"artifacts,omitempty"`
-	ChildTaskIDs    []string        `json:"childTaskIds,omitempty"`
 }
 
 type TaskMilestone struct {
@@ -423,20 +390,12 @@ type OrchestrationGraphSummary struct {
 
 type CreateTaskRequest struct {
 	ProjectID    string          `json:"projectId,omitempty"`
-	CampaignID   string          `json:"campaignId,omitempty"`
 	WorkstreamID string          `json:"workstreamId,omitempty"`
 	Title        string          `json:"title"`
 	Prompt       string          `json:"prompt"`
 	Source       string          `json:"source,omitempty"`
 	ExternalID   string          `json:"externalId,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
-}
-
-type CreateCampaignRequest struct {
-	ProjectID string          `json:"projectId,omitempty"`
-	Title     string          `json:"title"`
-	Prompt    string          `json:"prompt"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
 type UpdateLoopConfigRequest struct {
@@ -492,7 +451,6 @@ type ApprovalDecision struct {
 }
 
 type Snapshot struct {
-	Campaigns           []Campaign           `json:"campaigns,omitempty"`
 	Tasks               []Task               `json:"tasks"`
 	Workers             []Worker             `json:"workers"`
 	ExecutionNodes      []ExecutionNode      `json:"executionNodes"`

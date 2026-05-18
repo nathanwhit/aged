@@ -1495,7 +1495,6 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 	task := core.Task{
 		ID:           taskID,
 		ProjectID:    project.ID,
-		CampaignID:   strings.TrimSpace(stringMetadataValue(metadata["campaignId"])),
 		WorkstreamID: strings.TrimSpace(stringMetadataValue(metadata["workstreamId"])),
 		Title:        title,
 		Prompt:       req.Prompt,
@@ -1509,158 +1508,6 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		s.runTask(taskCtx, task)
 	})
 	return task, nil
-}
-
-func (s *Service) CreateCampaign(ctx context.Context, req core.CreateCampaignRequest) (core.Campaign, error) {
-	if strings.TrimSpace(req.Prompt) == "" {
-		return core.Campaign{}, errors.New("prompt is required")
-	}
-	metadata, err := createTaskMetadataMap(req.Metadata)
-	if err != nil {
-		return core.Campaign{}, err
-	}
-	if req.ProjectID != "" {
-		metadata["projectId"] = strings.TrimSpace(req.ProjectID)
-	}
-	project, err := s.projects.Resolve(core.CreateTaskRequest{
-		ProjectID: req.ProjectID,
-		Prompt:    req.Prompt,
-		Metadata:  core.MustJSON(metadata),
-	})
-	if err != nil {
-		return core.Campaign{}, err
-	}
-	metadata["projectId"] = project.ID
-	title := strings.TrimSpace(req.Title)
-	if title == "" {
-		title = s.generateTaskTitle(ctx, req.Prompt)
-		metadata["titleGenerated"] = true
-	}
-	campaignID := uuid.NewString()
-	created, err := s.append(ctx, core.Event{
-		Type:   core.EventCampaignCreated,
-		TaskID: campaignID,
-		Payload: core.MustJSON(map[string]any{
-			"projectId": project.ID,
-			"title":     title,
-			"prompt":    req.Prompt,
-			"metadata":  metadata,
-		}),
-	})
-	if err != nil {
-		return core.Campaign{}, err
-	}
-	return core.Campaign{
-		ID:              campaignID,
-		ProjectID:       project.ID,
-		Title:           title,
-		Prompt:          req.Prompt,
-		Status:          core.CampaignActive,
-		ObjectiveStatus: core.ObjectiveActive,
-		ObjectivePhase:  "active",
-		CreatedAt:       created.At,
-		UpdatedAt:       created.At,
-		Metadata:        core.MustJSON(metadata),
-	}, nil
-}
-
-func (s *Service) StartCampaign(ctx context.Context, req core.CreateCampaignRequest) (core.Campaign, error) {
-	campaign, err := s.CreateCampaign(ctx, req)
-	if err != nil {
-		return core.Campaign{}, err
-	}
-	rootMetadata := map[string]any{
-		"campaignId":       campaign.ID,
-		"campaignRole":     "coordinator",
-		"completionMode":   "campaign",
-		"omitApplyResult":  true,
-		"sourceCampaignId": campaign.ID,
-	}
-	if req.Metadata != nil {
-		var requestMetadata map[string]any
-		if err := json.Unmarshal(req.Metadata, &requestMetadata); err == nil {
-			if value := stringMetadataValue(requestMetadata["promptSetId"]); value != "" {
-				rootMetadata["promptSetId"] = value
-			}
-			if value := stringMetadataValue(requestMetadata["requiredTargetID"]); value != "" {
-				rootMetadata["requiredTargetID"] = value
-			}
-		}
-	}
-	root, err := s.CreateTask(ctx, core.CreateTaskRequest{
-		ProjectID:    campaign.ProjectID,
-		CampaignID:   campaign.ID,
-		WorkstreamID: "coordination",
-		Title:        campaign.Title + " coordination",
-		Prompt:       campaignCoordinatorPrompt(campaign),
-		Source:       "campaign-root",
-		ExternalID:   campaign.ID + ":root",
-		Metadata:     core.MustJSON(rootMetadata),
-	})
-	if err != nil {
-		_ = s.updateCampaignStatus(ctx, campaign.ID, core.CampaignFailed, "root_task_failed")
-		return core.Campaign{}, err
-	}
-	if _, err := s.append(ctx, core.Event{
-		Type:   core.EventCampaignUpdated,
-		TaskID: campaign.ID,
-		Payload: core.MustJSON(map[string]any{
-			"metadataPatch": map[string]any{"rootTaskId": root.ID},
-		}),
-	}); err != nil {
-		return core.Campaign{}, err
-	}
-	campaign.RootTaskID = root.ID
-	campaign.ChildTaskIDs = []string{root.ID}
-	campaign.Metadata = mergeMetadataForResponse(campaign.Metadata, map[string]any{"rootTaskId": root.ID})
-	return campaign, nil
-}
-
-func campaignCoordinatorPrompt(campaign core.Campaign) string {
-	return strings.TrimSpace(fmt.Sprintf(`Campaign objective:
-%s
-
-You are coordinating this campaign. Investigate and triage the objective, record high-signal findings in the worker summary, and use create_tasks to split implementation into independently reviewable child tasks. The coordinator task should not publish a pull request or produce an applyable final diff.`, campaign.Prompt))
-}
-
-func mergeMetadataForResponse(raw json.RawMessage, patch map[string]any) json.RawMessage {
-	metadata := map[string]any{}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &metadata)
-	}
-	for key, value := range patch {
-		metadata[key] = value
-	}
-	return core.MustJSON(metadata)
-}
-
-func (s *Service) updateCampaignStatus(ctx context.Context, campaignID string, status core.CampaignStatus, phase string) error {
-	if strings.TrimSpace(campaignID) == "" {
-		return nil
-	}
-	_, err := s.append(ctx, core.Event{
-		Type:   core.EventCampaignStatus,
-		TaskID: campaignID,
-		Payload: core.MustJSON(map[string]any{
-			"status":          status,
-			"objectiveStatus": campaignObjectiveStatus(status),
-			"phase":           phase,
-		}),
-	})
-	return err
-}
-
-func campaignObjectiveStatus(status core.CampaignStatus) core.ObjectiveStatus {
-	switch status {
-	case core.CampaignSucceeded:
-		return core.ObjectiveSatisfied
-	case core.CampaignFailed, core.CampaignCanceled:
-		return core.ObjectiveAbandoned
-	case core.CampaignWaiting:
-		return core.ObjectiveWaitingExternal
-	default:
-		return core.ObjectiveActive
-	}
 }
 
 func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req core.UpdateLoopConfigRequest) (core.Task, error) {
@@ -2489,30 +2336,7 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	return s.refreshCampaignStatusForTask(ctx, taskID)
-}
-
-func (s *Service) CancelCampaign(ctx context.Context, campaignID string) error {
-	campaignID = strings.TrimSpace(campaignID)
-	if campaignID == "" {
-		return eventstore.ErrNotFound
-	}
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	if _, ok := findCampaign(snapshot, campaignID); !ok {
-		return eventstore.ErrNotFound
-	}
-	for _, task := range snapshot.Tasks {
-		if task.CampaignID != campaignID || isTerminalTaskStatus(task.Status) {
-			continue
-		}
-		if err := s.CancelTask(ctx, task.ID); err != nil {
-			return err
-		}
-	}
-	return s.updateCampaignStatus(ctx, campaignID, core.CampaignCanceled, "user_canceled")
+	return nil
 }
 
 func (s *Service) ClearTask(ctx context.Context, taskID string) error {
@@ -2823,10 +2647,6 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	}
 	if plan.WorkPlan != nil {
 		if err := s.updateTaskWorkPlan(ctx, task.ID, *plan.WorkPlan); err != nil {
-			_ = s.failTask(ctx, task.ID, err)
-			return
-		}
-		if err := s.updateCampaignWorkPlan(ctx, task.CampaignID, *plan.WorkPlan); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
 			return
 		}
@@ -3509,9 +3329,6 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
 	workerPrompt := plan.Prompt
-	if campaignContext := s.campaignContextPrompt(ctx, task, plan.Metadata); campaignContext != "" {
-		workerPrompt = campaignContext + "\n\n" + workerPrompt
-	}
 	prompt := workerExecutionPrompt(workerPrompt, workspace)
 	if reusedWorkspace {
 		if !capabilities.ResumeSession {
@@ -5495,7 +5312,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		return false, results, nil
 	case "create_tasks":
-		created, err := s.createCampaignChildTasksFromAction(ctx, task, action)
+		created, err := s.createChildTasksFromAction(ctx, task, action)
 		if err != nil {
 			return false, results, err
 		}
@@ -5508,17 +5325,6 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			"createdTaskCount": len(created),
 		}); err != nil {
 			return false, results, err
-		}
-		if strings.TrimSpace(task.CampaignID) != "" {
-			_, _ = s.append(ctx, core.Event{
-				Type:   core.EventCampaignStatus,
-				TaskID: task.CampaignID,
-				Payload: core.MustJSON(map[string]any{
-					"status":          core.CampaignActive,
-					"objectiveStatus": core.ObjectiveActive,
-					"phase":           "child_tasks_running",
-				}),
-			})
 		}
 		return true, results, nil
 	case "wait_external":
@@ -5605,60 +5411,47 @@ func (s *Service) waitForMissingPublishCandidate(ctx context.Context, task core.
 	return s.waitForUserAction(ctx, task.ID, workerID, "missing_publish_candidate", question, metadata)
 }
 
-type campaignChildTaskSpec struct {
-	Title                      string   `json:"title"`
-	Prompt                     string   `json:"prompt"`
-	WorkstreamID               string   `json:"workstreamId,omitempty"`
-	CompletionMode             string   `json:"completionMode,omitempty"`
-	DependsOn                  []string `json:"dependsOn,omitempty"`
-	CampaignContextArtifactIDs []string `json:"campaignContextArtifactIds,omitempty"`
+type childTaskSpec struct {
+	Title          string   `json:"title"`
+	Prompt         string   `json:"prompt"`
+	WorkstreamID   string   `json:"workstreamId,omitempty"`
+	CompletionMode string   `json:"completionMode,omitempty"`
+	DependsOn      []string `json:"dependsOn,omitempty"`
 }
 
-func (s *Service) createCampaignChildTasksFromAction(ctx context.Context, parent core.Task, action PlanAction) ([]core.Task, error) {
-	campaignID := nonEmpty(stringMetadata(action.Inputs, "campaignId"), parent.CampaignID)
-	if strings.TrimSpace(campaignID) == "" {
-		return nil, errors.New("create_tasks requires a campaignId on the action or parent task")
-	}
+func (s *Service) createChildTasksFromAction(ctx context.Context, parent core.Task, action PlanAction) ([]core.Task, error) {
 	rawTasks := anySliceMetadata(action.Inputs, "tasks")
 	if len(rawTasks) == 0 {
 		return nil, errors.New("create_tasks requires at least one task")
 	}
 	created := make([]core.Task, 0, len(rawTasks))
 	for index, raw := range rawTasks {
-		spec, err := campaignChildTaskSpecFromInput(raw)
+		spec, err := childTaskSpecFromInput(raw)
 		if err != nil {
 			return nil, fmt.Errorf("create_tasks inputs.tasks[%d]: %w", index, err)
 		}
-		metadata := map[string]any{
-			"campaignId":   campaignID,
-			"parentTaskId": parent.ID,
-		}
+		metadata := map[string]any{"parentTaskId": parent.ID}
 		if spec.WorkstreamID != "" {
 			metadata["workstreamId"] = spec.WorkstreamID
 		}
 		if len(spec.DependsOn) > 0 {
 			metadata["dependsOn"] = spec.DependsOn
 		}
-		if len(spec.CampaignContextArtifactIDs) > 0 {
-			metadata["campaignContextArtifactIds"] = spec.CampaignContextArtifactIDs
-		}
 		switch strings.ToLower(strings.TrimSpace(spec.CompletionMode)) {
-		case "", "campaign":
-			metadata["completionMode"] = "campaign"
+		case "":
 		case "github":
 			metadata["completionMode"] = "github"
 		case "local":
 			metadata["completionMode"] = "local"
 		default:
-			return nil, fmt.Errorf("completionMode must be campaign, github, or local")
+			return nil, fmt.Errorf("completionMode must be github or local")
 		}
 		req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
 			ProjectID:    parent.ProjectID,
-			CampaignID:   campaignID,
 			WorkstreamID: spec.WorkstreamID,
 			Title:        spec.Title,
 			Prompt:       spec.Prompt,
-			Source:       "campaign-task",
+			Source:       "task-child",
 			ExternalID:   parent.ID + ":" + nonEmpty(spec.WorkstreamID, fmt.Sprintf("task-%d", index+1)),
 			Metadata:     core.MustJSON(metadata),
 		})
@@ -5674,26 +5467,25 @@ func (s *Service) createCampaignChildTasksFromAction(ctx context.Context, parent
 	return created, nil
 }
 
-func campaignChildTaskSpecFromInput(raw any) (campaignChildTaskSpec, error) {
+func childTaskSpecFromInput(raw any) (childTaskSpec, error) {
 	data, err := json.Marshal(raw)
 	if err != nil {
-		return campaignChildTaskSpec{}, err
+		return childTaskSpec{}, err
 	}
-	var spec campaignChildTaskSpec
+	var spec childTaskSpec
 	if err := json.Unmarshal(data, &spec); err != nil {
-		return campaignChildTaskSpec{}, err
+		return childTaskSpec{}, err
 	}
 	spec.Title = strings.TrimSpace(spec.Title)
 	spec.Prompt = strings.TrimSpace(spec.Prompt)
 	spec.WorkstreamID = strings.TrimSpace(spec.WorkstreamID)
 	spec.CompletionMode = strings.TrimSpace(spec.CompletionMode)
 	spec.DependsOn = trimStringSlice(spec.DependsOn)
-	spec.CampaignContextArtifactIDs = trimStringSlice(spec.CampaignContextArtifactIDs)
 	if spec.Title == "" {
-		return campaignChildTaskSpec{}, errors.New("title is required")
+		return childTaskSpec{}, errors.New("title is required")
 	}
 	if spec.Prompt == "" {
-		return campaignChildTaskSpec{}, errors.New("prompt is required")
+		return childTaskSpec{}, errors.New("prompt is required")
 	}
 	return spec, nil
 }
@@ -6094,8 +5886,6 @@ func taskCompletionModeFromTask(task core.Task) string {
 	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["completionMode"]))) {
 	case "github":
 		return "github"
-	case "campaign":
-		return "campaign"
 	default:
 		return "local"
 	}
@@ -6172,10 +5962,6 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		if decision.WorkPlan != nil {
 			if err := s.updateTaskWorkPlan(ctx, task.ID, *decision.WorkPlan); err != nil {
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			}
-			if err := s.updateCampaignWorkPlan(ctx, task.CampaignID, *decision.WorkPlan); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			}
@@ -7051,78 +6837,6 @@ func buildFollowUpPrompt(task core.Task, spawn SpawnRequest, results []WorkerTur
 	return builder.String()
 }
 
-func (s *Service) campaignContextPrompt(ctx context.Context, task core.Task, metadata map[string]any) string {
-	campaignID := strings.TrimSpace(task.CampaignID)
-	if campaignID == "" || boolMetadata(metadata, "omitCampaignContext") {
-		return ""
-	}
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return ""
-	}
-	campaign, ok := findCampaign(snapshot, campaignID)
-	if !ok {
-		return ""
-	}
-	selected := map[string]bool{}
-	for _, id := range stringSliceMetadata(metadata, "campaignContextArtifactIds") {
-		id = strings.TrimSpace(id)
-		if id != "" {
-			selected[id] = true
-		}
-	}
-	artifacts := campaign.Artifacts
-	if len(selected) > 0 {
-		filtered := make([]core.TaskArtifact, 0, len(selected))
-		for _, artifact := range artifacts {
-			if selected[artifact.ID] {
-				filtered = append(filtered, artifact)
-			}
-		}
-		artifacts = filtered
-	}
-	if len(artifacts) == 0 {
-		return ""
-	}
-	const maxCampaignArtifacts = 8
-	if len(artifacts) > maxCampaignArtifacts {
-		artifacts = artifacts[len(artifacts)-maxCampaignArtifacts:]
-	}
-	var builder strings.Builder
-	builder.WriteString("# Campaign Context\n\n")
-	builder.WriteString("Campaign: ")
-	builder.WriteString(campaign.Title)
-	builder.WriteString("\n")
-	if campaign.WorkPlan != nil && strings.TrimSpace(campaign.WorkPlan.Summary) != "" {
-		builder.WriteString("Plan summary: ")
-		builder.WriteString(strings.TrimSpace(campaign.WorkPlan.Summary))
-		builder.WriteString("\n")
-	}
-	builder.WriteString("\nUse this shared context as background. Do not inherit sibling task code changes unless this worker prompt explicitly names a code dependency.\n")
-	for _, artifact := range artifacts {
-		content := artifactMetadataString(artifact.Metadata, "content")
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-		builder.WriteString("\n## ")
-		builder.WriteString(nonEmpty(artifact.Name, artifact.Kind, artifact.ID))
-		builder.WriteString("\n")
-		if taskID := artifactMetadataString(artifact.Metadata, "taskId"); taskID != "" {
-			builder.WriteString("Task: ")
-			builder.WriteString(taskID)
-			builder.WriteString("\n")
-		}
-		if workerID := artifactMetadataString(artifact.Metadata, "workerId"); workerID != "" {
-			builder.WriteString("Worker: ")
-			builder.WriteString(workerID)
-			builder.WriteString("\n")
-		}
-		builder.WriteString(truncateStringForPrompt(content, 1500))
-		builder.WriteString("\n")
-	}
-	return strings.TrimSpace(builder.String())
-}
-
 func artifactMetadataString(raw json.RawMessage, key string) string {
 	if len(raw) == 0 {
 		return ""
@@ -7469,9 +7183,6 @@ func createTaskMetadata(req core.CreateTaskRequest) (map[string]any, error) {
 	if req.ProjectID != "" {
 		metadata["projectId"] = strings.TrimSpace(req.ProjectID)
 	}
-	if req.CampaignID != "" {
-		metadata["campaignId"] = strings.TrimSpace(req.CampaignID)
-	}
 	if req.WorkstreamID != "" {
 		metadata["workstreamId"] = strings.TrimSpace(req.WorkstreamID)
 	}
@@ -7636,15 +7347,6 @@ func findTask(snapshot core.Snapshot, taskID string) (core.Task, bool) {
 		}
 	}
 	return core.Task{}, false
-}
-
-func findCampaign(snapshot core.Snapshot, campaignID string) (core.Campaign, bool) {
-	for _, campaign := range snapshot.Campaigns {
-		if campaign.ID == campaignID {
-			return campaign, true
-		}
-	}
-	return core.Campaign{}, false
 }
 
 func taskSteering(snapshot core.Snapshot, taskID string) []string {
@@ -8367,73 +8069,6 @@ func (s *Service) setTaskStatus(ctx context.Context, taskID string, status core.
 			"status": status,
 		}),
 	})
-	if err != nil {
-		return err
-	}
-	return s.refreshCampaignStatusForTask(ctx, taskID)
-}
-
-func (s *Service) refreshCampaignStatusForTask(ctx context.Context, taskID string) error {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok || strings.TrimSpace(task.CampaignID) == "" {
-		return nil
-	}
-	var total, succeeded, failed, canceled, waiting int
-	for _, child := range snapshot.Tasks {
-		if child.CampaignID != task.CampaignID {
-			continue
-		}
-		total++
-		switch child.Status {
-		case core.TaskSucceeded:
-			succeeded++
-		case core.TaskFailed:
-			failed++
-		case core.TaskCanceled:
-			canceled++
-		case core.TaskWaiting:
-			waiting++
-		}
-	}
-	if total == 0 {
-		return nil
-	}
-	status := core.CampaignActive
-	objective := core.ObjectiveActive
-	phase := "child_tasks_running"
-	if succeeded+failed+canceled == total {
-		switch {
-		case failed > 0:
-			status = core.CampaignFailed
-			objective = core.ObjectiveAbandoned
-			phase = "child_task_failed"
-		case canceled > 0:
-			status = core.CampaignCanceled
-			objective = core.ObjectiveAbandoned
-			phase = "child_task_canceled"
-		default:
-			status = core.CampaignSucceeded
-			objective = core.ObjectiveSatisfied
-			phase = "satisfied"
-		}
-	} else if waiting > 0 {
-		status = core.CampaignWaiting
-		objective = core.ObjectiveWaitingExternal
-		phase = "waiting_on_child_tasks"
-	}
-	_, err = s.append(ctx, core.Event{
-		Type:   core.EventCampaignStatus,
-		TaskID: task.CampaignID,
-		Payload: core.MustJSON(map[string]any{
-			"status":          status,
-			"objectiveStatus": objective,
-			"phase":           phase,
-		}),
-	})
 	return err
 }
 
@@ -8454,19 +8089,6 @@ func (s *Service) updateTaskWorkPlan(ctx context.Context, taskID string, workPla
 	_, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskWorkPlan,
 		TaskID:  taskID,
-		Payload: core.MustJSON(workPlan),
-	})
-	return err
-}
-
-func (s *Service) updateCampaignWorkPlan(ctx context.Context, campaignID string, workPlan core.WorkPlan) error {
-	campaignID = strings.TrimSpace(campaignID)
-	if campaignID == "" {
-		return nil
-	}
-	_, err := s.append(ctx, core.Event{
-		Type:    core.EventCampaignWorkPlan,
-		TaskID:  campaignID,
 		Payload: core.MustJSON(workPlan),
 	})
 	return err
@@ -8508,54 +8130,6 @@ func (s *Service) recordTaskArtifact(ctx context.Context, taskID string, id stri
 	return err
 }
 
-func (s *Service) recordCampaignArtifact(ctx context.Context, campaignID string, id string, kind string, name string, url string, ref string, metadata map[string]any) error {
-	campaignID = strings.TrimSpace(campaignID)
-	if campaignID == "" {
-		return nil
-	}
-	if metadata == nil {
-		metadata = map[string]any{}
-	}
-	_, err := s.append(ctx, core.Event{
-		Type:   core.EventCampaignArtifact,
-		TaskID: campaignID,
-		Payload: core.MustJSON(map[string]any{
-			"id":       id,
-			"kind":     kind,
-			"name":     name,
-			"url":      url,
-			"ref":      ref,
-			"metadata": metadata,
-		}),
-	})
-	return err
-}
-
-func (s *Service) recordCampaignWorkerSummary(ctx context.Context, taskID string, workerID string, workerKind string, summary string, changes WorkspaceChanges) error {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok || strings.TrimSpace(task.CampaignID) == "" || strings.TrimSpace(summary) == "" {
-		return nil
-	}
-	changedFiles := make([]string, 0, len(changes.ChangedFiles))
-	for _, file := range changes.ChangedFiles {
-		if strings.TrimSpace(file.Path) != "" {
-			changedFiles = append(changedFiles, file.Path)
-		}
-	}
-	return s.recordCampaignArtifact(ctx, task.CampaignID, workerID+"-summary", "worker_summary", task.Title, "", workerID, map[string]any{
-		"taskId":       task.ID,
-		"workerId":     workerID,
-		"workerKind":   workerKind,
-		"workstreamId": task.WorkstreamID,
-		"content":      truncateArtifactContent(summary),
-		"changedFiles": changedFiles,
-	})
-}
-
 func (s *Service) recordWorkerArtifacts(ctx context.Context, taskID string, workerID string, workerKind string, state *workerRunState, changes WorkspaceChanges) error {
 	for _, artifact := range changes.Artifacts {
 		metadata := artifact.Metadata
@@ -8581,9 +8155,6 @@ func (s *Service) recordWorkerArtifacts(ctx context.Context, taskID string, work
 		if err := s.recordTaskArtifact(ctx, taskID, artifact.ID, artifact.Kind, artifact.Name, "", "", artifact.Metadata); err != nil {
 			return err
 		}
-	}
-	if err := s.recordCampaignWorkerSummary(ctx, taskID, workerID, workerKind, summary, changes); err != nil {
-		return err
 	}
 	return nil
 }

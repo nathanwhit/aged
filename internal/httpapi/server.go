@@ -36,8 +36,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /mcp", s.mcp)
 	mux.HandleFunc("GET /mcp", s.mcpInfo)
 	mux.HandleFunc("GET /api/snapshot", s.snapshot)
-	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
-	mux.HandleFunc("POST /api/campaigns/{id}/cancel", s.cancelCampaign)
 	mux.HandleFunc("GET /api/projects", s.projects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
@@ -128,11 +126,6 @@ func taskScopedSnapshot(snapshot core.Snapshot, taskID string) (core.Snapshot, b
 		return core.Snapshot{}, false
 	}
 	snapshot.Tasks = []core.Task{task}
-	if task.CampaignID != "" {
-		snapshot.Campaigns = filterTaskScoped(snapshot.Campaigns, map[string]bool{task.CampaignID: true}, func(campaign core.Campaign) string { return campaign.ID })
-	} else {
-		snapshot.Campaigns = nil
-	}
 	snapshot.Workers = filterTaskScoped(snapshot.Workers, keptTasks, func(worker core.Worker) string { return worker.TaskID })
 	snapshot.ExecutionNodes = filterTaskScoped(snapshot.ExecutionNodes, keptTasks, func(node core.ExecutionNode) string { return node.TaskID })
 	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, keptTasks, func(pr core.PullRequest) string { return pr.TaskID })
@@ -366,19 +359,6 @@ func (s *Server) taskSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, taskSnapshot)
-}
-
-func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeRequest[core.CreateCampaignRequest](w, r)
-	if !ok {
-		return
-	}
-	campaign, err := s.service.StartCampaign(r.Context(), req)
-	writeResult(w, http.StatusAccepted, campaign, err)
-}
-
-func (s *Server) cancelCampaign(w http.ResponseWriter, r *http.Request) {
-	writeNoContent(w, s.service.CancelCampaign(r.Context(), r.PathValue("id")))
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
