@@ -700,12 +700,6 @@ button:disabled {
   top: 16px;
 }
 
-.campaign-row-list {
-  display: grid;
-  gap: 4px;
-}
-
-.campaign-row,
 .task-row {
   align-items: center;
   background: transparent;
@@ -719,7 +713,6 @@ button:disabled {
   width: 100%;
 }
 
-.campaign-row.selected,
 .task-row.selected {
   background: #edf4ff;
   border-color: #8cb4ea;
@@ -756,7 +749,6 @@ button:disabled {
   gap: 8px;
 }
 
-.campaign-row-main,
 .task-row-main {
   align-items: start;
   background: transparent;
@@ -771,18 +763,15 @@ button:disabled {
   width: 100%;
 }
 
-.campaign-row-main > span,
 .task-row-main > span {
   min-width: 0;
 }
 
-.campaign-row-copy,
 .task-row-copy {
   display: grid;
   gap: 3px;
 }
 
-.campaign-row-copy strong,
 .task-row-copy strong {
   display: -webkit-box;
   font-size: 14px;
@@ -790,11 +779,6 @@ button:disabled {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-}
-
-.campaign-row-main:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
 }
 
 .task-row-meta {

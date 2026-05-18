@@ -74,185 +74,36 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
-func TestCampaignContextIsSharedWithChildTaskWorkers(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	runner := &recordingEventRunner{
-		kind: "codex",
-		events: []worker.Event{{
-			Kind: worker.EventResult,
-			Text: "## Findings\nImplemented the child task slice.",
-		}},
-	}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "codex",
-		Prompt:     "Use the prior triage.",
-		Rationale:  "run child task",
-	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
-
-	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
-		Title:  "Improve startup",
-		Prompt: "Find and ship independent startup improvements.",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := service.recordCampaignArtifact(ctx, campaign.ID, "triage", "investigation_summary", "Initial triage", "", "", map[string]any{
-		"content": "Triage found task detail hydration as the first slice.",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
-		CampaignID:   campaign.ID,
-		WorkstreamID: "detail-hydration",
-		Title:        "Defer task details",
-		Prompt:       "Implement the first startup slice.",
-		Metadata: core.MustJSON(map[string]any{
-			"completionMode":             "local",
-			"campaignContextArtifactIds": []string{"triage"},
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
-	if prompt := runner.promptValue(); !strings.Contains(prompt, "# Campaign Context") || !strings.Contains(prompt, "task detail hydration") {
-		t.Fatalf("worker prompt missing campaign context:\n%s", prompt)
-	}
-	campaign, ok := findCampaign(snapshot, campaign.ID)
-	if !ok {
-		t.Fatalf("missing campaign in snapshot")
-	}
-	if !reflect.DeepEqual(campaign.ChildTaskIDs, []string{task.ID}) {
-		t.Fatalf("campaign child tasks = %+v, want %s", campaign.ChildTaskIDs, task.ID)
-	}
-	foundWorkerSummary := false
-	for _, artifact := range campaign.Artifacts {
-		if artifact.Kind == "worker_summary" {
-			foundWorkerSummary = true
-			break
-		}
-	}
-	if !foundWorkerSummary {
-		t.Fatalf("campaign artifacts did not include promoted worker summary: %+v", campaign.Artifacts)
-	}
-}
-
-func TestStartCampaignCreatesCoordinatorTask(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	runner := &recordingEventRunner{
-		kind: "codex",
-		events: []worker.Event{{
-			Kind: worker.EventResult,
-			Text: "Triaged the campaign and found two independent slices.",
-		}},
-	}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
-		WorkerKind: "codex",
-		Prompt:     "Triage and split the campaign.",
-		Rationale:  "coordinate campaign",
-	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
-
-	campaign, err := service.StartCampaign(ctx, core.CreateCampaignRequest{
-		Title:  "Improve startup",
-		Prompt: "Find and ship independent startup improvements.",
-		Metadata: core.MustJSON(map[string]any{
-			"promptSetId": "custom-prompts",
-		}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if campaign.RootTaskID == "" {
-		t.Fatalf("campaign RootTaskID is empty")
-	}
-
-	snapshot := waitForTaskStatus(t, store, campaign.RootTaskID, core.TaskSucceeded)
-	root, ok := findTask(snapshot, campaign.RootTaskID)
-	if !ok {
-		t.Fatalf("missing campaign coordinator task")
-	}
-	if root.CampaignID != campaign.ID {
-		t.Fatalf("root CampaignID = %q, want %q", root.CampaignID, campaign.ID)
-	}
-	if root.WorkstreamID != "coordination" {
-		t.Fatalf("root WorkstreamID = %q, want coordination", root.WorkstreamID)
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(root.Metadata, &metadata); err != nil {
-		t.Fatal(err)
-	}
-	if metadata["completionMode"] != "campaign" {
-		t.Fatalf("root completionMode = %v, want campaign", metadata["completionMode"])
-	}
-	if metadata["campaignRole"] != "coordinator" {
-		t.Fatalf("root campaignRole = %v, want coordinator", metadata["campaignRole"])
-	}
-	if metadata["promptSetId"] != "custom-prompts" {
-		t.Fatalf("root did not inherit campaign execution metadata: %+v", metadata)
-	}
-	projectedCampaign, ok := findCampaign(snapshot, campaign.ID)
-	if !ok {
-		t.Fatalf("missing campaign in snapshot")
-	}
-	if projectedCampaign.RootTaskID != campaign.RootTaskID {
-		t.Fatalf("projected RootTaskID = %q, want %q", projectedCampaign.RootTaskID, campaign.RootTaskID)
-	}
-	if !reflect.DeepEqual(projectedCampaign.ChildTaskIDs, []string{campaign.RootTaskID}) {
-		t.Fatalf("campaign child tasks = %+v, want root task", projectedCampaign.ChildTaskIDs)
-	}
-	if !strings.Contains(root.Prompt, "Campaign objective") {
-		t.Fatalf("coordinator task prompt missing campaign framing:\n%s", root.Prompt)
-	}
-	if runner.callsValue() == 0 {
-		t.Fatalf("coordinator task did not run")
-	}
-}
-
-func TestCampaignChildTasksDefaultToCampaignCompletion(t *testing.T) {
+func TestCreateTasksActionCreatesGenericChildTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
 		WorkerKind: "codex",
-		Prompt:     "Run campaign child work.",
-		Rationale:  "campaign child",
+		Prompt:     "Run child work.",
+		Rationale:  "child task",
 	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "Done."}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 
-	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
-		Title:  "Improve startup",
-		Prompt: "Find and ship independent startup improvements.",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	parent := core.Task{
-		ID:         "campaign-root",
-		ProjectID:  "default",
-		CampaignID: campaign.ID,
+		ID:        "parent-task",
+		ProjectID: "default",
 	}
-	created, err := service.createCampaignChildTasksFromAction(ctx, parent, PlanAction{
+	created, err := service.createChildTasksFromAction(ctx, parent, PlanAction{
 		Kind: "create_tasks",
 		Inputs: map[string]any{
 			"tasks": []any{
 				map[string]any{
 					"title":        "Build benchmark harness",
-					"prompt":       "Create a campaign-only benchmark harness artifact for comparing options. It is not part of the upstream repo PR.",
-					"workstreamId": "campaign-harness",
+					"prompt":       "Create a benchmark harness artifact for comparing options.",
+					"workstreamId": "benchmark-harness",
 				},
 				map[string]any{
 					"title":          "Ship product optimization",
 					"prompt":         "Implement a PR-sized product optimization for the upstream repository.",
 					"workstreamId":   "product-optimization",
 					"completionMode": "github",
+					"dependsOn":      []string{"benchmark-harness"},
 				},
 			},
 		},
@@ -267,8 +118,14 @@ func TestCampaignChildTasksDefaultToCampaignCompletion(t *testing.T) {
 	if err := json.Unmarshal(created[0].Metadata, &firstMetadata); err != nil {
 		t.Fatal(err)
 	}
-	if firstMetadata["completionMode"] != "campaign" {
-		t.Fatalf("default child completionMode = %v, want campaign", firstMetadata["completionMode"])
+	if firstMetadata["parentTaskId"] != parent.ID {
+		t.Fatalf("child parentTaskId = %v, want %s", firstMetadata["parentTaskId"], parent.ID)
+	}
+	if firstMetadata["workstreamId"] != "benchmark-harness" {
+		t.Fatalf("child workstreamId = %v, want benchmark-harness", firstMetadata["workstreamId"])
+	}
+	if firstMetadata["completionMode"] != "github" {
+		t.Fatalf("default child completionMode = %v, want github", firstMetadata["completionMode"])
 	}
 	var secondMetadata map[string]any
 	if err := json.Unmarshal(created[1].Metadata, &secondMetadata); err != nil {
@@ -277,129 +134,19 @@ func TestCampaignChildTasksDefaultToCampaignCompletion(t *testing.T) {
 	if secondMetadata["completionMode"] != "github" {
 		t.Fatalf("explicit child completionMode = %v, want github", secondMetadata["completionMode"])
 	}
-}
-
-func TestCancelTaskRefreshesCampaignStatus(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
-		Title:  "Tune startup",
-		Prompt: "Find startup improvements.",
-	})
+	dependsOn, ok := secondMetadata["dependsOn"].([]any)
+	if !ok || len(dependsOn) != 1 || dependsOn[0] != "benchmark-harness" {
+		t.Fatalf("child dependsOn = %+v, want benchmark-harness", secondMetadata["dependsOn"])
+	}
+	found, ok, err := service.FindTaskByExternalID(ctx, "task-child", "parent-task:benchmark-harness")
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskID := "campaign-child"
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"title":    "Measure startup",
-			"prompt":   "Build a campaign-only measurement artifact.",
-			"metadata": map[string]any{"campaignId": campaign.ID},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := service.CancelTask(ctx, taskID); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := store.Snapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
-		t.Fatalf("task status = %q, want canceled", status)
-	}
-	updated, ok := findCampaign(snapshot, campaign.ID)
 	if !ok {
-		t.Fatal("campaign missing from snapshot")
+		t.Fatal("child task was not indexed by task-child external id")
 	}
-	if updated.Status != core.CampaignCanceled {
-		t.Fatalf("campaign status = %q, want canceled", updated.Status)
-	}
-	if updated.ObjectiveStatus != core.ObjectiveAbandoned {
-		t.Fatalf("campaign objective status = %q, want abandoned", updated.ObjectiveStatus)
-	}
-	if updated.ObjectivePhase != "child_task_canceled" {
-		t.Fatalf("campaign objective phase = %q, want child_task_canceled", updated.ObjectivePhase)
-	}
-}
-
-func TestCancelCampaignCancelsNonTerminalChildTasks(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
-	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
-		Title:  "Tune throughput",
-		Prompt: "Coordinate throughput improvements.",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, spec := range []struct {
-		id     string
-		title  string
-		status core.TaskStatus
-	}{
-		{id: "campaign-root", title: "Coordinate campaign", status: core.TaskQueued},
-		{id: "campaign-child-active", title: "Run local harness", status: core.TaskRunning},
-		{id: "campaign-child-done", title: "Landed optimization", status: core.TaskSucceeded},
-	} {
-		if _, err := store.Append(ctx, core.Event{
-			Type:   core.EventTaskCreated,
-			TaskID: spec.id,
-			Payload: core.MustJSON(map[string]any{
-				"title":    spec.title,
-				"prompt":   spec.title,
-				"metadata": map[string]any{"campaignId": campaign.ID},
-			}),
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if spec.status != core.TaskQueued {
-			if _, err := store.Append(ctx, core.Event{
-				Type:   core.EventTaskStatus,
-				TaskID: spec.id,
-				Payload: core.MustJSON(map[string]any{
-					"status": spec.status,
-				}),
-			}); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-
-	if err := service.CancelCampaign(ctx, campaign.ID); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := store.Snapshot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, taskID := range []string{"campaign-root", "campaign-child-active"} {
-		if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
-			t.Fatalf("%s status = %q, want canceled", taskID, status)
-		}
-	}
-	if status := taskStatus(snapshot, "campaign-child-done"); status != core.TaskSucceeded {
-		t.Fatalf("terminal child status = %q, want succeeded", status)
-	}
-	updated, ok := findCampaign(snapshot, campaign.ID)
-	if !ok {
-		t.Fatal("campaign missing from snapshot")
-	}
-	if updated.Status != core.CampaignCanceled {
-		t.Fatalf("campaign status = %q, want canceled", updated.Status)
-	}
-	if updated.ObjectivePhase != "user_canceled" {
-		t.Fatalf("campaign objective phase = %q, want user_canceled", updated.ObjectivePhase)
+	if found.ID != created[0].ID {
+		t.Fatalf("found task ID = %s, want %s", found.ID, created[0].ID)
 	}
 }
 

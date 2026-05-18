@@ -125,6 +125,43 @@ func TestCodexBrainSendsSchedulerPromptOnStdin(t *testing.T) {
 	}
 }
 
+func TestCodexBrainIncludesTaskMetadataInPromptPayload(t *testing.T) {
+	brain := &CodexBrain{template: "schedule the work"}
+	prompt := brain.taskMessage(core.Task{
+		ID:     "task-broad",
+		Title:  "Large migration",
+		Prompt: "Split the migration into reviewable PRs.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+			"objectiveMode":  "broad",
+		}),
+	}, nil)
+
+	if !strings.Contains(prompt, `"objectiveMode": "broad"`) {
+		t.Fatalf("scheduler prompt missing objectiveMode metadata:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `"completionMode": "github"`) {
+		t.Fatalf("scheduler prompt missing completionMode:\n%s", prompt)
+	}
+
+	replanPayload := replanPromptPayload(core.Task{
+		ID:     "task-broad",
+		Title:  "Large migration",
+		Prompt: "Split the migration into reviewable PRs.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+			"objectiveMode":  "broad",
+		}),
+	}, OrchestrationState{})
+	data, err := json.Marshal(replanPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"objectiveMode":"broad"`) {
+		t.Fatalf("replan prompt payload missing objectiveMode metadata: %s", data)
+	}
+}
+
 func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	brain := &CodexBrain{template: "schedule the work"}
 	results := make([]WorkerTurnResult, 120)
@@ -510,7 +547,7 @@ func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 	}
 }
 
-func TestDefaultPromptsRestrictMultiplePRsToCampaignTasks(t *testing.T) {
+func TestDefaultPromptsKeepBroadObjectivesInTaskGraph(t *testing.T) {
 	for _, path := range []string{"../../prompts/scheduler.md", "../../prompts/default/system.md", "../../prompts/default/replan.md"} {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -518,14 +555,22 @@ func TestDefaultPromptsRestrictMultiplePRsToCampaignTasks(t *testing.T) {
 		}
 		body := string(data)
 		if !strings.Contains(body, "Normal `completionMode=github` tasks should produce exactly one completion pull request") &&
-			!strings.Contains(body, "Normal GitHub-completion tasks should converge on one final candidate and one completion pull request") {
+			!strings.Contains(body, "Narrow `completionMode=github` tasks should produce exactly one completion pull request") &&
+			!strings.Contains(body, "Normal GitHub-completion tasks should converge on one final candidate and one completion pull request") &&
+			!strings.Contains(body, "Narrow GitHub-completion tasks should converge on one final candidate and one completion pull request") {
 			t.Fatalf("%s does not constrain normal GitHub-mode tasks to one completion PR:\n%s", path, body)
 		}
-		if !strings.Contains(body, "continueAfterPublish") || !strings.Contains(body, "campaign-style") {
-			t.Fatalf("%s does not reserve continueAfterPublish for campaign-style tasks:\n%s", path, body)
+		if !strings.Contains(body, "continueAfterPublish") || !strings.Contains(body, "large") {
+			t.Fatalf("%s does not reserve continueAfterPublish for broad large objectives:\n%s", path, body)
 		}
-		if !strings.Contains(body, "follow-up tasks") {
-			t.Fatalf("%s does not direct independent later slices to follow-up tasks:\n%s", path, body)
+		if !strings.Contains(body, "task's orchestration graph") && !strings.Contains(body, "this task's graph") {
+			t.Fatalf("%s does not keep broad objective setup inside the task graph:\n%s", path, body)
+		}
+		if !strings.Contains(body, "one massive PR") {
+			t.Fatalf("%s does not warn against collapsing broad objectives into one massive PR:\n%s", path, body)
+		}
+		if !strings.Contains(body, "multiple independent") && !strings.Contains(body, "multiple reviewable") {
+			t.Fatalf("%s does not allow broad objectives to produce multiple PR outputs:\n%s", path, body)
 		}
 	}
 }

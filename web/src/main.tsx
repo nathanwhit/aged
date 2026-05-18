@@ -22,13 +22,12 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelCampaign, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createCampaign, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Campaign, EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
-  campaigns: Campaign[];
   tasks: Task[];
   workers: Worker[];
   executionNodes: ExecutionNode[];
@@ -51,12 +50,11 @@ type TaskStartInput = {
   metadata?: Record<string, unknown>;
 };
 
-type RunMode = "one-shot" | "campaign" | "loop";
+type RunMode = "one-shot" | "objective" | "loop";
 
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
 const emptySnapshot: AppSnapshot = {
-  campaigns: [],
   tasks: [],
   workers: [],
   executionNodes: [],
@@ -210,9 +208,6 @@ function App() {
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
   const activeTasks = snapshot.tasks.filter((task) => !isTerminalTask(task));
   const completedTasks = tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask));
-  const activeCampaigns = campaignsByNewestUpdate(snapshot.campaigns.filter((campaign) => !isTerminalCampaign(campaign)));
-  const taskById = new Map(snapshot.tasks.map((task) => [task.id, task]));
-
   async function handleClearTask(taskId: string) {
     try {
       setError("");
@@ -225,14 +220,6 @@ function App() {
     try {
       setError("");
       await clearFinishedTasks();
-      await refresh();
-    } catch (err) { setError(errorMessage(err)); }
-  }
-
-  async function handleCancelCampaign(campaignId: string) {
-    try {
-      setError("");
-      await cancelCampaign(campaignId);
       await refresh();
     } catch (err) { setError(errorMessage(err)); }
   }
@@ -437,34 +424,6 @@ function App() {
 
       <section className="layout">
         <section className="left-rail">
-          <section className="panel campaign-list">
-            <div className="panel-title split-title">
-              <span>
-                <FolderPlus size={18} />
-                <h2>Campaigns</h2>
-              </span>
-              <span className="pill subtle">{activeCampaigns.length} active</span>
-            </div>
-            {initialSnapshotStatus === "loading" ? (
-              <TaskListLoading label="Loading campaigns..." />
-            ) : activeCampaigns.length === 0 ? (
-              <p className="empty">No active campaigns.</p>
-            ) : (
-              <div className="campaign-row-list">
-                {activeCampaigns.map((campaign) => (
-                  <CampaignRow
-                    key={campaign.id}
-                    campaign={campaign}
-                    rootTask={campaign.rootTaskId ? taskById.get(campaign.rootTaskId) : undefined}
-                    selectedTaskId={selectedTask?.id ?? ""}
-                    onSelectTask={setSelectedTaskId}
-                    onCancel={handleCancelCampaign}
-                  />
-                ))}
-              </div>
-            )}
-          </section>
-
           <section className="panel task-list">
             <div className="panel-title split-title">
               <span>
@@ -530,15 +489,6 @@ function App() {
             onCreate={async (input) => {
               setError("");
               const { runMode, ...request } = input;
-              if (runMode === "campaign") {
-                const campaign = await createCampaign(request);
-                setSnapshot((current) => upsertCampaign(current, campaign));
-                if (campaign.rootTaskId) {
-                  setSelectedTaskId(campaign.rootTaskId);
-                }
-                refresh().catch((err) => setError(errorMessage(err)));
-                return campaign;
-              }
               const task = await createTask(request);
               setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
@@ -628,54 +578,6 @@ function TaskListLoading({ label = "Loading tasks..." }: { label?: string }) {
   );
 }
 
-function CampaignRow({
-  campaign,
-  rootTask,
-  selectedTaskId,
-  onSelectTask,
-  onCancel,
-}: {
-  campaign: Campaign;
-  rootTask?: Task;
-  selectedTaskId: string;
-  onSelectTask: (id: string) => void;
-  onCancel: (id: string) => void;
-}) {
-  const childTaskIds = campaign.childTaskIds ?? [];
-  const implementationChildren = Math.max(0, childTaskIds.length - (campaign.rootTaskId ? 1 : 0));
-  const selected = selectedTaskId !== "" && (selectedTaskId === campaign.rootTaskId || childTaskIds.includes(selectedTaskId));
-  const canSelectRoot = Boolean(campaign.rootTaskId);
-  return (
-    <div className={selected ? "campaign-row selected" : "campaign-row"}>
-      <button
-        className="campaign-row-main"
-        disabled={!canSelectRoot}
-        onClick={() => campaign.rootTaskId && onSelectTask(campaign.rootTaskId)}
-        type="button"
-        aria-current={selected ? "true" : undefined}
-        title={canSelectRoot ? "Open campaign coordinator" : "Campaign coordinator unavailable"}
-      >
-        <span className="campaign-row-copy">
-          <strong>{campaign.title}</strong>
-          <small className="task-row-meta">
-            {[campaign.projectId && `Project ${campaign.projectId}`, campaign.id.slice(0, 8), rootTask?.status && `Coordinator ${humanizeKey(rootTask.status)}`].filter(Boolean).join(" · ")}
-          </small>
-        </span>
-        <span className="task-row-status">
-          <Status value={campaign.status} />
-          {campaign.objectivePhase && campaign.objectivePhase !== campaign.status && <span className="pill subtle">{humanizeKey(campaign.objectivePhase)}</span>}
-          <span className="pill subtle">{implementationChildren === 1 ? "1 child" : `${implementationChildren} children`}</span>
-        </span>
-      </button>
-      {!isTerminalCampaign(campaign) && (
-        <button className="icon-button danger task-action" onClick={() => onCancel(campaign.id)} title="Cancel campaign" type="button">
-          <CircleStop size={16} />
-        </button>
-      )}
-    </div>
-  );
-}
-
 function TaskRow({
   task,
   selected,
@@ -702,6 +604,7 @@ function TaskRow({
           {task.error && <small className="task-row-error">{task.error}</small>}
         </span>
         <span className="task-row-status">
+          {isBroadObjectiveMetadata(task.metadata) && <span className="pill subtle">Objective</span>}
           {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
           <Status value={task.status} />
           {task.objectiveStatus && String(task.objectiveStatus) !== task.status && <span className="pill subtle">{humanizeKey(task.objectiveStatus)}</span>}
@@ -1010,16 +913,8 @@ function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
 }
 
-function isTerminalCampaign(campaign: Campaign): boolean {
-  return campaign.status === "succeeded" || campaign.status === "failed" || campaign.status === "canceled";
-}
-
 function tasksByNewestCompletion(tasks: Task[]): Task[] {
   return [...tasks].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-}
-
-function campaignsByNewestUpdate(campaigns: Campaign[]): Campaign[] {
-  return [...campaigns].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 }
 
 function preferredTask(tasks: Task[]): Task | undefined {
@@ -1033,6 +928,10 @@ function isRetryableTask(task: Task): boolean {
 function isDurableLoopMetadata(metadata: Record<string, unknown> | undefined): boolean {
   const mode = String(metadata?.executionMode ?? "").trim().toLowerCase();
   return mode === "loop" || mode === "durable_loop" || mode === "agent_loop";
+}
+
+function isBroadObjectiveMetadata(metadata: Record<string, unknown> | undefined): boolean {
+  return String(metadata?.objectiveMode ?? "").trim().toLowerCase() === "broad";
 }
 
 function durableLoopIntervalSeconds(metadata: Record<string, unknown> | undefined): number {
@@ -1103,7 +1002,7 @@ function TaskComposer({
   promptSets,
   targets,
 }: {
-  onCreate: (input: TaskStartInput) => Promise<Task | Campaign>;
+  onCreate: (input: TaskStartInput) => Promise<Task>;
   onStartPending: (input: TaskStartInput) => void;
   onStartSettled: () => void;
   onError: (message: string) => void;
@@ -1133,8 +1032,8 @@ function TaskComposer({
           loopRole: loopRole.trim() || "maintenance_pr_loop",
           loopIntervalSeconds: interval,
         }
-      : runMode === "campaign"
-        ? {}
+      : runMode === "objective"
+        ? { objectiveMode: "broad", completionMode: "github" }
         : { completionMode };
     if (promptSetId) {
       metadata.promptSetId = promptSetId;
@@ -1207,10 +1106,10 @@ function TaskComposer({
           <Play size={16} />
           <span>One-shot</span>
         </label>
-        <label className={runMode === "campaign" ? "run-mode-option selected" : "run-mode-option"}>
-          <input type="radio" name="run-mode" value="campaign" checked={runMode === "campaign"} onChange={() => setRunMode("campaign")} />
+        <label className={runMode === "objective" ? "run-mode-option selected" : "run-mode-option"}>
+          <input type="radio" name="run-mode" value="objective" checked={runMode === "objective"} onChange={() => setRunMode("objective")} />
           <FolderPlus size={16} />
-          <span>Campaign</span>
+          <span>Objective</span>
         </label>
         <label className={runMode === "loop" ? "run-mode-option selected" : "run-mode-option"}>
           <input type="radio" name="run-mode" value="loop" checked={runMode === "loop"} onChange={() => setRunMode("loop")} />
@@ -1274,7 +1173,7 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
           <LoaderCircle className="spin" size={12} />
           Starting
         </span>
-        {task.runMode === "campaign" && <span className="pill subtle">Campaign</span>}
+        {task.runMode === "objective" && <span className="pill subtle">Objective</span>}
         {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
       </div>
     </div>
@@ -1847,13 +1746,14 @@ function TaskDetail({
   const [diff, setDiff] = useState<DiffReviewState | undefined>();
   const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
+  const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
   const currentLoopPrompt = durableLoopPromptValue(task);
   const requiredTargetID = requiredTargetIDFromMetadata(task.metadata);
   const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
-  const canApplyResult = !durableLoop && completionMode !== "github" && completionMode !== "campaign" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
+  const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
@@ -1959,7 +1859,7 @@ function TaskDetail({
             {task.projectId && <span>Project {task.projectId}</span>}
             <span>{task.id.slice(0, 8)}</span>
             {requiredTargetID && <span>Target {requiredTargetID}</span>}
-            <span>{completionMode === "github" ? "GitHub completion" : completionMode === "campaign" ? "Campaign coordinator" : "Local completion"}</span>
+            <span>{completionMode === "github" ? "GitHub completion" : "Local completion"}</span>
             {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
         </div>
@@ -1967,9 +1867,9 @@ function TaskDetail({
           <Status value={task.status} />
           {task.objectiveStatus && <Status value={task.objectiveStatus} />}
           {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
+          {broadObjective && <span className="pill">Objective mode</span>}
           {durableLoop && <span className="pill">Loop mode</span>}
           {!durableLoop && completionMode === "github" && <span className="pill">GitHub mode</span>}
-          {!durableLoop && completionMode === "campaign" && <span className="pill">Campaign coordinator</span>}
           {canApplyResult && (
             <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
               <Check size={16} />
@@ -2207,7 +2107,8 @@ function PullRequestPanel({
   const [watchRepo, setWatchRepo] = useState("");
   const [watchNumber, setWatchNumber] = useState("");
   const [watchUrl, setWatchUrl] = useState("");
-  const canPublish = canPublishPullRequest(task) && pullRequests.length === 0;
+  const broadObjective = isBroadObjectiveMetadata(task.metadata);
+  const canPublish = canPublishPullRequest(task) && (broadObjective || pullRequests.length === 0);
 
   async function run(action: string, fn: () => Promise<unknown>) {
     setBusy(action);
@@ -2228,7 +2129,7 @@ function PullRequestPanel({
         </span>
         <button className="secondary compact" disabled={!canPublish || busy === "publish"} onClick={() => run("publish", () => onPublish(task.id))}>
           <GitPullRequest size={16} />
-          {busy === "publish" ? "Opening" : "Open PR"}
+          {busy === "publish" ? "Opening" : broadObjective && pullRequests.length > 0 ? "Open PR Output" : "Open PR"}
         </button>
       </div>
       <form
@@ -4789,7 +4690,6 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
   const tasks = snapshot.tasks ?? [];
   const lastEventId = snapshot.lastEventId ?? snapshot.events?.at(-1)?.id ?? 0;
   return {
-    campaigns: snapshot.campaigns ?? [],
     tasks,
     workers: snapshot.workers ?? [],
     executionNodes,
@@ -4810,10 +4710,6 @@ function upsertTask(snapshot: AppSnapshot, task: Task): AppSnapshot {
     ? snapshot.tasks.map((candidate) => (candidate.id === task.id ? task : candidate))
     : [...snapshot.tasks, task];
   return { ...snapshot, tasks };
-}
-
-function upsertCampaign(snapshot: AppSnapshot, campaign: Campaign): AppSnapshot {
-  return { ...snapshot, campaigns: upsertById(snapshot.campaigns, campaign) };
 }
 
 function upsertProject(snapshot: AppSnapshot, project: Project): AppSnapshot {
@@ -4839,7 +4735,6 @@ function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): Ap
   ].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
   return {
     ...snapshot,
-    campaigns: mergeById(snapshot.campaigns, taskSnapshot.campaigns),
     tasks,
     workers: [
       ...snapshot.workers.filter((worker) => !taskIds.has(worker.taskId)),
@@ -4905,7 +4800,6 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const task: Task = {
       id: event.taskId,
       projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
-      campaignId: isRecord(payload.metadata) ? String(payload.metadata.campaignId ?? "") || undefined : undefined,
       workstreamId: isRecord(payload.metadata) ? String(payload.metadata.workstreamId ?? "") || undefined : undefined,
       title: String(payload.title ?? "Untitled task"),
       prompt: String(payload.prompt ?? ""),
@@ -5172,7 +5066,6 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
       tasks.set(event.taskId, {
         id: event.taskId,
         projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
-        campaignId: isRecord(payload.metadata) ? String(payload.metadata.campaignId ?? "") || undefined : undefined,
         workstreamId: isRecord(payload.metadata) ? String(payload.metadata.workstreamId ?? "") || undefined : undefined,
         title: String(payload.title ?? "Untitled task"),
         prompt: String(payload.prompt ?? ""),
@@ -5333,7 +5226,6 @@ function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
   }
 
   return {
-    campaigns: snapshot.campaigns,
     tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
     workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
     executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),

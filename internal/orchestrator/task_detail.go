@@ -334,8 +334,6 @@ func taskCompletionMode(task core.Task) string {
 			switch strings.ToLower(strings.TrimSpace(value)) {
 			case "github":
 				return "github"
-			case "campaign":
-				return "campaign"
 			}
 		}
 	}
