@@ -931,6 +931,7 @@ Field rules:
 - Use "continue" when another worker turn is needed.
 - Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The state.results list may omit routine old worker turns to keep the prompt bounded.
 - Treat state.pendingPullRequestFeedback as a task-local orchestration queue, not as user steering. When it is non-empty, do not complete the task until the queued PR feedback has been handled or explicitly determined to need no action. Prefer a targeted repair/inspection worker for one pullRequestId at a time. The continue plan should update that existing PR with update_pull_request before returning it to watch_pull_requests; do not publish a new PR for PR feedback.
+- Treat state.pendingWorkerSteering as targeted worker feedback queued for orchestration. When it is non-empty, do not complete the task until the queued worker feedback has been handled or explicitly determined obsolete. Prefer a continue plan that retries or supersedes the named workerId; do not turn worker-scoped steering into general task steering unless the feedback truly changes the whole objective.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
@@ -1072,6 +1073,9 @@ func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationS
 	state.ContextLedger = compactContextLedgerForPrompt(state.ContextLedger)
 	for index := range state.PendingPullRequestFeedback {
 		state.PendingPullRequestFeedback[index].Prompt = truncateStringForPrompt(state.PendingPullRequestFeedback[index].Prompt, maxPromptResultSummaryBytes)
+	}
+	for index := range state.PendingWorkerSteering {
+		state.PendingWorkerSteering[index].Message = truncateStringForPrompt(state.PendingWorkerSteering[index].Message, maxPromptResultSummaryBytes)
 	}
 
 	blocked := map[string]bool{}

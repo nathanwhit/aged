@@ -299,7 +299,7 @@ func (s *devServer) killDaemonPortListeners(ctx context.Context, log *bytes.Buff
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "lsof", "-ti", "-sTCP:LISTEN", "tcp:"+port)
+	cmd := exec.CommandContext(ctx, "lsof", lsofListenArgs(port)...)
 	out, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -359,6 +359,10 @@ func runCommand(ctx context.Context, dir string, log *bytes.Buffer, name string,
 		return fmt.Errorf("%s failed: %w", name, err)
 	}
 	return nil
+}
+
+func lsofListenArgs(port string) []string {
+	return []string{"-ti", "-sTCP:LISTEN", "-iTCP:" + port}
 }
 
 func portFromAddr(addr string) (string, error) {

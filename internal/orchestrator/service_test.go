@@ -543,6 +543,43 @@ func TestServiceFallsBackWhenTitleGeneratorFails(t *testing.T) {
 	}
 }
 
+func TestServiceLocalNoChangeTaskCompletesWhenReplannerUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "mock",
+			Prompt:     "inspect the requested PR mention",
+		},
+		err: errors.New("codex replan command failed: exec: \"codex\": executable file not found in $PATH"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed PR and found no code changes needed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Review PR mention",
+		Prompt: "Review the PR mention and leave a comment if needed.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "local",
+			"source":         "github-mention",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasEvent(snapshot.Events, core.EventTaskReplanned, task.ID, "") {
+		t.Fatalf("missing fallback replan event")
+	}
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, task.ID, "") {
+		t.Fatalf("local no-change task asked for approval after replanner failure")
+	}
+}
+
 func TestServicePublishesPullRequestAfterApplyingSingleWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9248,6 +9285,145 @@ func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	}
 }
 
+func TestRetryWorkerExecutionPromptDeduplicatesSteering(t *testing.T) {
+	prompt := retryWorkerExecutionPrompt("continue", "worker-1", "thread-1", []string{
+		"You need to use release-lite builds of deno. Debug is not accurate",
+		"You need to use release-lite builds of deno. Debug is not accurate",
+		"  You need to use release-lite builds of deno. Debug is not accurate  ",
+	}, "")
+	if got := strings.Count(prompt, "You need to use release-lite builds of deno. Debug is not accurate"); got != 1 {
+		t.Fatalf("steering occurrence count = %d, want 1:\n%s", got, prompt)
+	}
+}
+
+func TestTaskSteeringDeduplicatesRepeatedMessages(t *testing.T) {
+	snapshot := core.Snapshot{Events: []core.Event{
+		{
+			Type:   core.EventTaskSteered,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"message": "Use release-lite builds.",
+			}),
+		},
+		{
+			Type:   core.EventTaskSteered,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"message": " Use release-lite builds. ",
+			}),
+		},
+		{
+			Type:   core.EventTaskSteered,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"message": "Also compare against main.",
+			}),
+		},
+	}}
+	steering := taskSteering(snapshot, "task-1")
+	if got, want := strings.Join(steering, "\n"), "Use release-lite builds.\nAlso compare against main."; got != want {
+		t.Fatalf("steering = %q, want %q", got, want)
+	}
+}
+
+func TestServiceWorkerSteeringQueuesReplanState(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "pause after worker steering",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	seedSteerableWorkerGraph(t, ctx, store, "task-1", "worker-1")
+
+	if err := service.SteerWorker(ctx, "worker-1", core.SteeringRequest{Message: "Use release-lite builds."}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventTaskReplanned, "task-1")
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("worker steering leaked into task steering")
+	}
+	if len(brain.states) == 0 {
+		t.Fatalf("brain did not receive replan state")
+	}
+	pending := brain.states[0].PendingWorkerSteering
+	if len(pending) != 1 || pending[0].WorkerID != "worker-1" || pending[0].Message != "Use release-lite builds." {
+		t.Fatalf("pending worker steering = %+v", pending)
+	}
+}
+
+func TestServiceWorkerSteeringAnnotatesContinuePlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{decisions: []ReplanDecision{
+		{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "mock",
+				Prompt:     "rerun the benchmark",
+			},
+		},
+		{
+			Action:  "wait",
+			Message: "pause after retry",
+		},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "retried with release-lite"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	seedSteerableWorkerGraph(t, ctx, store, "task-1", "worker-1")
+
+	if err := service.SteerWorker(ctx, "worker-1", core.SteeringRequest{Message: "Use release-lite builds."}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEventCount(t, store, core.EventTaskPlanned, "task-1", 2)
+	var retryPlan Plan
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventTaskPlanned && event.TaskID == "task-1" {
+			if err := json.Unmarshal(event.Payload, &retryPlan); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := stringMetadata(retryPlan.Metadata, "retryFromWorkerID"); got != "worker-1" {
+		t.Fatalf("retryFromWorkerID = %q, want worker-1; metadata = %+v", got, retryPlan.Metadata)
+	}
+	if got := strings.Join(stringSliceMetadata(retryPlan.Metadata, "retrySteering"), "\n"); got != "Use release-lite builds." {
+		t.Fatalf("retrySteering = %q", got)
+	}
+}
+
+func TestServiceWorkerSteeringPreventsFallbackCompletionWhenReplannerUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &errorReplanningBrain{err: errors.New("codex replan command failed: exec: \"codex\": executable file not found in $PATH")}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	seedSteerableWorkerGraph(t, ctx, store, "task-1", "worker-1")
+
+	if err := service.SteerWorker(ctx, "worker-1", core.SteeringRequest{Message: "Use release-lite builds."}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventApprovalNeeded, "task-1")
+	if taskStatus(snapshot, "task-1") != core.TaskWaiting {
+		t.Fatalf("task status = %q, want waiting", taskStatus(snapshot, "task-1"))
+	}
+	if hasEvent(snapshot.Events, core.EventTaskCandidate, "task-1", "") {
+		t.Fatalf("queued worker steering was bypassed by fallback completion")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, "task-1", "queued worker steering must be handled") {
+		t.Fatalf("missing queued steering fallback reason")
+	}
+}
+
 func TestServiceDeduplicatesConcurrentNonSteerableSteeringRestarts(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -10821,6 +10997,70 @@ func ptrInt(value int) *int {
 
 func ptrString(value string) *string {
 	return &value
+}
+
+func seedSteerableWorkerGraph(t *testing.T, ctx context.Context, store eventstore.Store, taskID string, workerID string) {
+	t.Helper()
+	events := []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task",
+				"prompt": "Prompt",
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+		{
+			Type:   core.EventTaskPlanned,
+			TaskID: taskID,
+			Payload: core.MustJSON(Plan{
+				WorkerKind: "mock",
+				Prompt:     "initial worker",
+			}),
+		},
+		{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-1",
+				"workerId":   workerID,
+				"workerKind": "mock",
+				"role":       "benchmark",
+				"spawnId":    "bench",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind":    "mock",
+				"command": []string{"mock"},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "finished benchmark",
+			}),
+		},
+	}
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 type fixedBrain struct {

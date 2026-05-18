@@ -61,6 +61,7 @@ const (
 	EventWorkerCleanup     EventType = "worker.workspace_cleaned"
 	EventWorkerCreated     EventType = "worker.created"
 	EventWorkerStarted     EventType = "worker.started"
+	EventWorkerSteered     EventType = "worker.steering_queued"
 	EventWorkerOutput      EventType = "worker.output"
 	EventWorkerCompleted   EventType = "worker.completed"
 	EventWorkerApplied     EventType = "worker.changes_applied"

@@ -1341,11 +1341,18 @@ small {
 .worker-activity,
 .worker-context,
 .worker-graph-context,
+.worker-steer,
 .worker-review {
   border-top: 1px solid #e7edf4;
   grid-column: 1 / -1;
   min-width: 0;
   padding-top: 10px;
+}
+
+.worker-steer {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 38px;
 }
 
 .worker-context {

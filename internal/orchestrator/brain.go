@@ -91,6 +91,7 @@ type OrchestrationState struct {
 	Results                    []WorkerTurnResult        `json:"results"`
 	ContextLedger              []ContextLedgerEntry      `json:"contextLedger,omitempty"`
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
+	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`
 	BlockedFinalCandidateIDs   []string                  `json:"blockedFinalCandidateIds,omitempty"`
 	RecoveryHint               string                    `json:"recoveryHint,omitempty"`
@@ -111,6 +112,18 @@ type PullRequestFeedbackItem struct {
 	MergeStatus   string `json:"mergeStatus,omitempty"`
 	ReviewStatus  string `json:"reviewStatus,omitempty"`
 	Prompt        string `json:"prompt,omitempty"`
+}
+
+type WorkerSteeringItem struct {
+	EventID    int64  `json:"eventId"`
+	WorkerID   string `json:"workerId"`
+	NodeID     string `json:"nodeId,omitempty"`
+	WorkerKind string `json:"workerKind,omitempty"`
+	Role       string `json:"role,omitempty"`
+	SpawnID    string `json:"spawnId,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message"`
 }
 
 type ContextLedgerEntry struct {

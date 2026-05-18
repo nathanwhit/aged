@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -372,6 +372,7 @@ function App() {
               onApply={applyWorkerChanges}
               onApplied={refresh}
               onCancel={cancelWorker}
+              onSteer={steerWorker}
               onError={setError}
             />
           ),
@@ -2206,6 +2207,7 @@ function WorkerList({
   onApply,
   onApplied,
   onCancel,
+  onSteer,
   onError,
 }: {
   task: Task;
@@ -2220,10 +2222,12 @@ function WorkerList({
   onApply: (id: string) => Promise<void>;
   onApplied: () => Promise<void>;
   onCancel: (id: string) => Promise<void>;
+  onSteer: (id: string, message: string) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [applying, setApplying] = useState<string>("");
   const [diffs, setDiffs] = useState<Record<string, DiffReviewState>>({});
+  const [steering, setSteering] = useState<Record<string, string>>({});
 
   async function apply(workerId: string) {
     setApplying(workerId);
@@ -2265,6 +2269,17 @@ function WorkerList({
         [workerId]: { open: true, loading: false, loaded: true, diff: "", error: message },
       }));
       onError(message);
+    }
+  }
+
+  async function steer(event: React.FormEvent, workerId: string) {
+    event.preventDefault();
+    const message = steering[workerId] ?? "";
+    try {
+      await onSteer(workerId, message);
+      setSteering((items) => ({ ...items, [workerId]: "" }));
+    } catch (err) {
+      onError(errorMessage(err));
     }
   }
 
@@ -2335,6 +2350,14 @@ function WorkerList({
                   <p>{latestEvent ? eventDisplayText(latestEvent) : "No worker events yet."}</p>
                 </div>
                 <WorkerActivity events={workerEvents} defaultOpen={status === "failed"} />
+                {workerId && (
+                  <form className="worker-steer" onSubmit={(event) => steer(event, workerId)}>
+                    <input value={steering[workerId] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [workerId]: event.target.value }))} placeholder="Steer this worker..." required />
+                    <button className="icon-button" title="Send worker steering">
+                      <Send size={16} />
+                    </button>
+                  </form>
+                )}
                 {changes.length > 0 && (
                   <div className="worker-review">
                     <details>
