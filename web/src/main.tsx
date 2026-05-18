@@ -94,7 +94,8 @@ type DashboardPane = {
   element: React.ReactNode;
 };
 
-const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v3";
+const LEGACY_DASHBOARD_LAYOUT_STORAGE_KEYS = ["aged.dashboard.layout.v3"];
+const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v4";
 const DASHBOARD_MIN_SPAN = 4;
 const DASHBOARD_MAX_SPAN = 12;
 const DASHBOARD_MIN_HEIGHT = 0;
@@ -817,6 +818,9 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
 function useDashboardLayout() {
   const [layout, setLayout] = useState<DashboardPaneLayout[]>(() => {
     if (typeof window === "undefined") return defaultDashboardLayout();
+    for (const key of LEGACY_DASHBOARD_LAYOUT_STORAGE_KEYS) {
+      window.localStorage.removeItem(key);
+    }
     try {
       return normalizeDashboardLayout(JSON.parse(window.localStorage.getItem(DASHBOARD_LAYOUT_STORAGE_KEY) || "null"));
     } catch {
