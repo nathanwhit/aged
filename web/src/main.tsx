@@ -22,7 +22,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createCampaign, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
 import type { Campaign, EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
@@ -44,13 +44,14 @@ type AppSnapshot = {
 };
 
 type TaskStartInput = {
+  runMode?: RunMode;
   projectId?: string;
   title: string;
   prompt: string;
   metadata?: Record<string, unknown>;
 };
 
-type RunMode = "one-shot" | "loop";
+type RunMode = "one-shot" | "campaign" | "loop";
 
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
@@ -490,6 +491,15 @@ function App() {
           <TaskComposer
             onCreate={async (input) => {
               setError("");
+              if (input.runMode === "campaign") {
+                const campaign = await createCampaign(input);
+                setSnapshot((current) => upsertCampaign(current, campaign));
+                if (campaign.rootTaskId) {
+                  setSelectedTaskId(campaign.rootTaskId);
+                }
+                refresh().catch((err) => setError(errorMessage(err)));
+                return campaign;
+              }
               const task = await createTask(input);
               setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
@@ -998,7 +1008,7 @@ function TaskComposer({
   promptSets,
   targets,
 }: {
-  onCreate: (input: TaskStartInput) => Promise<Task>;
+  onCreate: (input: TaskStartInput) => Promise<Task | Campaign>;
   onStartPending: (input: TaskStartInput) => void;
   onStartSettled: () => void;
   onError: (message: string) => void;
@@ -1028,14 +1038,16 @@ function TaskComposer({
           loopRole: loopRole.trim() || "maintenance_pr_loop",
           loopIntervalSeconds: interval,
         }
-      : { completionMode };
+      : runMode === "campaign"
+        ? {}
+        : { completionMode };
     if (promptSetId) {
       metadata.promptSetId = promptSetId;
     }
     if (requiredTargetID) {
       metadata.requiredTargetID = requiredTargetID;
     }
-    const input = { projectId: projectId || undefined, title, prompt, metadata };
+    const input = { runMode, projectId: projectId || undefined, title, prompt, metadata };
     setBusy(true);
     onStartPending(input);
     try {
@@ -1100,6 +1112,11 @@ function TaskComposer({
           <Play size={16} />
           <span>One-shot</span>
         </label>
+        <label className={runMode === "campaign" ? "run-mode-option selected" : "run-mode-option"}>
+          <input type="radio" name="run-mode" value="campaign" checked={runMode === "campaign"} onChange={() => setRunMode("campaign")} />
+          <FolderPlus size={16} />
+          <span>Campaign</span>
+        </label>
         <label className={runMode === "loop" ? "run-mode-option selected" : "run-mode-option"}>
           <input type="radio" name="run-mode" value="loop" checked={runMode === "loop"} onChange={() => setRunMode("loop")} />
           <RefreshCw size={16} />
@@ -1114,7 +1131,7 @@ function TaskComposer({
             <option value="local">Local: review diff here and apply result</option>
           </select>
         </label>
-      ) : (
+      ) : runMode === "loop" ? (
         <div className="loop-config">
           <label>
             Worker kind
@@ -1134,7 +1151,7 @@ function TaskComposer({
             <input value={loopRole} onChange={(event) => setLoopRole(event.target.value)} />
           </label>
         </div>
-      )}
+      ) : null}
       <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>
         {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
         {busy ? "Starting task" : "Start"}
@@ -1162,6 +1179,7 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
           <LoaderCircle className="spin" size={12} />
           Starting
         </span>
+        {task.runMode === "campaign" && <span className="pill subtle">Campaign</span>}
         {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
       </div>
     </div>
@@ -1740,7 +1758,7 @@ function TaskDetail({
   const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
-  const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
+  const canApplyResult = !durableLoop && completionMode !== "github" && completionMode !== "campaign" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
   const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
@@ -1846,7 +1864,7 @@ function TaskDetail({
             {task.projectId && <span>Project {task.projectId}</span>}
             <span>{task.id.slice(0, 8)}</span>
             {requiredTargetID && <span>Target {requiredTargetID}</span>}
-            <span>{completionMode === "github" ? "GitHub completion" : "Local completion"}</span>
+            <span>{completionMode === "github" ? "GitHub completion" : completionMode === "campaign" ? "Campaign coordinator" : "Local completion"}</span>
             {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
         </div>
@@ -1856,6 +1874,7 @@ function TaskDetail({
           {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
           {durableLoop && <span className="pill">Loop mode</span>}
           {!durableLoop && completionMode === "github" && <span className="pill">GitHub mode</span>}
+          {!durableLoop && completionMode === "campaign" && <span className="pill">Campaign coordinator</span>}
           {canApplyResult && (
             <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
               <Check size={16} />
@@ -4696,6 +4715,10 @@ function upsertTask(snapshot: AppSnapshot, task: Task): AppSnapshot {
     ? snapshot.tasks.map((candidate) => (candidate.id === task.id ? task : candidate))
     : [...snapshot.tasks, task];
   return { ...snapshot, tasks };
+}
+
+function upsertCampaign(snapshot: AppSnapshot, campaign: Campaign): AppSnapshot {
+  return { ...snapshot, campaigns: upsertById(snapshot.campaigns, campaign) };
 }
 
 function upsertProject(snapshot: AppSnapshot, project: Project): AppSnapshot {

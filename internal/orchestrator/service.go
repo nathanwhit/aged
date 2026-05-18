@@ -1564,6 +1564,105 @@ func (s *Service) CreateCampaign(ctx context.Context, req core.CreateCampaignReq
 	}, nil
 }
 
+func (s *Service) StartCampaign(ctx context.Context, req core.CreateCampaignRequest) (core.Campaign, error) {
+	campaign, err := s.CreateCampaign(ctx, req)
+	if err != nil {
+		return core.Campaign{}, err
+	}
+	rootMetadata := map[string]any{
+		"campaignId":       campaign.ID,
+		"campaignRole":     "coordinator",
+		"completionMode":   "campaign",
+		"omitApplyResult":  true,
+		"sourceCampaignId": campaign.ID,
+	}
+	if req.Metadata != nil {
+		var requestMetadata map[string]any
+		if err := json.Unmarshal(req.Metadata, &requestMetadata); err == nil {
+			if value := stringMetadataValue(requestMetadata["promptSetId"]); value != "" {
+				rootMetadata["promptSetId"] = value
+			}
+			if value := stringMetadataValue(requestMetadata["requiredTargetID"]); value != "" {
+				rootMetadata["requiredTargetID"] = value
+			}
+		}
+	}
+	root, err := s.CreateTask(ctx, core.CreateTaskRequest{
+		ProjectID:    campaign.ProjectID,
+		CampaignID:   campaign.ID,
+		WorkstreamID: "coordination",
+		Title:        campaign.Title + " coordination",
+		Prompt:       campaignCoordinatorPrompt(campaign),
+		Source:       "campaign-root",
+		ExternalID:   campaign.ID + ":root",
+		Metadata:     core.MustJSON(rootMetadata),
+	})
+	if err != nil {
+		_ = s.updateCampaignStatus(ctx, campaign.ID, core.CampaignFailed, "root_task_failed")
+		return core.Campaign{}, err
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventCampaignUpdated,
+		TaskID: campaign.ID,
+		Payload: core.MustJSON(map[string]any{
+			"metadataPatch": map[string]any{"rootTaskId": root.ID},
+		}),
+	}); err != nil {
+		return core.Campaign{}, err
+	}
+	campaign.RootTaskID = root.ID
+	campaign.ChildTaskIDs = []string{root.ID}
+	campaign.Metadata = mergeMetadataForResponse(campaign.Metadata, map[string]any{"rootTaskId": root.ID})
+	return campaign, nil
+}
+
+func campaignCoordinatorPrompt(campaign core.Campaign) string {
+	return strings.TrimSpace(fmt.Sprintf(`Campaign objective:
+%s
+
+You are coordinating this campaign. Investigate and triage the objective, record high-signal findings in the worker summary, and use create_tasks to split implementation into independently reviewable child tasks. The coordinator task should not publish a pull request or produce an applyable final diff.`, campaign.Prompt))
+}
+
+func mergeMetadataForResponse(raw json.RawMessage, patch map[string]any) json.RawMessage {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	for key, value := range patch {
+		metadata[key] = value
+	}
+	return core.MustJSON(metadata)
+}
+
+func (s *Service) updateCampaignStatus(ctx context.Context, campaignID string, status core.CampaignStatus, phase string) error {
+	if strings.TrimSpace(campaignID) == "" {
+		return nil
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventCampaignStatus,
+		TaskID: campaignID,
+		Payload: core.MustJSON(map[string]any{
+			"status":          status,
+			"objectiveStatus": campaignObjectiveStatus(status),
+			"phase":           phase,
+		}),
+	})
+	return err
+}
+
+func campaignObjectiveStatus(status core.CampaignStatus) core.ObjectiveStatus {
+	switch status {
+	case core.CampaignSucceeded:
+		return core.ObjectiveSatisfied
+	case core.CampaignFailed, core.CampaignCanceled:
+		return core.ObjectiveAbandoned
+	case core.CampaignWaiting:
+		return core.ObjectiveWaitingExternal
+	default:
+		return core.ObjectiveActive
+	}
+}
+
 func (s *Service) UpdateTaskLoopConfig(ctx context.Context, taskID string, req core.UpdateLoopConfigRequest) (core.Task, error) {
 	if req.LoopIntervalSeconds == nil && req.LoopPrompt == nil && req.RequiredTargetID == nil {
 		return core.Task{}, errors.New("loop config update requires loopIntervalSeconds, loopPrompt, or requiredTargetID")
@@ -5967,6 +6066,8 @@ func taskCompletionModeFromTask(task core.Task) string {
 	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["completionMode"]))) {
 	case "github":
 		return "github"
+	case "campaign":
+		return "campaign"
 	default:
 		return "local"
 	}

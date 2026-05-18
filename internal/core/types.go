@@ -123,6 +123,7 @@ type Task struct {
 type Campaign struct {
 	ID              string          `json:"id"`
 	ProjectID       string          `json:"projectId,omitempty"`
+	RootTaskID      string          `json:"rootTaskId,omitempty"`
 	Title           string          `json:"title"`
 	Prompt          string          `json:"prompt"`
 	Status          CampaignStatus  `json:"status"`

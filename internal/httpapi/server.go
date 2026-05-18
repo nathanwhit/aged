@@ -372,7 +372,7 @@ func (s *Server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	campaign, err := s.service.CreateCampaign(r.Context(), req)
+	campaign, err := s.service.StartCampaign(r.Context(), req)
 	writeResult(w, http.StatusAccepted, campaign, err)
 }
 
