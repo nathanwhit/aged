@@ -62,6 +62,7 @@ const (
 	EventTaskMilestone     EventType = "task.milestone_reached"
 	EventTaskWorkPlan      EventType = "task.work_plan_updated"
 	EventTaskArtifact      EventType = "task.artifact_recorded"
+	EventTaskMemoryUpdated EventType = "task.memory_updated"
 	EventTaskCleared       EventType = "task.cleared"
 	EventTaskAction        EventType = "task.action_executed"
 	EventCampaignCreated   EventType = "campaign.created"
@@ -118,6 +119,7 @@ type Task struct {
 	Milestones             []TaskMilestone `json:"milestones,omitempty"`
 	WorkPlan               *WorkPlan       `json:"workPlan,omitempty"`
 	Artifacts              []TaskArtifact  `json:"artifacts,omitempty"`
+	Memory                 *TaskMemory     `json:"memory,omitempty"`
 }
 
 type Campaign struct {
@@ -153,6 +155,41 @@ type TaskArtifact struct {
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+type TaskMemory struct {
+	Version   int                  `json:"version"`
+	UpdatedAt time.Time            `json:"updatedAt"`
+	Coverage  TaskMemoryCoverage   `json:"coverage"`
+	Objective string               `json:"objective,omitempty"`
+	Decisions []TaskMemoryNote     `json:"decisions,omitempty"`
+	Blockers  []TaskMemoryNote     `json:"blockers,omitempty"`
+	Themes    []TaskMemoryNote     `json:"themes,omitempty"`
+	Artifacts []TaskMemoryArtifact `json:"artifacts,omitempty"`
+}
+
+type TaskMemoryCoverage struct {
+	FromIteration    int   `json:"fromIteration,omitempty"`
+	ThroughIteration int   `json:"throughIteration,omitempty"`
+	EventCutoffID    int64 `json:"eventCutoffId,omitempty"`
+}
+
+type TaskMemoryNote struct {
+	Text               string `json:"text"`
+	FirstSeenIteration int    `json:"firstSeenIteration,omitempty"`
+	LastSeenIteration  int    `json:"lastSeenIteration,omitempty"`
+	Count              int    `json:"count,omitempty"`
+}
+
+type TaskMemoryArtifact struct {
+	ID                   string `json:"id"`
+	Kind                 string `json:"kind"`
+	URL                  string `json:"url,omitempty"`
+	Title                string `json:"title,omitempty"`
+	State                string `json:"state,omitempty"`
+	ChecksConclusion     string `json:"checksConclusion,omitempty"`
+	MergeStatus          string `json:"mergeStatus,omitempty"`
+	PublishedAtIteration int    `json:"publishedAtIteration,omitempty"`
 }
 
 type WorkPlan struct {

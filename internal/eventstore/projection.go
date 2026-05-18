@@ -414,6 +414,16 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 		})
 		task.UpdatedAt = event.At
 		p.Tasks[event.TaskID] = task
+	case core.EventTaskMemoryUpdated:
+		var payload core.TaskMemory
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return fmt.Errorf("decode task.memory_updated: %w", err)
+		}
+		task := p.Tasks[event.TaskID]
+		memory := payload
+		task.Memory = &memory
+		task.UpdatedAt = event.At
+		p.Tasks[event.TaskID] = task
 	case core.EventTaskCleared:
 		p.ClearedTasks[event.TaskID] = true
 	case core.EventExecutionPlanned:

@@ -3862,6 +3862,22 @@ func TestServiceRunsDurableLoopModeWithoutBrainPlanning(t *testing.T) {
 	if !strings.Contains(runner.promptValue(), "# Context Ledger") || !strings.Contains(runner.promptValue(), "generated fixtures") {
 		t.Fatalf("runner prompt missing durable context ledger:\n%s", runner.promptValue())
 	}
+	if !strings.Contains(runner.promptValue(), "# Task Memory") || !strings.Contains(runner.promptValue(), "loop learned the repo uses generated fixtures") {
+		t.Fatalf("runner prompt missing synthesized loop memory:\n%s", runner.promptValue())
+	}
+	if count := countEvents(snapshot.Events, core.EventTaskMemoryUpdated, task.ID); count != 2 {
+		t.Fatalf("task.memory_updated count = %d, want 2", count)
+	}
+	latestTask, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing loop task")
+	}
+	if latestTask.Memory == nil {
+		t.Fatal("task memory was not projected")
+	}
+	if !loopMemoryTestNotesContain(latestTask.Memory.Blockers, "need user input") {
+		t.Fatalf("task memory missing waiting blocker: %+v", latestTask.Memory.Blockers)
+	}
 	if !hasTaskAction(snapshot.Events, task.ID, "durable_loop", "waiting_for_input") {
 		t.Fatalf("missing durable loop waiting action")
 	}

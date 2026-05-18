@@ -643,6 +643,7 @@ func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
 		core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
 		core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"text": strings.Repeat("output-payload", 100)})},
 		core.Event{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: "worker-ledger", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded, "summary": "decision: keep the bounded ledger query"})},
+		core.Event{Type: core.EventTaskMemoryUpdated, TaskID: taskID, Payload: core.MustJSON(core.TaskMemory{Version: 1, Objective: "durable loop memory"})},
 		core.Event{Type: core.EventWorkerCompleted, TaskID: "other-task", WorkerID: "other-worker", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded, "summary": "decision: should not leak"})},
 	)
 
@@ -650,8 +651,8 @@ func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("events = %d, want 2; events = %+v", len(events), events)
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3; events = %+v", len(events), events)
 	}
 	for _, event := range events {
 		if event.TaskID != taskID {
@@ -664,9 +665,50 @@ func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
 			t.Fatalf("ledger event query included unrelated payload: %+v", event)
 		}
 	}
-	if events[0].Type != core.EventWorkerCreated || events[1].Type != core.EventWorkerCompleted {
-		t.Fatalf("event types = %q, %q; want worker.created, worker.completed", events[0].Type, events[1].Type)
+	if events[0].Type != core.EventWorkerCreated || events[1].Type != core.EventWorkerCompleted || events[2].Type != core.EventTaskMemoryUpdated {
+		t.Fatalf("event types = %q, %q, %q; want worker.created, worker.completed, task.memory_updated", events[0].Type, events[1].Type, events[2].Type)
 	}
+}
+
+func TestSnapshotProjectsTaskMemoryUpdated(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	taskID := "memory-task"
+	memory := core.TaskMemory{
+		Version:   1,
+		UpdatedAt: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		Coverage:  core.TaskMemoryCoverage{FromIteration: 1, ThroughIteration: 20, EventCutoffID: 99},
+		Objective: "Keep the long-horizon context available.",
+		Decisions: []core.TaskMemoryNote{{
+			Text:               "decision: keep synthesis deterministic",
+			FirstSeenIteration: 2,
+			LastSeenIteration:  10,
+			Count:              2,
+		}},
+	}
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Memory", "prompt": "Remember context"})},
+		core.Event{Type: core.EventTaskMemoryUpdated, TaskID: taskID, Payload: core.MustJSON(memory)},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID != taskID {
+			continue
+		}
+		if task.Memory == nil {
+			t.Fatalf("task memory was not projected: %+v", task)
+		}
+		if task.Memory.Coverage.ThroughIteration != 20 || len(task.Memory.Decisions) != 1 || task.Memory.Decisions[0].Text != "decision: keep synthesis deterministic" {
+			t.Fatalf("task memory = %+v", task.Memory)
+		}
+		return
+	}
+	t.Fatalf("task %q not found in snapshot: %+v", taskID, snapshot.Tasks)
 }
 
 func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
