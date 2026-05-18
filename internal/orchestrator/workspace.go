@@ -46,6 +46,8 @@ type PreparedWorkspace struct {
 	CleanupPolicy string `json:"cleanupPolicy"`
 	WorkerID      string `json:"workerId"`
 	TaskID        string `json:"taskId"`
+	TargetID      string `json:"targetId,omitempty"`
+	TargetKind    string `json:"targetKind,omitempty"`
 }
 
 type WorkspaceChangedFile struct {

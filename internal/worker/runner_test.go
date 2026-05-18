@@ -558,15 +558,16 @@ higher_is_better: true
 		{
 			name: "repeated samples same command",
 			prompt: `
-baseline_command: go test -bench=Parser
-candidate_command: go test -bench=Parser
-baseline_samples: 100, 101, 99
-candidate_samples: 108, 109, 107
-min_samples: 3
-threshold_percent: 5
-higher_is_better: true
-`,
-			want: []string{"sample_count: 3", "verdict: improved"},
+	baseline_command: go test -bench=Parser
+	candidate_command: go test -bench=Parser
+	target_id: perf-vm
+	baseline_samples: 100, 101, 99
+	candidate_samples: 108, 109, 107
+	min_samples: 3
+	threshold_percent: 5
+	higher_is_better: true
+	`,
+			want: []string{"target_id: perf-vm", "sample_count: 3", "verdict: improved"},
 		},
 		{
 			name: "scientific notation scalars",
@@ -642,12 +643,39 @@ func TestBenchmarkCompareNumberParserSupportsFloatNotation(t *testing.T) {
 
 func TestBenchmarkCompareRunnerRejectsCommandMismatch(t *testing.T) {
 	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
-baseline_command: go test -bench=Parser
-candidate_command: go test -bench=Lexer
+	baseline_command: go test -bench=Parser
+	candidate_command: go test -bench=Lexer
 baseline_samples: 100, 101, 99
 candidate_samples: 108, 109, 107
 `}, &recordingSink{})
 	if err == nil || !strings.Contains(err.Error(), "to match") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBenchmarkCompareRunnerRejectsTargetMismatch(t *testing.T) {
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+	baseline_command: go test -bench=Parser
+	candidate_command: go test -bench=Parser
+	baseline_target_id: perf-a
+	candidate_target_id: perf-b
+	baseline_samples: 100, 101, 99
+	candidate_samples: 108, 109, 107
+	`}, &recordingSink{})
+	if err == nil || !strings.Contains(err.Error(), "target_id") || !strings.Contains(err.Error(), "match") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestBenchmarkCompareRunnerRejectsPartialTarget(t *testing.T) {
+	err := BenchmarkCompareRunner{}.Run(context.Background(), Spec{Prompt: `
+	baseline_command: go test -bench=Parser
+	candidate_command: go test -bench=Parser
+	baseline_target_id: perf-a
+	baseline_samples: 100, 101, 99
+	candidate_samples: 108, 109, 107
+	`}, &recordingSink{})
+	if err == nil || !strings.Contains(err.Error(), "both be provided") {
 		t.Fatalf("err = %v", err)
 	}
 }

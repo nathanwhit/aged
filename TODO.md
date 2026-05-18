@@ -31,5 +31,5 @@
 ## Artifacts And Evaluation
 
 - [x] Add structured benchmark/profiler artifacts when prompt-parsed text is not enough for comparison, UI display, or auditability.
-- [x] Extend benchmark comparison to enforce same-command before/after runs, repeated samples, thresholds, and anti-cherry-picking rules.
+- [x] Extend benchmark comparison to enforce same-command and same-target before/after runs, repeated samples, thresholds, and anti-cherry-picking rules.
 - [x] Add richer task artifacts for deployments, packages, test reports, CI runs, and review comments.
