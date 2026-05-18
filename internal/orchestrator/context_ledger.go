@@ -134,6 +134,7 @@ func contextLedgerWorkerCompletion(event core.Event, info contextLedgerWorkerInf
 		Status           core.WorkerStatus      `json:"status"`
 		Summary          string                 `json:"summary,omitempty"`
 		Error            string                 `json:"error,omitempty"`
+		Checkpoint       *WorkerCheckpoint      `json:"checkpoint,omitempty"`
 		ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
 		WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges,omitempty"`
 	}
@@ -152,8 +153,12 @@ func contextLedgerWorkerCompletion(event core.Event, info contextLedgerWorkerInf
 	candidateChanges := resultHasCandidateChanges(result)
 	score := 0
 	kind := "worker_result"
+	checkpoint := compactOptionalWorkerCheckpoint(payload.Checkpoint)
 	highValue := highValueLedgerText(payload.Summary) || highValueLedgerText(payload.Error)
 	switch {
+	case checkpoint != nil:
+		score = contextLedgerScoreHighValue
+		kind = "worker_checkpoint"
 	case highValue:
 		score = contextLedgerScoreHighValue
 		if candidateChanges {
@@ -180,6 +185,7 @@ func contextLedgerWorkerCompletion(event core.Event, info contextLedgerWorkerInf
 		Status:       string(payload.Status),
 		Summary:      payload.Summary,
 		Error:        payload.Error,
+		Checkpoint:   checkpoint,
 		ChangedFiles: changedFiles,
 	}, score, true
 }
@@ -338,6 +344,7 @@ func highValueLedgerText(value string) bool {
 func compactContextLedgerEntry(entry ContextLedgerEntry) ContextLedgerEntry {
 	entry.Summary = truncateStringForPrompt(strings.TrimSpace(entry.Summary), maxContextLedgerTextBytes)
 	entry.Error = truncateStringForPrompt(strings.TrimSpace(entry.Error), maxContextLedgerTextBytes)
+	entry.Checkpoint = compactOptionalWorkerCheckpointForPrompt(entry.Checkpoint)
 	if len(entry.ChangedFiles) > maxContextLedgerChangedFiles {
 		omitted := len(entry.ChangedFiles) - maxContextLedgerChangedFiles
 		entry.ChangedFiles = append(entry.ChangedFiles[:maxContextLedgerChangedFiles], WorkspaceChangedFile{
@@ -433,6 +440,10 @@ func renderContextLedgerForWorkerPrompt(entries []ContextLedgerEntry) string {
 				}
 			}
 			builder.WriteString("]")
+		}
+		if rendered := renderWorkerCheckpointForPrompt(entry.Checkpoint); rendered != "" {
+			builder.WriteString(" [checkpoint]\n")
+			builder.WriteString(rendered)
 		}
 		builder.WriteString("\n")
 	}

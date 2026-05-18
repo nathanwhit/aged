@@ -142,6 +142,14 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 			Kind:     "codex",
 			Summary:  "summary-marker-" + strconv.Itoa(index) + strings.Repeat("s", 50000),
 			Error:    "error-marker-" + strconv.Itoa(index) + strings.Repeat("e", 50000),
+			Checkpoint: &WorkerCheckpoint{
+				CurrentHypothesis:            "checkpoint-marker-" + strconv.Itoa(index) + strings.Repeat("c", 50000),
+				TouchedSubsystems:            []string{strings.Repeat("subsystem", 5000)},
+				CommandsRun:                  []string{strings.Repeat("command", 5000)},
+				PendingChecks:                []string{strings.Repeat("pending", 5000)},
+				Risks:                        []string{strings.Repeat("risk", 5000)},
+				RecommendedNextWorkerPrompts: []string{strings.Repeat("next prompt", 5000)},
+			},
 			Changes: WorkspaceChanges{
 				Dirty:        true,
 				Status:       strings.Repeat("status", 2000),
@@ -207,6 +215,12 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	}
 	if strings.Contains(prompt, "DIFF_SHOULD_NOT_BE_INCLUDED") {
 		t.Fatalf("prompt included raw diff")
+	}
+	if !strings.Contains(prompt, "checkpoint-marker-119") {
+		t.Fatalf("prompt dropped latest checkpoint")
+	}
+	if strings.Contains(prompt, strings.Repeat("command", 500)) {
+		t.Fatalf("prompt included unbounded checkpoint command")
 	}
 	if !strings.Contains(prompt, "truncated for replanning prompt") {
 		t.Fatalf("prompt did not mark truncated context")

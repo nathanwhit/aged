@@ -7934,6 +7934,80 @@ func TestServiceRecordsBenchmarkResultArtifact(t *testing.T) {
 	}
 }
 
+func TestServicePersistsWorkerCheckpointAndProjectsToFollowUpPrompt(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	initialSummary := `Implemented the parsing path.
+
+` + "```json" + `
+{
+  "checkpoint": {
+    "currentHypothesis": "worker output should attach checkpoint state to completion",
+    "touchedSubsystems": ["service", "context ledger"],
+    "commandsRun": ["go test ./internal/orchestrator -run TestWorkerCheckpoint"],
+    "pendingChecks": ["run focused orchestration tests"],
+    "risks": ["malformed checkpoint JSON must be ignored"],
+    "recommendedNextWorkerPrompts": ["Verify prompt bounding for checkpoints"]
+  }
+}
+` + "```"
+	reviewer := &recordingEventRunner{
+		kind: "reviewer",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "reviewed checkpoint handoff",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "implement checkpoint handoff",
+		Spawns: []SpawnRequest{{
+			Role:       "reviewer",
+			Reason:     "Review the checkpoint handoff context.",
+			WorkerKind: "reviewer",
+		}},
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{
+			kind: "codex",
+			events: []worker.Event{{
+				Kind: worker.EventResult,
+				Text: initialSummary,
+			}},
+		},
+		"reviewer": reviewer,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Checkpoint", Prompt: "Preserve compact worker state."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
+	if payload.Summary != initialSummary {
+		t.Fatalf("summary changed:\n%s", payload.Summary)
+	}
+	if payload.Checkpoint == nil || payload.Checkpoint.CurrentHypothesis != "worker output should attach checkpoint state to completion" {
+		t.Fatalf("checkpoint = %+v", payload.Checkpoint)
+	}
+	task = snapshot.Tasks[0]
+	if !taskHasArtifactKind(task, "worker_checkpoint") {
+		t.Fatalf("missing worker checkpoint artifact: %+v", task.Artifacts)
+	}
+	prompt := reviewer.promptValue()
+	for _, want := range []string{
+		"Checkpoint:",
+		"worker output should attach checkpoint state to completion",
+		"go test ./internal/orchestrator -run TestWorkerCheckpoint",
+		"Verify prompt bounding for checkpoints",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("follow-up prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestServiceRunsSpawnedFollowUpWorkerWithPriorResultContext(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -12244,12 +12318,22 @@ func hasWorkerCreated(events []core.Event, taskID string, kind string) bool {
 	return false
 }
 
+func taskHasArtifactKind(task core.Task, kind string) bool {
+	for _, artifact := range task.Artifacts {
+		if artifact.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) struct {
 	Status           core.WorkerStatus      `json:"status"`
 	Summary          string                 `json:"summary"`
 	Error            string                 `json:"error"`
 	NeedsInput       bool                   `json:"needsInput"`
 	LogCount         int                    `json:"logCount"`
+	Checkpoint       *WorkerCheckpoint      `json:"checkpoint"`
 	ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
 	WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
 } {
@@ -12264,6 +12348,7 @@ func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) st
 			Error            string                 `json:"error"`
 			NeedsInput       bool                   `json:"needsInput"`
 			LogCount         int                    `json:"logCount"`
+			Checkpoint       *WorkerCheckpoint      `json:"checkpoint"`
 			ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
 			WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
 		}
@@ -12279,6 +12364,7 @@ func workerCompletedPayload(t *testing.T, events []core.Event, taskID string) st
 		Error            string                 `json:"error"`
 		NeedsInput       bool                   `json:"needsInput"`
 		LogCount         int                    `json:"logCount"`
+		Checkpoint       *WorkerCheckpoint      `json:"checkpoint"`
 		ChangedFiles     []WorkspaceChangedFile `json:"changedFiles"`
 		WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges"`
 	}{}

@@ -1176,6 +1176,7 @@ func compactWorkPlanItemsForPrompt(items []core.WorkPlanItem) []core.WorkPlanIte
 func compactWorkerTurnResultForPrompt(result WorkerTurnResult) WorkerTurnResult {
 	result.Summary = truncateStringForPrompt(result.Summary, maxPromptResultSummaryBytes)
 	result.Error = truncateStringForPrompt(result.Error, maxPromptResultErrorBytes)
+	result.Checkpoint = compactOptionalWorkerCheckpointForPrompt(result.Checkpoint)
 	result.Changes.Status = truncateStringForPrompt(result.Changes.Status, maxPromptStatusBytes)
 	result.Changes.DiffStat = truncateStringForPrompt(result.Changes.DiffStat, maxPromptDiffStatBytes)
 	result.Changes.Diff = ""
