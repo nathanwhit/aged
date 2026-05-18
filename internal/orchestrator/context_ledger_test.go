@@ -118,6 +118,37 @@ func TestProjectTaskContextLedgerKeepsOldHighValueFactAcrossManyChangedResults(t
 	}
 }
 
+func TestProjectTaskContextLedgerKeepsDurableLoopIterationSummaries(t *testing.T) {
+	events := []core.Event{
+		{
+			Type:   core.EventTaskAction,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"kind":      loopActionKind,
+				"status":    "iteration_completed",
+				"iteration": 7,
+				"workerId":  "worker-7",
+				"summary":   "Implemented checkpoint pruning and queued a follow-up benchmark task.",
+			}),
+		},
+	}
+
+	ledger := projectTaskContextLedger(events, "task-1")
+	if len(ledger) != 1 {
+		t.Fatalf("ledger entries = %d, want 1: %+v", len(ledger), ledger)
+	}
+	entry := ledger[0]
+	if entry.Kind != "durable_loop_iteration" {
+		t.Fatalf("ledger kind = %q, want durable_loop_iteration", entry.Kind)
+	}
+	if entry.WorkerID != "worker-7" {
+		t.Fatalf("ledger worker = %q, want worker-7", entry.WorkerID)
+	}
+	if !strings.Contains(entry.Summary, "iteration 7:") || !strings.Contains(entry.Summary, "checkpoint pruning") {
+		t.Fatalf("ledger summary did not preserve iteration context: %+v", entry)
+	}
+}
+
 func ledgerContainsSummary(entries []ContextLedgerEntry, needle string) bool {
 	for _, entry := range entries {
 		if strings.Contains(entry.Summary, needle) {

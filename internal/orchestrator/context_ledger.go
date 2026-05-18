@@ -230,17 +230,38 @@ func contextLedgerApprovalDecided(event core.Event) (ContextLedgerEntry, bool) {
 
 func contextLedgerTaskAction(event core.Event) (ContextLedgerEntry, int, bool) {
 	var payload struct {
-		Kind     string `json:"kind"`
-		Status   string `json:"status"`
-		Reason   string `json:"reason"`
-		WorkerID string `json:"workerId"`
-		Error    string `json:"error"`
-		Summary  string `json:"summary"`
+		Kind      string `json:"kind"`
+		Status    string `json:"status"`
+		Reason    string `json:"reason"`
+		WorkerID  string `json:"workerId"`
+		Error     string `json:"error"`
+		Summary   string `json:"summary"`
+		Iteration int    `json:"iteration"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ContextLedgerEntry{}, 0, false
 	}
 	text := nonEmpty(payload.Reason, payload.Summary, payload.Error)
+	if payload.Kind == loopActionKind {
+		if strings.TrimSpace(text) == "" {
+			return ContextLedgerEntry{}, 0, false
+		}
+		score := 88
+		if strings.Contains(payload.Status, "failed") || strings.Contains(payload.Status, "canceled") || payload.Status == "waiting_for_input" || highValueLedgerText(text) {
+			score = contextLedgerScoreHighValue
+		}
+		if payload.Iteration > 0 {
+			text = fmt.Sprintf("iteration %d: %s", payload.Iteration, text)
+		}
+		return ContextLedgerEntry{
+			Kind:        "durable_loop_iteration",
+			SourceEvent: string(event.Type),
+			WorkerID:    nonEmpty(payload.WorkerID, event.WorkerID),
+			Status:      payload.Status,
+			Summary:     text,
+			Error:       payload.Error,
+		}, score, true
+	}
 	important := payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" || highValueLedgerText(text)
 	if !important {
 		return ContextLedgerEntry{}, 0, false
