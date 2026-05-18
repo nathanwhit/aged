@@ -6074,8 +6074,16 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 		WorkerKind: "mock",
 		Prompt:     "run remotely",
 	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"},
+		{ID: "deno", Name: "Deno", LocalPath: t.TempDir(), DefaultBase: "main"},
+	}, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
 
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Parent", Prompt: "Run remote parent."})
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "deno", Title: "Parent", Prompt: "Run remote parent."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6105,6 +6113,9 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	if metadata["completionMode"] != "github" {
 		t.Fatalf("metadata = %+v, want remote follow-up to default to GitHub completion", metadata)
 	}
+	if found.ProjectID != "deno" || metadata["projectId"] != "deno" {
+		t.Fatalf("follow-up project = %q metadata %+v, want inherited deno", found.ProjectID, metadata)
+	}
 	if !eventContains(snapshot.Events, core.EventWorkerOutput, "remote worker queued follow-up task") {
 		t.Fatalf("missing parent worker callback event")
 	}
@@ -6120,8 +6131,16 @@ func TestLocalWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T)
 		WorkerKind: "callback",
 		Prompt:     "parent task creates a follow-up",
 	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"},
+		{ID: "deno", Name: "Deno", LocalPath: t.TempDir(), DefaultBase: "main"},
+	}, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
 
-	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Parent", Prompt: "Run local parent."})
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "deno", Title: "Parent", Prompt: "Run local parent."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6153,6 +6172,9 @@ func TestLocalWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T)
 	}
 	if metadata["parentTaskId"] != task.ID || metadata["parentWorkerId"] != runner.parentWorkerID {
 		t.Fatalf("metadata = %+v, want parent ids %q %q", metadata, task.ID, runner.parentWorkerID)
+	}
+	if found.ProjectID != "deno" || metadata["projectId"] != "deno" {
+		t.Fatalf("follow-up project = %q metadata %+v, want inherited deno", found.ProjectID, metadata)
 	}
 	if !strings.Contains(runner.prompt, "aged-create-task") {
 		t.Fatalf("runner prompt missing task helper instructions:\n%s", runner.prompt)

@@ -3981,6 +3981,10 @@ func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remote
 	if prompt == "" {
 		return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
 	}
+	projectID, err := s.workerCallbackProjectID(ctx, run.TaskID, callback.ProjectID)
+	if err != nil {
+		return fmt.Errorf("resolve project for remote callback %s: %w", callback.ID, err)
+	}
 	metadata := map[string]any{
 		"source":           "remote_worker",
 		"parentTaskId":     nonEmpty(callback.ParentTaskID, run.TaskID),
@@ -3990,14 +3994,13 @@ func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remote
 		"remoteCallbackId": callback.ID,
 	}
 	req := core.CreateTaskRequest{
-		ProjectID:  strings.TrimSpace(callback.ProjectID),
+		ProjectID:  projectID,
 		Title:      strings.TrimSpace(callback.Title),
 		Prompt:     prompt,
 		Source:     "remote-worker",
 		ExternalID: nonEmpty(run.WorkerID, run.Session) + ":" + callback.ID,
 		Metadata:   core.MustJSON(metadata),
 	}
-	var err error
 	req, err = NormalizeCreateTaskRequest(req)
 	if err != nil {
 		return fmt.Errorf("normalize task from remote callback %s: %w", callback.ID, err)
@@ -4105,6 +4108,10 @@ func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID stri
 	if prompt == "" {
 		return fmt.Errorf("local worker callback %s has empty prompt", callback.ID)
 	}
+	projectID, err := s.workerCallbackProjectID(ctx, taskID, callback.ProjectID)
+	if err != nil {
+		return fmt.Errorf("resolve project for local callback %s: %w", callback.ID, err)
+	}
 	metadata := map[string]any{
 		"source":         "local_worker",
 		"parentTaskId":   nonEmpty(callback.ParentTaskID, taskID),
@@ -4112,14 +4119,13 @@ func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID stri
 		"callbackId":     callback.ID,
 	}
 	req := core.CreateTaskRequest{
-		ProjectID:  strings.TrimSpace(callback.ProjectID),
+		ProjectID:  projectID,
 		Title:      strings.TrimSpace(callback.Title),
 		Prompt:     prompt,
 		Source:     "local-worker",
 		ExternalID: nonEmpty(workerID, taskID) + ":" + callback.ID,
 		Metadata:   core.MustJSON(metadata),
 	}
-	var err error
 	req, err = NormalizeCreateTaskRequest(req)
 	if err != nil {
 		return fmt.Errorf("normalize task from local callback %s: %w", callback.ID, err)
@@ -4141,6 +4147,18 @@ func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID stri
 		return err
 	}
 	return nil
+}
+
+func (s *Service) workerCallbackProjectID(ctx context.Context, parentTaskID string, explicitProjectID string) (string, error) {
+	projectID := strings.TrimSpace(explicitProjectID)
+	if projectID != "" {
+		return projectID, nil
+	}
+	project, err := s.projectForTaskID(ctx, parentTaskID)
+	if err != nil {
+		return "", err
+	}
+	return project.ID, nil
 }
 
 func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) error {
