@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -66,14 +67,18 @@ func TestServiceDefaultPullRequestMonitorContinuesTasksForPRsNeedingAttention(t 
 			if !hasEvent(snapshot.Events, core.EventPRStatusChecked, "task-1", "") {
 				t.Fatalf("missing status check event")
 			}
-			if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
-				t.Fatalf("missing task steering event")
+			if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+				t.Fatalf("automatic pull request feedback steered task")
+			}
+			followUp := latestPullRequestFollowUpPayload(t, snapshot, "task-1")
+			if followUp.Status != "queued" || followUp.ID != "pr-1" || followUp.Attempt != 1 {
+				t.Fatalf("follow-up payload = %+v", followUp)
 			}
 		})
 	}
 }
 
-func TestServiceDefaultPullRequestMonitorSteersWithFailingCheckContext(t *testing.T) {
+func TestServiceDefaultPullRequestMonitorQueuesFailingCheckContext(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -93,17 +98,20 @@ func TestServiceDefaultPullRequestMonitorSteersWithFailingCheckContext(t *testin
 		t.Fatal(err)
 	}
 
-	snapshot := waitForEvent(t, store, core.EventTaskSteered, "task-1")
-	steering := latestTaskSteering(snapshot, "task-1")
+	snapshot := waitForEvent(t, store, core.EventPRFollowUp, "task-1")
+	followUp := latestPullRequestFollowUpPayload(t, snapshot, "task-1")
 	for _, want := range []string{
 		"Failing check context:",
 		"Go / unit (FAILURE)",
 		"https://github.com/owner/repo/actions/runs/1/job/2",
 		"internal/foo_test.go:42",
 	} {
-		if !strings.Contains(steering, want) {
-			t.Fatalf("steering prompt missing %q:\n%s", want, steering)
+		if !strings.Contains(followUp.Prompt, want) {
+			t.Fatalf("follow-up prompt missing %q:\n%s", want, followUp.Prompt)
 		}
+	}
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("automatic pull request feedback steered task")
 	}
 }
 
@@ -266,8 +274,8 @@ func TestServicePullRequestMonitorStartsFollowUpWhenAutoMergeFails(t *testing.T)
 	if publisher.mergeCalls != 1 {
 		t.Fatalf("merge calls = %d, want 1", publisher.mergeCalls)
 	}
-	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
-		t.Fatalf("missing task steering event")
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("automatic pull request feedback steered task")
 	}
 	if snapshot.Tasks[0].ObjectivePhase != "pr_needs_work" {
 		t.Fatalf("objective phase = %q, want pr_needs_work", snapshot.Tasks[0].ObjectivePhase)
@@ -277,7 +285,7 @@ func TestServicePullRequestMonitorStartsFollowUpWhenAutoMergeFails(t *testing.T)
 	}
 }
 
-func TestServiceDefaultPullRequestMonitorKeepsFeedbackPendingWhileTaskRunning(t *testing.T) {
+func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -293,32 +301,78 @@ func TestServiceDefaultPullRequestMonitorKeepsFeedbackPendingWhileTaskRunning(t 
 	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
-	if hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
-		t.Fatalf("running task started follow-up")
+	snapshot := waitForEvent(t, store, core.EventPRFollowUp, "task-1")
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("automatic pull request feedback steered task")
 	}
-	if !pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
-		t.Fatalf("running task feedback was marked handled")
+	if pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
+		t.Fatalf("queued feedback was not marked handled")
 	}
-
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: "task-1",
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskWaiting,
-		}),
-	}); err != nil {
-		t.Fatal(err)
+	followUp := latestPullRequestFollowUpPayload(t, snapshot, "task-1")
+	if followUp.Status != "queued" || followUp.ID != "pr-1" {
+		t.Fatalf("follow-up payload = %+v", followUp)
 	}
 	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot = waitForEvent(t, store, core.EventPRFollowUp, "task-1")
-	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
-		t.Fatalf("missing task steering event")
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
-		t.Fatalf("follow-up feedback was not marked handled")
+	if got := countEvents(snapshot.Events, core.EventPRFollowUp, "task-1"); got != 1 {
+		t.Fatalf("pull request follow-up events = %d, want 1", got)
+	}
+}
+
+func TestServicePullRequestFeedbackQueueResumesWaitingTaskWithPendingState(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "pause after observing feedback",
+	}}}
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatus("failing", "CLEAN", "APPROVED")}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	service.brain = brain
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskPlanned,
+		TaskID: "task-1",
+		Payload: core.MustJSON(Plan{
+			WorkerKind: "mock",
+			Prompt:     "original plan",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "published a pull request",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventTaskReplanned, "task-1")
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("automatic pull request feedback steered task")
+	}
+	if len(brain.states) == 0 {
+		t.Fatalf("brain did not receive replan state")
+	}
+	pending := brain.states[0].PendingPullRequestFeedback
+	if len(pending) != 1 || pending[0].PullRequestID != "pr-1" || pending[0].ChecksStatus != "failing" {
+		t.Fatalf("pending pull request feedback = %+v", pending)
 	}
 }
 
@@ -537,6 +591,35 @@ func appendTrackedPullRequestWithRepo(t *testing.T, ctx context.Context, store *
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type testPullRequestFollowUpPayload struct {
+	ID           string `json:"id"`
+	Attempt      int    `json:"attempt"`
+	Status       string `json:"status"`
+	Prompt       string `json:"prompt"`
+	ChecksStatus string `json:"checksStatus"`
+	MergeStatus  string `json:"mergeStatus"`
+	ReviewStatus string `json:"reviewStatus"`
+}
+
+func latestPullRequestFollowUpPayload(t *testing.T, snapshot core.Snapshot, taskID string) testPullRequestFollowUpPayload {
+	t.Helper()
+	var out testPullRequestFollowUpPayload
+	found := false
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
+			continue
+		}
+		if err := json.Unmarshal(event.Payload, &out); err != nil {
+			t.Fatal(err)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("missing pull request follow-up event for task %s", taskID)
+	}
+	return out
 }
 
 func monitoredPullRequestStatus(checks string, merge string, review string) core.PullRequest {

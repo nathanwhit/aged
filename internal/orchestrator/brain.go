@@ -86,13 +86,31 @@ type SpawnRequest struct {
 }
 
 type OrchestrationState struct {
-	InitialPlan              Plan                 `json:"initialPlan"`
-	WorkPlan                 *core.WorkPlan       `json:"workPlan,omitempty"`
-	Results                  []WorkerTurnResult   `json:"results"`
-	ContextLedger            []ContextLedgerEntry `json:"contextLedger,omitempty"`
-	Turn                     int                  `json:"turn"`
-	BlockedFinalCandidateIDs []string             `json:"blockedFinalCandidateIds,omitempty"`
-	RecoveryHint             string               `json:"recoveryHint,omitempty"`
+	InitialPlan                Plan                      `json:"initialPlan"`
+	WorkPlan                   *core.WorkPlan            `json:"workPlan,omitempty"`
+	Results                    []WorkerTurnResult        `json:"results"`
+	ContextLedger              []ContextLedgerEntry      `json:"contextLedger,omitempty"`
+	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
+	Turn                       int                       `json:"turn"`
+	BlockedFinalCandidateIDs   []string                  `json:"blockedFinalCandidateIds,omitempty"`
+	RecoveryHint               string                    `json:"recoveryHint,omitempty"`
+}
+
+type PullRequestFeedbackItem struct {
+	EventID       int64  `json:"eventId"`
+	PullRequestID string `json:"pullRequestId"`
+	Attempt       int    `json:"attempt,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Repo          string `json:"repo,omitempty"`
+	Number        int    `json:"number,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Branch        string `json:"branch,omitempty"`
+	Base          string `json:"base,omitempty"`
+	State         string `json:"state,omitempty"`
+	ChecksStatus  string `json:"checksStatus,omitempty"`
+	MergeStatus   string `json:"mergeStatus,omitempty"`
+	ReviewStatus  string `json:"reviewStatus,omitempty"`
+	Prompt        string `json:"prompt,omitempty"`
 }
 
 type ContextLedgerEntry struct {
