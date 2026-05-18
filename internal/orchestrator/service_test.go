@@ -216,6 +216,193 @@ func TestStartCampaignCreatesCoordinatorTask(t *testing.T) {
 	}
 }
 
+func TestCampaignChildTasksDefaultToCampaignCompletion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "Run campaign child work.",
+		Rationale:  "campaign child",
+	}}, map[string]worker.Runner{"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "Done."}}}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
+		Title:  "Improve startup",
+		Prompt: "Find and ship independent startup improvements.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := core.Task{
+		ID:         "campaign-root",
+		ProjectID:  "default",
+		CampaignID: campaign.ID,
+	}
+	created, err := service.createCampaignChildTasksFromAction(ctx, parent, PlanAction{
+		Kind: "create_tasks",
+		Inputs: map[string]any{
+			"tasks": []any{
+				map[string]any{
+					"title":        "Build benchmark harness",
+					"prompt":       "Create a campaign-only benchmark harness artifact for comparing options. It is not part of the upstream repo PR.",
+					"workstreamId": "campaign-harness",
+				},
+				map[string]any{
+					"title":          "Ship product optimization",
+					"prompt":         "Implement a PR-sized product optimization for the upstream repository.",
+					"workstreamId":   "product-optimization",
+					"completionMode": "github",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created) != 2 {
+		t.Fatalf("created %d tasks, want 2", len(created))
+	}
+	var firstMetadata map[string]any
+	if err := json.Unmarshal(created[0].Metadata, &firstMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if firstMetadata["completionMode"] != "campaign" {
+		t.Fatalf("default child completionMode = %v, want campaign", firstMetadata["completionMode"])
+	}
+	var secondMetadata map[string]any
+	if err := json.Unmarshal(created[1].Metadata, &secondMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if secondMetadata["completionMode"] != "github" {
+		t.Fatalf("explicit child completionMode = %v, want github", secondMetadata["completionMode"])
+	}
+}
+
+func TestCancelTaskRefreshesCampaignStatus(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
+		Title:  "Tune startup",
+		Prompt: "Find startup improvements.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := "campaign-child"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":    "Measure startup",
+			"prompt":   "Build a campaign-only measurement artifact.",
+			"metadata": map[string]any{"campaignId": campaign.ID},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.CancelTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", status)
+	}
+	updated, ok := findCampaign(snapshot, campaign.ID)
+	if !ok {
+		t.Fatal("campaign missing from snapshot")
+	}
+	if updated.Status != core.CampaignCanceled {
+		t.Fatalf("campaign status = %q, want canceled", updated.Status)
+	}
+	if updated.ObjectiveStatus != core.ObjectiveAbandoned {
+		t.Fatalf("campaign objective status = %q, want abandoned", updated.ObjectiveStatus)
+	}
+	if updated.ObjectivePhase != "child_task_canceled" {
+		t.Fatalf("campaign objective phase = %q, want child_task_canceled", updated.ObjectivePhase)
+	}
+}
+
+func TestCancelCampaignCancelsNonTerminalChildTasks(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	campaign, err := service.CreateCampaign(ctx, core.CreateCampaignRequest{
+		Title:  "Tune throughput",
+		Prompt: "Coordinate throughput improvements.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range []struct {
+		id     string
+		title  string
+		status core.TaskStatus
+	}{
+		{id: "campaign-root", title: "Coordinate campaign", status: core.TaskQueued},
+		{id: "campaign-child-active", title: "Run local harness", status: core.TaskRunning},
+		{id: "campaign-child-done", title: "Landed optimization", status: core.TaskSucceeded},
+	} {
+		if _, err := store.Append(ctx, core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: spec.id,
+			Payload: core.MustJSON(map[string]any{
+				"title":    spec.title,
+				"prompt":   spec.title,
+				"metadata": map[string]any{"campaignId": campaign.ID},
+			}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if spec.status != core.TaskQueued {
+			if _, err := store.Append(ctx, core.Event{
+				Type:   core.EventTaskStatus,
+				TaskID: spec.id,
+				Payload: core.MustJSON(map[string]any{
+					"status": spec.status,
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	if err := service.CancelCampaign(ctx, campaign.ID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range []string{"campaign-root", "campaign-child-active"} {
+		if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
+			t.Fatalf("%s status = %q, want canceled", taskID, status)
+		}
+	}
+	if status := taskStatus(snapshot, "campaign-child-done"); status != core.TaskSucceeded {
+		t.Fatalf("terminal child status = %q, want succeeded", status)
+	}
+	updated, ok := findCampaign(snapshot, campaign.ID)
+	if !ok {
+		t.Fatal("campaign missing from snapshot")
+	}
+	if updated.Status != core.CampaignCanceled {
+		t.Fatalf("campaign status = %q, want canceled", updated.Status)
+	}
+	if updated.ObjectivePhase != "user_canceled" {
+		t.Fatalf("campaign objective phase = %q, want user_canceled", updated.ObjectivePhase)
+	}
+}
+
 func TestProjectHealthCatchesGitHubGraphQLBadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
