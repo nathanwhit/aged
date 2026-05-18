@@ -1,4 +1,4 @@
-import type { Campaign, DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
@@ -41,7 +41,6 @@ export async function getTaskEvents(taskId: string, options: { limit?: number } 
 
 export async function createTask(input: {
   projectId?: string;
-  campaignId?: string;
   workstreamId?: string;
   title: string;
   prompt: string;
@@ -50,19 +49,6 @@ export async function createTask(input: {
   metadata?: Record<string, unknown>;
 }): Promise<Task> {
   return requestJSON("/api/tasks", jsonInit("POST", input));
-}
-
-export async function createCampaign(input: {
-  projectId?: string;
-  title: string;
-  prompt: string;
-  metadata?: Record<string, unknown>;
-}): Promise<Campaign> {
-  return requestJSON("/api/campaigns", jsonInit("POST", input));
-}
-
-export async function cancelCampaign(campaignId: string): Promise<void> {
-  return requestVoid(`/api/campaigns/${encodeURIComponent(campaignId)}/cancel`, { method: "POST" });
 }
 
 export async function updateTaskLoopConfig(taskId: string, input: {

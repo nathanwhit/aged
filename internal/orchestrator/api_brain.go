@@ -178,12 +178,7 @@ func (b *APIBrain) chatCompletion(ctx context.Context, caller string, request ch
 
 func (b *APIBrain) taskMessage(task core.Task, steering []string) string {
 	payload := map[string]any{
-		"task": map[string]any{
-			"id":        task.ID,
-			"projectId": task.ProjectID,
-			"title":     task.Title,
-			"prompt":    task.Prompt,
-		},
+		"task": taskPromptPayload(task),
 		"availableWorkers": []map[string]string{
 			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
 			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
