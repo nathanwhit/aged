@@ -210,6 +210,8 @@ function App() {
   const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
   const activeTasks = snapshot.tasks.filter((task) => !isTerminalTask(task));
   const completedTasks = tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask));
+  const activeCampaigns = campaignsByNewestUpdate(snapshot.campaigns.filter((campaign) => !isTerminalCampaign(campaign)));
+  const taskById = new Map(snapshot.tasks.map((task) => [task.id, task]));
 
   async function handleClearTask(taskId: string) {
     try {
@@ -427,6 +429,33 @@ function App() {
 
       <section className="layout">
         <section className="left-rail">
+          <section className="panel campaign-list">
+            <div className="panel-title split-title">
+              <span>
+                <FolderPlus size={18} />
+                <h2>Campaigns</h2>
+              </span>
+              <span className="pill subtle">{activeCampaigns.length} active</span>
+            </div>
+            {initialSnapshotStatus === "loading" ? (
+              <TaskListLoading label="Loading campaigns..." />
+            ) : activeCampaigns.length === 0 ? (
+              <p className="empty">No active campaigns.</p>
+            ) : (
+              <div className="campaign-row-list">
+                {activeCampaigns.map((campaign) => (
+                  <CampaignRow
+                    key={campaign.id}
+                    campaign={campaign}
+                    rootTask={campaign.rootTaskId ? taskById.get(campaign.rootTaskId) : undefined}
+                    selectedTaskId={selectedTask?.id ?? ""}
+                    onSelectTask={setSelectedTaskId}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
           <section className="panel task-list">
             <div className="panel-title split-title">
               <span>
@@ -491,8 +520,9 @@ function App() {
           <TaskComposer
             onCreate={async (input) => {
               setError("");
-              if (input.runMode === "campaign") {
-                const campaign = await createCampaign(input);
+              const { runMode, ...request } = input;
+              if (runMode === "campaign") {
+                const campaign = await createCampaign(request);
                 setSnapshot((current) => upsertCampaign(current, campaign));
                 if (campaign.rootTaskId) {
                   setSelectedTaskId(campaign.rootTaskId);
@@ -500,7 +530,7 @@ function App() {
                 refresh().catch((err) => setError(errorMessage(err)));
                 return campaign;
               }
-              const task = await createTask(input);
+              const task = await createTask(request);
               setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
               refresh().catch((err) => setError(errorMessage(err)));
@@ -580,11 +610,52 @@ function OverviewMetric({ label, value, tone }: { label: string; value: string; 
   );
 }
 
-function TaskListLoading() {
+function TaskListLoading({ label = "Loading tasks..." }: { label?: string }) {
   return (
     <div className="task-list-loading" role="status" aria-live="polite">
       <LoaderCircle className="spin" size={16} />
-      <span>Loading tasks...</span>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function CampaignRow({
+  campaign,
+  rootTask,
+  selectedTaskId,
+  onSelectTask,
+}: {
+  campaign: Campaign;
+  rootTask?: Task;
+  selectedTaskId: string;
+  onSelectTask: (id: string) => void;
+}) {
+  const childTaskIds = campaign.childTaskIds ?? [];
+  const implementationChildren = Math.max(0, childTaskIds.length - (campaign.rootTaskId ? 1 : 0));
+  const selected = selectedTaskId !== "" && (selectedTaskId === campaign.rootTaskId || childTaskIds.includes(selectedTaskId));
+  const canSelectRoot = Boolean(campaign.rootTaskId);
+  return (
+    <div className={selected ? "campaign-row selected" : "campaign-row"}>
+      <button
+        className="campaign-row-main"
+        disabled={!canSelectRoot}
+        onClick={() => campaign.rootTaskId && onSelectTask(campaign.rootTaskId)}
+        type="button"
+        aria-current={selected ? "true" : undefined}
+        title={canSelectRoot ? "Open campaign coordinator" : "Campaign coordinator unavailable"}
+      >
+        <span className="campaign-row-copy">
+          <strong>{campaign.title}</strong>
+          <small className="task-row-meta">
+            {[campaign.projectId && `Project ${campaign.projectId}`, campaign.id.slice(0, 8), rootTask?.status && `Coordinator ${humanizeKey(rootTask.status)}`].filter(Boolean).join(" · ")}
+          </small>
+        </span>
+        <span className="task-row-status">
+          <Status value={campaign.status} />
+          {campaign.objectivePhase && campaign.objectivePhase !== campaign.status && <span className="pill subtle">{humanizeKey(campaign.objectivePhase)}</span>}
+          <span className="pill subtle">{implementationChildren === 1 ? "1 child" : `${implementationChildren} children`}</span>
+        </span>
+      </button>
     </div>
   );
 }
@@ -923,8 +994,16 @@ function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
 }
 
+function isTerminalCampaign(campaign: Campaign): boolean {
+  return campaign.status === "succeeded" || campaign.status === "failed" || campaign.status === "canceled";
+}
+
 function tasksByNewestCompletion(tasks: Task[]): Task[] {
   return [...tasks].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+}
+
+function campaignsByNewestUpdate(campaigns: Campaign[]): Campaign[] {
+  return [...campaigns].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 }
 
 function preferredTask(tasks: Task[]): Task | undefined {
