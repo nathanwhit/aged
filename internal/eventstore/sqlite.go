@@ -847,6 +847,7 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 			campaigns[event.TaskID] = core.Campaign{
 				ID:              event.TaskID,
 				ProjectID:       projectID,
+				RootTaskID:      stringFromMetadata(payload.Metadata, "rootTaskId"),
 				Title:           payload.Title,
 				Prompt:          payload.Prompt,
 				Status:          core.CampaignActive,
@@ -876,6 +877,7 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				campaign.Prompt = payload.Prompt
 			}
 			campaign.Metadata = mergeMetadataPatch(campaign.Metadata, payload.MetadataPatch)
+			campaign.RootTaskID = stringFromMetadata(campaign.Metadata, "rootTaskId")
 			campaign.UpdatedAt = event.At
 			campaigns[event.TaskID] = campaign
 		case core.EventCampaignStatus:

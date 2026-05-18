@@ -331,7 +331,12 @@ func taskCompletionMode(task core.Task) string {
 	var metadata map[string]any
 	if len(task.Metadata) > 0 && json.Unmarshal(task.Metadata, &metadata) == nil {
 		if value, ok := metadata["completionMode"].(string); ok && strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "github":
+				return "github"
+			case "campaign":
+				return "campaign"
+			}
 		}
 	}
 	return "local"

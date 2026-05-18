@@ -142,6 +142,80 @@ func TestCampaignContextIsSharedWithChildTaskWorkers(t *testing.T) {
 	}
 }
 
+func TestStartCampaignCreatesCoordinatorTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &recordingEventRunner{
+		kind: "codex",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "Triaged the campaign and found two independent slices.",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "Triage and split the campaign.",
+		Rationale:  "coordinate campaign",
+	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	campaign, err := service.StartCampaign(ctx, core.CreateCampaignRequest{
+		Title:  "Improve startup",
+		Prompt: "Find and ship independent startup improvements.",
+		Metadata: core.MustJSON(map[string]any{
+			"promptSetId": "custom-prompts",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if campaign.RootTaskID == "" {
+		t.Fatalf("campaign RootTaskID is empty")
+	}
+
+	snapshot := waitForTaskStatus(t, store, campaign.RootTaskID, core.TaskSucceeded)
+	root, ok := findTask(snapshot, campaign.RootTaskID)
+	if !ok {
+		t.Fatalf("missing campaign coordinator task")
+	}
+	if root.CampaignID != campaign.ID {
+		t.Fatalf("root CampaignID = %q, want %q", root.CampaignID, campaign.ID)
+	}
+	if root.WorkstreamID != "coordination" {
+		t.Fatalf("root WorkstreamID = %q, want coordination", root.WorkstreamID)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(root.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["completionMode"] != "campaign" {
+		t.Fatalf("root completionMode = %v, want campaign", metadata["completionMode"])
+	}
+	if metadata["campaignRole"] != "coordinator" {
+		t.Fatalf("root campaignRole = %v, want coordinator", metadata["campaignRole"])
+	}
+	if metadata["promptSetId"] != "custom-prompts" {
+		t.Fatalf("root did not inherit campaign execution metadata: %+v", metadata)
+	}
+	projectedCampaign, ok := findCampaign(snapshot, campaign.ID)
+	if !ok {
+		t.Fatalf("missing campaign in snapshot")
+	}
+	if projectedCampaign.RootTaskID != campaign.RootTaskID {
+		t.Fatalf("projected RootTaskID = %q, want %q", projectedCampaign.RootTaskID, campaign.RootTaskID)
+	}
+	if !reflect.DeepEqual(projectedCampaign.ChildTaskIDs, []string{campaign.RootTaskID}) {
+		t.Fatalf("campaign child tasks = %+v, want root task", projectedCampaign.ChildTaskIDs)
+	}
+	if !strings.Contains(root.Prompt, "Campaign objective") {
+		t.Fatalf("coordinator task prompt missing campaign framing:\n%s", root.Prompt)
+	}
+	if runner.callsValue() == 0 {
+		t.Fatalf("coordinator task did not run")
+	}
+}
+
 func TestProjectHealthCatchesGitHubGraphQLBadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

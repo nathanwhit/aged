@@ -77,6 +77,7 @@ export type WorkPlanItem = {
 export type Campaign = {
   id: string;
   projectId?: string;
+  rootTaskId?: string;
   title: string;
   prompt: string;
   status: CampaignStatus;

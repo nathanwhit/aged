@@ -152,6 +152,7 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 		p.Campaigns[event.TaskID] = core.Campaign{
 			ID:              event.TaskID,
 			ProjectID:       projectID,
+			RootTaskID:      stringFromMetadata(payload.Metadata, "rootTaskId"),
 			Title:           payload.Title,
 			Prompt:          payload.Prompt,
 			Status:          core.CampaignActive,
@@ -181,6 +182,7 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 			campaign.Prompt = payload.Prompt
 		}
 		campaign.Metadata = mergeMetadataPatch(campaign.Metadata, payload.MetadataPatch)
+		campaign.RootTaskID = stringFromMetadata(campaign.Metadata, "rootTaskId")
 		campaign.UpdatedAt = event.At
 		p.Campaigns[event.TaskID] = campaign
 	case core.EventCampaignStatus:
