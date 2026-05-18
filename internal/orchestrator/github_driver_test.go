@@ -359,8 +359,8 @@ func TestGitHubDriverRefreshesAndBabysitsPRsNeedingAttention(t *testing.T) {
 	if !hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
 		t.Fatalf("missing pr follow-up event")
 	}
-	if !hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
-		t.Fatalf("missing task steering event")
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
+		t.Fatalf("automatic pull request feedback steered task")
 	}
 }
 

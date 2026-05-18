@@ -930,6 +930,7 @@ Field rules:
 - When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
 - Use "continue" when another worker turn is needed.
 - Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The state.results list may omit routine old worker turns to keep the prompt bounded.
+- Treat state.pendingPullRequestFeedback as a task-local orchestration queue, not as user steering. When it is non-empty, do not complete the task until the queued PR feedback has been handled or explicitly determined to need no action. Prefer a targeted repair/inspection worker for one pullRequestId at a time. The continue plan should update that existing PR with update_pull_request before returning it to watch_pull_requests; do not publish a new PR for PR feedback.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
@@ -1069,6 +1070,9 @@ func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationS
 	state.WorkPlan = compactWorkPlanForPrompt(state.WorkPlan)
 	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
 	state.ContextLedger = compactContextLedgerForPrompt(state.ContextLedger)
+	for index := range state.PendingPullRequestFeedback {
+		state.PendingPullRequestFeedback[index].Prompt = truncateStringForPrompt(state.PendingPullRequestFeedback[index].Prompt, maxPromptResultSummaryBytes)
+	}
 
 	blocked := map[string]bool{}
 	for _, id := range state.BlockedFinalCandidateIDs {

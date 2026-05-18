@@ -1149,23 +1149,35 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	if !ok {
 		return eventstore.ErrNotFound
 	}
-	if task.Status == core.TaskRunning || task.Status == core.TaskPlanning || task.Status == core.TaskQueued {
+	if isTerminalTaskStatus(task.Status) {
 		return nil
 	}
-	if isTerminalTaskStatus(task.Status) {
+	if pullRequestFeedbackAlreadyPending(snapshot, pr.TaskID, pr.ID) {
 		return nil
 	}
 	if pullRequestFollowUpStartedAfterLatestStatus(snapshot, pr.ID) {
 		return nil
 	}
 	attempt := pullRequestFollowUpAttempt(snapshot, pr.ID) + 1
+	prompt := pullRequestFollowUpPrompt(pr)
 	if _, err := s.append(ctx, core.Event{
 		Type:   core.EventPRFollowUp,
 		TaskID: pr.TaskID,
 		Payload: core.MustJSON(map[string]any{
-			"id":      pr.ID,
-			"attempt": attempt,
-			"reason":  "pull_request_needs_work",
+			"id":           pr.ID,
+			"attempt":      attempt,
+			"reason":       "pull_request_needs_work",
+			"status":       "queued",
+			"repo":         pr.Repo,
+			"number":       pr.Number,
+			"url":          pr.URL,
+			"branch":       pr.Branch,
+			"base":         pr.Base,
+			"state":        pr.State,
+			"checksStatus": pr.ChecksStatus,
+			"mergeStatus":  pr.MergeStatus,
+			"reviewStatus": pr.ReviewStatus,
+			"prompt":       prompt,
 		}),
 	}); err != nil {
 		return err
@@ -1182,10 +1194,15 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, "pr_needs_work", "Pull request needs follow-up work from checks or review."); err != nil {
 		return err
 	}
-	if err := s.SteerTask(ctx, pr.TaskID, core.SteeringRequest{Message: pullRequestFollowUpPrompt(pr)}); err != nil {
+	if err := s.markPullRequestFeedbackTriggered(ctx, pr); err != nil {
 		return err
 	}
-	return s.markPullRequestFeedbackTriggered(ctx, pr)
+	if task.Status == core.TaskWaiting {
+		s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
+			s.resumePullRequestFeedbackQueue(taskCtx, pr.TaskID)
+		})
+	}
+	return nil
 }
 
 func (s *Service) markPullRequestFeedbackTriggered(ctx context.Context, pr core.PullRequest) error {
@@ -1476,6 +1493,156 @@ func latestPullRequestFollowUp(snapshot core.Snapshot, taskID string) (core.Pull
 		}
 	}
 	return core.PullRequest{}, false
+}
+
+func latestPullRequestFollowUpIsQueued(snapshot core.Snapshot, taskID string) bool {
+	latestFollowUp := int64(0)
+	queued := false
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
+			continue
+		}
+		var payload struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if event.ID >= latestFollowUp {
+			latestFollowUp = event.ID
+			queued = payload.Status == "queued"
+		}
+	}
+	return queued
+}
+
+func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
+	latestPlanned := int64(0)
+	pullRequests := map[string]core.PullRequest{}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID == taskID {
+			pullRequests[pr.ID] = pr
+		}
+	}
+	for _, event := range snapshot.Events {
+		if event.TaskID == taskID && event.Type == core.EventTaskPlanned && event.ID > latestPlanned {
+			latestPlanned = event.ID
+		}
+	}
+	var items []PullRequestFeedbackItem
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp || event.ID <= latestPlanned {
+			continue
+		}
+		var payload struct {
+			ID           string `json:"id"`
+			Attempt      int    `json:"attempt"`
+			Reason       string `json:"reason"`
+			Repo         string `json:"repo"`
+			Number       int    `json:"number"`
+			URL          string `json:"url"`
+			Branch       string `json:"branch"`
+			Base         string `json:"base"`
+			State        string `json:"state"`
+			ChecksStatus string `json:"checksStatus"`
+			MergeStatus  string `json:"mergeStatus"`
+			ReviewStatus string `json:"reviewStatus"`
+			Prompt       string `json:"prompt"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
+			continue
+		}
+		if pr, ok := pullRequests[payload.ID]; ok {
+			payload.Repo = nonEmpty(payload.Repo, pr.Repo)
+			payload.Number = firstNonZero(payload.Number, pr.Number)
+			payload.URL = nonEmpty(payload.URL, pr.URL)
+			payload.Branch = nonEmpty(payload.Branch, pr.Branch)
+			payload.Base = nonEmpty(payload.Base, pr.Base)
+			payload.State = nonEmpty(payload.State, pr.State)
+			payload.ChecksStatus = nonEmpty(payload.ChecksStatus, pr.ChecksStatus)
+			payload.MergeStatus = nonEmpty(payload.MergeStatus, pr.MergeStatus)
+			payload.ReviewStatus = nonEmpty(payload.ReviewStatus, pr.ReviewStatus)
+			if payload.Prompt == "" {
+				payload.Prompt = pullRequestFollowUpPrompt(pr)
+			}
+		}
+		items = append(items, PullRequestFeedbackItem{
+			EventID:       event.ID,
+			PullRequestID: payload.ID,
+			Attempt:       payload.Attempt,
+			Reason:        payload.Reason,
+			Repo:          payload.Repo,
+			Number:        payload.Number,
+			URL:           payload.URL,
+			Branch:        payload.Branch,
+			Base:          payload.Base,
+			State:         payload.State,
+			ChecksStatus:  payload.ChecksStatus,
+			MergeStatus:   payload.MergeStatus,
+			ReviewStatus:  payload.ReviewStatus,
+			Prompt:        payload.Prompt,
+		})
+	}
+	return items
+}
+
+func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, prID string) bool {
+	for _, item := range pendingPullRequestFeedback(snapshot, taskID) {
+		if item.PullRequestID == prID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) pendingPullRequestFeedback(ctx context.Context, taskID string) []PullRequestFeedbackItem {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	return pendingPullRequestFeedback(snapshot, taskID)
+}
+
+func firstPendingPullRequestFeedback(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
+	items := pendingPullRequestFeedback(snapshot, taskID)
+	if len(items) == 0 {
+		return core.PullRequest{}, false
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == items[0].PullRequestID {
+			return pr, true
+		}
+	}
+	return core.PullRequest{
+		ID:           items[0].PullRequestID,
+		TaskID:       taskID,
+		Repo:         items[0].Repo,
+		Number:       items[0].Number,
+		URL:          items[0].URL,
+		Branch:       items[0].Branch,
+		Base:         items[0].Base,
+		State:        items[0].State,
+		ChecksStatus: items[0].ChecksStatus,
+		MergeStatus:  items[0].MergeStatus,
+		ReviewStatus: items[0].ReviewStatus,
+	}, true
+}
+
+func (s *Service) firstPendingPullRequestFeedback(ctx context.Context, taskID string) (core.PullRequest, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false
+	}
+	return firstPendingPullRequestFeedback(snapshot, taskID)
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {

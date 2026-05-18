@@ -1022,13 +1022,6 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 			continue
 		}
 		if resumingPullRequestFollowUp(snapshot, task.ID) {
-			feedback := latestTaskSteering(snapshot, task.ID)
-			if feedback == "" {
-				feedback = "Resume the interrupted pull request follow-up planning turn."
-			}
-			if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
-				return err
-			}
 			_, err := s.append(ctx, core.Event{
 				Type:   core.EventTaskAction,
 				TaskID: task.ID,
@@ -1041,9 +1034,18 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 			if err != nil {
 				return err
 			}
-			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
-				s.resumeWaitingTask(taskCtx, task.ID, feedback)
-			})
+			if latestPullRequestFollowUpIsQueued(snapshot, task.ID) {
+				if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
+					return err
+				}
+				s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+					s.resumePullRequestFeedbackQueue(taskCtx, task.ID)
+				})
+			} else {
+				s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+					s.resumeLegacyPullRequestFollowUpPlanning(taskCtx, task.ID)
+				})
+			}
 			continue
 		}
 		_, err := s.append(ctx, core.Event{
@@ -2986,6 +2988,95 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		}
 		_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 	}
+}
+
+func (s *Service) resumeLegacyPullRequestFollowUpPlanning(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || task.Status != core.TaskPlanning {
+		return
+	}
+	plan, err := s.brain.Plan(ctx, task, taskSteering(snapshot, taskID))
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if err := plan.Validate(); err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
+		plan = annotatePullRequestFollowUpPlan(plan, pr)
+	}
+	plan = normalizePullRequestFollowUpPlan(plan)
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	results, ok, err := s.runPlanWorkerSet(ctx, task, plan, nil, "")
+	if err != nil {
+		_ = s.failTask(ctx, taskID, err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+		if s.waitForRecoverableError(ctx, taskID, "", err) {
+			return
+		}
+		_ = s.failTask(ctx, taskID, err)
+	} else if ok {
+		results = nextResults
+		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+		if !replanOK {
+			return
+		}
+		_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+	}
+}
+
+func (s *Service) resumePullRequestFeedbackQueue(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || task.Status != core.TaskWaiting {
+		return
+	}
+	if len(pendingPullRequestFeedback(snapshot, taskID)) == 0 {
+		return
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "pull_request_feedback_queue",
+			"status": "waiting",
+			"reason": "queued pull request feedback could not resume automatically",
+			"error":  err.Error(),
+		})
+		return
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "pr_needs_work"
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	if !replanOK {
+		return
+	}
+	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 }
 
 func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
@@ -5926,13 +6017,14 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
-			InitialPlan:              initial,
-			WorkPlan:                 currentWorkPlan,
-			Results:                  results,
-			ContextLedger:            s.taskContextLedger(ctx, task.ID),
-			Turn:                     turn,
-			BlockedFinalCandidateIDs: blockedFinalCandidateIDs,
-			RecoveryHint:             recoveryHint,
+			InitialPlan:                initial,
+			WorkPlan:                   currentWorkPlan,
+			Results:                    results,
+			ContextLedger:              s.taskContextLedger(ctx, task.ID),
+			PendingPullRequestFeedback: s.pendingPullRequestFeedback(ctx, task.ID),
+			Turn:                       turn,
+			BlockedFinalCandidateIDs:   blockedFinalCandidateIDs,
+			RecoveryHint:               recoveryHint,
 		})
 		if err != nil {
 			if ctx.Err() != nil {
@@ -5969,6 +6061,15 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		switch decision.Action {
 		case "complete":
+			if pending := s.pendingPullRequestFeedback(ctx, task.ID); len(pending) > 0 {
+				reason := "queued pull request feedback must be handled before completing the task"
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", "", results
+				}
+				stalledTurns++
+				continue
+			}
 			if taskCompletionModeFromTask(task) != "github" {
 				if candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID); err == nil && candidateWorkerID != "" {
 					if candidate, ok := workerResultByID(results, candidateWorkerID); ok {
@@ -6027,6 +6128,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		case "continue":
 			beforeResults := results
 			next := *decision.Plan
+			if pr, ok := s.firstPendingPullRequestFeedback(ctx, task.ID); ok {
+				next = annotatePullRequestFollowUpPlan(next, pr)
+				next = normalizePullRequestFollowUpPlan(next)
+			}
 			if next.Metadata == nil {
 				next.Metadata = map[string]any{}
 			}
