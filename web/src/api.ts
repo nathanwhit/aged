@@ -182,6 +182,13 @@ export async function cancelWorker(workerId: string): Promise<void> {
   return requestVoid(`/api/workers/${workerId}/cancel`, { method: "POST" });
 }
 
+export async function steerWorker(workerId: string, message: string): Promise<void> {
+  return requestVoid(`/api/workers/${workerId}/steer`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}
+
 export async function getWorkerChanges(workerId: string): Promise<WorkerChangesReview> {
   return requestJSON(`/api/workers/${workerId}/changes`);
 }

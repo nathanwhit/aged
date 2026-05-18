@@ -297,11 +297,7 @@ func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSe
 	if len(steering) > 0 {
 		b.WriteString("# User Steering\n\n")
 		b.WriteString("Apply this user steering on the resumed turn:\n")
-		for _, message := range steering {
-			message = strings.TrimSpace(message)
-			if message == "" {
-				continue
-			}
+		for _, message := range dedupeTrimmedStrings(steering) {
 			b.WriteString("- ")
 			b.WriteString(message)
 			b.WriteString("\n")
@@ -1812,6 +1808,68 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	return err
 }
 
+func (s *Service) SteerWorker(ctx context.Context, workerID string, req core.SteeringRequest) error {
+	workerID = strings.TrimSpace(workerID)
+	message := strings.TrimSpace(req.Message)
+	if workerID == "" {
+		return errors.New("workerId is required")
+	}
+	if message == "" {
+		return errors.New("message is required")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	workerState, ok := findWorker(snapshot, workerID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	task, ok := findTask(snapshot, workerState.TaskID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if isTerminalTaskStatus(task.Status) {
+		return nil
+	}
+	node := executionNodeForWorker(snapshot, workerID)
+	if workerSteeringAlreadyPending(snapshot, task.ID, workerID, message) {
+		return nil
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerSteered,
+		TaskID:   task.ID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":   workerID,
+			"nodeId":     node.ID,
+			"workerKind": nonEmpty(workerState.Kind, node.WorkerKind),
+			"role":       node.Role,
+			"spawnId":    node.SpawnID,
+			"status":     "queued",
+			"reason":     "user_worker_steering",
+			"message":    message,
+		}),
+	}); err != nil {
+		return err
+	}
+	if err := s.recordTaskMilestone(ctx, task.ID, "worker_steering_queued", "worker_steering", "Worker-specific steering queued for replanning.", map[string]any{
+		"workerId": workerID,
+		"nodeId":   node.ID,
+	}); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "worker_steering", "Worker-specific steering is queued for replanning."); err != nil {
+		return err
+	}
+	if task.Status == core.TaskWaiting {
+		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			s.resumeWorkerSteeringQueue(taskCtx, task.ID)
+		})
+	}
+	return nil
+}
+
 func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID string, message string, workerIDs []string) {
 	defer s.finishSteeringRestart(taskID)
 	_ = s.recordTaskAction(ctx, taskID, map[string]any{
@@ -3079,6 +3137,42 @@ func (s *Service) resumePullRequestFeedbackQueue(ctx context.Context, taskID str
 	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
 }
 
+func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || task.Status != core.TaskWaiting {
+		return
+	}
+	if len(pendingWorkerSteering(snapshot, taskID)) == 0 {
+		return
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":   "worker_steering_queue",
+			"status": "waiting",
+			"reason": "queued worker steering could not resume automatically",
+			"error":  err.Error(),
+		})
+		return
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
+		return
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "worker_steering"
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	if !replanOK {
+		return
+	}
+	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
 func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
 	candidateWorkerID := strings.TrimSpace(task.FinalCandidateWorkerID)
 	if candidateWorkerID == "" || task.ObjectiveStatus != core.ObjectiveWaitingUser || task.ObjectivePhase != "approval_needed" {
@@ -3430,6 +3524,9 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	} else {
 		resumeSessionID = ""
 		delete(plan.Metadata, "retryResumeSessionID")
+		if retryFromWorkerID != "" && len(retrySteering) > 0 {
+			prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, "", retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
+		}
 	}
 	spec := worker.Spec{
 		ID:              workerID,
@@ -3802,6 +3899,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			spec.ResumeSessionID = ""
 		}
 		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"), stringMetadata(plan.Metadata, "retryContextKind"))
+	} else if retryFromWorkerID != "" {
+		retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
+		if len(retrySteering) > 0 {
+			spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, "", retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
+		}
 	}
 	command := runner.BuildCommand(spec)
 	workspace.Root = remoteRun.RunDir
@@ -6022,6 +6124,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			Results:                    results,
 			ContextLedger:              s.taskContextLedger(ctx, task.ID),
 			PendingPullRequestFeedback: s.pendingPullRequestFeedback(ctx, task.ID),
+			PendingWorkerSteering:      s.pendingWorkerSteering(ctx, task.ID),
 			Turn:                       turn,
 			BlockedFinalCandidateIDs:   blockedFinalCandidateIDs,
 			RecoveryHint:               recoveryHint,
@@ -6063,6 +6166,15 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		case "complete":
 			if pending := s.pendingPullRequestFeedback(ctx, task.ID); len(pending) > 0 {
 				reason := "queued pull request feedback must be handled before completing the task"
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", "", results
+				}
+				stalledTurns++
+				continue
+			}
+			if pending := s.pendingWorkerSteering(ctx, task.ID); len(pending) > 0 {
+				reason := "queued worker steering must be handled before completing the task"
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", "", results
@@ -6131,6 +6243,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			if pr, ok := s.firstPendingPullRequestFeedback(ctx, task.ID); ok {
 				next = annotatePullRequestFollowUpPlan(next, pr)
 				next = normalizePullRequestFollowUpPlan(next)
+			}
+			if steering, ok := s.firstPendingWorkerSteering(ctx, task.ID); ok {
+				next = annotateWorkerSteeringPlan(next, steering)
 			}
 			if next.Metadata == nil {
 				next.Metadata = map[string]any{}
@@ -6299,6 +6414,10 @@ type replanFallbackConfig struct {
 }
 
 func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, string, []WorkerTurnResult) {
+	if pendingReason := s.pendingReplanQueueBlockReason(ctx, task.ID); pendingReason != "" {
+		s.waitForReplanFallback(ctx, task, turn, replanErr, config, pendingReason)
+		return false, "", "", results
+	}
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil && candidateWorkerID != "" {
 		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
@@ -6327,6 +6446,33 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 				return false, "", "", results
 			}
 			return true, candidateWorkerID, reason, results
+		}
+	}
+	if taskCompletionModeFromTask(task) != "github" && candidateWorkerID == "" {
+		if workerID, workerReason := deterministicLocalNoChangeCompletionWorker(results); workerID != "" {
+			reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
+			if workerReason != "" {
+				reason += "; " + workerReason
+			}
+			if _, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskReplanned,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"turn": turn,
+					"decision": ReplanDecision{
+						Action:                 "complete",
+						FinalCandidateWorkerID: workerID,
+						Rationale:              reason,
+						Message:                config.CompleteMessage,
+					},
+					"fallback": true,
+					"error":    replanErr.Error(),
+				}),
+			}); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			}
+			return true, workerID, reason, results
 		}
 	}
 	if candidateWorkerID, candidateReason := latestCandidateLeafExcluding(results, options.BlockedFinalCandidates); candidateWorkerID != "" {
@@ -6358,6 +6504,22 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 	if candidateErr != nil {
 		candidateError = candidateErr.Error()
 	}
+	s.waitForReplanFallback(ctx, task, turn, replanErr, config, candidateError)
+	return false, "", "", results
+}
+
+func (s *Service) pendingReplanQueueBlockReason(ctx context.Context, taskID string) string {
+	var reasons []string
+	if pending := s.pendingPullRequestFeedback(ctx, taskID); len(pending) > 0 {
+		reasons = append(reasons, "queued pull request feedback must be handled before deterministic fallback completion")
+	}
+	if pending := s.pendingWorkerSteering(ctx, taskID); len(pending) > 0 {
+		reasons = append(reasons, "queued worker steering must be handled before deterministic fallback completion")
+	}
+	return strings.Join(reasons, "; ")
+}
+
+func (s *Service) waitForReplanFallback(ctx context.Context, task core.Task, turn int, replanErr error, config replanFallbackConfig, candidateError string) {
 	if _, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskReplanned,
 		TaskID: task.ID,
@@ -6374,7 +6536,7 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 		}),
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
-		return false, "", "", results
+		return
 	}
 	if err := s.waitForUserAction(ctx, task.ID, "", config.WaitReason, config.WaitQuestion, map[string]any{
 		"error":          replanErr.Error(),
@@ -6383,7 +6545,42 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 	}
-	return false, "", "", results
+}
+
+func deterministicLocalNoChangeCompletionWorker(results []WorkerTurnResult) (string, string) {
+	if len(candidateResults(results)) != 0 {
+		return "", ""
+	}
+	successful := []WorkerTurnResult{}
+	for _, result := range results {
+		if result.Status == core.WorkerSucceeded {
+			successful = append(successful, result)
+		}
+	}
+	if len(successful) != 1 {
+		return "", ""
+	}
+	return successful[0].WorkerID, "only successful worker and local completion does not require candidate changes"
+}
+
+func annotateWorkerSteeringPlan(plan Plan, item WorkerSteeringItem) Plan {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["retryFromWorkerID"] = item.WorkerID
+	plan.Metadata["retrySteering"] = dedupeTrimmedStrings(append(stringSliceMetadata(plan.Metadata, "retrySteering"), item.Message))
+	plan.Metadata["retryContextKind"] = "worker_steering"
+	plan.Metadata["steeredWorkerID"] = item.WorkerID
+	if item.NodeID != "" {
+		plan.Metadata["steeredNodeID"] = item.NodeID
+	}
+	if item.Role != "" {
+		plan.Metadata["steeredWorkerRole"] = item.Role
+	}
+	if item.SpawnID != "" {
+		plan.Metadata["steeredWorkerSpawnID"] = item.SpawnID
+	}
+	return plan
 }
 
 func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, repairReason string, blocked map[string]string) Plan {
@@ -7454,8 +7651,27 @@ func findTask(snapshot core.Snapshot, taskID string) (core.Task, bool) {
 	return core.Task{}, false
 }
 
+func findWorker(snapshot core.Snapshot, workerID string) (core.Worker, bool) {
+	for _, worker := range snapshot.Workers {
+		if worker.ID == workerID {
+			return worker, true
+		}
+	}
+	return core.Worker{}, false
+}
+
+func executionNodeForWorker(snapshot core.Snapshot, workerID string) core.ExecutionNode {
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID == workerID {
+			return node
+		}
+	}
+	return core.ExecutionNode{}
+}
+
 func taskSteering(snapshot core.Snapshot, taskID string) []string {
 	var out []string
+	seen := map[string]bool{}
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID || event.Type != core.EventTaskSteered {
 			continue
@@ -7463,9 +7679,27 @@ func taskSteering(snapshot core.Snapshot, taskID string) []string {
 		var payload struct {
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(event.Payload, &payload); err == nil && strings.TrimSpace(payload.Message) != "" {
-			out = append(out, payload.Message)
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			message := strings.TrimSpace(payload.Message)
+			if message != "" && !seen[message] {
+				seen[message] = true
+				out = append(out, message)
+			}
 		}
+	}
+	return out
+}
+
+func dedupeTrimmedStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
 	}
 	return out
 }
@@ -7476,6 +7710,106 @@ func latestTaskSteering(snapshot core.Snapshot, taskID string) string {
 		return ""
 	}
 	return steering[len(steering)-1]
+}
+
+func pendingWorkerSteering(snapshot core.Snapshot, taskID string) []WorkerSteeringItem {
+	latestPlanned := int64(0)
+	workers := map[string]core.Worker{}
+	nodes := map[string]core.ExecutionNode{}
+	for _, worker := range snapshot.Workers {
+		if worker.TaskID == taskID {
+			workers[worker.ID] = worker
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID == taskID && node.WorkerID != "" {
+			nodes[node.WorkerID] = node
+		}
+	}
+	for _, event := range snapshot.Events {
+		if event.TaskID == taskID && event.Type == core.EventTaskPlanned && event.ID > latestPlanned {
+			latestPlanned = event.ID
+		}
+	}
+	var items []WorkerSteeringItem
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventWorkerSteered || event.ID <= latestPlanned {
+			continue
+		}
+		var payload struct {
+			WorkerID   string `json:"workerId"`
+			NodeID     string `json:"nodeId"`
+			WorkerKind string `json:"workerKind"`
+			Role       string `json:"role"`
+			SpawnID    string `json:"spawnId"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+			Message    string `json:"message"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		payload.WorkerID = nonEmpty(payload.WorkerID, event.WorkerID)
+		payload.Message = strings.TrimSpace(payload.Message)
+		if payload.WorkerID == "" || payload.Message == "" {
+			continue
+		}
+		if worker, ok := workers[payload.WorkerID]; ok {
+			payload.WorkerKind = nonEmpty(payload.WorkerKind, worker.Kind)
+		}
+		if node, ok := nodes[payload.WorkerID]; ok {
+			payload.NodeID = nonEmpty(payload.NodeID, node.ID)
+			payload.WorkerKind = nonEmpty(payload.WorkerKind, node.WorkerKind)
+			payload.Role = nonEmpty(payload.Role, node.Role)
+			payload.SpawnID = nonEmpty(payload.SpawnID, node.SpawnID)
+		}
+		items = append(items, WorkerSteeringItem{
+			EventID:    event.ID,
+			WorkerID:   payload.WorkerID,
+			NodeID:     payload.NodeID,
+			WorkerKind: payload.WorkerKind,
+			Role:       payload.Role,
+			SpawnID:    payload.SpawnID,
+			Status:     payload.Status,
+			Reason:     payload.Reason,
+			Message:    payload.Message,
+		})
+	}
+	return items
+}
+
+func (s *Service) pendingWorkerSteering(ctx context.Context, taskID string) []WorkerSteeringItem {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	return pendingWorkerSteering(snapshot, taskID)
+}
+
+func firstPendingWorkerSteering(snapshot core.Snapshot, taskID string) (WorkerSteeringItem, bool) {
+	items := pendingWorkerSteering(snapshot, taskID)
+	if len(items) == 0 {
+		return WorkerSteeringItem{}, false
+	}
+	return items[0], true
+}
+
+func (s *Service) firstPendingWorkerSteering(ctx context.Context, taskID string) (WorkerSteeringItem, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return WorkerSteeringItem{}, false
+	}
+	return firstPendingWorkerSteering(snapshot, taskID)
+}
+
+func workerSteeringAlreadyPending(snapshot core.Snapshot, taskID string, workerID string, message string) bool {
+	message = strings.TrimSpace(message)
+	for _, item := range pendingWorkerSteering(snapshot, taskID) {
+		if item.WorkerID == workerID && strings.TrimSpace(item.Message) == message {
+			return true
+		}
+	}
+	return false
 }
 
 func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {

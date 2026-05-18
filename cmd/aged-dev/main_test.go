@@ -58,6 +58,19 @@ func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
 	}
 }
 
+func TestLsofListenArgsUsesLinuxTCPFilter(t *testing.T) {
+	got := lsofListenArgs("8787")
+	want := []string{"-ti", "-sTCP:LISTEN", "-iTCP:8787"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %v, want %v", got, want)
+		}
+	}
+}
+
 func registerDaemonTestFlags(flags *flag.FlagSet, artifactCleanup *bool, artifactDryRun *bool, githubDriver *flagutil.OptionalValue, discordDriver *string, web *string) {
 	flags.String("addr", "", "")
 	flags.String("db", "", "")

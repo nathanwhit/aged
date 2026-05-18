@@ -79,6 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/pull-requests/{id}/babysit", s.startPullRequestBabysitter)
 	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/apply", s.applyWorkerChanges)
+	mux.HandleFunc("POST /api/workers/{id}/steer", s.steerWorker)
 	mux.HandleFunc("POST /api/workers/{id}/cancel", s.cancelWorker)
 	if s.static != nil {
 		mux.Handle("/", s.static)
@@ -434,6 +435,14 @@ func (s *Server) clearTerminalTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelWorker(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w, s.service.CancelWorker(r.Context(), r.PathValue("id")))
+}
+
+func (s *Server) steerWorker(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeRequest[core.SteeringRequest](w, r)
+	if !ok {
+		return
+	}
+	writeNoContent(w, s.service.SteerWorker(r.Context(), r.PathValue("id"), req))
 }
 
 func (s *Server) reviewWorkerChanges(w http.ResponseWriter, r *http.Request) {
