@@ -29,6 +29,8 @@ type Spec struct {
 	Command         []string
 	ResumeSessionID string
 	ReasoningEffort string
+	TargetID        string
+	TargetKind      string
 	Steering        <-chan string
 }
 

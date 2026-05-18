@@ -25,6 +25,12 @@ func (BenchmarkCompareRunner) Run(ctx context.Context, spec Spec, sink Sink) err
 	if strings.TrimSpace(input.BaselineCommand) != "" && strings.TrimSpace(input.CandidateCommand) != "" && strings.TrimSpace(input.BaselineCommand) != strings.TrimSpace(input.CandidateCommand) {
 		return fmt.Errorf("benchmark_compare requires baseline_command and candidate_command to match")
 	}
+	if (input.BaselineTargetID == "") != (input.CandidateTargetID == "") {
+		return fmt.Errorf("benchmark_compare requires baseline_target_id and candidate_target_id to both be provided when either is provided")
+	}
+	if input.BaselineTargetID != "" && input.BaselineTargetID != input.CandidateTargetID {
+		return fmt.Errorf("benchmark_compare requires baseline_target_id and candidate_target_id to match")
+	}
 	if len(input.BaselineSamples) > 0 || len(input.CandidateSamples) > 0 {
 		if len(input.BaselineSamples) < input.MinSamples || len(input.CandidateSamples) < input.MinSamples {
 			return fmt.Errorf("benchmark_compare requires at least %d baseline and candidate samples", input.MinSamples)
@@ -51,6 +57,7 @@ func (BenchmarkCompareRunner) Run(ctx context.Context, spec Spec, sink Sink) err
 %s
 
 ## Benchmark Results
+- target_id: %s
 - baseline: %.6g
 - candidate: %.6g
 - baseline_samples: %s
@@ -64,21 +71,23 @@ func (BenchmarkCompareRunner) Run(ctx context.Context, spec Spec, sink Sink) err
 
 ## Recommended Next Turns
 %s
-`, input.Command, input.Baseline, input.Candidate, sampleSummary(input.BaselineSamples), sampleSummary(input.CandidateSamples), minNonZero(len(input.BaselineSamples), len(input.CandidateSamples)), input.MinSamples, input.ThresholdPercent, deltaPercent, input.HigherIsBetter, verdict, benchmarkRecommendation(improved))
+`, input.Command, nonEmptyBenchmarkValue(input.BaselineTargetID, "not provided"), input.Baseline, input.Candidate, sampleSummary(input.BaselineSamples), sampleSummary(input.CandidateSamples), minNonZero(len(input.BaselineSamples), len(input.CandidateSamples)), input.MinSamples, input.ThresholdPercent, deltaPercent, input.HigherIsBetter, verdict, benchmarkRecommendation(improved))
 	return sink.Event(ctx, Event{Kind: EventResult, Text: report})
 }
 
 type benchmarkInput struct {
-	Command          string
-	BaselineCommand  string
-	CandidateCommand string
-	Baseline         float64
-	Candidate        float64
-	BaselineSamples  []float64
-	CandidateSamples []float64
-	MinSamples       int
-	ThresholdPercent float64
-	HigherIsBetter   bool
+	Command           string
+	BaselineCommand   string
+	CandidateCommand  string
+	BaselineTargetID  string
+	CandidateTargetID string
+	Baseline          float64
+	Candidate         float64
+	BaselineSamples   []float64
+	CandidateSamples  []float64
+	MinSamples        int
+	ThresholdPercent  float64
+	HigherIsBetter    bool
 }
 
 func parseBenchmarkInput(prompt string) benchmarkInput {
@@ -93,7 +102,7 @@ func parseBenchmarkInput(prompt string) benchmarkInput {
 		if !ok {
 			continue
 		}
-		key = strings.ToLower(strings.TrimSpace(key))
+		key = benchmarkInputKey(key)
 		value = strings.TrimSpace(value)
 		switch key {
 		case "command", "benchmark_command":
@@ -105,6 +114,13 @@ func parseBenchmarkInput(prompt string) benchmarkInput {
 			}
 		case "candidate_command":
 			input.CandidateCommand = value
+		case "target_id", "benchmark_target_id":
+			input.BaselineTargetID = value
+			input.CandidateTargetID = value
+		case "baseline_target_id":
+			input.BaselineTargetID = value
+		case "candidate_target_id":
+			input.CandidateTargetID = value
 		case "baseline", "baseline_value":
 			input.Baseline = firstNumber(value)
 		case "candidate", "candidate_value":
@@ -125,6 +141,31 @@ func parseBenchmarkInput(prompt string) benchmarkInput {
 		}
 	}
 	return input
+}
+
+func benchmarkInputKey(key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.ReplaceAll(key, "-", "_")
+	key = strings.ReplaceAll(key, " ", "_")
+	switch key {
+	case "target", "targetid":
+		return "target_id"
+	case "benchmark_target", "benchmark_targetid":
+		return "benchmark_target_id"
+	case "baseline_target", "baseline_targetid":
+		return "baseline_target_id"
+	case "candidate_target", "candidate_targetid":
+		return "candidate_target_id"
+	default:
+		return key
+	}
+}
+
+func nonEmptyBenchmarkValue(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
 }
 
 var numberPattern = regexp.MustCompile(`[-+]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][-+]?\d+)?`)

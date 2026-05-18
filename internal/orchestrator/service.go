@@ -128,6 +128,16 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	b.WriteString("Run every command from this execution workspace:\n")
 	b.WriteString(cwd)
 	b.WriteString("\n\n")
+	if targetID := strings.TrimSpace(workspace.TargetID); targetID != "" {
+		b.WriteString("Execution target id: ")
+		b.WriteString(targetID)
+		if targetKind := strings.TrimSpace(workspace.TargetKind); targetKind != "" {
+			b.WriteString(" (")
+			b.WriteString(targetKind)
+			b.WriteString(")")
+		}
+		b.WriteString("\n\n")
+	}
 	b.WriteString("Edit only files under the execution workspace. ")
 	if sourceRoot != "" && sourceRoot != cwd {
 		b.WriteString("Do not edit the source checkout directly:\n")
@@ -3347,6 +3357,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			}
 		}
 	}
+	workspace.TargetID = target.ID
+	workspace.TargetKind = string(target.Kind)
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerWorkspace,
 		TaskID:   task.ID,
@@ -3394,6 +3406,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		WorkDir:         workspace.CWD,
 		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
+		TargetID:        target.ID,
+		TargetKind:      string(target.Kind),
 		Steering:        steering,
 	}
 	command := runner.BuildCommand(spec)
@@ -3732,6 +3746,8 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		VCSType:    "ssh",
 		WorkerID:   workerID,
 		TaskID:     task.ID,
+		TargetID:   target.ID,
+		TargetKind: string(target.Kind),
 	}
 	capabilities := worker.RunnerCapabilities(runner)
 	capabilities.LiveSteering = false
@@ -3743,6 +3759,8 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		WorkDir:         remoteWorkDir,
 		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
+		TargetID:        target.ID,
+		TargetKind:      string(target.Kind),
 	}
 	if reusedWorkspace {
 		if !capabilities.ResumeSession {
