@@ -21,6 +21,8 @@ type SQLiteStore struct {
 	appends atomic.Uint64
 }
 
+const sqliteBusyTimeoutMillis = 30000
+
 func isTerminalWorkerStatus(status core.WorkerStatus) bool {
 	return status == core.WorkerSucceeded || status == core.WorkerFailed || status == core.WorkerCanceled
 }
@@ -40,12 +42,49 @@ func jsonString(value any, nullDefault string) (string, error) {
 	return string(data), nil
 }
 
+func withSQLiteBusyRetry(ctx context.Context, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		wait := 50 * time.Millisecond * time.Duration(1<<attempt)
+		if wait > time.Second {
+			wait = time.Second
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+	return lastErr
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "sqlite_busy") ||
+		strings.Contains(text, "database is locked") ||
+		strings.Contains(text, "database table is locked")
+}
+
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(ctx); err != nil {
@@ -55,11 +94,26 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	return store, nil
 }
 
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator +
+		"_txlock=immediate" +
+		fmt.Sprintf("&_pragma=busy_timeout%%3d%d", sqliteBusyTimeoutMillis) +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=wal_autocheckpoint(256)" +
+		"&_pragma=journal_size_limit(67108864)" +
+		"&_pragma=foreign_keys(ON)"
+}
+
 func (s *SQLiteStore) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
-PRAGMA busy_timeout = 5000;
+PRAGMA busy_timeout = 30000;
 PRAGMA wal_autocheckpoint = 256;
 PRAGMA journal_size_limit = 67108864;
 PRAGMA foreign_keys = ON;
@@ -445,37 +499,46 @@ func (s *SQLiteStore) Append(ctx context.Context, event core.Event) (core.Event,
 		event.Payload = json.RawMessage(`{}`)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return core.Event{}, err
-	}
-	defer tx.Rollback()
+	var appended core.Event
+	err := withSQLiteBusyRetry(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
 
-	res, err := tx.ExecContext(ctx, `
+		next := event
+		res, err := tx.ExecContext(ctx, `
 INSERT INTO events (at, type, task_id, worker_id, payload)
 VALUES (?, ?, ?, ?, ?)`,
-		event.At.Format(time.RFC3339Nano),
-		string(event.Type),
-		event.TaskID,
-		event.WorkerID,
-		string(event.Payload),
-	)
+			next.At.Format(time.RFC3339Nano),
+			string(next.Type),
+			next.TaskID,
+			next.WorkerID,
+			string(next.Payload),
+		)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		next.ID = id
+		if err := updateSnapshotProjectionTx(ctx, tx, next); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		appended = next
+		return nil
+	})
 	if err != nil {
-		return core.Event{}, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return core.Event{}, err
-	}
-	event.ID = id
-	if err := updateSnapshotProjectionTx(ctx, tx, event); err != nil {
-		return core.Event{}, err
-	}
-	if err := tx.Commit(); err != nil {
 		return core.Event{}, err
 	}
 	s.maybeCheckpointWAL()
-	return event, nil
+	return appended, nil
 }
 
 func (s *SQLiteStore) ListEvents(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
@@ -1705,11 +1768,13 @@ func (s *SQLiteStore) Setting(ctx context.Context, key string) (string, error) {
 }
 
 func (s *SQLiteStore) SaveSetting(ctx context.Context, key string, value string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return withSQLiteBusyRetry(ctx, func() error {
+		_, err := s.db.ExecContext(ctx, `
 INSERT INTO settings (key, value) VALUES (?, ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value
 `, key, value)
-	return err
+		return err
+	})
 }
 
 func (s *SQLiteStore) setting(ctx context.Context, key string) (string, error) {
@@ -1772,7 +1837,7 @@ func stringFromMetadata(metadata json.RawMessage, key string) string {
 }
 
 func (s *SQLiteStore) Close() error {
-	_ = s.checkpointWAL(context.Background())
+	_ = s.checkpointWAL(context.Background(), "TRUNCATE", true)
 	return s.db.Close()
 }
 
@@ -1782,16 +1847,16 @@ func (s *SQLiteStore) maybeCheckpointWAL() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = s.checkpointWAL(ctx)
+	_ = s.checkpointWAL(ctx, "PASSIVE", false)
 }
 
-func (s *SQLiteStore) checkpointWAL(ctx context.Context) error {
-	row := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+func (s *SQLiteStore) checkpointWAL(ctx context.Context, mode string, requireComplete bool) error {
+	row := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(`+mode+`)`)
 	var busy, logFrames, checkpointedFrames int
 	if err := row.Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
 		return err
 	}
-	if busy != 0 {
+	if requireComplete && busy != 0 {
 		return fmt.Errorf("wal checkpoint busy: log=%d checkpointed=%d", logFrames, checkpointedFrames)
 	}
 	return nil
