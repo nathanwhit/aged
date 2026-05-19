@@ -1948,6 +1948,55 @@ func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T)
 	}
 }
 
+func TestPublicationBlockerIgnoresFindingsBeforeCurrentCandidate(t *testing.T) {
+	results := []WorkerTurnResult{{
+		WorkerID: "old-candidate",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "old.ts", Status: "modified"}},
+		},
+	}, {
+		WorkerID: "old-review",
+		SpawnID:  "validate_old_candidate",
+		Role:     "independent validator",
+		Status:   core.WorkerSucceeded,
+		Summary: `## Findings
+
+Medium issue: reject this candidate before publishing.
+
+## Recommended Next Turns
+
+Fix it before publishing.`,
+	}, {
+		WorkerID: "new-candidate",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "new.ts", Status: "modified"}},
+		},
+	}, {
+		WorkerID: "new-review",
+		SpawnID:  "validate_new_candidate",
+		Role:     "independent validator",
+		Status:   core.WorkerSucceeded,
+		Summary: `## Findings
+
+No findings.
+
+## Recommended Next Turns
+
+Publish the pull request.`,
+	}}
+
+	if blocker, ok := publicationBlockedByFollowUpFinding(results, "new-candidate"); ok {
+		t.Fatalf("new candidate blocked by stale finding: %+v", blocker)
+	}
+	if blocker, ok := publicationBlockedByFollowUpFinding(results, "old-candidate"); !ok || blocker.WorkerID != "old-review" {
+		t.Fatalf("old candidate blocker = %+v ok=%v, want old-review", blocker, ok)
+	}
+}
+
 func TestServiceProjectReviewPolicyBlocksIntermediatePublication(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

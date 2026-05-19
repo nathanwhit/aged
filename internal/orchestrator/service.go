@@ -5421,7 +5421,11 @@ func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan,
 			continue
 		}
 		if strings.TrimSpace(action.Kind) == "publish_pull_request" {
-			if blocker, ok := publicationBlockedByFollowUpFinding(results); ok {
+			workerID := ""
+			if strings.TrimSpace(action.WorkerID) != "" {
+				workerID = planActionWorkerID(results, action.WorkerID)
+			}
+			if blocker, ok := publicationBlockedByFollowUpFinding(results, workerID); ok {
 				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":           "publish_pull_request_blocked_by_follow_up",
 					"when":           nonEmpty(action.When, "after_success"),
@@ -5455,8 +5459,18 @@ type followUpPublicationBlocker struct {
 	Reason   string
 }
 
-func publicationBlockedByFollowUpFinding(results []WorkerTurnResult) (followUpPublicationBlocker, bool) {
-	for _, result := range results {
+func publicationBlockedByFollowUpFinding(results []WorkerTurnResult, candidateWorkerID string) (followUpPublicationBlocker, bool) {
+	start := 0
+	candidateWorkerID = strings.TrimSpace(candidateWorkerID)
+	if candidateWorkerID != "" {
+		start = len(results)
+		for i, result := range results {
+			if result.WorkerID == candidateWorkerID {
+				start = i + 1
+			}
+		}
+	}
+	for _, result := range results[start:] {
 		if result.Status != core.WorkerSucceeded {
 			continue
 		}
