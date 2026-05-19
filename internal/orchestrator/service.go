@@ -4670,6 +4670,15 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
 			return recoverErr
 		}
+		publicationAction := completionPublicationReviewAction(s.latestCompletionPullRequestBody(ctx, taskID))
+		if ready, rejectionReason, err := s.reviewCompletionPublicationReadiness(ctx, taskID, publicationAction, results, candidateWorkerID); err != nil {
+			return err
+		} else if !ready {
+			if handled, recoverErr := s.recoverPublicationReadinessRejectedCandidate(ctx, taskID, results, candidateWorkerID, rejectionReason); handled {
+				return recoverErr
+			}
+			return nil
+		}
 		review, err := s.reviewCandidateBeforePullRequest(ctx, taskID, results, candidateWorkerID, "completion")
 		if err != nil {
 			return err
@@ -4683,7 +4692,7 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		}
 		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
 			WorkerID: candidateWorkerID,
-			Body:     s.latestCompletionPullRequestBody(ctx, taskID),
+			Body:     stringMetadata(publicationAction.Inputs, "body"),
 		}); err != nil {
 			publishErr := fmt.Errorf("publish completion pull request: %w", err)
 			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, recoveryState); handled {
@@ -5887,14 +5896,42 @@ func latestSuccessfulWorkerResult(results []WorkerTurnResult) (WorkerTurnResult,
 	return WorkerTurnResult{}, false
 }
 
+func completionPublicationReviewAction(body string) PlanAction {
+	return PlanAction{
+		Kind:   "publish_pull_request",
+		When:   "before_completion",
+		Reason: "publish completion pull request",
+		Inputs: map[string]any{
+			"body": strings.TrimSpace(body),
+		},
+	}
+}
+
+func (s *Service) reviewCompletionPublicationReadiness(ctx context.Context, taskID string, action PlanAction, results []WorkerTurnResult, workerID string) (bool, string, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return false, "", eventstore.ErrNotFound
+	}
+	return s.reviewTaskPublicationReadiness(ctx, task, action, results, workerID)
+}
+
 func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
+	ready, _, err := s.reviewTaskPublicationReadiness(ctx, task, action, results, workerID)
+	return ready, err
+}
+
+func (s *Service) reviewTaskPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, string, error) {
 	reviewer, ok := s.brain.(PublicationReviewProvider)
 	if !ok {
-		return true, nil
+		return true, "", nil
 	}
 	candidate, ok := workerResultByID(results, workerID)
 	if !ok {
-		return false, fmt.Errorf("publish_pull_request action selected unknown worker %s", workerID)
+		return false, "", fmt.Errorf("publish_pull_request action selected unknown worker %s", workerID)
 	}
 	review, err := reviewer.ReviewPublication(ctx, task, candidate, action)
 	if err != nil {
@@ -5906,18 +5943,18 @@ func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.
 			"status":   "ignored",
 			"error":    err.Error(),
 		}); recordErr != nil {
-			return false, recordErr
+			return false, "", recordErr
 		}
-		return true, nil
+		return true, "", nil
 	}
 	if review.Ready {
-		return true, nil
+		return true, "", nil
 	}
 	reason := strings.TrimSpace(review.Reason)
 	if reason == "" {
 		reason = "candidate is not ready to publish as a pull request"
 	}
-	return false, s.recordTaskAction(ctx, task.ID, map[string]any{
+	return false, reason, s.recordTaskAction(ctx, task.ID, map[string]any{
 		"kind":            "publish_pull_request_readiness_rejected",
 		"when":            nonEmpty(action.When, "after_success"),
 		"reason":          reason,
@@ -5926,6 +5963,35 @@ func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.
 		"status":          "rejected",
 		"candidateStatus": candidate.Status,
 	})
+}
+
+func (s *Service) recoverPublicationReadinessRejectedCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, reason string) (bool, error) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "publication readiness review rejected completion pull request"
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return true, err
+	}
+	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason))
+	if !recovery.Handled {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":     "completion_publish_readiness_recovery",
+			"when":     "before_publish",
+			"reason":   "Publication readiness review blocked completion pull request.",
+			"workerId": candidateWorkerID,
+			"status":   "waiting",
+			"error":    reason,
+		})
+		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness_review", "Publication readiness review blocked the completion pull request.\n\n"+reason+"\n\nSteer the task to continue, select a different final candidate, or explicitly publish anyway.", map[string]any{
+			"error": reason,
+		})
+		return true, nil
+	}
+	if recovery.Err != nil || !recovery.Completed {
+		return true, recovery.Err
+	}
+	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
 }
 
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {

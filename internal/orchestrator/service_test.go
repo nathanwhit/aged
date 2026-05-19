@@ -2175,6 +2175,71 @@ func TestServicePlanActionDoesNotPublishRejectedCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceCompletionDoesNotPublishRejectedCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	baseBrain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "find and implement a real throughput optimization",
+		},
+		decisions: []ReplanDecision{{
+			Action:          "complete",
+			Rationale:       "candidate is ready",
+			PullRequestBody: "## Summary\n- Add benchmark harness.\n\n## Validation\n- benchmark command",
+		}, {
+			Action:  "wait",
+			Message: "continue broader investigation before publishing",
+		}},
+	}
+	brain := &publicationReviewBrain{
+		BrainProvider:  baseBrain,
+		ReplanProvider: baseBrain,
+		reviews: []PublicationReview{{
+			Ready:  false,
+			Reason: "candidate only produced a benchmark harness and not a product optimization",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "I added a benchmark harness, but there is no throughput optimization yet."}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "bench/http_harness.js", Status: "added"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Deno Serve Throughput",
+		Prompt: "Keep working until there is a real throughput optimization.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want rejected completion candidate to stay unpublished", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("publication review calls = %d, want 1", brain.reviewCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_readiness_rejected", "rejected") {
+		t.Fatalf("missing publication readiness rejection event")
+	}
+	if len(baseBrain.states) < 2 {
+		t.Fatalf("replanner was not asked to recover after rejected completion publication: %+v", baseBrain.states)
+	}
+}
+
 func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
