@@ -2,6 +2,7 @@ package eventstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -11,6 +12,115 @@ import (
 
 	"aged/internal/core"
 )
+
+func TestSQLiteStoreWaitsForBusyWriter(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "aged.db")
+	store, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	locker, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	tx, err := locker.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ('held_lock', '1')`); err != nil {
+		t.Fatal(err)
+	}
+
+	saveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- store.SaveSetting(saveCtx, "github_mentions_last_poll_at", time.Now().UTC().Format(time.RFC3339Nano))
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Setting(ctx, "github_mentions_last_poll_at")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(value) == "" {
+		t.Fatal("setting was not saved after busy writer released")
+	}
+}
+
+func TestSQLiteStoreAppendWaitsForBusyWriter(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "aged.db")
+	store, err := OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	locker, err := sql.Open("sqlite", sqliteDSN(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locker.Close()
+	locker.SetMaxOpenConns(1)
+	tx, err := locker.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ('held_lock', '1')`); err != nil {
+		t.Fatal(err)
+	}
+
+	appendCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.Append(appendCtx, core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-busy",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Busy append",
+				"prompt": "Wait for the write lock.",
+			}),
+		})
+		done <- err
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.SnapshotSummary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sqliteTestTaskByID(snapshot.Tasks, "task-busy"); !ok {
+		t.Fatal("task append was not saved after busy writer released")
+	}
+}
+
+func sqliteTestTaskByID(tasks []core.Task, id string) (core.Task, bool) {
+	for _, task := range tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return core.Task{}, false
+}
 
 func openTestSQLiteStore(tb testing.TB, ctx context.Context) *SQLiteStore {
 	tb.Helper()

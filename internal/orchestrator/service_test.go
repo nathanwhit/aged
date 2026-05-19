@@ -2236,6 +2236,44 @@ func TestServiceProjectReviewPolicyBlocksIntermediatePublication(t *testing.T) {
 	}
 }
 
+func TestCodeReviewBlocksPublicationHonorsApproveDecision(t *testing.T) {
+	result := WorkerTurnResult{
+		Status: core.WorkerSucceeded,
+		Summary: "Decision: approve\n" +
+			"Findings:\n" +
+			"- No P0/P1 issues. Missing dedicated coverage is not blocking.\n" +
+			"Commands Run:\n" +
+			"- go test ./...\n" +
+			"Residual Risk:\n" +
+			"- Low.",
+	}
+	policy := core.ReviewPolicy{BlockingSeverities: []string{"P0", "P1"}}
+	if codeReviewBlocksPublication(result, policy) {
+		t.Fatal("approval decision with negated severity mentions blocked publication")
+	}
+}
+
+func TestCodeReviewBlocksPublicationHonorsRequestChangesDecision(t *testing.T) {
+	result := WorkerTurnResult{
+		Status:  core.WorkerSucceeded,
+		Summary: "Decision: request_changes\nFindings:\n- Needs more validation before publishing.",
+	}
+	if !codeReviewBlocksPublication(result, core.ReviewPolicy{}) {
+		t.Fatal("request_changes decision did not block publication")
+	}
+}
+
+func TestCodeReviewBlocksPublicationFallsBackToBlockingSeverity(t *testing.T) {
+	result := WorkerTurnResult{
+		Status:  core.WorkerSucceeded,
+		Summary: "Findings:\n- P1: publication would skip the required review gate.",
+	}
+	policy := core.ReviewPolicy{BlockingSeverities: []string{"P1"}}
+	if !codeReviewBlocksPublication(result, policy) {
+		t.Fatal("blocking severity without a decision line did not block publication")
+	}
+}
+
 func TestServicePlanActionPublishesAfterCleanReviewFinding(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
