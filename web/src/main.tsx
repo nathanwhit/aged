@@ -968,7 +968,7 @@ function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nod
         <Metric label="Done" value={`${progress.done}/${progress.total}`} />
         <Metric label="Running" value={String(progress.running)} />
         <Metric label="Waiting" value={String(progress.waiting)} />
-        <Metric label="Failed" value={String(progress.failed)} />
+        <Metric label="Failed/Canceled" value={String(progress.failed)} />
       </div>
       <div className="progress-track" aria-label={`Progress ${progress.percent}%`}>
         <div style={{ width: `${progress.percent}%` }} />
@@ -2283,6 +2283,14 @@ function WorkerList({
     }
   }
 
+  const rows = orchestrationRows(workers, nodes, graph);
+
+  function selectWorker(workerId: string) {
+    if (!workerId) return;
+    onSelect(workerId);
+    document.getElementById(workerCardDomId(workerId))?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   return (
     <section className="panel orchestration-panel">
       <div className="panel-title split-title">
@@ -2296,8 +2304,10 @@ function WorkerList({
       {workers.length === 0 && nodes.length === 0 ? (
         <p className="empty">No workers have been spawned.</p>
       ) : (
-        <div className="worker-grid">
-          {orchestrationRows(workers, nodes, graph).map(({ worker, node, graphNode }) => {
+        <>
+          <WorkerNavigator rows={rows} progress={progress} selectedWorkerId={selectedWorkerId} onSelect={selectWorker} />
+          <div className="worker-grid">
+          {rows.map(({ worker, node, graphNode }) => {
             const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
             const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
             const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
@@ -2317,13 +2327,13 @@ function WorkerList({
             const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
             const idle = formatWorkerIdle(status, worker?.updatedAt ?? node?.updatedAt ?? "");
             return (
-              <article key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
+              <article id={workerId ? workerCardDomId(workerId) : undefined} key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
                   <strong>{node?.role || graphNode?.role || kind}</strong>
                   <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
                 </div>
                 <Status value={status} />
-                <button className="icon-button ghost" disabled={!workerId} onClick={() => onSelect(workerId)} title="Inspect worker">
+                <button className="icon-button ghost" disabled={!workerId} onClick={() => selectWorker(workerId)} title="Inspect worker">
                   <Eye size={16} />
                 </button>
                 <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err) => onError(errorMessage(err)))} title="Cancel worker">
@@ -2387,9 +2397,59 @@ function WorkerList({
               </article>
             );
           })}
-        </div>
+          </div>
+        </>
       )}
     </section>
+  );
+}
+
+function WorkerNavigator({
+  rows,
+  progress,
+  selectedWorkerId,
+  onSelect,
+}: {
+  rows: OrchestrationRow[];
+  progress: WorkProgress;
+  selectedWorkerId: string;
+  onSelect: (id: string) => void;
+}) {
+  const items = rows.map((row, index) => {
+    const workerId = row.worker?.id ?? row.node?.workerId ?? row.graphNode?.workerId ?? "";
+    const rowId = workerId || row.node?.id || row.graphNode?.id || String(index + 1);
+    const status = row.worker?.status ?? row.node?.status ?? row.graphNode?.status ?? "queued";
+    const label = row.node?.role || row.graphNode?.role || row.worker?.kind || row.node?.workerKind || row.graphNode?.workerKind || "worker";
+    return { rowId, workerId, status, label };
+  });
+  const activeCount = items.filter((item) => item.status === "running" || item.status === "waiting" || item.status === "queued").length;
+  const failedCount = items.filter((item) => item.status === "failed").length;
+  const canceledCount = items.filter((item) => item.status === "canceled").length;
+  return (
+    <div className="worker-navigator" aria-label="Worker navigator">
+      <div className="worker-navigator-summary">
+        <strong>{progress.done}/{progress.total} complete</strong>
+        <span>{activeCount} active</span>
+        {failedCount > 0 && <span className="warning">{failedCount} failed</span>}
+        {canceledCount > 0 && <span className="warning">{canceledCount} canceled</span>}
+      </div>
+      <div className="worker-navigator-list">
+        {items.map((item, index) => (
+          <button
+            key={item.rowId}
+            type="button"
+            className={item.workerId === selectedWorkerId ? "worker-nav-chip selected" : "worker-nav-chip"}
+            disabled={!item.workerId}
+            onClick={() => onSelect(item.workerId)}
+            title={item.workerId ? `Jump to ${item.label} ${item.workerId.slice(0, 8)}` : item.label}
+          >
+            <span>{index + 1}</span>
+            <strong>{item.label}</strong>
+            <Status value={item.status} />
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -2415,7 +2475,7 @@ function OrchestrationOverview({
         <Metric label="Done" value={`${progress.done}/${progress.total}`} />
         <Metric label="Running" value={String(running)} />
         <Metric label="Waiting" value={String(waiting)} />
-        <Metric label="Failed" value={String(failed)} />
+        <Metric label="Failed/Canceled" value={String(failed)} />
       </div>
       <div className="progress-track" aria-label={`Progress ${progress.percent}%`}>
         <div style={{ width: `${progress.percent}%` }} />
@@ -2448,6 +2508,10 @@ function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: Orc
     rows.set(worker.id, { ...rows.get(worker.id), worker });
   }
   return [...rows.values()];
+}
+
+function workerCardDomId(workerId: string): string {
+  return `worker-card-${workerId}`;
 }
 
 function WorkerContextItem({ label, value }: { label: string; value: string }) {
