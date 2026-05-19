@@ -1352,7 +1352,7 @@ small {
   display: grid;
   gap: 6px;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  max-height: 276px;
+  max-height: 220px;
   overflow: auto;
   padding-right: 2px;
 }
@@ -1364,14 +1364,11 @@ small {
   border-radius: 6px;
   color: #202124;
   display: grid;
-  gap: 7px;
-  grid-template-areas:
-    "index title"
-    "index status";
-  grid-template-columns: auto minmax(0, 1fr);
-  min-height: 56px;
+  gap: 8px;
+  grid-template-columns: 24px minmax(0, 1fr) max-content;
+  min-height: 42px;
   min-width: 0;
-  padding: 7px 8px;
+  padding: 6px 8px;
   text-align: left;
 }
 
@@ -1392,7 +1389,7 @@ small {
   opacity: 0.68;
 }
 
-.worker-nav-chip > span {
+.worker-nav-index {
   align-items: center;
   background: #eef2f7;
   border-radius: 999px;
@@ -1400,7 +1397,6 @@ small {
   display: inline-flex;
   font-size: 12px;
   font-weight: 700;
-  grid-area: index;
   height: 22px;
   justify-content: center;
   align-self: center;
@@ -1408,7 +1404,7 @@ small {
 }
 
 .worker-nav-chip strong {
-  grid-area: title;
+  align-self: center;
   line-height: 1.15;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1416,11 +1412,11 @@ small {
 }
 
 .worker-nav-chip .status {
-  grid-area: status;
+  align-self: center;
   justify-content: center;
-  justify-self: start;
+  justify-self: end;
   max-width: 100%;
-  min-width: 0;
+  min-width: max-content;
   overflow: hidden;
   text-overflow: ellipsis;
 }

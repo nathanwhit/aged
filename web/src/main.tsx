@@ -2443,7 +2443,7 @@ function WorkerNavigator({
             onClick={() => onSelect(item.workerId)}
             title={item.workerId ? `Jump to ${item.label} ${item.workerId.slice(0, 8)}` : item.label}
           >
-            <span>{index + 1}</span>
+            <span className="worker-nav-index">{index + 1}</span>
             <strong>{item.label}</strong>
             <Status value={item.status} />
           </button>
