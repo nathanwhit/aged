@@ -1870,6 +1870,15 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	if len(publisher.publishedSpecs) != 2 {
 		t.Fatalf("published specs = %d, want 2", len(publisher.publishedSpecs))
 	}
+	if !boolMetadata(publisher.publishedSpecs[0].Metadata, "continueAfterPublish") {
+		t.Fatalf("first publish spec continueAfterPublish = false, want intermediate PR metadata")
+	}
+	if boolMetadata(publisher.publishedSpecs[1].Metadata, "continueAfterPublish") {
+		t.Fatalf("second publish spec continueAfterPublish = true, want terminal PR metadata")
+	}
+	if publisher.publishedSpecs[0].Title == task.Title {
+		t.Fatalf("intermediate PR title fell back to broad task title %q", task.Title)
+	}
 	if countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest") != 4 {
 		t.Fatalf("task action events = %d, want 4", countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest"))
 	}
@@ -1994,6 +2003,69 @@ Publish the pull request.`,
 	}
 	if blocker, ok := publicationBlockedByFollowUpFinding(results, "old-candidate"); !ok || blocker.WorkerID != "old-review" {
 		t.Fatalf("old candidate blocker = %+v ok=%v, want old-review", blocker, ok)
+	}
+}
+
+func TestServicePlanActionSkipsTerminalPullRequestUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(&fakePullRequestPublisher{})
+
+	task := core.Task{ID: "task-closed-pr", Title: "Broad objective"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Keep producing independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-closed",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 42,
+		URL:    "https://github.com/owner/repo/pull/42",
+		Branch: "codex/old",
+		Base:   "main",
+		Title:  "Old attempt",
+		State:  "CLOSED",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "worker-new",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+		},
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "worker-new",
+		Reason:   "repair the old PR",
+		Inputs:   map[string]any{"repo": "owner/repo", "number": 42},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("terminal PR update should be skipped without stopping the plan")
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "update_pull_request", "skipped") {
+		t.Fatalf("missing skipped update_pull_request action")
 	}
 }
 
