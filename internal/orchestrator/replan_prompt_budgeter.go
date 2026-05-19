@@ -36,6 +36,7 @@ type ReplanPromptState struct {
 	ContextLedger              []ContextLedgerEntry      `json:"contextLedger,omitempty"`
 	Artifacts                  []ReplanPromptArtifact    `json:"artifacts,omitempty"`
 	PullRequests               []ReplanPullRequestState  `json:"pullRequests,omitempty"`
+	TaskSteering               []string                  `json:"taskSteering,omitempty"`
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
 	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`
@@ -116,6 +117,7 @@ func (b ReplanPromptBudgeter) BoundState(state OrchestrationState) ReplanPromptS
 		ContextLedger:              b.compactContextLedger(state.ContextLedger),
 		Artifacts:                  b.compactArtifacts(state.Artifacts),
 		PullRequests:               compactPullRequestsForPrompt(state.PullRequests),
+		TaskSteering:               compactTaskSteeringForPrompt(state.TaskSteering),
 		PendingPullRequestFeedback: b.compactPullRequestFeedback(state.PendingPullRequestFeedback),
 		PendingWorkerSteering:      compactWorkerSteeringForPrompt(state.PendingWorkerSteering),
 		Turn:                       state.Turn,
@@ -303,6 +305,20 @@ func compactWorkerSteeringForPrompt(items []WorkerSteeringItem) []WorkerSteering
 	compact := append([]WorkerSteeringItem{}, items...)
 	for i := range compact {
 		compact[i].Message = truncateStringForPrompt(compact[i].Message, tokensToApproxChars(1000))
+	}
+	return compact
+}
+
+func compactTaskSteeringForPrompt(items []string) []string {
+	compact := dedupeTrimmedStrings(items)
+	if len(compact) > 20 {
+		compact = compact[len(compact)-20:]
+	}
+	for i := range compact {
+		compact[i] = truncateStringForPrompt(compact[i], tokensToApproxChars(1000))
+	}
+	for approxJSONTokens(compact) > 4000 && len(compact) > 1 {
+		compact = compact[1:]
 	}
 	return compact
 }

@@ -2942,6 +2942,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		ContextLedger: s.taskContextLedger(ctx, task.ID),
 		Artifacts:     s.taskArtifacts(ctx, task.ID),
 		PullRequests:  s.taskPullRequestStates(ctx, task.ID),
+		TaskSteering:  s.taskSteering(ctx, task.ID),
 		Turn:          1,
 	})
 	if err != nil {
@@ -5074,7 +5075,7 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 	if !blocked {
 		return false, nil
 	}
-	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason))
+	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), true)
 	if !recovery.Handled {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":     "completion_publish_readiness_recovery",
@@ -5095,7 +5096,7 @@ func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, t
 	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
 }
 
-func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error) finalCandidateRecoveryResult {
+func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, allowBlockedCandidateValidation bool) finalCandidateRecoveryResult {
 	if _, ok := s.brain.(ReplanProvider); !ok {
 		return finalCandidateRecoveryResult{}
 	}
@@ -5125,7 +5126,7 @@ func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, task
 	blockedFinalCandidates := map[string]string{candidateWorkerID: failureErr.Error()}
 	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
 		BlockedFinalCandidates:          blockedFinalCandidates,
-		AllowBlockedCandidateValidation: true,
+		AllowBlockedCandidateValidation: allowBlockedCandidateValidation,
 		RecoveryHint:                    fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate unless a successful validation worker confirms it. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
 	})
 	if !ok {
@@ -5618,6 +5619,20 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			}
 			return true, results, nil
 		}
+		if result, ok := workerResultByID(results, workerID); ok && !resultHasCandidateChanges(result) {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     action.Kind,
+				"when":     nonEmpty(action.When, "after_success"),
+				"reason":   action.Reason,
+				"inputs":   action.Inputs,
+				"workerId": workerID,
+				"status":   "skipped",
+				"error":    "follow-up worker produced no candidate changes to update pull request",
+			}); err != nil {
+				return false, results, err
+			}
+			return true, results, nil
+		}
 		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
 		if err != nil {
 			return false, results, err
@@ -5973,7 +5988,7 @@ func (s *Service) recoverPublicationReadinessRejectedCandidate(ctx context.Conte
 	if err != nil {
 		return true, err
 	}
-	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason))
+	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason), false)
 	if !recovery.Handled {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":     "completion_publish_readiness_recovery",
@@ -5993,7 +6008,6 @@ func (s *Service) recoverPublicationReadinessRejectedCandidate(ctx context.Conte
 	}
 	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
 }
-
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {
 	_, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskAction,
@@ -6373,6 +6387,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			ContextLedger:              s.taskContextLedger(ctx, task.ID),
 			Artifacts:                  s.taskArtifacts(ctx, task.ID),
 			PullRequests:               s.taskPullRequestStates(ctx, task.ID),
+			TaskSteering:               s.taskSteering(ctx, task.ID),
 			PendingPullRequestFeedback: s.pendingPullRequestFeedback(ctx, task.ID),
 			PendingWorkerSteering:      s.pendingWorkerSteering(ctx, task.ID),
 			Turn:                       turn,
@@ -8054,6 +8069,14 @@ func taskSteering(snapshot core.Snapshot, taskID string) []string {
 		}
 	}
 	return out
+}
+
+func (s *Service) taskSteering(ctx context.Context, taskID string) []string {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	return taskSteering(snapshot, taskID)
 }
 
 func dedupeTrimmedStrings(values []string) []string {

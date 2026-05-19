@@ -92,6 +92,7 @@ type OrchestrationState struct {
 	ContextLedger              []ContextLedgerEntry      `json:"contextLedger,omitempty"`
 	Artifacts                  []core.TaskArtifact       `json:"artifacts,omitempty"`
 	PullRequests               []ReplanPullRequestState  `json:"pullRequests,omitempty"`
+	TaskSteering               []string                  `json:"taskSteering,omitempty"`
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
 	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`

@@ -332,6 +332,37 @@ func TestReplanPromptBudgeterSplitsBoundedStateAndOmitsLargeArtifactContents(t *
 	}
 }
 
+func TestReplanPromptPayloadIncludesTaskSteering(t *testing.T) {
+	payload := replanPromptPayload(core.Task{
+		ID:     "task-1",
+		Title:  "Steered",
+		Prompt: "continue the task",
+	}, OrchestrationState{
+		TaskSteering: []string{
+			"Go for bolder changes.",
+			" Go for bolder changes. ",
+			"Use release-lite builds.",
+		},
+	})
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"taskSteering":["Go for bolder changes.","Use release-lite builds."]`) {
+		t.Fatalf("payload missing deduplicated task steering: %s", text)
+	}
+
+	prompt := (&CodexBrain{template: "schedule the work"}).replanPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Steered",
+		Prompt: "continue the task",
+	}, OrchestrationState{TaskSteering: []string{"Go for bolder changes."}})
+	if !strings.Contains(prompt, "Treat state.taskSteering as current user steering for this whole task") {
+		t.Fatalf("replan prompt missing task steering instruction")
+	}
+}
+
 func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	brain := newTestCodexBrain(t, "invalid", StaticBrain{WorkerKind: "mock"})
 	plan, err := brain.Plan(context.Background(), core.Task{

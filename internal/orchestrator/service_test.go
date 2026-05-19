@@ -2240,6 +2240,56 @@ func TestServiceCompletionDoesNotPublishRejectedCandidate(t *testing.T) {
 	}
 }
 
+func TestServicePublicationReadinessRecoveryDoesNotAcceptNoChangeValidation(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &publicationReadinessValidationBrain{}
+	publisher := &fakePullRequestPublisher{}
+	workspaces := &sequencingWorkspaceManager{
+		fakeWorkspaceManager: fakeWorkspaceManager{
+			cwd:        t.TempDir(),
+			sourceRoot: t.TempDir(),
+		},
+		changes: []WorkspaceChanges{
+			{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "tests/bench/node_http_throughput/run.ts", Status: "modified"}},
+			},
+			{},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change":   eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "added benchmark harness only"}}},
+		"validate": eventRunner{kind: "validate", events: []worker.Event{{Kind: worker.EventResult, Text: "validated that no product optimization remains"}}},
+	}, t.TempDir(), workspaces)
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Improve Deno Serve Throughput",
+		Prompt: "Keep working until there is a real throughput optimization.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want no-change validation not to publish blocked candidate", publisher.publishCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("publication review calls = %d, want only the original blocked candidate reviewed", brain.reviewCalls)
+	}
+	if len(brain.states) < 3 {
+		t.Fatalf("replan states = %d, want recovery validation and wait", len(brain.states))
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("missing rejected recovery completion for no-change validator")
+	}
+}
 func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -2710,6 +2760,103 @@ func TestServicePullRequestFollowUpUpdatesExistingPullRequestBeforeWatching(t *t
 	}
 	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
 		t.Fatalf("watch list spec = %+v", publisher.listSpec)
+	}
+}
+
+func TestServicePullRequestFollowUpNoChangeReturnsToWatch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-followup-no-change"
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Check PR",
+				"prompt": "Inspect the pull request and keep watching it.",
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+		{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/aged-test",
+				"base":   "main",
+				"title":  "Check PR",
+				"state":  "OPEN",
+			}),
+		},
+		{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":      "pr-1",
+				"attempt": 1,
+				"reason":  "pull_request_needs_work",
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Workers: []WorkerRequest{{
+			ID:         "inspect_pr",
+			Role:       "inspect PR",
+			Reason:     "determine whether the PR needs changes",
+			WorkerKind: "change",
+			Prompt:     "inspect PR state and report no code changes are needed",
+		}},
+		Actions: []PlanAction{
+			{
+				Kind:     "update_pull_request",
+				When:     "after_success",
+				Reason:   "apply repair changes if any were needed",
+				WorkerID: "inspect_pr",
+				Inputs:   map[string]any{"repo": "owner/repo", "number": 7},
+			},
+			{
+				Kind:     "watch_pull_requests",
+				When:     "after_success",
+				Reason:   "return PR to monitor",
+				WorkerID: "inspect_pr",
+				Inputs:   map[string]any{"repo": "owner/repo", "number": 7},
+			},
+		},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "PR is already green; no code change needed"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if publisher.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want no update for no-change follow-up", publisher.updateCalls)
+	}
+	if publisher.listSpec.Repo != "owner/repo" || publisher.listSpec.Number != 7 {
+		t.Fatalf("watch list spec = %+v", publisher.listSpec)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"kind":"update_pull_request"`) ||
+		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"status":"skipped"`) ||
+		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, "no candidate changes") {
+		t.Fatalf("missing skipped no-change update action")
 	}
 }
 
@@ -9688,6 +9835,42 @@ func TestServiceWorkerSteeringQueuesReplanState(t *testing.T) {
 	}
 }
 
+func TestServiceTaskSteeringQueuesReplanState(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "pause after task steering",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	seedSteerableWorkerGraph(t, ctx, store, "task-1", "worker-1")
+
+	if err := service.SteerTask(ctx, "task-1", core.SteeringRequest{Message: "Go for bolder changes."}); err != nil {
+		t.Fatal(err)
+	}
+
+	task := core.Task{ID: "task-1", Title: "Task", Prompt: "Prompt"}
+	service.replanLoop(ctx, task, Plan{WorkerKind: "mock", Prompt: "initial worker"}, []WorkerTurnResult{{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+		Kind:     "mock",
+		Summary:  "finished benchmark",
+	}})
+
+	if len(brain.states) == 0 {
+		t.Fatalf("brain did not receive replan state")
+	}
+	got := strings.Join(brain.states[0].TaskSteering, "\n")
+	if got != "Go for bolder changes." {
+		t.Fatalf("task steering = %q", got)
+	}
+	if len(brain.states[0].PendingWorkerSteering) != 0 {
+		t.Fatalf("task steering leaked into pending worker steering: %+v", brain.states[0].PendingWorkerSteering)
+	}
+}
+
 func TestServiceWorkerSteeringAnnotatesContinuePlan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -11723,6 +11906,56 @@ func (b *publicationReviewBrain) ReviewPublication(context.Context, core.Task, W
 	review := b.reviews[0]
 	b.reviews = b.reviews[1:]
 	return review, nil
+}
+
+type publicationReadinessValidationBrain struct {
+	states      []OrchestrationState
+	reviewCalls int
+}
+
+func (b *publicationReadinessValidationBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return Plan{WorkerKind: "change", Prompt: "produce benchmark harness candidate"}, nil
+}
+
+func (b *publicationReadinessValidationBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	switch len(b.states) {
+	case 1:
+		return ReplanDecision{
+			Action:          "complete",
+			Rationale:       "benchmark harness candidate is ready",
+			PullRequestBody: "## Summary\n- Add benchmark harness.\n\n## Validation\n- benchmark command",
+		}, nil
+	case 2:
+		return ReplanDecision{
+			Action: "continue",
+			Plan: &Plan{
+				WorkerKind: "validate",
+				Prompt:     "validate whether the blocked benchmark-only candidate should publish",
+			},
+			Rationale: "validate the blocked benchmark-only candidate",
+		}, nil
+	case 3:
+		latest := latestWorkerResult(state.Results)
+		return ReplanDecision{
+			Action:                 "complete",
+			FinalCandidateWorkerID: latest.WorkerID,
+			Rationale:              "no-change validation says no product optimization remains",
+		}, nil
+	default:
+		return ReplanDecision{
+			Action:  "wait",
+			Message: "No publishable optimization remains under the current criteria.",
+		}, nil
+	}
+}
+
+func (b *publicationReadinessValidationBrain) ReviewPublication(context.Context, core.Task, WorkerTurnResult, PlanAction) (PublicationReview, error) {
+	b.reviewCalls++
+	if b.reviewCalls == 1 {
+		return PublicationReview{Ready: false, Reason: "candidate is benchmark-harness-only, not a product optimization"}, nil
+	}
+	return PublicationReview{Ready: true}, nil
 }
 
 type continueThenSelectLatestBrain struct {
