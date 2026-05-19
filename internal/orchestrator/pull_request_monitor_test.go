@@ -137,6 +137,76 @@ func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	}
 }
 
+func TestServicePullRequestMonitorDoesNotCancelRunningTaskForClosedPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	status := monitoredPullRequestStatus("success", "CLEAN", "APPROVED")
+	status.State = "CLOSED"
+	publisher := &fakePullRequestPublisher{status: status}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskCanceled {
+		t.Fatalf("task status = %q, want running task not canceled by closed PR", task.Status)
+	}
+	if task.ObjectivePhase != "intermediate_pr_closed" {
+		t.Fatalf("objective phase = %q, want intermediate_pr_closed", task.ObjectivePhase)
+	}
+}
+
+func TestServicePullRequestMonitorDoesNotTerminalizeIntermediatePullRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     string
+		wantPhase string
+	}{
+		{name: "closed", state: "CLOSED", wantPhase: "intermediate_pr_closed"},
+		{name: "merged", state: "MERGED", wantPhase: "intermediate_pr_merged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t)
+			defer store.Close()
+
+			status := monitoredPullRequestStatusWithMetadata("success", "CLEAN", "APPROVED", core.MustJSON(map[string]any{
+				"continueAfterPublish": true,
+				"publicationPhase":     "intermediate",
+			}))
+			status.State = tc.state
+			publisher := &fakePullRequestPublisher{status: status}
+			service := newTestPullRequestMonitorService(t, store, publisher)
+			appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+			if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+			task, ok := findTask(snapshot, "task-1")
+			if !ok {
+				t.Fatal("missing task")
+			}
+			if task.Status == core.TaskCanceled || task.Status == core.TaskSucceeded {
+				t.Fatalf("task status = %q, want intermediate PR not terminalize task", task.Status)
+			}
+			if task.ObjectivePhase != tc.wantPhase {
+				t.Fatalf("objective phase = %q, want %q", task.ObjectivePhase, tc.wantPhase)
+			}
+		})
+	}
+}
+
 func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

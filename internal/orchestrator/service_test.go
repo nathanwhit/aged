@@ -1870,6 +1870,12 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	if len(publisher.publishedSpecs) != 2 {
 		t.Fatalf("published specs = %d, want 2", len(publisher.publishedSpecs))
 	}
+	if !boolMetadata(publisher.publishedSpecs[0].Metadata, "continueAfterPublish") {
+		t.Fatalf("first publish spec continueAfterPublish = false, want intermediate PR metadata")
+	}
+	if boolMetadata(publisher.publishedSpecs[1].Metadata, "continueAfterPublish") {
+		t.Fatalf("second publish spec continueAfterPublish = true, want terminal PR metadata")
+	}
 	if countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest") != 4 {
 		t.Fatalf("task action events = %d, want 4", countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest"))
 	}
@@ -1945,6 +1951,55 @@ func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T)
 	}
 	if len(brain.states[0].Results) != 2 {
 		t.Fatalf("replan results = %d, want implementation plus review", len(brain.states[0].Results))
+	}
+}
+
+func TestPublicationBlockerIgnoresFindingsBeforeCurrentCandidate(t *testing.T) {
+	results := []WorkerTurnResult{{
+		WorkerID: "old-candidate",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "old.ts", Status: "modified"}},
+		},
+	}, {
+		WorkerID: "old-review",
+		SpawnID:  "validate_old_candidate",
+		Role:     "independent validator",
+		Status:   core.WorkerSucceeded,
+		Summary: `## Findings
+
+Medium issue: reject this candidate before publishing.
+
+## Recommended Next Turns
+
+Fix it before publishing.`,
+	}, {
+		WorkerID: "new-candidate",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "new.ts", Status: "modified"}},
+		},
+	}, {
+		WorkerID: "new-review",
+		SpawnID:  "validate_new_candidate",
+		Role:     "independent validator",
+		Status:   core.WorkerSucceeded,
+		Summary: `## Findings
+
+No findings.
+
+## Recommended Next Turns
+
+Publish the pull request.`,
+	}}
+
+	if blocker, ok := publicationBlockedByFollowUpFinding(results, "new-candidate"); ok {
+		t.Fatalf("new candidate blocked by stale finding: %+v", blocker)
+	}
+	if blocker, ok := publicationBlockedByFollowUpFinding(results, "old-candidate"); !ok || blocker.WorkerID != "old-review" {
+		t.Fatalf("old candidate blocker = %+v ok=%v, want old-review", blocker, ok)
 	}
 }
 
