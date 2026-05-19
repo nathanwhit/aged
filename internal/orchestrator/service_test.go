@@ -4799,83 +4799,101 @@ func TestServiceRetriesFinalCandidateByPublishingWithoutRerunningWorker(t *testi
 }
 
 func TestServiceRetriesDynamicReplanFailureFromCompletedGraph(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	defer store.Close()
-
-	taskID := "task-retry-graph"
-	workerID := "worker-done"
-	initial := Plan{WorkerKind: "codex", Prompt: "implement the change"}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskCreated,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"title":  "Graph retry",
-			"prompt": "Retry only replan.",
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:    core.EventTaskPlanned,
-		TaskID:  taskID,
-		Payload: core.MustJSON(initial),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventWorkerCreated,
-		TaskID:   taskID,
-		WorkerID: workerID,
-		Payload: core.MustJSON(map[string]any{
-			"kind": "codex",
-			"metadata": map[string]any{
-				"nodeID": "node-1",
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:     core.EventWorkerCompleted,
-		TaskID:   taskID,
-		WorkerID: workerID,
-		Payload: core.MustJSON(map[string]any{
-			"status":  core.WorkerSucceeded,
-			"summary": "implemented",
-			"workspaceChanges": WorkspaceChanges{
-				Dirty:        true,
-				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskFailed,
-			"error":  "dynamic replan failed: decode codex replan decision: invalid character '}' after top-level value",
-		}),
-	}); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name  string
+		error string
+	}{
+		{
+			name:  "decode failure",
+			error: "dynamic replan failed: decode codex replan decision: invalid character '}' after top-level value",
+		},
+		{
+			name:  "unknown spawn dependency",
+			error: `spawn "next_hotspot_planner" depends on unknown spawn "review_header_path"`,
+		},
 	}
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
-	retried, err := service.RetryTask(ctx, taskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if retried.Status != core.TaskPlanning {
-		t.Fatalf("retry status = %q", retried.Status)
-	}
-	snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
-	if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
-		t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
-	}
-	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
-		t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openTestStore(t)
+			defer store.Close()
+
+			taskID := "task-retry-graph"
+			workerID := "worker-done"
+			initial := Plan{WorkerKind: "codex", Prompt: "implement the change"}
+			if _, err := store.Append(ctx, core.Event{
+				Type:   core.EventTaskCreated,
+				TaskID: taskID,
+				Payload: core.MustJSON(map[string]any{
+					"title":  "Graph retry",
+					"prompt": "Retry only replan.",
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:    core.EventTaskPlanned,
+				TaskID:  taskID,
+				Payload: core.MustJSON(initial),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:     core.EventWorkerCreated,
+				TaskID:   taskID,
+				WorkerID: workerID,
+				Payload: core.MustJSON(map[string]any{
+					"kind": "codex",
+					"metadata": map[string]any{
+						"nodeID": "node-1",
+					},
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:     core.EventWorkerCompleted,
+				TaskID:   taskID,
+				WorkerID: workerID,
+				Payload: core.MustJSON(map[string]any{
+					"status":  core.WorkerSucceeded,
+					"summary": "implemented",
+					"workspaceChanges": WorkspaceChanges{
+						Dirty:        true,
+						ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+					},
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append(ctx, core.Event{
+				Type:   core.EventTaskStatus,
+				TaskID: taskID,
+				Payload: core.MustJSON(map[string]any{
+					"status": core.TaskFailed,
+					"error":  tt.error,
+				}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+			retried, err := service.RetryTask(ctx, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retried.Status != core.TaskPlanning {
+				t.Fatalf("retry status = %q", retried.Status)
+			}
+			snapshot := waitForTaskStatus(t, store, taskID, core.TaskSucceeded)
+			if snapshot.Tasks[0].FinalCandidateWorkerID != workerID {
+				t.Fatalf("final candidate = %q, want %q", snapshot.Tasks[0].FinalCandidateWorkerID, workerID)
+			}
+			if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
+				t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+			}
+		})
 	}
 }
 
@@ -9111,6 +9129,79 @@ func TestServiceRunsSpawnedWorkersFromDynamicReplan(t *testing.T) {
 	}
 	if len(brain.states[1].Results) != 4 {
 		t.Fatalf("second replan results = %d, want 4", len(brain.states[1].Results))
+	}
+}
+
+func TestServiceRunsReplannedSpawnDependingOnWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "establish baseline",
+		},
+		decisions: []ReplanDecision{
+			{
+				Action: "continue",
+				Plan: &Plan{
+					Rationale: "try one candidate then plan the next slice",
+					Workers: []WorkerRequest{
+						{
+							ID:         "implement_header_path",
+							Role:       "implementer",
+							Reason:     "Implement the header path candidate.",
+							WorkerKind: "implementer",
+							Prompt:     "implement",
+						},
+						{
+							ID:         "review_header_path",
+							Role:       "reviewer",
+							Reason:     "Review the header path candidate.",
+							WorkerKind: "reviewer",
+							Prompt:     "review",
+							DependsOn:  []string{"implement_header_path"},
+						},
+					},
+					Spawns: []SpawnRequest{{
+						ID:         "next_hotspot_planner",
+						Role:       "planner",
+						Reason:     "Plan the next hotspot after review.",
+						WorkerKind: "planner",
+						DependsOn:  []string{"review_header_path"},
+					}},
+				},
+			},
+			{
+				Action:    "complete",
+				Rationale: "all replanned work completed",
+			},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":       eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "baseline"}}},
+		"implementer": eventRunner{kind: "implementer", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"reviewer":    eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: "reviewed"}}},
+		"planner":     eventRunner{kind: "planner", events: []worker.Event{{Kind: worker.EventResult, Text: "planned next"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Worker dependency spawn", Prompt: "Continue after review."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !hasWorkerCreated(snapshot.Events, task.ID, "planner") {
+		t.Fatalf("dependent spawn did not run")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskStatus, task.ID, `depends on unknown spawn "review_header_path"`) {
+		t.Fatalf("task recorded unknown-spawn failure")
+	}
+	if len(brain.states) != 2 {
+		t.Fatalf("replan states = %d, want 2", len(brain.states))
+	}
+	if len(brain.states[1].Results) != 4 {
+		t.Fatalf("second replan results = %d, want initial plus worker graph and dependent spawn", len(brain.states[1].Results))
 	}
 }
 

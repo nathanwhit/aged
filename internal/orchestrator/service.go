@@ -6877,11 +6877,11 @@ func (s *Service) runFollowUpWorkers(ctx context.Context, task core.Task, initia
 	if len(initial.Spawns) == 0 {
 		return results, true, nil
 	}
-	pending, err := followUpNodes(initial.Spawns)
+	completed := completedWorkerDependencies(results)
+	pending, err := followUpNodes(initial.Spawns, completed)
 	if err != nil {
 		return results, false, err
 	}
-	completed := map[string]WorkerTurnResult{}
 	for len(pending) > 0 {
 		ready := readyFollowUps(pending, completed)
 		if len(ready) == 0 {
@@ -6903,7 +6903,20 @@ func (s *Service) runFollowUpWorkers(ctx context.Context, task core.Task, initia
 	return results, true, nil
 }
 
-func followUpNodes(spawns []SpawnRequest) (map[string]followUpNode, error) {
+func completedWorkerDependencies(results []WorkerTurnResult) map[string]WorkerTurnResult {
+	completed := map[string]WorkerTurnResult{}
+	for _, result := range results {
+		if id := strings.TrimSpace(result.SpawnID); id != "" {
+			completed[id] = result
+		}
+		if id := strings.TrimSpace(result.WorkerID); id != "" {
+			completed[id] = result
+		}
+	}
+	return completed
+}
+
+func followUpNodes(spawns []SpawnRequest, completed map[string]WorkerTurnResult) (map[string]followUpNode, error) {
 	nodes := map[string]followUpNode{}
 	for index, spawn := range spawns {
 		id := spawnID(spawn, index)
@@ -6922,7 +6935,9 @@ func followUpNodes(spawns []SpawnRequest) (map[string]followUpNode, error) {
 	for _, node := range nodes {
 		for _, dep := range node.deps {
 			if _, ok := nodes[dep]; !ok {
-				return nil, fmt.Errorf("spawn %q depends on unknown spawn %q", node.id, dep)
+				if _, ok := completed[dep]; !ok {
+					return nil, fmt.Errorf("spawn %q depends on unknown spawn %q", node.id, dep)
+				}
 			}
 			if dep == node.id {
 				return nil, fmt.Errorf("spawn %q depends on itself", node.id)
@@ -7941,6 +7956,8 @@ func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, resu
 			strings.Contains(errorText, "final candidate") ||
 			strings.Contains(errorText, "selected final candidate") ||
 			strings.Contains(errorText, "multiple competing final candidates") ||
+			strings.Contains(errorText, "depends on unknown spawn") ||
+			strings.Contains(errorText, "depends on unknown worker") ||
 			strings.Contains(errorText, "worker command failed")
 	}) {
 		return true
