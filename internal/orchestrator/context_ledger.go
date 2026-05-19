@@ -101,6 +101,10 @@ func projectTaskContextLedger(events []core.Event, taskID string) []ContextLedge
 			if ledgerEntry, ok := contextLedgerTaskMilestone(event); ok {
 				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: contextLedgerScoreHighValue, order: index})
 			}
+		case core.EventTaskArtifact:
+			if ledgerEntry, ok := contextLedgerTaskArtifact(event, workers); ok {
+				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: contextLedgerScoreHighValue, order: index})
+			}
 		case core.EventTaskReplanned:
 			if ledgerEntry, score, ok := contextLedgerTaskReplanned(event); ok {
 				projected = append(projected, projectedLedgerEntry{entry: ledgerEntry, score: score, order: index})
@@ -230,32 +234,36 @@ func contextLedgerApprovalDecided(event core.Event) (ContextLedgerEntry, bool) {
 
 func contextLedgerTaskAction(event core.Event) (ContextLedgerEntry, int, bool) {
 	var payload struct {
-		Kind     string `json:"kind"`
-		Status   string `json:"status"`
-		Reason   string `json:"reason"`
-		WorkerID string `json:"workerId"`
-		Error    string `json:"error"`
-		Summary  string `json:"summary"`
+		Kind     string         `json:"kind"`
+		Status   string         `json:"status"`
+		Reason   string         `json:"reason"`
+		WorkerID string         `json:"workerId"`
+		Error    string         `json:"error"`
+		Summary  string         `json:"summary"`
+		Metadata map[string]any `json:"metadata"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return ContextLedgerEntry{}, 0, false
 	}
 	text := nonEmpty(payload.Reason, payload.Summary, payload.Error)
-	important := payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" || highValueLedgerText(text)
+	important := payload.Kind == "worker_result_digest" || payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" || highValueLedgerText(text)
 	if !important {
 		return ContextLedgerEntry{}, 0, false
 	}
 	score := 84
-	if highValueLedgerText(text) || payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" {
+	if payload.Kind == "worker_result_digest" || highValueLedgerText(text) || payload.Status == "rejected" || payload.Status == "failed" || payload.Status == "waiting" {
 		score = contextLedgerScoreHighValue
 	}
+	changedFiles := workspaceChangedFilesMetadata(payload.Metadata["changedFiles"])
 	return ContextLedgerEntry{
-		Kind:        nonEmpty(payload.Kind, "task_action"),
-		SourceEvent: string(event.Type),
-		WorkerID:    nonEmpty(payload.WorkerID, event.WorkerID),
-		Status:      payload.Status,
-		Summary:     text,
-		Error:       payload.Error,
+		Kind:         nonEmpty(payload.Kind, "task_action"),
+		SourceEvent:  string(event.Type),
+		WorkerID:     nonEmpty(payload.WorkerID, event.WorkerID),
+		Status:       payload.Status,
+		Summary:      text,
+		Error:        payload.Error,
+		ChangedFiles: changedFiles,
+		Metadata:     compactLedgerMetadata(payload.Metadata),
 	}, score, true
 }
 
@@ -274,6 +282,41 @@ func contextLedgerTaskMilestone(event core.Event) (ContextLedgerEntry, bool) {
 		SourceEvent: string(event.Type),
 		Status:      payload.Phase,
 		Summary:     nonEmpty(payload.Summary, payload.Name),
+	}, true
+}
+
+func contextLedgerTaskArtifact(event core.Event, workers map[string]contextLedgerWorkerInfo) (ContextLedgerEntry, bool) {
+	var payload struct {
+		ID       string         `json:"id"`
+		Kind     string         `json:"kind"`
+		Name     string         `json:"name"`
+		Metadata map[string]any `json:"metadata"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return ContextLedgerEntry{}, false
+	}
+	if payload.Kind != "worker_result_digest" {
+		return ContextLedgerEntry{}, false
+	}
+	workerID := nonEmpty(stringMetadata(payload.Metadata, "workerId"), event.WorkerID)
+	info := workers[workerID]
+	summary := stringMetadata(payload.Metadata, "summary")
+	errorText := stringMetadata(payload.Metadata, "error")
+	status := stringMetadata(payload.Metadata, "status")
+	changedFiles := workspaceChangedFilesMetadata(payload.Metadata["changedFiles"])
+	return ContextLedgerEntry{
+		Kind:         "worker_result_digest",
+		SourceEvent:  string(event.Type),
+		WorkerID:     workerID,
+		NodeID:       info.nodeID,
+		WorkerKind:   info.kind,
+		Role:         info.role,
+		SpawnID:      info.spawnID,
+		BaseWorkerID: info.baseWorkerID,
+		Status:       status,
+		Summary:      nonEmpty(summary, payload.Name, payload.ID),
+		Error:        errorText,
+		ChangedFiles: changedFiles,
 	}, true
 }
 
@@ -333,6 +376,25 @@ func highValueLedgerText(value string) bool {
 		}
 	}
 	return false
+}
+
+func workspaceChangedFilesMetadata(value any) []WorkspaceChangedFile {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	files := make([]WorkspaceChangedFile, 0, len(items))
+	for _, item := range items {
+		fields, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		files = append(files, WorkspaceChangedFile{
+			Path:   stringMetadata(fields, "path"),
+			Status: stringMetadata(fields, "status"),
+		})
+	}
+	return files
 }
 
 func compactContextLedgerEntry(entry ContextLedgerEntry) ContextLedgerEntry {

@@ -1870,8 +1870,8 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	if len(publisher.publishedSpecs) != 2 {
 		t.Fatalf("published specs = %d, want 2", len(publisher.publishedSpecs))
 	}
-	if countEvents(snapshot.Events, core.EventTaskAction, task.ID) != 4 {
-		t.Fatalf("task action events = %d, want 4", countEvents(snapshot.Events, core.EventTaskAction, task.ID))
+	if countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest") != 4 {
+		t.Fatalf("task action events = %d, want 4", countTaskActionEventsExcludingKind(snapshot.Events, task.ID, "worker_result_digest"))
 	}
 	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 1 {
 		t.Fatalf("task.replanned events = %d, want 1", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
@@ -8733,6 +8733,136 @@ func TestServiceDynamicallyReplansAfterFollowUpWorker(t *testing.T) {
 	}
 }
 
+func TestServiceRecordsCompactWorkerResultDigestLedgerEvent(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	largeContent := strings.Repeat("large artifact content ", 1000)
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "write result",
+	}}, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "benchmark result improved by 12%"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			Diff:         strings.Repeat("raw diff", 1000),
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+			Artifacts: []WorkspaceArtifact{{
+				ID:      "bench-log",
+				Kind:    "log",
+				Name:    "benchmark.log",
+				Content: largeContent,
+			}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Digest artifact", Prompt: "Run work."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	var digest core.Event
+	for _, event := range snapshot.Events {
+		if event.TaskID == task.ID && event.Type == core.EventTaskAction && eventPayloadContains([]core.Event{event}, core.EventTaskAction, task.ID, "worker_result_digest") {
+			digest = event
+			break
+		}
+	}
+	if digest.ID == 0 {
+		t.Fatalf("missing worker_result_digest event: %+v", snapshot.Events)
+	}
+	if strings.Contains(string(digest.Payload), largeContent) || strings.Contains(string(digest.Payload), "raw diffraw diff") {
+		t.Fatalf("digest event retained raw artifact content or diff: %s", digest.Payload)
+	}
+	if !strings.Contains(string(digest.Payload), "benchmark result improved") {
+		t.Fatalf("digest event missing compact summary: %s", digest.Payload)
+	}
+	ledger := projectTaskContextLedger(snapshot.Events, task.ID)
+	if !ledgerContainsSummary(ledger, "benchmark result improved") {
+		t.Fatalf("digest was not projected into context ledger: %+v", ledger)
+	}
+}
+
+func TestServiceStopsDynamicReplanWhenTaskBecomesTerminal(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "initial implementation",
+		},
+		decisions: []ReplanDecision{
+			{
+				Action: "continue",
+				Plan: &Plan{
+					WorkerKind: "follow",
+					Prompt:     "continue after initial result",
+				},
+			},
+			{
+				Action:    "complete",
+				Rationale: "should not run after cancellation",
+			},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial"}}},
+		"follow": &blockingEventRunner{kind: "follow", started: started, release: release, summary: "follow-up finished"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Terminal replan", Prompt: "Keep working."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-started:
+		if got != "follow" {
+			t.Fatalf("started worker kind = %q, want follow", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follow-up worker did not start")
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskCanceled,
+			"reason": "test_terminal_status",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	snapshot := waitForEventCount(t, store, core.EventWorkerCompleted, task.ID, 2)
+	time.Sleep(100 * time.Millisecond)
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskStatus(snapshot, task.ID) != core.TaskCanceled {
+		t.Fatalf("task status = %q, want canceled", taskStatus(snapshot, task.ID))
+	}
+	if len(brain.states) != 1 {
+		t.Fatalf("replan states = %d, want 1", len(brain.states))
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, "should not run after cancellation") {
+		t.Fatalf("dynamic replan continued after terminal task status")
+	}
+}
+
 func TestServiceDynamicReplanFollowUpHandsOffLocalBaseToRemoteTarget(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8845,6 +8975,53 @@ func TestServiceCompletesWithFallbackWhenReplannerErrorsAfterSingleCandidate(t *
 	}
 	if countEvents(snapshot.Events, core.EventTaskReplanned, task.ID) != 1 {
 		t.Fatalf("task.replanned count = %d, want 1", countEvents(snapshot.Events, core.EventTaskReplanned, task.ID))
+	}
+}
+
+func TestServiceWaitsInsteadOfFallbackCompletionWhenReplannerExceedsContextWindow(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &errorReplanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the change",
+		},
+		err: errors.New("codex replan command failed: Codex ran out of room in the model's context window"),
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Context wait",
+		Prompt: "Do it.",
+		Metadata: core.MustJSON(map[string]any{
+			"completionMode": "github",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].FinalCandidateWorkerID != "" {
+		t.Fatalf("final candidate = %q, want empty", snapshot.Tasks[0].FinalCandidateWorkerID)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("missing fallback replanned event")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"action":"complete"`) {
+		t.Fatalf("context-window error used fallback completion")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, "context window") {
+		t.Fatalf("missing context-window fallback reason")
 	}
 }
 
@@ -12518,6 +12695,23 @@ func countEvents(events []core.Event, eventType core.EventType, taskID string) i
 		if event.Type == eventType && event.TaskID == taskID {
 			count++
 		}
+	}
+	return count
+}
+
+func countTaskActionEventsExcludingKind(events []core.Event, taskID string, excludedKind string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.Kind == excludedKind {
+			continue
+		}
+		count++
 	}
 	return count
 }

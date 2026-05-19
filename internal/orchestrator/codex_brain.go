@@ -803,13 +803,19 @@ func (b *CodexBrain) customPrompts(task core.Task, templateNames []string, input
 	if b.promptSets == nil {
 		return nil
 	}
+	taskPrompt := task.Prompt
+	taskJSON := taskPromptPayload(task)
+	if len(templateNames) == 1 && templateNames[0] == "replan" {
+		taskPrompt = truncateStringForPrompt(taskPrompt, maxPromptTaskTextBytes)
+		taskJSON = replanTaskPromptPayload(task)
+	}
 	data := map[string]any{
 		"system":      strings.TrimSpace(b.template),
 		"input_json":  input,
 		"task_id":     task.ID,
 		"task_title":  task.Title,
-		"task_prompt": task.Prompt,
-		"task_json":   taskPromptPayload(task),
+		"task_prompt": taskPrompt,
+		"task_json":   taskJSON,
 	}
 	var rendered []RenderedPrompt
 	for _, templateName := range templateNames {
@@ -841,15 +847,7 @@ func isGitHubReviewRequestTask(task core.Task) bool {
 }
 
 func replanPromptPayload(task core.Task, state OrchestrationState) map[string]any {
-	return map[string]any{
-		"task":  taskPromptPayload(task),
-		"state": compactOrchestrationStateForPrompt(state),
-		"availableWorkers": []map[string]string{
-			{"kind": "codex", "description": "Autonomous software engineering worker using Codex CLI headless mode."},
-			{"kind": "claude", "description": "Autonomous software engineering worker using Claude Code headless mode."},
-			{"kind": "mock", "description": "No-op deterministic worker for smoke tests and scheduler validation."},
-		},
-	}
+	return DefaultReplanPromptBudgeter().PromptPayload(task, state)
 }
 
 func completionReviewPayload(task core.Task, candidate WorkerTurnResult, reason string) map[string]any {
@@ -929,7 +927,9 @@ Field rules:
 - When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty; do not set it to a no-change review or validation worker unless the correct final result is to complete without publishing changes.
 - When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
 - Use "continue" when another worker turn is needed.
-- Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The state.results list may omit routine old worker turns to keep the prompt bounded.
+- Use state.recentResults for the latest compact worker turn summaries. Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The prompt budgeter omits raw worker output, full stdout logs, giant artifact contents, and routine old worker turns.
+- Use state.artifacts for durable task artifact metadata. Artifact contents are omitted unless tiny; do not infer source changes from artifact metadata alone.
+- Use state.pullRequests for the current pull request state associated with this task.
 - Treat state.pendingPullRequestFeedback as a task-local orchestration queue, not as user steering. When it is non-empty, do not complete the task until the queued PR feedback has been handled or explicitly determined to need no action. Prefer a targeted repair/inspection worker for one pullRequestId at a time. The continue plan should update that existing PR with update_pull_request before returning it to watch_pull_requests; do not publish a new PR for PR feedback.
 - Treat state.pendingWorkerSteering as targeted worker feedback queued for orchestration. When it is non-empty, do not complete the task until the queued worker feedback has been handled or explicitly determined obsolete. Prefer a continue plan that retries or supersedes the named workerId; do not turn worker-scoped steering into general task steering unless the feedback truly changes the whole objective.
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
@@ -1054,48 +1054,12 @@ Code review input:
 }
 
 const (
-	maxReplanPromptResults      = 30
-	maxPromptPlanTextBytes      = 12000
-	maxPromptRationaleBytes     = 4000
-	maxPromptResultSummaryBytes = 3000
-	maxPromptResultErrorBytes   = 2000
-	maxPromptStatusBytes        = 1000
-	maxPromptDiffStatBytes      = 2000
-	maxPromptArtifactBytes      = 2000
-	maxPromptChangedFiles       = 40
-	maxPromptArtifacts          = 20
+	maxPromptPlanTextBytes  = 12000
+	maxPromptRationaleBytes = 4000
+	maxPromptTaskTextBytes  = 20000
+	maxPromptChangedFiles   = 40
+	maxPromptArtifacts      = 8
 )
-
-func compactOrchestrationStateForPrompt(state OrchestrationState) OrchestrationState {
-	state.InitialPlan = compactPlanForPrompt(state.InitialPlan)
-	state.WorkPlan = compactWorkPlanForPrompt(state.WorkPlan)
-	state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, maxPromptResultErrorBytes)
-	state.ContextLedger = compactContextLedgerForPrompt(state.ContextLedger)
-	for index := range state.PendingPullRequestFeedback {
-		state.PendingPullRequestFeedback[index].Prompt = truncateStringForPrompt(state.PendingPullRequestFeedback[index].Prompt, maxPromptResultSummaryBytes)
-	}
-	for index := range state.PendingWorkerSteering {
-		state.PendingWorkerSteering[index].Message = truncateStringForPrompt(state.PendingWorkerSteering[index].Message, maxPromptResultSummaryBytes)
-	}
-
-	blocked := map[string]bool{}
-	for _, id := range state.BlockedFinalCandidateIDs {
-		blocked[id] = true
-	}
-	keepFrom := 0
-	if len(state.Results) > maxReplanPromptResults {
-		keepFrom = len(state.Results) - maxReplanPromptResults
-	}
-	results := make([]WorkerTurnResult, 0, len(state.Results)-keepFrom)
-	for index, result := range state.Results {
-		if index < keepFrom && !blocked[result.WorkerID] {
-			continue
-		}
-		results = append(results, compactWorkerTurnResultForPrompt(result))
-	}
-	state.Results = results
-	return state
-}
 
 func compactPlanForPrompt(plan Plan) Plan {
 	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
@@ -1170,29 +1134,6 @@ func compactWorkPlanItemsForPrompt(items []core.WorkPlanItem) []core.WorkPlanIte
 	return items
 }
 
-func compactWorkerTurnResultForPrompt(result WorkerTurnResult) WorkerTurnResult {
-	result.Summary = truncateStringForPrompt(result.Summary, maxPromptResultSummaryBytes)
-	result.Error = truncateStringForPrompt(result.Error, maxPromptResultErrorBytes)
-	result.Changes.Status = truncateStringForPrompt(result.Changes.Status, maxPromptStatusBytes)
-	result.Changes.DiffStat = truncateStringForPrompt(result.Changes.DiffStat, maxPromptDiffStatBytes)
-	result.Changes.Diff = ""
-	result.Changes.Error = truncateStringForPrompt(result.Changes.Error, maxPromptResultErrorBytes)
-	if len(result.Changes.ChangedFiles) > maxPromptChangedFiles {
-		omitted := len(result.Changes.ChangedFiles) - maxPromptChangedFiles
-		result.Changes.ChangedFiles = append(result.Changes.ChangedFiles[:maxPromptChangedFiles], WorkspaceChangedFile{
-			Path:   fmt.Sprintf("... %d additional changed files omitted ...", omitted),
-			Status: "omitted",
-		})
-	}
-	if len(result.Changes.Artifacts) > maxPromptArtifacts {
-		result.Changes.Artifacts = result.Changes.Artifacts[:maxPromptArtifacts]
-	}
-	for index := range result.Changes.Artifacts {
-		result.Changes.Artifacts[index].Content = truncateStringForPrompt(result.Changes.Artifacts[index].Content, maxPromptArtifactBytes)
-	}
-	return result
-}
-
 func truncateStringForPrompt(value string, maxBytes int) string {
 	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value
@@ -1204,6 +1145,14 @@ func truncateStringForPrompt(value string, maxBytes int) string {
 	head := (maxBytes - len(marker)) / 2
 	tail := maxBytes - len(marker) - head
 	return value[:head] + marker + value[len(value)-tail:]
+}
+
+func replanTaskPromptPayload(task core.Task) map[string]any {
+	payload := taskPromptPayload(task)
+	if prompt, ok := payload["prompt"].(string); ok {
+		payload["prompt"] = truncateStringForPrompt(prompt, maxPromptTaskTextBytes)
+	}
+	return payload
 }
 
 func extractCodexAgentMessage(output []byte) (string, error) {

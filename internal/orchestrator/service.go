@@ -2451,6 +2451,62 @@ func isTerminalTaskStatus(status core.TaskStatus) bool {
 	return status == core.TaskSucceeded || status == core.TaskFailed || status == core.TaskCanceled
 }
 
+func (s *Service) taskIsTerminal(ctx context.Context, taskID string) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID == taskID {
+			return isTerminalTaskStatus(task.Status), nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Service) taskArtifacts(ctx context.Context, taskID string) []core.TaskArtifact {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, task := range snapshot.Tasks {
+		if task.ID == taskID {
+			return append([]core.TaskArtifact{}, task.Artifacts...)
+		}
+	}
+	return nil
+}
+
+func (s *Service) taskPullRequestStates(ctx context.Context, taskID string) []ReplanPullRequestState {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	states := []ReplanPullRequestState{}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		states = append(states, ReplanPullRequestState{
+			ID:               pr.ID,
+			Repo:             pr.Repo,
+			Number:           pr.Number,
+			URL:              pr.URL,
+			Branch:           pr.Branch,
+			Base:             pr.Base,
+			Title:            pr.Title,
+			State:            pr.State,
+			Draft:            pr.Draft,
+			ChecksStatus:     pr.ChecksStatus,
+			ChecksConclusion: pr.ChecksConclusion,
+			MergeStatus:      pr.MergeStatus,
+			Mergeable:        pr.Mergeable,
+			ReviewStatus:     pr.ReviewStatus,
+		})
+	}
+	return states
+}
+
 func canPublishPullRequestForTask(task core.Task) bool {
 	return isTerminalTaskStatus(task.Status) || strings.TrimSpace(task.FinalCandidateWorkerID) != ""
 }
@@ -2884,6 +2940,8 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		InitialPlan:   initial,
 		Results:       results,
 		ContextLedger: s.taskContextLedger(ctx, task.ID),
+		Artifacts:     s.taskArtifacts(ctx, task.ID),
+		PullRequests:  s.taskPullRequestStates(ctx, task.ID),
 		Turn:          1,
 	})
 	if err != nil {
@@ -4080,7 +4138,7 @@ func (s *Service) workerCompleted(ctx context.Context, taskID string, workerID s
 
 func (s *Service) appendWorkerCompleted(ctx context.Context, taskID string, workerID string, payload map[string]any) error {
 	if s.workerCompleted(context.Background(), taskID, workerID) {
-		return nil
+		return s.recordWorkerCompletedDigest(ctx, taskID, workerID, payload)
 	}
 	event := core.Event{
 		Type:     core.EventWorkerCompleted,
@@ -4114,9 +4172,127 @@ func (s *Service) appendWorkerCompleted(ctx context.Context, taskID string, work
 			}
 			continue
 		}
-		return nil
+		return s.recordWorkerCompletedDigest(ctx, taskID, workerID, payload)
 	}
 	return fmt.Errorf("append worker.completed for worker %s: %w", workerID, lastErr)
+}
+
+func (s *Service) recordWorkerCompletedDigest(ctx context.Context, taskID string, workerID string, payload map[string]any) error {
+	if s.workerCompletedDigestRecorded(ctx, taskID, workerID) {
+		return nil
+	}
+	metadata := workerCompletedDigestMetadata(workerID, payload)
+	if len(metadata) == 0 {
+		return nil
+	}
+	reason := stringMetadata(metadata, "summary")
+	if reason == "" {
+		reason = stringMetadata(metadata, "error")
+	}
+	if reason == "" {
+		reason = "worker completed with status " + stringMetadata(metadata, "status")
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:     core.EventTaskAction,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "worker_result_digest",
+			"status":   "recorded",
+			"reason":   reason,
+			"workerId": workerID,
+			"metadata": metadata,
+		}),
+	})
+	return err
+}
+
+func (s *Service) workerCompletedDigestRecorded(ctx context.Context, taskID string, workerID string) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.WorkerID != workerID || event.Type != core.EventTaskAction {
+			continue
+		}
+		var payload struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(event.Payload, &payload) == nil && payload.Kind == "worker_result_digest" {
+			return true
+		}
+	}
+	return false
+}
+
+func workerCompletedDigestMetadata(workerID string, payload map[string]any) map[string]any {
+	if len(payload) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return map[string]any{"workerId": workerID, "error": "could not encode worker completion payload: " + err.Error()}
+	}
+	var decoded struct {
+		Status           core.WorkerStatus      `json:"status"`
+		Summary          string                 `json:"summary,omitempty"`
+		Error            string                 `json:"error,omitempty"`
+		LogCount         int                    `json:"logCount,omitempty"`
+		NeedsInput       bool                   `json:"needsInput,omitempty"`
+		ChangedFiles     []WorkspaceChangedFile `json:"changedFiles,omitempty"`
+		WorkspaceChanges WorkspaceChanges       `json:"workspaceChanges,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return map[string]any{"workerId": workerID, "error": "could not decode worker completion payload: " + err.Error()}
+	}
+	changedFiles := decoded.ChangedFiles
+	if len(changedFiles) == 0 {
+		changedFiles = decoded.WorkspaceChanges.ChangedFiles
+	}
+	if len(changedFiles) > 20 {
+		omitted := len(changedFiles) - 20
+		changedFiles = append(append([]WorkspaceChangedFile{}, changedFiles[:20]...), WorkspaceChangedFile{
+			Path:   fmt.Sprintf("... %d additional changed files omitted ...", omitted),
+			Status: "omitted",
+		})
+	}
+	artifactMetadata := []map[string]any{}
+	for _, artifact := range decoded.WorkspaceChanges.Artifacts {
+		item := map[string]any{
+			"id":   artifact.ID,
+			"kind": artifact.Kind,
+			"name": artifact.Name,
+			"path": artifact.Path,
+		}
+		if artifact.Content != "" {
+			item["contentBytes"] = len(artifact.Content)
+			if len(artifact.Content) <= replanPromptTinyArtifactContentBytes {
+				item["content"] = artifact.Content
+			}
+		}
+		artifactMetadata = append(artifactMetadata, item)
+	}
+	metadata := map[string]any{
+		"workerId":     workerID,
+		"status":       decoded.Status,
+		"summary":      truncateStringForPrompt(decoded.Summary, 2000),
+		"error":        truncateStringForPrompt(decoded.Error, 2000),
+		"logCount":     decoded.LogCount,
+		"needsInput":   decoded.NeedsInput,
+		"dirty":        decoded.WorkspaceChanges.Dirty,
+		"changedFiles": changedFiles,
+	}
+	if decoded.WorkspaceChanges.DiffStat != "" {
+		metadata["diffStat"] = truncateStringForPrompt(decoded.WorkspaceChanges.DiffStat, 1000)
+	}
+	if decoded.WorkspaceChanges.Error != "" {
+		metadata["workspaceError"] = truncateStringForPrompt(decoded.WorkspaceChanges.Error, 2000)
+	}
+	if len(artifactMetadata) > 0 {
+		metadata["artifacts"] = artifactMetadata
+	}
+	return metadata
 }
 
 func remoteWorkerStartFailureChanges(workspace PreparedWorkspace) WorkspaceChanges {
@@ -6111,6 +6287,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	stalledTurns := 0
 	currentWorkPlan := initial.WorkPlan
 	for turn := 1; ; turn++ {
+		if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+			return false, "", "", results
+		} else if terminal && !options.FinalizationRecovery {
+			return false, "", "", results
+		}
 		if stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
 			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
@@ -6123,6 +6305,8 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			WorkPlan:                   currentWorkPlan,
 			Results:                    results,
 			ContextLedger:              s.taskContextLedger(ctx, task.ID),
+			Artifacts:                  s.taskArtifacts(ctx, task.ID),
+			PullRequests:               s.taskPullRequestStates(ctx, task.ID),
 			PendingPullRequestFeedback: s.pendingPullRequestFeedback(ctx, task.ID),
 			PendingWorkerSteering:      s.pendingWorkerSteering(ctx, task.ID),
 			Turn:                       turn,
@@ -6238,6 +6422,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
 			return false, "", "", results
 		case "continue":
+			if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			} else if terminal && !options.FinalizationRecovery {
+				return false, "", "", results
+			}
 			beforeResults := results
 			next := *decision.Plan
 			if pr, ok := s.firstPendingPullRequestFeedback(ctx, task.ID); ok {
@@ -6311,6 +6501,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				return false, "", "", results
 			}
 			results = append(results, nextResults...)
+			if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
+				return false, "", "", results
+			} else if terminal && !options.FinalizationRecovery {
+				return false, "", "", results
+			}
 			if failed := firstWorkerResultWithStatus(nextResults, core.WorkerFailed); failed.WorkerID != "" {
 				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failed.Error, failed.Summary)); ok {
 					if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, next, failed, blocker) {
@@ -6416,6 +6612,10 @@ type replanFallbackConfig struct {
 func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, string, []WorkerTurnResult) {
 	if pendingReason := s.pendingReplanQueueBlockReason(ctx, task.ID); pendingReason != "" {
 		s.waitForReplanFallback(ctx, task, turn, replanErr, config, pendingReason)
+		return false, "", "", results
+	}
+	if isReplanContextWindowError(replanErr) {
+		s.waitForReplanContextOverflow(ctx, task, turn, replanErr, results)
 		return false, "", "", results
 	}
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
@@ -6545,6 +6745,91 @@ func (s *Service) waitForReplanFallback(ctx context.Context, task core.Task, tur
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 	}
+}
+
+func (s *Service) waitForReplanContextOverflow(ctx context.Context, task core.Task, turn int, replanErr error, results []WorkerTurnResult) {
+	digest := latestCompactReplanDigest(results)
+	message := "Replan context too large. aged could not fit the compact orchestration state into the model context window, so it paused instead of selecting an old final candidate."
+	if digest != "" {
+		message += "\n\nLatest compact digest:\n" + digest
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskReplanned,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"turn": turn,
+			"decision": ReplanDecision{
+				Action:    "wait",
+				Rationale: "replan context too large",
+				Message:   message,
+			},
+			"fallback":       true,
+			"error":          replanErr.Error(),
+			"candidateError": "replan context too large",
+			"compactDigest":  digest,
+		}),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if err := s.waitForUserAction(ctx, task.ID, "", "dynamic_replan_context_too_large", message, map[string]any{
+		"error":         replanErr.Error(),
+		"objective":     "Replanning paused because the prompt exceeded the model context window.",
+		"compactDigest": digest,
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+	}
+}
+
+func latestCompactReplanDigest(results []WorkerTurnResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+	result := DefaultReplanPromptBudgeter().compactWorkerResult(results[len(results)-1])
+	parts := []string{
+		"workerId=" + result.WorkerID,
+		"status=" + string(result.Status),
+		"kind=" + result.Kind,
+	}
+	if result.Role != "" {
+		parts = append(parts, "role="+result.Role)
+	}
+	if result.Summary != "" {
+		parts = append(parts, "summary="+truncateStringForPrompt(result.Summary, 1200))
+	}
+	if result.Error != "" {
+		parts = append(parts, "error="+truncateStringForPrompt(result.Error, 1200))
+	}
+	if len(result.Changes.ChangedFiles) > 0 {
+		files := []string{}
+		for _, file := range result.Changes.ChangedFiles {
+			files = append(files, file.Path+":"+file.Status)
+		}
+		parts = append(parts, "changedFiles="+strings.Join(files, ", "))
+	}
+	if result.Changes.DiffStat != "" {
+		parts = append(parts, "diffStat="+result.Changes.DiffStat)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func isReplanContextWindowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"context window",
+		"ran out of room",
+		"too many tokens",
+		"maximum context length",
+		"context length exceeded",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func deterministicLocalNoChangeCompletionWorker(results []WorkerTurnResult) (string, string) {

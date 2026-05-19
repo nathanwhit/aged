@@ -90,11 +90,30 @@ type OrchestrationState struct {
 	WorkPlan                   *core.WorkPlan            `json:"workPlan,omitempty"`
 	Results                    []WorkerTurnResult        `json:"results"`
 	ContextLedger              []ContextLedgerEntry      `json:"contextLedger,omitempty"`
+	Artifacts                  []core.TaskArtifact       `json:"artifacts,omitempty"`
+	PullRequests               []ReplanPullRequestState  `json:"pullRequests,omitempty"`
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
 	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`
 	BlockedFinalCandidateIDs   []string                  `json:"blockedFinalCandidateIds,omitempty"`
 	RecoveryHint               string                    `json:"recoveryHint,omitempty"`
+}
+
+type ReplanPullRequestState struct {
+	ID               string `json:"id"`
+	Repo             string `json:"repo,omitempty"`
+	Number           int    `json:"number,omitempty"`
+	URL              string `json:"url,omitempty"`
+	Branch           string `json:"branch,omitempty"`
+	Base             string `json:"base,omitempty"`
+	Title            string `json:"title,omitempty"`
+	State            string `json:"state,omitempty"`
+	Draft            bool   `json:"draft,omitempty"`
+	ChecksStatus     string `json:"checksStatus,omitempty"`
+	ChecksConclusion string `json:"checksConclusion,omitempty"`
+	MergeStatus      string `json:"mergeStatus,omitempty"`
+	Mergeable        string `json:"mergeable,omitempty"`
+	ReviewStatus     string `json:"reviewStatus,omitempty"`
 }
 
 type PullRequestFeedbackItem struct {

@@ -230,6 +230,9 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	if len(prompt) >= 1_048_576 {
 		t.Fatalf("replan prompt length = %d, want below Codex input limit", len(prompt))
 	}
+	if len(prompt) >= 300_000 {
+		t.Fatalf("replan prompt length = %d, want tightly bounded prompt", len(prompt))
+	}
 	if !strings.Contains(prompt, "worker-119") {
 		t.Fatalf("prompt dropped latest result")
 	}
@@ -247,6 +250,85 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "truncated for replanning prompt") {
 		t.Fatalf("prompt did not mark truncated context")
+	}
+}
+
+func TestCodexBrainReplanPayloadTruncatesHugeTaskPrompt(t *testing.T) {
+	payload := replanPromptPayload(core.Task{
+		ID:     "task-1",
+		Title:  "Huge task",
+		Prompt: "important beginning " + strings.Repeat("large task prompt ", 10000) + " important ending",
+	}, OrchestrationState{})
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) >= 40_000 {
+		t.Fatalf("payload length = %d, want bounded task prompt", len(data))
+	}
+	text := string(data)
+	if !strings.Contains(text, "important beginning") || !strings.Contains(text, "important ending") {
+		t.Fatalf("truncated task prompt did not keep head and tail: %s", text)
+	}
+	if !strings.Contains(text, "truncated for replanning prompt") {
+		t.Fatalf("missing task prompt truncation marker")
+	}
+}
+
+func TestReplanPromptBudgeterSplitsBoundedStateAndOmitsLargeArtifactContents(t *testing.T) {
+	largeArtifact := strings.Repeat("artifact-content-", 1000)
+	payload := replanPromptPayload(core.Task{
+		ID:     "task-1",
+		Title:  "Budget",
+		Prompt: "keep it bounded",
+	}, OrchestrationState{
+		Results: []WorkerTurnResult{{
+			WorkerID: "worker-1",
+			Status:   core.WorkerSucceeded,
+			Kind:     "codex",
+			Summary:  "implemented useful change",
+			Changes: WorkspaceChanges{
+				Dirty:        true,
+				Diff:         strings.Repeat("raw diff", 1000),
+				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+				Artifacts: []WorkspaceArtifact{{
+					ID:      "workspace-artifact",
+					Kind:    "log",
+					Content: largeArtifact,
+				}},
+			},
+		}},
+		ContextLedger: []ContextLedgerEntry{{
+			Kind:     "worker_result_digest",
+			WorkerID: "old-worker",
+			Summary:  "important compact fact",
+		}},
+		Artifacts: []core.TaskArtifact{{
+			ID:   "artifact-1",
+			Kind: "worker_result_digest",
+			Metadata: core.MustJSON(map[string]any{
+				"workerId": "worker-1",
+				"content":  largeArtifact,
+				"summary":  "compact summary",
+			}),
+		}},
+	})
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"recentResults"`) || strings.Contains(text, `"results"`) {
+		t.Fatalf("payload should expose recentResults instead of raw results: %s", text)
+	}
+	if !strings.Contains(text, "important compact fact") {
+		t.Fatalf("payload missing context ledger fact: %s", text)
+	}
+	if strings.Contains(text, largeArtifact) || strings.Contains(text, "raw diffraw diff") {
+		t.Fatalf("payload retained large raw artifact content or diff")
+	}
+	if !strings.Contains(text, "contentOmittedBytes") {
+		t.Fatalf("payload did not record omitted artifact content metadata: %s", text)
 	}
 }
 
