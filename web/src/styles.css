@@ -1351,8 +1351,8 @@ small {
 .worker-navigator-list {
   display: grid;
   gap: 6px;
-  grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
-  max-height: 178px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  max-height: 276px;
   overflow: auto;
   padding-right: 2px;
 }
@@ -1365,10 +1365,13 @@ small {
   color: #202124;
   display: grid;
   gap: 7px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  min-height: 38px;
+  grid-template-areas:
+    "index title"
+    "index status";
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 56px;
   min-width: 0;
-  padding: 6px 7px;
+  padding: 7px 8px;
   text-align: left;
 }
 
@@ -1397,19 +1400,29 @@ small {
   display: inline-flex;
   font-size: 12px;
   font-weight: 700;
+  grid-area: index;
   height: 22px;
   justify-content: center;
+  align-self: center;
   width: 22px;
 }
 
 .worker-nav-chip strong {
+  grid-area: title;
+  line-height: 1.15;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .worker-nav-chip .status {
+  grid-area: status;
+  justify-content: center;
+  justify-self: start;
+  max-width: 100%;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .worker-card {
