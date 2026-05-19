@@ -85,6 +85,7 @@ type Service struct {
 	workspaces    WorkspaceManager
 	targets       *TargetRegistry
 	sshRunner     SSHRunner
+	usageSource   ProviderUsageSource
 	prPublisher   PullRequestPublisher
 	remoteApply   func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
 
@@ -627,6 +628,10 @@ func (s *Service) SetPromptSets(promptSets *PromptSetRegistry) {
 	if promptSets != nil {
 		s.promptSets = promptSets
 	}
+}
+
+func (s *Service) SetProviderUsageSource(source ProviderUsageSource) {
+	s.usageSource = source
 }
 
 func (s *Service) LoadPromptSets(ctx context.Context, seed *PromptSetRegistry) error {
@@ -3351,11 +3356,12 @@ func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Pl
 }
 
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
+	normalizePlanReasoning(&plan)
+	plan = s.rebalancePlanWorkerKind(ctx, plan)
 	runner := s.runners[plan.WorkerKind]
 	if runner == nil {
 		return WorkerTurnResult{}, fmt.Errorf("unknown worker kind %q", plan.WorkerKind)
 	}
-	normalizePlanReasoning(&plan)
 	project, err := s.projectForTask(task)
 	if err != nil {
 		return WorkerTurnResult{}, err
@@ -3695,6 +3701,45 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
 	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
+}
+
+func (s *Service) rebalancePlanWorkerKind(ctx context.Context, plan Plan) Plan {
+	if s == nil || s.usageSource == nil {
+		return plan
+	}
+	kind := strings.TrimSpace(plan.WorkerKind)
+	if kind != "codex" && kind != "claude" {
+		return plan
+	}
+	alternate := "claude"
+	if kind == "claude" {
+		alternate = "codex"
+	}
+	if s.runners[kind] == nil || s.runners[alternate] == nil {
+		return plan
+	}
+	snapshot := s.usageSource.Snapshot(ctx)
+	currentUsage, currentOK := snapshot.Providers[kind]
+	alternateUsage, alternateOK := snapshot.Providers[alternate]
+	currentPressure, currentKnown := providerUsagePressure(currentUsage)
+	alternatePressure, alternateKnown := providerUsagePressure(alternateUsage)
+	if !currentOK || !alternateOK || !currentKnown || !alternateKnown {
+		return plan
+	}
+	if alternatePressure+providerUsageSwitchMargin > currentPressure && currentPressure < 95 {
+		return plan
+	}
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["usageAwareScheduling"] = true
+	plan.Metadata["usageOriginalWorkerKind"] = kind
+	plan.Metadata["usageSelectedWorkerKind"] = alternate
+	plan.Metadata["usageSelectionReason"] = fmt.Sprintf("%s usage pressure %d%%, %s usage pressure %d%%", kind, currentPressure, alternate, alternatePressure)
+	plan.Metadata["usageCurrentPressure"] = currentPressure
+	plan.Metadata["usageAlternatePressure"] = alternatePressure
+	plan.WorkerKind = alternate
+	return plan
 }
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
@@ -9175,6 +9220,12 @@ func planMetadata(plan Plan) map[string]any {
 		"retryWorkspaceReused",
 		"retryWorkspaceCWD",
 		"retryWorkspaceError",
+		"usageAwareScheduling",
+		"usageOriginalWorkerKind",
+		"usageSelectedWorkerKind",
+		"usageSelectionReason",
+		"usageCurrentPressure",
+		"usageAlternatePressure",
 	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
 			metadata[key] = value

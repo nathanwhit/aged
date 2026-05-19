@@ -1,0 +1,37 @@
+Welcome to fish, the friendly interactive shell
+Type help for instructions on how to use fish
+
+~/Documents/Code/aged @4f8d11f
+< codex
+OpenAI Codex (v0.131.0)
+
+Tip: Try the Codex App. Run 'codex app' or visit
+https://chatgpt.com/codex?app-landing-page=true
+
+/status
+
+OpenAI Codex (v0.131.0)
+
+Visit https://chatgpt.com/codex/settings/usage for up-to-date
+information on rate limits and credits
+
+Model:                       gpt-5.5 (reasoning high, summaries auto)
+Directory:                   ~/Documents/Code/aged
+Permissions:                 Custom (workspace with network access [/Users/
+Agents.md:                   /Users/example/.codex/AGENTS.md
+Account:                     user@example.com (Pro)
+Collaboration mode:          Default
+Session:                     00000000-0000-0000-0000-000000000000
+
+5h limit:                    [████████████████████] 99% left (resets 16:33)
+Weekly limit:                [████████████████████] 100% left
+                             (resets 11:33 on 26 May)
+GPT-5.3-Codex-Spark limit:
+5h limit:                    [████████████████████] 100% left
+                             (resets 16:36)
+Weekly limit:                [████████████████████] 100% left
+                             (resets 11:36 on 26 May)
+
+> Run /review on my current changes
+
+gpt-5.5 high · ~/Documents/Code/aged · 5h 1% · weekly 2%
