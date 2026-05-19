@@ -57,6 +57,10 @@ func TestResolvePullRequestWorkerIDSelectsSingleUnappliedCandidateWithUnlistedCh
 			name:    "diff",
 			changes: WorkspaceChanges{Diff: "diff --git a/main.go b/main.go\n"},
 		},
+		{
+			name:    "publish diff",
+			changes: WorkspaceChanges{PublishDiff: "diff --git a/main.go b/main.go\n"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

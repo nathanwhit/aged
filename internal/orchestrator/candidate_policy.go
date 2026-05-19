@@ -283,5 +283,8 @@ func latestCandidateLeafExcluding(results []WorkerTurnResult, blocked map[string
 }
 
 func resultHasCandidateChanges(result WorkerTurnResult) bool {
-	return result.Changes.Dirty || len(result.Changes.ChangedFiles) > 0 || strings.TrimSpace(result.Changes.Diff) != ""
+	return result.Changes.Dirty ||
+		len(result.Changes.ChangedFiles) > 0 ||
+		strings.TrimSpace(result.Changes.Diff) != "" ||
+		strings.TrimSpace(result.Changes.PublishDiff) != ""
 }

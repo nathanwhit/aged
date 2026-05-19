@@ -2028,6 +2028,13 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			return task, nil
 		}
 	}
+	if task.Status == core.TaskFailed && s.retryFailedPublishPullRequestAction(ctx, task, snapshot) {
+		task.Status = core.TaskPlanning
+		task.Error = ""
+		task.ObjectiveStatus = core.ObjectiveActive
+		task.ObjectivePhase = "retrying"
+		return task, nil
+	}
 	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
 		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
 			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
