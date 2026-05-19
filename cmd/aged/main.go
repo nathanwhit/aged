@@ -52,6 +52,8 @@ func main() {
 		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
 		prMonitor         = flag.Bool("pull-request-monitor", envutil.Bool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
 		prMonitorInterval = flag.Duration("pull-request-monitor-interval", envutil.Duration("AGED_PULL_REQUEST_MONITOR_INTERVAL", time.Minute), "tracked pull request refresh interval")
+		usageAware        = flag.Bool("usage-aware-scheduling", envutil.Bool("AGED_USAGE_AWARE_SCHEDULING", true), "rebalance Codex and Claude worker scheduling using cached interactive CLI usage probes")
+		usageTTL          = flag.Duration("usage-aware-scheduling-ttl", envutil.Duration("AGED_USAGE_AWARE_SCHEDULING_TTL", 5*time.Minute), "minimum interval between Codex/Claude usage probes")
 		discordDriverPath = flag.String("discord-driver", envutil.String("AGED_DISCORD_DRIVER", ""), "Discord driver config JSON path or inline JSON")
 		webDistPath       = flag.String("web", envutil.String("AGED_WEB_DIST", "web/dist"), "built web dashboard directory")
 		authMode          = flag.String("auth", envutil.String("AGED_AUTH", "none"), "HTTP authentication mode: none or google")
@@ -180,6 +182,9 @@ func main() {
 		fatal("initialize registered targets", err)
 	}
 	service.SetPromptSets(promptSets)
+	if *usageAware {
+		service.SetProviderUsageSource(orchestrator.NewTmuxProviderUsageMonitor("tmux", *codexPath, *claudePath, *usageTTL))
+	}
 	if err := service.LoadProjects(ctx, projects); err != nil {
 		fatal("initialize projects", err)
 	}

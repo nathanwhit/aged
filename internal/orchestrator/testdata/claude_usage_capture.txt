@@ -1,0 +1,40 @@
+Welcome to fish, the friendly interactive shell
+Type help for instructions on how to use fish
+
+~/Documents/Code/aged @4f8d11f
+< claude
+Claude Code v2.1.144
+Opus 4.7 (1M context) with high effort - Claude Max
+~/Documents/Code/aged
+
+> /usage
+
+Settings  Status   Config   Usage   Stats
+
+Session
+
+Total cost:            $0.0000
+Total duration (API):  0s
+Total duration (wall): 13s
+Total code changes:    0 lines added, 0 lines removed
+Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+
+Current session
+███▌                                               7% used
+Resets 3pm (America/Los_Angeles)
+
+Current week (all models)
+██████                                             12% used
+Resets May 24 at 7pm (America/Los_Angeles)
+
+Current week (Sonnet only)
+                                                   0% used
+
+What's contributing to your limits usage?
+Approximate, based on local sessions on this machine - does not include
+other devices or claude.ai
+
+Usage credits
+Usage credits are off - /usage-credits to turn them on
+
+Esc to cancel

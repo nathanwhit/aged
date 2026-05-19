@@ -67,6 +67,8 @@ type daemonConfig struct {
 	artifactCleanup   bool
 	artifactDryRun    bool
 	artifactMinAge    time.Duration
+	usageAware        bool
+	usageTTL          time.Duration
 	githubDriverPath  string
 	discordDriverPath string
 	webDistPath       string
@@ -91,6 +93,8 @@ func main() {
 		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "aged daemon retained workspace artifact cleanup")
 		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "aged daemon retained workspace artifact cleanup dry run")
 		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "aged daemon retained workspace artifact cleanup minimum age")
+		usageAware        = flag.Bool("usage-aware-scheduling", envutil.Bool("AGED_USAGE_AWARE_SCHEDULING", true), "aged daemon Codex/Claude usage-aware worker scheduling")
+		usageTTL          = flag.Duration("usage-aware-scheduling-ttl", envutil.Duration("AGED_USAGE_AWARE_SCHEDULING_TTL", 5*time.Minute), "aged daemon Codex/Claude usage probe cache ttl")
 		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
 		discordDriverPath = flag.String("discord-driver", envutil.String("AGED_DISCORD_DRIVER", ""), "aged daemon Discord driver config JSON path or inline JSON")
 		webDistPath       = flag.String("web", envutil.String("AGED_WEB_DIST", "web/dist"), "aged dashboard dist directory")
@@ -131,6 +135,8 @@ func main() {
 			artifactCleanup:   *artifactCleanup,
 			artifactDryRun:    *artifactDryRun,
 			artifactMinAge:    *artifactMinAge,
+			usageAware:        *usageAware,
+			usageTTL:          *usageTTL,
 			githubDriverPath:  githubDriverPath.String(),
 			discordDriverPath: *discordDriverPath,
 			webDistPath:       *webDistPath,
@@ -201,6 +207,8 @@ func buildDaemonArgs(config daemonConfig) []string {
 		"-workspace-artifact-cleanup=" + strconv.FormatBool(config.artifactCleanup),
 		"-workspace-artifact-cleanup-dry-run=" + strconv.FormatBool(config.artifactDryRun),
 		"-workspace-artifact-cleanup-min-age", config.artifactMinAge.String(),
+		"-usage-aware-scheduling=" + strconv.FormatBool(config.usageAware),
+		"-usage-aware-scheduling-ttl", config.usageTTL.String(),
 		"-github-driver=" + config.githubDriverPath,
 		"-discord-driver", config.discordDriverPath,
 		"-web", config.webDistPath,
