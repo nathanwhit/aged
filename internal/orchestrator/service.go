@@ -3045,9 +3045,14 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	if s.retryWaitingFinalCandidatePublication(ctx, task, snapshot) {
 		return
 	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "replanning", "Resuming task with user feedback."); err != nil {
+		return
+	}
 	if err := s.setTaskStatus(ctx, taskID, core.TaskPlanning); err != nil {
 		return
 	}
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "replanning"
 	steering := taskSteering(snapshot, taskID)
 	steering = append(steering, fmt.Sprintf("Worker question: %s\nFeedback: %s", question, feedback))
 	plan, err := s.brain.Plan(ctx, task, steering)

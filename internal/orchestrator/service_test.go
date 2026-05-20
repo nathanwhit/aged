@@ -7481,6 +7481,66 @@ func TestServiceMovesTaskToWaitingWhenWorkerNeedsInput(t *testing.T) {
 	}
 }
 
+func TestServiceUserFeedbackResumeClearsWaitingObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	brain := &sequenceBrain{plans: []Plan{
+		{WorkerKind: "ask", Prompt: "ask for input"},
+		{WorkerKind: "answer", Prompt: "continue with user answer"},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"ask": eventRunner{kind: "ask", events: []worker.Event{{
+			Kind: worker.EventNeedsInput,
+			Text: "Which dependency should I use?",
+		}}},
+		"answer": &blockingEventRunner{
+			kind:    "answer",
+			started: started,
+			release: release,
+			summary: "continued after user answer",
+		},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Do work", Prompt: "User request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser {
+		t.Fatalf("objective status before resume = %q, want waiting_user", snapshot.Tasks[0].ObjectiveStatus)
+	}
+
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "Use the existing dependency."}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case kind := <-started:
+		if kind != "answer" {
+			t.Fatalf("started runner = %q, want answer", kind)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("resume worker did not start")
+	}
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		task, ok := findTask(snapshot, task.ID)
+		return ok && task.Status == core.TaskRunning && task.ObjectiveStatus == core.ObjectiveActive
+	}, func(snapshot core.Snapshot) string {
+		task, _ := findTask(snapshot, task.ID)
+		return fmt.Sprintf("task did not clear waiting objective after resume: %+v", task)
+	})
+	resumed, _ := findTask(snapshot, task.ID)
+	if resumed.ObjectivePhase != "replanning" {
+		t.Fatalf("objective phase = %q, want replanning", resumed.ObjectivePhase)
+	}
+
+	close(release)
+	waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+}
+
 func TestServiceAutonomouslyContinuesWhenReplannerAnswersWorkerQuestion(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
