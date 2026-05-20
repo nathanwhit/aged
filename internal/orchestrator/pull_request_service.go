@@ -1493,6 +1493,50 @@ func (s *Service) retryWaitingPublishPullRequestAction(ctx context.Context, task
 	return true
 }
 
+func (s *Service) retryFailedPublishPullRequestAction(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
+	action, workerID, ok := latestFailedPublishPullRequestAction(snapshot, task.ID)
+	if !ok {
+		return false
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying failed pull request publication."); err != nil {
+		return true
+	}
+	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
+		return true
+	}
+	req := publishPullRequestRequestFromAction(action)
+	req.WorkerID = workerID
+	recordCompletedAction := func(pr core.PullRequest) error {
+		return s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          action.Kind,
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        action.Reason,
+			"inputs":        action.Inputs,
+			"workerId":      workerID,
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+		})
+	}
+	_, err := s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
+	if err != nil {
+		if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
+			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     action.Kind,
+				"when":     nonEmpty(action.When, "after_success"),
+				"reason":   action.Reason,
+				"inputs":   action.Inputs,
+				"workerId": workerID,
+				"status":   "waiting",
+				"error":    err.Error(),
+			})
+			return true
+		}
+		_ = s.failTask(ctx, task.ID, err)
+		return true
+	}
+	return true
+}
+
 func latestWaitingPublishPullRequestAction(snapshot core.Snapshot, taskID string) (PlanAction, string, bool) {
 	for i := len(snapshot.Events) - 1; i >= 0; i-- {
 		event := snapshot.Events[i]
@@ -1511,6 +1555,46 @@ func latestWaitingPublishPullRequestAction(snapshot core.Snapshot, taskID string
 			return PlanAction{}, "", false
 		}
 		if payload.Kind != "publish_pull_request" || payload.Status != "waiting" || strings.TrimSpace(payload.WorkerID) == "" {
+			return PlanAction{}, "", false
+		}
+		return PlanAction{
+			Kind:     payload.Kind,
+			When:     payload.When,
+			Reason:   payload.Reason,
+			WorkerID: payload.WorkerID,
+			Inputs:   payload.Inputs,
+		}, payload.WorkerID, true
+	}
+	return PlanAction{}, "", false
+}
+
+func latestFailedPublishPullRequestAction(snapshot core.Snapshot, taskID string) (PlanAction, string, bool) {
+	if !latestTaskFailureMatches(snapshot, taskID, func(errorText string) bool {
+		return strings.Contains(errorText, errPullRequestWorkerNotPublishable.Error()) ||
+			strings.Contains(errorText, "publish_pull_request action has no successful worker with candidate changes")
+	}) {
+		return PlanAction{}, "", false
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventTaskAction || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Kind     string         `json:"kind"`
+			When     string         `json:"when"`
+			Reason   string         `json:"reason"`
+			Inputs   map[string]any `json:"inputs"`
+			WorkerID string         `json:"workerId"`
+			Status   string         `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return PlanAction{}, "", false
+		}
+		if payload.Kind != "publish_pull_request" {
+			return PlanAction{}, "", false
+		}
+		if payload.Status != "started" || strings.TrimSpace(payload.WorkerID) == "" {
 			return PlanAction{}, "", false
 		}
 		return PlanAction{

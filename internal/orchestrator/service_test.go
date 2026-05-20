@@ -1463,6 +1463,48 @@ func TestServicePlanActionPublishesIntermediatePullRequest(t *testing.T) {
 	}
 }
 
+func TestServicePlanActionPublishesCandidateWithPublishDiffOnly(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make remote change",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "publish the remote cumulative patch",
+				Inputs: map[string]any{
+					"repo":  "owner/repo",
+					"base":  "main",
+					"title": "perf(node): optimize ServerResponse.end()",
+					"body":  "## Summary\n- Optimize ServerResponse.end().\n\n## Validation\n- Release-lite checks passed.",
+				},
+			}},
+		}},
+		changes: WorkspaceChanges{
+			PublishDiff: "diff --git a/ext/node/polyfills/_http_outgoing.ts b/ext/node/polyfills/_http_outgoing.ts\n",
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Remote publish diff", Prompt: "Publish the remote cumulative patch."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "started") {
+		t.Fatalf("missing started publish action")
+	}
+	if hasEventPayloadValue(snapshot.Events, core.EventTaskStatus, task.ID, "status", string(core.TaskFailed)) {
+		t.Fatalf("task failed despite publishDiff candidate")
+	}
+}
+
 func TestServicePlanActionPublishesLogicalWorkerID(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1868,6 +1910,123 @@ func TestServiceRetriesExplicitPublishPullRequestActionAfterRecoverableSigningFa
 	}
 	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "") {
 		t.Fatalf("missing completed publish_pull_request action")
+	}
+}
+
+func TestServiceRetriesFailedPublishPullRequestActionBeforeStaleFinalCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-failed-publish-action"
+	publishWorkerID := "worker-publishable"
+	staleFinalWorkerID := "worker-stale-final"
+	actionInputs := map[string]any{
+		"repo":  "owner/repo",
+		"base":  "main",
+		"title": "perf(node): optimize ServerResponse.end()",
+		"body":  "## Summary\n- Optimize ServerResponse.end().\n\n## Validation\n- Release-lite checks passed.",
+	}
+	events := []core.Event{{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Optimize node:http throughput",
+			"prompt": "Find and publish useful optimization PRs.",
+		}),
+	}, {
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "change", Prompt: "make change"}),
+	}, {
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: publishWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "change",
+			"metadata": map[string]any{"nodeID": "node-publishable"},
+		}),
+	}, {
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: publishWorkerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:       "/remote/run",
+			CWD:        "/remote/repo",
+			SourceRoot: "/remote/repo",
+			VCSType:    "ssh",
+			TaskID:     taskID,
+			WorkerID:   publishWorkerID,
+		}),
+	}, {
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: publishWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "implemented node:http fast path",
+			"workspaceChanges": WorkspaceChanges{
+				PublishDiff: "diff --git a/ext/node/polyfills/_http_outgoing.ts b/ext/node/polyfills/_http_outgoing.ts\n",
+			},
+		}),
+	}, {
+		Type:   core.EventTaskCandidate,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId": staleFinalWorkerID,
+			"reason":   "old stale final candidate",
+		}),
+	}, {
+		Type:   core.EventTaskAction,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "publish_pull_request",
+			"when":     "after_success",
+			"reason":   "publish the useful intermediate candidate",
+			"inputs":   actionInputs,
+			"workerId": publishWorkerID,
+			"status":   "started",
+		}),
+	}, {
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+			"error":  errPullRequestWorkerNotPublishable.Error(),
+		}),
+	}}
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:   fixedBrain{plan: Plan{WorkerKind: "change", Prompt: "unused"}},
+		changes: WorkspaceChanges{PublishDiff: "diff --git a/ext/node/polyfills/_http_outgoing.ts b/ext/node/polyfills/_http_outgoing.ts\n"},
+	})
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, taskID, 1)
+	snapshot = waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want retry publish only", publisher.publishCalls)
+	}
+	if publisher.published.WorkerID != publishWorkerID {
+		t.Fatalf("published worker = %q, want failed action worker %q", publisher.published.WorkerID, publishWorkerID)
+	}
+	if publisher.published.WorkerID == staleFinalWorkerID {
+		t.Fatalf("retried stale final candidate %q", staleFinalWorkerID)
+	}
+	if publisher.published.Title != "perf(node): optimize ServerResponse.end" {
+		t.Fatalf("published title = %q", publisher.published.Title)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "publish_pull_request", "") {
+		t.Fatalf("missing completed publish_pull_request action")
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID != staleFinalWorkerID {
+		t.Fatalf("final candidate was unexpectedly rewritten: %+v", snapshot.Tasks[0])
 	}
 }
 
