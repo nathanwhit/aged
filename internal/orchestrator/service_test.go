@@ -6965,6 +6965,72 @@ func TestRemoteWorkerPublishPullRequestCallbackWithoutCandidateIsSkipped(t *test
 	}
 }
 
+func TestServiceRunsRemoteWorkerInPerWorkerGitWorktree(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	executor := &fakeRemoteExecutor{}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/remote/checkouts",
+		WorkRoot: "/remote/runs",
+		Capacity: TargetCapacity{MaxWorkers: 4, CPUWeight: 100},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "run remotely",
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:          "deno",
+		Name:        "Deno",
+		LocalPath:   t.TempDir(),
+		Repo:        "denoland/deno",
+		DefaultBase: "main",
+	}}, "deno")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "deno", Title: "Remote worktree", Prompt: "Run remote work."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	var workspace PreparedWorkspace
+	var workerID string
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventWorkerWorkspace || event.TaskID != task.ID {
+			continue
+		}
+		workerID = event.WorkerID
+		if err := json.Unmarshal(event.Payload, &workspace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if workerID == "" {
+		t.Fatalf("missing worker workspace event")
+	}
+	wantRunDir := "/remote/runs/" + workerID
+	wantWorkDir := wantRunDir + "/repo"
+	if workspace.Root != wantRunDir || workspace.CWD != wantWorkDir || workspace.SourceRoot != "/remote/checkouts/deno" {
+		t.Fatalf("workspace = %+v, want root %q cwd %q source root /remote/checkouts/deno", workspace, wantRunDir, wantWorkDir)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventExecutionPlanned, task.ID, `"remoteWorkDir":"`+wantWorkDir+`"`) {
+		t.Fatalf("missing per-worker remoteWorkDir %q in execution plan", wantWorkDir)
+	}
+	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
+	if !strings.Contains(joinedCommands, "/remote/checkouts/deno") {
+		t.Fatalf("remote checkout source was not prepared:\n%s", joinedCommands)
+	}
+	if !strings.Contains(joinedCommands, wantWorkDir) || !strings.Contains(joinedCommands, `git -C "$source_dir" worktree add --detach "$worktree_dir" HEAD`) {
+		t.Fatalf("remote per-worker worktree was not prepared:\n%s", joinedCommands)
+	}
+}
+
 func TestRecoverRemoteWorkerResumesTaskAfterCompletion(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9131,6 +9197,72 @@ func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
 	}
 }
 
+func TestServiceReplansInitialWorkerGraphAfterErroredDeferredSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	secondStarted := make(chan string, 1)
+	secondRelease := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			Rationale: "initial worker graph has a dependency",
+			Workers: []WorkerRequest{
+				{
+					ID:         "baseline",
+					Role:       "baseline collector",
+					Reason:     "Collect the baseline.",
+					WorkerKind: "first",
+					Prompt:     "Collect baseline.",
+				},
+				{
+					ID:         "implement",
+					Role:       "implementer",
+					Reason:     "Implement after the baseline.",
+					WorkerKind: "second",
+					Prompt:     "Implement after baseline.",
+					DependsOn:  []string{"baseline"},
+				},
+			},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "wait",
+			Rationale: "baseline worker did not finish",
+			Message:   "retry baseline collection",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"first": eventRunner{kind: "first", events: []worker.Event{
+			{Kind: worker.EventError, Text: "tool use failed while checking build progress"},
+			{Kind: worker.EventResult, Text: "Waiting for the cargo build to finish; harness will re-invoke when it completes."},
+		}},
+		"second": &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "implemented"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent initial graph",
+		Prompt: "Collect baseline, then implement.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-secondStarted:
+		close(secondRelease)
+		t.Fatal("dependent initial worker started after failed dependency")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 1 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	result := brain.states[0].Results[0]
+	if result.Status != core.WorkerFailed || !strings.Contains(result.Summary, "Waiting for the cargo build") || !strings.Contains(result.Error, "tool use failed") {
+		t.Fatalf("dependency result = %+v, want failed deferred-success result", result)
+	}
+}
+
 func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9200,6 +9332,72 @@ func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if !strings.Contains(second.promptValue(), "review summary") {
 		t.Fatalf("dependent prompt missing dependency summary:\n%s", second.promptValue())
+	}
+}
+
+func TestServiceReplansFollowUpGraphAfterFailedDependency(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	secondStarted := make(chan string, 1)
+	secondRelease := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the first bounded slice",
+			Spawns: []SpawnRequest{
+				{
+					ID:         "review",
+					Role:       "reviewer",
+					Reason:     "Review the implementation.",
+					WorkerKind: "first",
+				},
+				{
+					ID:         "repair",
+					Role:       "repairer",
+					Reason:     "Repair review findings.",
+					WorkerKind: "second",
+					DependsOn:  []string{"review"},
+				},
+			},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "wait",
+			Rationale: "review worker failed",
+			Message:   "retry review",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"first": eventThenFailRunner{
+			kind: "first",
+			err:  errors.New("review command failed"),
+		},
+		"second": &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "repaired"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent follow-up graph",
+		Prompt: "Implement, review, then repair.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-secondStarted:
+		close(secondRelease)
+		t.Fatal("dependent follow-up worker started after failed dependency")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	failed := brain.states[0].Results[1]
+	if failed.Status != core.WorkerFailed || !strings.Contains(failed.Error, "review command failed") {
+		t.Fatalf("follow-up dependency result = %+v", failed)
 	}
 }
 
@@ -10220,6 +10418,133 @@ func TestRetryWorkerExecutionPromptDeduplicatesSteering(t *testing.T) {
 	}
 }
 
+func TestRetryPlanForTaskNarrowsInitialWorkerGraphToCanceledWorker(t *testing.T) {
+	taskID := "task-1"
+	initial := Plan{
+		Rationale: "run a broad graph",
+		Workers: []WorkerRequest{
+			{
+				ID:         "scout",
+				Role:       "scout",
+				Reason:     "Find options.",
+				WorkerKind: "claude",
+				Prompt:     "Scout options.",
+			},
+			{
+				ID:         "implement",
+				Role:       "implementer",
+				Reason:     "Implement selected option.",
+				WorkerKind: "codex",
+				Prompt:     "Implement.",
+			},
+			{
+				ID:         "validate",
+				Role:       "validator",
+				Reason:     "Validate implementation.",
+				WorkerKind: "claude",
+				Prompt:     "Validate.",
+				DependsOn:  []string{"implement"},
+			},
+		},
+		Actions: []PlanAction{{
+			Kind:     "publish_pull_request",
+			When:     "after_success",
+			WorkerID: "validate",
+		}},
+	}
+	snapshot := core.Snapshot{
+		ExecutionNodes: []core.ExecutionNode{{
+			ID:         "node-validate",
+			TaskID:     taskID,
+			WorkerID:   "worker-validate",
+			WorkerKind: "claude",
+			Status:     core.WorkerCanceled,
+			SpawnID:    "validate",
+			Role:       "validator",
+		}},
+		Events: []core.Event{{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(initial),
+		}, {
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: "worker-implement",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+				"metadata": map[string]any{
+					"spawnID":   "implement",
+					"spawnRole": "implementer",
+				},
+			}),
+		}, {
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "worker-implement",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "implemented candidate",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+				},
+			}),
+		}, {
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: "worker-validate",
+			Payload: core.MustJSON(map[string]any{
+				"workerId":   "worker-validate",
+				"workerKind": "claude",
+				"nodeId":     "node-validate",
+				"spawnId":    "validate",
+				"role":       "validator",
+			}),
+		}, {
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "worker-validate",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.WorkerCanceled,
+			}),
+		}},
+	}
+
+	retry, err := retryPlanForTask(snapshot, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retry.Workers) != 0 {
+		t.Fatalf("retry workers = %+v, want direct single-worker retry", retry.Workers)
+	}
+	if retry.WorkerKind != "claude" || retry.Prompt == "Scout options." || !strings.Contains(retry.Prompt, "Validate.") {
+		t.Fatalf("retry plan = %+v", retry)
+	}
+	if !strings.Contains(retry.Prompt, "implemented candidate") {
+		t.Fatalf("retry prompt missing dependency result:\n%s", retry.Prompt)
+	}
+	if got := stringMetadata(retry.Metadata, "retryFromWorkerID"); got != "worker-validate" {
+		t.Fatalf("retryFromWorkerID = %q, want worker-validate; metadata = %+v", got, retry.Metadata)
+	}
+	if got := stringMetadata(retry.Metadata, "spawnID"); got != "validate" {
+		t.Fatalf("spawnID = %q, want validate; metadata = %+v", got, retry.Metadata)
+	}
+	if len(retry.Actions) != 1 || retry.Actions[0].WorkerID != "validate" {
+		t.Fatalf("retry actions = %+v", retry.Actions)
+	}
+}
+
+func TestWorkerRunStateFailsEmptyRetainedRetrySuccess(t *testing.T) {
+	state := &workerRunState{}
+	state.observe(worker.Event{Kind: worker.EventLog, Text: "did some work but produced no final answer"})
+	status, err := state.normalizeCompletionStatus(Plan{
+		Metadata: map[string]any{"retryFromWorkerID": "worker-old"},
+	}, core.WorkerSucceeded, nil, WorkspaceChanges{})
+	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "without a final summary") {
+		t.Fatalf("status = %q err = %v, want failed empty retry success", status, err)
+	}
+}
+
 func TestTaskSteeringDeduplicatesRepeatedMessages(t *testing.T) {
 	snapshot := core.Snapshot{Events: []core.Event{
 		{
@@ -10862,9 +11187,11 @@ func TestServiceRunsWorkerOnSSHTarget(t *testing.T) {
 		t.Fatalf("workers = %+v", snapshot.Workers)
 	}
 	remoteWorker := snapshot.Workers[0]
-	wantPrompt := remoteWorkerExecutionPrompt("run remotely", PreparedWorkspace{CWD: "/repo/default", Mode: "remote", VCSType: "ssh", TargetID: "vm-1", TargetKind: "ssh"})
-	if remoteWorker.Prompt != wantPrompt {
-		t.Fatalf("worker prompt = %q, want %q", remoteWorker.Prompt, wantPrompt)
+	if !strings.Contains(remoteWorker.Prompt, "Run every command from this execution workspace:\n/runs/"+remoteWorker.ID+"/repo") {
+		t.Fatalf("worker prompt missing per-worker execution workspace:\n%s", remoteWorker.Prompt)
+	}
+	if !strings.Contains(remoteWorker.Prompt, "Do not edit the source checkout directly:\n/repo/default") {
+		t.Fatalf("worker prompt missing source-checkout warning:\n%s", remoteWorker.Prompt)
 	}
 	if !strings.Contains(remoteWorker.Prompt, "do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR") {
 		t.Fatalf("worker prompt missing draft PR guard:\n%s", remoteWorker.Prompt)
@@ -11018,11 +11345,13 @@ func TestServiceRemoteWorkerUsesProjectCheckoutOverride(t *testing.T) {
 	if len(snapshot.ExecutionNodes) != 1 {
 		t.Fatalf("nodes = %+v", snapshot.ExecutionNodes)
 	}
-	if snapshot.ExecutionNodes[0].RemoteWorkDir != "/custom/node" {
-		t.Fatalf("remote workdir = %q, want override", snapshot.ExecutionNodes[0].RemoteWorkDir)
+	node := snapshot.ExecutionNodes[0]
+	wantWorkDir := "/runs/" + node.WorkerID + "/repo"
+	if node.RemoteWorkDir != wantWorkDir {
+		t.Fatalf("remote workdir = %q, want per-worker worktree %q", node.RemoteWorkDir, wantWorkDir)
 	}
 	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
-	if !strings.Contains(joinedCommands, "/custom/node") {
+	if !strings.Contains(joinedCommands, "/custom/node") || !strings.Contains(joinedCommands, wantWorkDir) {
 		t.Fatalf("remote commands did not use checkout override: %+v", executor.commands)
 	}
 }

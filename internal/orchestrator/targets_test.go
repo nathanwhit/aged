@@ -1055,9 +1055,44 @@ func TestSSHRunnerPrepareCheckoutClonesAndChecksOutBase(t *testing.T) {
 		t.Fatal("missing prepare command")
 	}
 	joined := strings.Join(executor.commands[0], " ")
-	for _, want := range []string{"git clone", "git fetch origin --prune", `git cat-file -e "$base_ref^{commit}"`, `git checkout --detach "$base_ref"`, "origin/$base"} {
+	for _, want := range []string{"git clone", "fetch_remote=origin", `git fetch "$fetch_remote" --prune`, `git checkout --detach "$fetch_remote/$base"`} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestSSHRunnerPrepareCheckoutPrefersExistingUpstreamRemote(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:     "https://github.com/denoland/deno.git",
+		WorkDir:     "/srv/aged/repos/deno",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing prepare command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		"git remote get-url upstream",
+		"fetch_remote=upstream",
+		`git fetch "$fetch_remote" --prune`,
+		`git checkout --detach "$fetch_remote/$base"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+	for _, blocked := range []string{
+		"git remote set-url origin",
+		"git remote add origin",
+		"git pull --ff-only",
+	} {
+		if strings.Contains(joined, blocked) {
+			t.Fatalf("prepare command should not contain %q:\n%s", blocked, joined)
 		}
 	}
 }
@@ -1088,6 +1123,28 @@ func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 	for _, blocked := range []string{"remote checkout is dirty", "exit 20", `[ -z "${dirty:-}" ]`} {
 		if strings.Contains(joined, blocked) {
 			t.Fatalf("prepare command still rejects dirty checkout with %q:\n%s", blocked, joined)
+		}
+	}
+}
+
+func TestSSHRunnerPrepareWorktreeCreatesDetachedWorktree(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareWorktree(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, "/srv/aged/repos/deno", "/srv/aged/runs/worker/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing worktree command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		"/srv/aged/repos/deno",
+		"/srv/aged/runs/worker/repo",
+		`git -C "$source_dir" worktree prune`,
+		`git -C "$source_dir" worktree add --detach "$worktree_dir" HEAD`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("worktree command missing %q:\n%s", want, joined)
 		}
 	}
 }

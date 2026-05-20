@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -3685,6 +3686,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 	status := core.WorkerSucceeded
 	var statusErr error
+	status, statusErr = runState.normalizeCompletionStatus(plan, status, statusErr, changes)
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		status = core.WorkerCanceled
 		statusErr = context.Canceled
@@ -3693,7 +3695,11 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 	s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
-	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, WorkspaceResultSucceeded)
+	workspaceResult := WorkspaceResultSucceeded
+	if status == core.WorkerFailed {
+		workspaceResult = WorkspaceResultFailed
+	}
+	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
 }
 
@@ -3881,10 +3887,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	if err != nil {
 		return WorkerTurnResult{}, err
 	}
-	remoteWorkDir, err := resolveRemoteCheckout(project, target)
+	remoteSourceDir, err := resolveRemoteCheckout(project, target)
 	if err != nil {
 		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w", err)
 	}
+	remoteWorkDir := remoteSourceDir
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
 	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
@@ -3931,7 +3938,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
 			RepoURL:     projectCloneURL(project),
-			WorkDir:     remoteWorkDir,
+			WorkDir:     remoteSourceDir,
 			DefaultBase: checkoutBase,
 			BaseRef:     checkoutBaseRef,
 		})
@@ -3940,6 +3947,16 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		if checkoutLog != "" {
 			plan.Metadata["remoteCheckout"] = checkoutLog
+		}
+		remoteWorkDir = path.Join(remoteRun.RunDir, "repo")
+		worktreeLog, err := s.sshRunner.PrepareWorktree(ctx, target, remoteSourceDir, remoteWorkDir)
+		if err != nil {
+			return WorkerTurnResult{}, fmt.Errorf("prepare remote worktree: %w: %s", err, worktreeLog)
+		}
+		remoteRun.WorkDir = remoteWorkDir
+		plan.Metadata["remoteSourceDir"] = remoteSourceDir
+		if worktreeLog != "" {
+			plan.Metadata["remoteWorktree"] = worktreeLog
 		}
 		if baseWorkerID != "" {
 			patch, baseChanges, err := s.workerHandoffPatch(ctx, baseWorkerID)
@@ -3969,7 +3986,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	workspace := PreparedWorkspace{
 		Root:       remoteWorkDir,
 		CWD:        remoteWorkDir,
-		SourceRoot: remoteWorkDir,
+		SourceRoot: remoteSourceDir,
 		Mode:       "remote",
 		VCSType:    "ssh",
 		WorkerID:   workerID,
@@ -4006,7 +4023,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	command := runner.BuildCommand(spec)
 	workspace.Root = remoteRun.RunDir
 	workspace.CWD = remoteRun.WorkDir
-	workspace.SourceRoot = remoteRun.WorkDir
+	workspace.SourceRoot = remoteSourceDir
 	workspace.WorkspaceName = remoteRun.Session
 	plan.Metadata["remoteSession"] = remoteRun.Session
 	plan.Metadata["remoteRunDir"] = remoteRun.RunDir
@@ -4118,6 +4135,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		statusErr = context.Canceled
 	}
 	changes := s.sshRunner.DescribeChanges(ctx, remoteRun)
+	workerStatus, statusErr = runState.normalizeCompletionStatus(plan, workerStatus, statusErr, changes)
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		workerStatus = core.WorkerCanceled
 		statusErr = context.Canceled
@@ -7200,6 +7218,9 @@ func (s *Service) runInitialWorkerGraph(ctx context.Context, task core.Task, pla
 			completed[ready[index].id] = result
 			delete(pending, ready[index].id)
 		}
+		if workerResultsContainFailure(waveResults) {
+			return results, true, nil
+		}
 		if err != nil {
 			return results, false, err
 		}
@@ -7244,7 +7265,8 @@ func readyInitialWorkers(pending map[string]initialWorkerNode, completed map[str
 	for _, node := range pending {
 		blocked := false
 		for _, dep := range node.deps {
-			if _, ok := completed[dep]; !ok {
+			result, ok := completed[dep]
+			if !ok || !workerDependencySatisfied(result) {
 				blocked = true
 				break
 			}
@@ -7427,6 +7449,9 @@ func (s *Service) runFollowUpWorkers(ctx context.Context, task core.Task, initia
 			completed[ready[index].id] = result
 			delete(pending, ready[index].id)
 		}
+		if workerResultsContainFailure(waveResults) {
+			return results, true, nil
+		}
 		if err != nil {
 			return results, false, err
 		}
@@ -7448,6 +7473,59 @@ func completedWorkerDependencies(results []WorkerTurnResult) map[string]WorkerTu
 		}
 	}
 	return completed
+}
+
+func completedWorkerResultsForTask(snapshot core.Snapshot, taskID string) []WorkerTurnResult {
+	workerMetadata := map[string]map[string]any{}
+	results := []WorkerTurnResult{}
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventWorkerCreated:
+			var payload struct {
+				Kind     string         `json:"kind"`
+				Metadata map[string]any `json:"metadata"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			metadata := map[string]any{}
+			for key, value := range payload.Metadata {
+				metadata[key] = value
+			}
+			if payload.Kind != "" {
+				metadata["workerKind"] = payload.Kind
+			}
+			workerMetadata[event.WorkerID] = metadata
+		case core.EventWorkerCompleted:
+			var payload struct {
+				Status           core.WorkerStatus `json:"status"`
+				Summary          string            `json:"summary"`
+				Error            string            `json:"error"`
+				WorkspaceChanges WorkspaceChanges  `json:"workspaceChanges"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				continue
+			}
+			metadata := workerMetadata[event.WorkerID]
+			result := WorkerTurnResult{
+				WorkerID: event.WorkerID,
+				Status:   payload.Status,
+				Kind:     stringMetadata(metadata, "workerKind"),
+				Summary:  payload.Summary,
+				Error:    payload.Error,
+				Changes:  payload.WorkspaceChanges,
+			}
+			result.NodeID = stringMetadata(metadata, "nodeID")
+			result.Role = stringMetadata(metadata, "spawnRole")
+			result.SpawnID = stringMetadata(metadata, "spawnID")
+			result.BaseWorkerID = stringMetadata(metadata, "baseWorkerID")
+			results = append(results, result)
+		}
+	}
+	return results
 }
 
 func followUpNodes(spawns []SpawnRequest, completed map[string]WorkerTurnResult) (map[string]followUpNode, error) {
@@ -7493,7 +7571,8 @@ func readyFollowUps(pending map[string]followUpNode, completed map[string]Worker
 	for _, node := range pending {
 		blocked := false
 		for _, dep := range node.deps {
-			if _, ok := completed[dep]; !ok {
+			result, ok := completed[dep]
+			if !ok || !workerDependencySatisfied(result) {
 				blocked = true
 				break
 			}
@@ -7559,6 +7638,19 @@ func (s *Service) runFollowUpWave(ctx context.Context, task core.Task, initial P
 		}
 	}
 	return ordered, true, nil
+}
+
+func workerResultsContainFailure(results []WorkerTurnResult) bool {
+	for _, result := range results {
+		if result.Status == core.WorkerFailed {
+			return true
+		}
+	}
+	return false
+}
+
+func workerDependencySatisfied(result WorkerTurnResult) bool {
+	return result.Status == core.WorkerSucceeded
 }
 
 func failedFollowUpResult(plan Plan, err error) WorkerTurnResult {
@@ -8408,6 +8500,11 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 		return Plan{}, errors.New("task has no persisted plan to retry")
 	}
 	if terminalWorkerID != "" {
+		for i := len(plans) - 1; i >= 0; i-- {
+			if plan, ok := retryInitialWorkerPlanWithResume(snapshot, plans[i], taskID, terminalWorkerID); ok {
+				return plan, nil
+			}
+		}
 		for i := len(workerIDs) - 1; i >= 0; i-- {
 			if workerIDs[i] == terminalWorkerID && i < len(plans) {
 				return retryPlanWithResume(snapshot, plans[i], taskID, terminalWorkerID), nil
@@ -8415,6 +8512,72 @@ func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 		}
 	}
 	return retryPlanWithResume(snapshot, plans[len(plans)-1], taskID, terminalWorkerID), nil
+}
+
+func retryInitialWorkerPlanWithResume(snapshot core.Snapshot, plan Plan, taskID string, workerID string) (Plan, bool) {
+	if len(plan.Workers) == 0 || strings.TrimSpace(workerID) == "" {
+		return Plan{}, false
+	}
+	node := executionNodeForWorker(snapshot, workerID)
+	spawnID := strings.TrimSpace(node.SpawnID)
+	if spawnID == "" {
+		return Plan{}, false
+	}
+	results := completedWorkerResultsForTask(snapshot, taskID)
+	for index, request := range plan.Workers {
+		if workerRequestID(request, index) != spawnID {
+			continue
+		}
+		retry := planFromInitialWorkerRequest(plan, request, results, index+1, spawnID)
+		return retryPlanWithResume(snapshot, retry, taskID, workerID), true
+	}
+	return Plan{}, false
+}
+
+func planFromInitialWorkerRequest(initial Plan, request WorkerRequest, results []WorkerTurnResult, turn int, workerID string) Plan {
+	reasoningEffort := normalizeReasoningEffort(nonEmpty(request.ReasoningEffort, initial.ReasoningEffort))
+	role := nonEmpty(request.Role, workerID)
+	reason := nonEmpty(request.Reason, "initial worker scheduled by the scheduler")
+	dependsOn := normalizedWorkerDependencies(request.DependsOn)
+	metadata := copyPlanMetadata(initial.Metadata)
+	metadata["initialWorker"] = true
+	metadata["scheduledWorkerID"] = workerID
+	metadata["spawnID"] = workerID
+	metadata["spawnRole"] = role
+	metadata["spawnReason"] = reason
+	metadata["dependsOn"] = dependsOn
+	metadata["turn"] = turn
+	metadata["parentRationale"] = initial.Rationale
+	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
+		metadata["baseWorkerID"] = baseWorkerID
+	}
+	if reasoningEffort != "" {
+		metadata["reasoningEffort"] = reasoningEffort
+	}
+	return Plan{
+		WorkerKind:      request.WorkerKind,
+		Prompt:          buildInitialWorkerPrompt(request.Prompt, results, dependsOn),
+		ReasoningEffort: reasoningEffort,
+		Rationale:       "retry initial worker from plan: " + reason,
+		Steps: []PlanStep{{
+			Title:       "Run " + role,
+			Description: reason,
+		}},
+		Actions:  initial.Actions,
+		WorkPlan: initial.WorkPlan,
+		Metadata: metadata,
+	}
+}
+
+func normalizedWorkerDependencies(dependsOn []string) []string {
+	deps := make([]string, 0, len(dependsOn))
+	for _, dep := range dependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep != "" {
+			deps = append(deps, dep)
+		}
+	}
+	return deps
 }
 
 func taskFailedDuringDynamicReplan(snapshot core.Snapshot, taskID string) bool {
@@ -9563,6 +9726,66 @@ func (s *workerRunState) summaryText() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.summary
+}
+
+func (s *workerRunState) normalizeCompletionStatus(plan Plan, status core.WorkerStatus, runErr error, changes WorkspaceChanges) (core.WorkerStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if status != core.WorkerSucceeded || runErr != nil {
+		return status, runErr
+	}
+	if reason := s.incompleteSuccessReasonLocked(changes); reason != "" {
+		return core.WorkerFailed, errors.New(reason)
+	}
+	if reason := s.emptyRetrySuccessReasonLocked(plan, changes); reason != "" {
+		return core.WorkerFailed, errors.New(reason)
+	}
+	return status, runErr
+}
+
+func (s *workerRunState) incompleteSuccessReasonLocked(changes WorkspaceChanges) string {
+	if strings.TrimSpace(s.lastError) == "" || !workerSummaryDefersCompletion(s.summary) {
+		return ""
+	}
+	reason := "worker reported success after an unresolved tool or runtime error while deferring completion"
+	if strings.TrimSpace(s.summary) != "" {
+		reason += ": " + strings.TrimSpace(s.summary)
+	}
+	return reason
+}
+
+func (s *workerRunState) emptyRetrySuccessReasonLocked(plan Plan, changes WorkspaceChanges) string {
+	if strings.TrimSpace(s.summary) != "" || s.logCount == 0 || stringMetadata(plan.Metadata, "retryFromWorkerID") == "" {
+		return ""
+	}
+	if changes.Dirty || len(changes.ChangedFiles) > 0 {
+		return ""
+	}
+	return "worker reported success without a final summary or new workspace changes while running in a retained retry workspace"
+}
+
+func workerSummaryDefersCompletion(summary string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(summary))
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"waiting for",
+		"will re-invoke",
+		"re-invoke when",
+		"wakeup",
+		"wake up",
+		"continue later",
+		"continue when",
+		"not complete",
+		"not finished",
+		"inconclusive",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr error, changes WorkspaceChanges) map[string]any {
