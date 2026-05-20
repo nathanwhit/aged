@@ -101,20 +101,22 @@ type OrchestrationState struct {
 }
 
 type ReplanPullRequestState struct {
-	ID               string `json:"id"`
-	Repo             string `json:"repo,omitempty"`
-	Number           int    `json:"number,omitempty"`
-	URL              string `json:"url,omitempty"`
-	Branch           string `json:"branch,omitempty"`
-	Base             string `json:"base,omitempty"`
-	Title            string `json:"title,omitempty"`
-	State            string `json:"state,omitempty"`
-	Draft            bool   `json:"draft,omitempty"`
-	ChecksStatus     string `json:"checksStatus,omitempty"`
-	ChecksConclusion string `json:"checksConclusion,omitempty"`
-	MergeStatus      string `json:"mergeStatus,omitempty"`
-	Mergeable        string `json:"mergeable,omitempty"`
-	ReviewStatus     string `json:"reviewStatus,omitempty"`
+	ID                   string `json:"id"`
+	Repo                 string `json:"repo,omitempty"`
+	Number               int    `json:"number,omitempty"`
+	URL                  string `json:"url,omitempty"`
+	Branch               string `json:"branch,omitempty"`
+	Base                 string `json:"base,omitempty"`
+	Title                string `json:"title,omitempty"`
+	State                string `json:"state,omitempty"`
+	Draft                bool   `json:"draft,omitempty"`
+	ChecksStatus         string `json:"checksStatus,omitempty"`
+	ChecksConclusion     string `json:"checksConclusion,omitempty"`
+	MergeStatus          string `json:"mergeStatus,omitempty"`
+	Mergeable            string `json:"mergeable,omitempty"`
+	ReviewStatus         string `json:"reviewStatus,omitempty"`
+	ContinueAfterPublish bool   `json:"continueAfterPublish,omitempty"`
+	PublicationPhase     string `json:"publicationPhase,omitempty"`
 }
 
 type PullRequestFeedbackItem struct {

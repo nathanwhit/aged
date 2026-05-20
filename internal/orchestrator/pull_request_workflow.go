@@ -22,12 +22,18 @@ func (s *Service) pullRequestWorkspaceChanges(ctx context.Context, workerID stri
 }
 
 func defaultPullRequestTitle(explicit string, task core.Task, summary string, changes WorkspaceChanges) string {
+	return defaultPullRequestTitleForPublication(explicit, task, summary, changes, false)
+}
+
+func defaultPullRequestTitleForPublication(explicit string, task core.Task, summary string, changes WorkspaceChanges, intermediate bool) string {
 	if title := normalizePullRequestTitle(explicit, allowReportProseTitle); title != "" {
 		return title
 	}
-	for _, candidate := range taskTitleIntentCandidates(task) {
-		if title := normalizePullRequestTitle(candidate, rejectReportProseTitle); title != "" {
-			return title
+	if !intermediate {
+		for _, candidate := range taskTitleIntentCandidates(task) {
+			if title := normalizePullRequestTitle(candidate, rejectReportProseTitle); title != "" {
+				return title
+			}
 		}
 	}
 	changedFiles := make([]string, 0, len(changes.ChangedFiles))
@@ -37,7 +43,7 @@ func defaultPullRequestTitle(explicit string, task core.Task, summary string, ch
 		}
 	}
 	title := changeCommitMessage(changeCommitMessageContext{
-		Fallback:      nonEmpty(strings.TrimSpace(task.Title), "Task result"),
+		Fallback:      pullRequestTitleFallback(task, intermediate),
 		WorkerSummary: summary,
 		ChangedFiles:  changedFiles,
 	})
@@ -47,10 +53,22 @@ func defaultPullRequestTitle(explicit string, task core.Task, summary string, ch
 	if title := commitMessageFromChangedFiles(changedFiles); title != "" {
 		return title
 	}
-	if title := normalizePullRequestTitle(task.Title, rejectReportProseTitle); title != "" {
-		return title
+	if !intermediate {
+		if title := normalizePullRequestTitle(task.Title, rejectReportProseTitle); title != "" {
+			return title
+		}
 	}
 	return "aged task " + shortID(task.ID)
+}
+
+func pullRequestTitleFallback(task core.Task, intermediate bool) string {
+	if intermediate {
+		return "Update task output"
+	}
+	if title := strings.TrimSpace(task.Title); title != "" {
+		return title
+	}
+	return "Task result"
 }
 
 type reportProsePolicy bool

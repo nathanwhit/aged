@@ -423,13 +423,14 @@ type AssistantResponse struct {
 }
 
 type PublishPullRequestRequest struct {
-	WorkerID string `json:"workerId,omitempty"`
-	Repo     string `json:"repo,omitempty"`
-	Base     string `json:"base,omitempty"`
-	Branch   string `json:"branch,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Body     string `json:"body,omitempty"`
-	Draft    bool   `json:"draft,omitempty"`
+	WorkerID             string `json:"workerId,omitempty"`
+	Repo                 string `json:"repo,omitempty"`
+	Base                 string `json:"base,omitempty"`
+	Branch               string `json:"branch,omitempty"`
+	Title                string `json:"title,omitempty"`
+	Body                 string `json:"body,omitempty"`
+	Draft                bool   `json:"draft,omitempty"`
+	ContinueAfterPublish bool   `json:"continueAfterPublish,omitempty"`
 }
 
 type WatchPullRequestsRequest struct {

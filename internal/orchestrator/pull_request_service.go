@@ -22,6 +22,7 @@ import (
 var (
 	githubPullRequestURLRE      = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
 	pullRequestClosingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
+	errTerminalPullRequest      = errors.New("pull request is already terminal")
 )
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
@@ -171,20 +172,22 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	base := nonEmpty(req.Base, project.DefaultBase)
 	draft := req.Draft || project.PullRequestPolicy.Draft
 	metadata := map[string]any{
-		"workerId":          workerID,
-		"taskTitle":         task.Title,
-		"workDir":           sourceRoot,
-		"projectId":         project.ID,
-		"branchPrefix":      project.PullRequestPolicy.BranchPrefix,
-		"mergeAllowed":      project.PullRequestPolicy.AllowMerge,
-		"autoMerge":         project.PullRequestPolicy.AutoMerge,
-		"mergeMethod":       project.PullRequestPolicy.MergeMethod,
-		"pullRequestPolicy": project.PullRequestPolicy,
+		"workerId":             workerID,
+		"taskTitle":            task.Title,
+		"workDir":              sourceRoot,
+		"projectId":            project.ID,
+		"branchPrefix":         project.PullRequestPolicy.BranchPrefix,
+		"mergeAllowed":         project.PullRequestPolicy.AllowMerge,
+		"autoMerge":            project.PullRequestPolicy.AutoMerge,
+		"mergeMethod":          project.PullRequestPolicy.MergeMethod,
+		"pullRequestPolicy":    project.PullRequestPolicy,
+		"continueAfterPublish": req.ContinueAfterPublish,
+		"publicationPhase":     pullRequestPublicationPhase(req.ContinueAfterPublish),
 	}
 	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
 	publishPatch, patchFromBase := pullRequestPublishPatch(publishWorkspace, changes)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
-	title := defaultPullRequestTitle(req.Title, task, summary, changes)
+	title := defaultPullRequestTitleForPublication(req.Title, task, summary, changes, req.ContinueAfterPublish)
 	body := pullRequestBodyWithIssueClosingReference(strings.TrimSpace(req.Body), task, repo)
 	pr, adopted, err := s.workerCreatedPullRequest(ctx, snapshot, task, workerID, repo, metadata)
 	if err != nil {
@@ -687,6 +690,31 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	return prs, nil
 }
 
+func (s *Service) watchRequestTargetsTerminalPullRequest(ctx context.Context, taskID string, req core.WatchPullRequestsRequest) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	repo := strings.ToLower(strings.TrimSpace(req.Repo))
+	url := strings.TrimSpace(req.URL)
+	branch := strings.TrimSpace(req.HeadBranch)
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || !isTerminalPullRequestState(pr.State) {
+			continue
+		}
+		if url != "" && strings.EqualFold(pr.URL, url) {
+			return true
+		}
+		if repo != "" && req.Number > 0 && strings.EqualFold(pr.Repo, repo) && pr.Number == req.Number {
+			return true
+		}
+		if branch != "" && pr.Branch == branch && (repo == "" || strings.EqualFold(pr.Repo, repo)) {
+			return true
+		}
+	}
+	return false
+}
+
 func existingPullRequestID(snapshot core.Snapshot, taskID string, pr core.PullRequest) string {
 	for _, existing := range snapshot.PullRequests {
 		if existing.TaskID != taskID {
@@ -906,6 +934,12 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		}); err != nil {
 			return core.PullRequest{}, err
 		}
+		if !pullRequestTerminalizesTask(snapshot, checked) {
+			if err := s.updateTaskObjective(ctx, checked.TaskID, core.ObjectiveActive, "intermediate_pr_merged", "Intermediate pull request merged; objective continues."); err != nil {
+				return core.PullRequest{}, err
+			}
+			return checked, nil
+		}
 		if err := s.setTaskStatus(ctx, checked.TaskID, core.TaskSucceeded); err != nil {
 			return core.PullRequest{}, err
 		}
@@ -920,6 +954,12 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 			"number":        checked.Number,
 		}); err != nil {
 			return core.PullRequest{}, err
+		}
+		if !pullRequestTerminalizesTask(snapshot, checked) {
+			if err := s.updateTaskObjective(ctx, checked.TaskID, core.ObjectiveActive, "intermediate_pr_closed", "Intermediate pull request closed; objective continues."); err != nil {
+				return core.PullRequest{}, err
+			}
+			return checked, nil
 		}
 		if err := s.setTaskStatus(ctx, checked.TaskID, core.TaskCanceled); err != nil {
 			return core.PullRequest{}, err
@@ -1006,6 +1046,9 @@ func (s *Service) ReconcilePullRequestTerminalTasks(ctx context.Context, prID st
 	if !ok {
 		return eventstore.ErrNotFound
 	}
+	if !pullRequestTerminalizesTask(snapshot, pr) {
+		return nil
+	}
 	switch {
 	case strings.EqualFold(pr.State, "MERGED"):
 		return s.completeRelatedPullRequestTasks(ctx, snapshot, pr, core.TaskSucceeded, core.ObjectiveSatisfied, "pr_merged", "merged", "Pull request merged.")
@@ -1018,6 +1061,43 @@ func (s *Service) ReconcilePullRequestTerminalTasks(ctx context.Context, prID st
 
 func isTerminalPullRequestState(state string) bool {
 	return strings.EqualFold(state, "MERGED") || strings.EqualFold(state, "CLOSED")
+}
+
+func pullRequestPublicationPhase(continueAfterPublish bool) string {
+	if continueAfterPublish {
+		return "intermediate"
+	}
+	return "completion"
+}
+
+func pullRequestContinuesTask(pr core.PullRequest) bool {
+	if len(pr.Metadata) == 0 {
+		return false
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
+		return false
+	}
+	if boolMetadata(metadata, "continueAfterPublish") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(stringMetadataValue(metadata["publicationPhase"])), "intermediate")
+}
+
+func pullRequestTerminalizesTask(snapshot core.Snapshot, pr core.PullRequest) bool {
+	if pullRequestContinuesTask(pr) {
+		return false
+	}
+	if taskHasActiveWorkers(snapshot, pr.TaskID) {
+		return false
+	}
+	if task, ok := findTask(snapshot, pr.TaskID); ok {
+		switch task.Status {
+		case core.TaskRunning, core.TaskPlanning:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) completeRelatedPullRequestTasks(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, taskStatus core.TaskStatus, objectiveStatus core.ObjectiveStatus, milestone string, phase string, summary string) error {
@@ -1808,30 +1888,42 @@ func (s *Service) pullRequestForUpdateAction(ctx context.Context, taskID string,
 	number := intMetadata(inputs, "number")
 	url := strings.TrimSpace(stringMetadata(inputs, "url"))
 	branch := strings.TrimSpace(stringMetadata(inputs, "branch"))
+	hasExplicitTarget := id != "" || url != "" || (repo != "" && number > 0) || branch != ""
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID != taskID || isTerminalPullRequestState(pr.State) {
+		if pr.TaskID != taskID || !pullRequestMatchesUpdateTarget(pr, id, repo, number, url, branch) {
 			continue
 		}
-		if id != "" && pr.ID == id {
-			return pr, nil
+		if isTerminalPullRequestState(pr.State) {
+			return pr, errTerminalPullRequest
 		}
-		if url != "" && strings.EqualFold(pr.URL, url) {
-			return pr, nil
-		}
-		if repo != "" && number > 0 && strings.EqualFold(pr.Repo, repo) && pr.Number == number {
-			return pr, nil
-		}
-		if branch != "" && pr.Branch == branch && (repo == "" || strings.EqualFold(pr.Repo, repo)) {
-			return pr, nil
-		}
+		return pr, nil
+	}
+	if hasExplicitTarget {
+		return core.PullRequest{}, eventstore.ErrNotFound
 	}
 	if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
+		if isTerminalPullRequestState(pr.State) {
+			return core.PullRequest{}, eventstore.ErrNotFound
+		}
 		return pr, nil
 	}
 	if pr, ok := firstOpenPullRequest(snapshot, taskID); ok {
 		return pr, nil
 	}
 	return core.PullRequest{}, eventstore.ErrNotFound
+}
+
+func pullRequestMatchesUpdateTarget(pr core.PullRequest, id string, repo string, number int, url string, branch string) bool {
+	if id != "" && pr.ID == id {
+		return true
+	}
+	if url != "" && strings.EqualFold(pr.URL, url) {
+		return true
+	}
+	if repo != "" && number > 0 && strings.EqualFold(pr.Repo, repo) && pr.Number == number {
+		return true
+	}
+	return branch != "" && pr.Branch == branch && (repo == "" || strings.EqualFold(pr.Repo, repo))
 }
 
 func firstOpenPullRequest(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
@@ -1846,12 +1938,13 @@ func firstOpenPullRequest(snapshot core.Snapshot, taskID string) (core.PullReque
 func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
 	inputs := action.Inputs
 	return core.PublishPullRequestRequest{
-		Title:  stringMetadata(inputs, "title"),
-		Body:   stringMetadata(inputs, "body"),
-		Repo:   stringMetadata(inputs, "repo"),
-		Base:   stringMetadata(inputs, "base"),
-		Branch: stringMetadata(inputs, "branch"),
-		Draft:  boolMetadata(inputs, "draft"),
+		Title:                stringMetadata(inputs, "title"),
+		Body:                 stringMetadata(inputs, "body"),
+		Repo:                 stringMetadata(inputs, "repo"),
+		Base:                 stringMetadata(inputs, "base"),
+		Branch:               stringMetadata(inputs, "branch"),
+		Draft:                boolMetadata(inputs, "draft"),
+		ContinueAfterPublish: boolMetadata(inputs, "continueAfterPublish"),
 	}
 }
 

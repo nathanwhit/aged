@@ -2493,20 +2493,22 @@ func (s *Service) taskPullRequestStates(ctx context.Context, taskID string) []Re
 			continue
 		}
 		states = append(states, ReplanPullRequestState{
-			ID:               pr.ID,
-			Repo:             pr.Repo,
-			Number:           pr.Number,
-			URL:              pr.URL,
-			Branch:           pr.Branch,
-			Base:             pr.Base,
-			Title:            pr.Title,
-			State:            pr.State,
-			Draft:            pr.Draft,
-			ChecksStatus:     pr.ChecksStatus,
-			ChecksConclusion: pr.ChecksConclusion,
-			MergeStatus:      pr.MergeStatus,
-			Mergeable:        pr.Mergeable,
-			ReviewStatus:     pr.ReviewStatus,
+			ID:                   pr.ID,
+			Repo:                 pr.Repo,
+			Number:               pr.Number,
+			URL:                  pr.URL,
+			Branch:               pr.Branch,
+			Base:                 pr.Base,
+			Title:                pr.Title,
+			State:                pr.State,
+			Draft:                pr.Draft,
+			ChecksStatus:         pr.ChecksStatus,
+			ChecksConclusion:     pr.ChecksConclusion,
+			MergeStatus:          pr.MergeStatus,
+			Mergeable:            pr.Mergeable,
+			ReviewStatus:         pr.ReviewStatus,
+			ContinueAfterPublish: pullRequestContinuesTask(pr),
+			PublicationPhase:     pullRequestMetadataString(pr, "publicationPhase"),
 		})
 	}
 	return states
@@ -4548,13 +4550,14 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 		return nil
 	}
 	pr, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
-		WorkerID: publishWorkerID,
-		Repo:     strings.TrimSpace(callback.Repo),
-		Base:     strings.TrimSpace(callback.Base),
-		Branch:   strings.TrimSpace(callback.Branch),
-		Title:    strings.TrimSpace(callback.Title),
-		Body:     body,
-		Draft:    callback.Draft,
+		WorkerID:             publishWorkerID,
+		Repo:                 strings.TrimSpace(callback.Repo),
+		Base:                 strings.TrimSpace(callback.Base),
+		Branch:               strings.TrimSpace(callback.Branch),
+		Title:                strings.TrimSpace(callback.Title),
+		Body:                 body,
+		Draft:                callback.Draft,
+		ContinueAfterPublish: callback.ContinueAfterPublish,
 	})
 	if err != nil {
 		return fmt.Errorf("publish pull request from %s callback %s: %w", source, callback.ID, err)
@@ -5694,6 +5697,19 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
 		if err != nil {
+			if errors.Is(err, errTerminalPullRequest) {
+				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":   action.Kind,
+					"when":   nonEmpty(action.When, "after_success"),
+					"reason": action.Reason,
+					"inputs": action.Inputs,
+					"status": "skipped",
+					"error":  "pull request is already closed or merged; publish a fresh pull request for new candidate work",
+				}); err != nil {
+					return false, results, err
+				}
+				return true, results, nil
+			}
 			return false, results, err
 		}
 		req := updatePullRequestRequestFromAction(action)
@@ -5740,6 +5756,19 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		return true, results, nil
 	case "watch_pull_requests":
 		req := watchPullRequestsRequestFromAction(action)
+		if s.watchRequestTargetsTerminalPullRequest(ctx, task.ID, req) {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   action.Kind,
+				"when":   nonEmpty(action.When, "after_success"),
+				"reason": action.Reason,
+				"inputs": action.Inputs,
+				"status": "skipped",
+				"error":  "pull request is already closed or merged",
+			}); err != nil {
+				return false, results, err
+			}
+			return true, results, nil
+		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":   action.Kind,
 			"when":   nonEmpty(action.When, "after_success"),
