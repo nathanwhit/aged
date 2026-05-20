@@ -911,17 +911,11 @@ func pullRequestMetadataMarkFeedbackTriggered(raw json.RawMessage) (json.RawMess
 	if metadata == nil {
 		return raw, false
 	}
-	signature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
-	if signature == "" {
-		signature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentSignature"]))
-	}
+	signature := pullRequestFeedbackSignatureFromMetadata(metadata)
 	if signature == "" {
 		return raw, false
 	}
-	triggeredSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
-	if triggeredSignature == "" {
-		triggeredSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
-	}
+	triggeredSignature := pullRequestTriggeredFeedbackSignatureFromMetadata(metadata)
 	if triggeredSignature == signature {
 		return raw, false
 	}
@@ -938,18 +932,39 @@ func pullRequestHasUntriggeredFeedback(pr core.PullRequest) bool {
 	if err := json.Unmarshal(pr.Metadata, &metadata); err != nil {
 		return false
 	}
+	signature := pullRequestFeedbackSignatureFromMetadata(metadata)
+	if signature == "" {
+		return false
+	}
+	triggeredSignature := pullRequestTriggeredFeedbackSignatureFromMetadata(metadata)
+	return triggeredSignature != signature
+}
+
+func pullRequestFeedbackSignature(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return ""
+	}
+	return pullRequestFeedbackSignatureFromMetadata(metadata)
+}
+
+func pullRequestFeedbackSignatureFromMetadata(metadata map[string]any) string {
 	signature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
 	if signature == "" {
 		signature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentSignature"]))
 	}
+	return signature
+}
+
+func pullRequestTriggeredFeedbackSignatureFromMetadata(metadata map[string]any) string {
+	signature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
 	if signature == "" {
-		return false
+		signature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
 	}
-	triggeredSignature := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
-	if triggeredSignature == "" {
-		triggeredSignature = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
-	}
-	return triggeredSignature != signature
+	return signature
 }
 
 func feedbackAfterPullRequestWatch(feedback prFeedback, watchedAt time.Time) bool {

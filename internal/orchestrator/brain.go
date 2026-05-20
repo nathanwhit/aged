@@ -120,20 +120,21 @@ type ReplanPullRequestState struct {
 }
 
 type PullRequestFeedbackItem struct {
-	EventID       int64  `json:"eventId"`
-	PullRequestID string `json:"pullRequestId"`
-	Attempt       int    `json:"attempt,omitempty"`
-	Reason        string `json:"reason,omitempty"`
-	Repo          string `json:"repo,omitempty"`
-	Number        int    `json:"number,omitempty"`
-	URL           string `json:"url,omitempty"`
-	Branch        string `json:"branch,omitempty"`
-	Base          string `json:"base,omitempty"`
-	State         string `json:"state,omitempty"`
-	ChecksStatus  string `json:"checksStatus,omitempty"`
-	MergeStatus   string `json:"mergeStatus,omitempty"`
-	ReviewStatus  string `json:"reviewStatus,omitempty"`
-	Prompt        string `json:"prompt,omitempty"`
+	EventID           int64  `json:"eventId"`
+	PullRequestID     string `json:"pullRequestId"`
+	Attempt           int    `json:"attempt,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	Repo              string `json:"repo,omitempty"`
+	Number            int    `json:"number,omitempty"`
+	URL               string `json:"url,omitempty"`
+	Branch            string `json:"branch,omitempty"`
+	Base              string `json:"base,omitempty"`
+	State             string `json:"state,omitempty"`
+	ChecksStatus      string `json:"checksStatus,omitempty"`
+	MergeStatus       string `json:"mergeStatus,omitempty"`
+	ReviewStatus      string `json:"reviewStatus,omitempty"`
+	FeedbackSignature string `json:"feedbackSignature,omitempty"`
+	Prompt            string `json:"prompt,omitempty"`
 }
 
 type WorkerSteeringItem struct {
