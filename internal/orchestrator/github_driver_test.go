@@ -379,6 +379,16 @@ func TestPullRequestNeedsBabysitterForNewConversationComment(t *testing.T) {
 	}
 }
 
+func TestPullRequestNeedsBabysitterIgnoresBlockedPendingRequirements(t *testing.T) {
+	if pullRequestNeedsBabysitter(core.PullRequest{
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "BLOCKED",
+	}) {
+		t.Fatal("pending externally blocked PR should not need babysitter follow-up")
+	}
+}
+
 func TestGitHubDriverMonitorsUpstreamPullRequestsFromIssueSources(t *testing.T) {
 	publisher := &fakePullRequestPublisher{status: core.PullRequest{
 		ID:           "pr-1",

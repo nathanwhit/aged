@@ -137,6 +137,32 @@ func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	}
 }
 
+func TestServiceDefaultPullRequestMonitorSkipsBlockedPendingPRs(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatus("pending", "BLOCKED", "")}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+	if hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
+		t.Fatalf("pending blocked pull request started follow-up")
+	}
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.ObjectiveStatus != core.ObjectiveWaitingExternal || task.ObjectivePhase != "pr_open" {
+		t.Fatalf("task objective = %s/%s, want waiting_external/pr_open", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+}
+
 func TestServicePullRequestMonitorDoesNotCancelRunningTaskForClosedPullRequest(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

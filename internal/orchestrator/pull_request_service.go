@@ -990,11 +990,21 @@ func pullRequestMergeNeedsWork(pr core.PullRequest) bool {
 	mergeable := strings.ToUpper(strings.TrimSpace(pr.Mergeable))
 	for _, value := range []string{merge, mergeable} {
 		switch value {
-		case "DIRTY", "BLOCKED", "CONFLICTING", "BEHIND":
+		case "DIRTY", "CONFLICTING", "BEHIND":
 			return true
+		case "BLOCKED":
+			if pullRequestBlockedByActionableState(pr) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func pullRequestBlockedByActionableState(pr core.PullRequest) bool {
+	checks := strings.ToLower(strings.TrimSpace(pr.ChecksStatus))
+	review := strings.ToUpper(strings.TrimSpace(pr.ReviewStatus))
+	return checks == "failing" || checks == "failure" || review == "CHANGES_REQUESTED" || review == "COMMENTED"
 }
 
 func pullRequestMetadataString(pr core.PullRequest, key string) string {
