@@ -1517,6 +1517,72 @@ func TestServicePlanActionPublishesLogicalWorkerID(t *testing.T) {
 	}
 }
 
+func TestServiceExplicitPublishActionRunsBeforeFollowUpSpawns(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{
+			Workers: []WorkerRequest{{
+				ID:         "implement_optimization",
+				Role:       "implementer",
+				Reason:     "prepare the first optimization",
+				WorkerKind: "change",
+				Prompt:     "make change",
+			}},
+			Spawns: []SpawnRequest{{
+				ID:         "next_optimization_planner",
+				Role:       "planner",
+				Reason:     "after the first optimization is published, choose the next PR-sized optimization",
+				WorkerKind: "planner",
+			}},
+			Actions: []PlanAction{{
+				Kind:     "publish_pull_request",
+				When:     "after_success",
+				Reason:   "publish the first optimization before planning the next one",
+				WorkerID: "implement_optimization",
+				Inputs: map[string]any{
+					"repo":                 "owner/repo",
+					"title":                "perf(node): optimize ServerResponse.end()",
+					"body":                 "## Summary\n- Optimize ServerResponse.end().\n\n## Validation\n- Focused tests passed.",
+					"continueAfterPublish": true,
+				},
+			}},
+		}},
+		runners: map[string]worker.Runner{
+			"change":  eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented first optimization"}}},
+			"planner": eventRunner{kind: "planner", events: []worker.Event{{Kind: worker.EventResult, Text: "planned next optimization"}}},
+		},
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Perf research", Prompt: "Publish each successful optimization and continue."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForPullRequests(t, store, task.ID, 1)
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasEventPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "spawnID", "next_optimization_planner")
+	}, func(snapshot core.Snapshot) string {
+		return "missing next optimization planner"
+	})
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	publishedAt := firstEventID(snapshot.Events, core.EventPRPublished, task.ID, "")
+	plannerCreatedAt := firstEventIDWithPayloadValue(snapshot.Events, core.EventWorkerCreated, task.ID, "spawnID", "next_optimization_planner")
+	if publishedAt == 0 || plannerCreatedAt == 0 {
+		t.Fatalf("missing event ordering evidence: published=%d planner=%d", publishedAt, plannerCreatedAt)
+	}
+	if publishedAt > plannerCreatedAt {
+		t.Fatalf("follow-up planner was spawned before publish action: publish event %d, planner event %d", publishedAt, plannerCreatedAt)
+	}
+}
+
 func TestServicePlanActionPublishWithoutCandidateWaitsForUser(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -13031,6 +13097,34 @@ func hasEvent(events []core.Event, eventType core.EventType, taskID string, work
 		}
 	}
 	return false
+}
+
+func firstEventID(events []core.Event, eventType core.EventType, taskID string, workerID string) int64 {
+	for _, event := range events {
+		if event.Type == eventType && event.TaskID == taskID && (workerID == "" || event.WorkerID == workerID) {
+			return event.ID
+		}
+	}
+	return 0
+}
+
+func firstEventIDWithPayloadValue(events []core.Event, eventType core.EventType, taskID string, key string, want string) int64 {
+	for _, event := range events {
+		if event.Type != eventType || event.TaskID != taskID {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if stringMetadataValue(payload[key]) == want {
+			return event.ID
+		}
+		if metadata, ok := payload["metadata"].(map[string]any); ok && stringMetadataValue(metadata[key]) == want {
+			return event.ID
+		}
+	}
+	return 0
 }
 
 func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {

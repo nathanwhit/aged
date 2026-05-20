@@ -2783,19 +2783,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 
 	results := []WorkerTurnResult{}
 	var ok bool
+	followUpParentNodeID := ""
 	if len(plan.Workers) > 0 {
 		results, ok, err = s.runInitialWorkerGraph(ctx, task, plan)
-		if err != nil {
-			if s.waitForRecoverableError(ctx, task.ID, "", err) {
-				return
-			}
-			_ = s.failTask(ctx, task.ID, err)
-			return
-		}
-		if !ok {
-			return
-		}
-		results, ok, err = s.runFollowUpWorkers(ctx, task, plan, results, "")
 		if err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, "", err) {
 				return
@@ -2829,20 +2819,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		if !s.finishOrContinueTask(ctx, task.ID, result) {
 			return
 		}
-
-		results, ok, err = s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
-		if err != nil {
-			if s.waitForRecoverableError(ctx, task.ID, "", err) {
-				return
-			}
-			_ = s.failTask(ctx, task.ID, err)
-			return
-		}
-		if !ok {
-			return
-		}
+		followUpParentNodeID = result.NodeID
 	}
-	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, plan, results, followUpParentNodeID); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
 		}
@@ -3008,7 +2987,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		if !ok {
 			return
 		}
-		if ok, updatedResults, err := s.runPlanActions(ctx, task, *decision.Plan, nextResults); err != nil {
+		if ok, updatedResults, err := s.runDeferredPlanWork(ctx, task, *decision.Plan, nextResults, waiting.NodeID); err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, waiting.WorkerID, err) {
 				return
 			}
@@ -3099,7 +3078,7 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	if !ok {
 		return
 	}
-	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, plan, results, ""); err != nil {
 		if s.waitForRecoverableError(ctx, taskID, "", err) {
 			return
 		}
@@ -3152,7 +3131,7 @@ func (s *Service) resumeLegacyPullRequestFollowUpPlanning(ctx context.Context, t
 	if !ok {
 		return
 	}
-	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, plan, results, ""); err != nil {
 		if s.waitForRecoverableError(ctx, taskID, "", err) {
 			return
 		}
@@ -3306,7 +3285,7 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	if !ok {
 		return
 	}
-	if ok, nextResults, err := s.runPlanActions(ctx, task, plan, results); err != nil {
+	if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, plan, results, ""); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
 			return
 		}
@@ -3326,13 +3305,14 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 
 func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Plan, priorResults []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
 	results := append([]WorkerTurnResult{}, priorResults...)
+	_ = parentNodeID
 	if len(plan.Workers) > 0 {
 		graphResults, ok, err := s.runInitialWorkerGraph(ctx, task, plan)
 		results = append(results, graphResults...)
 		if err != nil || !ok {
 			return results, ok, err
 		}
-		return s.runFollowUpWorkers(ctx, task, plan, results, parentNodeID)
+		return results, true, nil
 	}
 	result, err := s.runPlannedWorker(ctx, task, plan)
 	if err != nil {
@@ -3346,7 +3326,7 @@ func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Pla
 	if !s.finishOrContinueTask(ctx, task.ID, result) {
 		return results, false, nil
 	}
-	return s.runFollowUpWorkers(ctx, task, plan, results, result.NodeID)
+	return results, true, nil
 }
 
 func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) {
@@ -5454,6 +5434,85 @@ func (s *Service) runPlanActions(ctx context.Context, task core.Task, plan Plan,
 	return true, results, nil
 }
 
+func (s *Service) runDeferredPlanWork(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult, parentNodeID string) (bool, []WorkerTurnResult, error) {
+	earlyActions, remainingActions := splitPreFollowUpActions(plan.Actions, results)
+	if len(earlyActions) == 0 {
+		nextResults, ok, err := s.runFollowUpWorkers(ctx, task, plan, results, parentNodeID)
+		if err != nil || !ok {
+			return ok, nextResults, err
+		}
+		return s.runPlanActions(ctx, task, plan, nextResults)
+	}
+	beforePRs, err := s.taskPullRequestCount(ctx, task.ID)
+	if err != nil {
+		return false, results, err
+	}
+	ok, nextResults, err := s.runPlanActions(ctx, task, planWithActions(plan, earlyActions), results)
+	if err != nil || !ok {
+		return ok, nextResults, err
+	}
+	if containsPublishPullRequestAction(earlyActions) {
+		afterPRs, err := s.taskPullRequestCount(ctx, task.ID)
+		if err != nil {
+			return false, nextResults, err
+		}
+		if afterPRs <= beforePRs {
+			return true, nextResults, nil
+		}
+	}
+	nextResults, ok, err = s.runFollowUpWorkers(ctx, task, plan, nextResults, parentNodeID)
+	if err != nil || !ok {
+		return ok, nextResults, err
+	}
+	return s.runPlanActions(ctx, task, planWithActions(plan, remainingActions), nextResults)
+}
+
+func splitPreFollowUpActions(actions []PlanAction, results []WorkerTurnResult) ([]PlanAction, []PlanAction) {
+	early := []PlanAction{}
+	remaining := []PlanAction{}
+	for _, action := range actions {
+		if strings.TrimSpace(action.When) == "immediate" {
+			continue
+		}
+		if strings.TrimSpace(action.WorkerID) != "" {
+			if _, ok := workerResultByReference(results, action.WorkerID); ok {
+				early = append(early, action)
+				continue
+			}
+		}
+		remaining = append(remaining, action)
+	}
+	return early, remaining
+}
+
+func planWithActions(plan Plan, actions []PlanAction) Plan {
+	plan.Actions = actions
+	return plan
+}
+
+func containsPublishPullRequestAction(actions []PlanAction) bool {
+	for _, action := range actions {
+		if strings.TrimSpace(action.Kind) == "publish_pull_request" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) taskPullRequestCount(ctx context.Context, taskID string) (int, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID == taskID {
+			count++
+		}
+	}
+	return count, nil
+}
+
 type followUpPublicationBlocker struct {
 	WorkerID string
 	SpawnID  string
@@ -6709,21 +6768,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				reason := nonEmpty(latest.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
 				return true, latest.WorkerID, reason, results
 			}
-			results, ok, err = s.runFollowUpWorkers(ctx, task, next, results, latest.NodeID)
-			if err != nil {
-				if ctx.Err() != nil {
-					return false, "", "", results
-				}
-				if s.waitForRecoverableError(ctx, task.ID, latest.WorkerID, err) {
-					return false, "", "", results
-				}
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			}
-			if !ok {
-				return false, "", "", results
-			}
-			if ok, nextResults, err := s.runPlanActions(ctx, task, next, results); err != nil {
+			if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, next, results, latest.NodeID); err != nil {
 				if ctx.Err() != nil {
 					return false, "", "", results
 				}
