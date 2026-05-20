@@ -18,22 +18,23 @@ import (
 )
 
 type PullRequestPublishSpec struct {
-	TaskID        string
-	WorkerID      string
-	WorkDir       string
-	Repo          string
-	Base          string
-	Branch        string
-	HeadRepoOwner string
-	PushRemote    string
-	BranchPrefix  string
-	Title         string
-	Body          string
-	Draft         bool
-	Patch         string
-	PatchFromBase bool
-	ResetWorkDir  bool
-	Metadata      map[string]any
+	TaskID         string
+	WorkerID       string
+	WorkDir        string
+	Repo           string
+	Base           string
+	Branch         string
+	HeadRepoOwner  string
+	PushRemote     string
+	BranchPrefix   string
+	Title          string
+	Body           string
+	Draft          bool
+	Patch          string
+	PatchFromBase  bool
+	ResetWorkDir   bool
+	ForceWithLease bool
+	Metadata       map[string]any
 }
 
 type PullRequestMergeSpec struct {
@@ -335,7 +336,7 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 		if remote == "" {
 			remote = "origin"
 		}
-		if err := pushGitPublishBranch(ctx, exec, dir, branch, remote); err != nil {
+		if err := pushGitPublishBranch(ctx, exec, dir, branch, remote, spec.ForceWithLease); err != nil {
 			return err
 		}
 		if spec.ResetWorkDir {
@@ -383,7 +384,7 @@ func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec 
 	if remote == "" {
 		remote = "origin"
 	}
-	if err := pushGitPublishBranch(ctx, exec, worktree, branch, remote); err != nil {
+	if err := pushGitPublishBranch(ctx, exec, worktree, branch, remote, spec.ForceWithLease); err != nil {
 		return err
 	}
 	return nil
@@ -396,20 +397,64 @@ func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec 
 // worktree ...". In that case the local ref is left alone and the remote
 // branch is force-updated directly via a refspec push, which does not require
 // the local branch to be free.
-func pushGitPublishBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string) error {
+func pushGitPublishBranch(ctx context.Context, exec commandExecutor, dir string, branch string, remote string, forceWithLease bool) error {
+	leaseArg := ""
+	if forceWithLease {
+		var err error
+		leaseArg, err = gitForceWithLeaseArg(ctx, exec, dir, remote, branch)
+		if err != nil {
+			return fmt.Errorf("prepare git branch lease: %w", err)
+		}
+	}
 	if _, err := exec(ctx, dir, "git", "branch", "-f", branch, "HEAD"); err != nil {
 		if !isBranchInUseByWorktreeError(err) {
 			return fmt.Errorf("create git branch: %w", err)
 		}
-		if _, pushErr := exec(ctx, dir, "git", "push", "--force", remote, "HEAD:refs/heads/"+branch); pushErr != nil {
+		args := []string{"push"}
+		if forceWithLease {
+			args = append(args, leaseArg)
+		} else {
+			args = append(args, "--force")
+		}
+		args = append(args, remote, "HEAD:refs/heads/"+branch)
+		if _, pushErr := exec(ctx, dir, "git", args...); pushErr != nil {
 			return fmt.Errorf("push git branch: %w", pushErr)
 		}
 		return nil
 	}
-	if _, err := exec(ctx, dir, "git", "push", "-u", remote, branch); err != nil {
+	args := []string{"push", "-u"}
+	if forceWithLease {
+		args = append(args, leaseArg)
+	}
+	args = append(args, remote, branch)
+	if _, err := exec(ctx, dir, "git", args...); err != nil {
 		return fmt.Errorf("push git branch: %w", err)
 	}
 	return nil
+}
+
+func gitForceWithLeaseArg(ctx context.Context, exec commandExecutor, dir string, remote string, branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return "", errors.New("branch is required")
+	}
+	out, err := exec(ctx, dir, "git", "ls-remote", "--heads", remote, branch)
+	if err != nil {
+		return "", fmt.Errorf("read remote branch head: %w", err)
+	}
+	oid := ""
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[1] != "refs/heads/"+branch {
+			continue
+		}
+		oid = fields[0]
+		break
+	}
+	if oid == "" {
+		return "", fmt.Errorf("remote branch %q not found on %s", branch, remote)
+	}
+	return "--force-with-lease=refs/heads/" + branch + ":" + oid, nil
 }
 
 func isBranchInUseByWorktreeError(err error) bool {
