@@ -9197,6 +9197,72 @@ func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
 	}
 }
 
+func TestServiceReplansInitialWorkerGraphAfterErroredDeferredSuccess(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	secondStarted := make(chan string, 1)
+	secondRelease := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			Rationale: "initial worker graph has a dependency",
+			Workers: []WorkerRequest{
+				{
+					ID:         "baseline",
+					Role:       "baseline collector",
+					Reason:     "Collect the baseline.",
+					WorkerKind: "first",
+					Prompt:     "Collect baseline.",
+				},
+				{
+					ID:         "implement",
+					Role:       "implementer",
+					Reason:     "Implement after the baseline.",
+					WorkerKind: "second",
+					Prompt:     "Implement after baseline.",
+					DependsOn:  []string{"baseline"},
+				},
+			},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "wait",
+			Rationale: "baseline worker did not finish",
+			Message:   "retry baseline collection",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"first": eventRunner{kind: "first", events: []worker.Event{
+			{Kind: worker.EventError, Text: "tool use failed while checking build progress"},
+			{Kind: worker.EventResult, Text: "Waiting for the cargo build to finish; harness will re-invoke when it completes."},
+		}},
+		"second": &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "implemented"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent initial graph",
+		Prompt: "Collect baseline, then implement.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-secondStarted:
+		close(secondRelease)
+		t.Fatal("dependent initial worker started after failed dependency")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 1 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	result := brain.states[0].Results[0]
+	if result.Status != core.WorkerFailed || !strings.Contains(result.Summary, "Waiting for the cargo build") || !strings.Contains(result.Error, "tool use failed") {
+		t.Fatalf("dependency result = %+v, want failed deferred-success result", result)
+	}
+}
+
 func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -9266,6 +9332,72 @@ func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if !strings.Contains(second.promptValue(), "review summary") {
 		t.Fatalf("dependent prompt missing dependency summary:\n%s", second.promptValue())
+	}
+}
+
+func TestServiceReplansFollowUpGraphAfterFailedDependency(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	secondStarted := make(chan string, 1)
+	secondRelease := make(chan struct{})
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the first bounded slice",
+			Spawns: []SpawnRequest{
+				{
+					ID:         "review",
+					Role:       "reviewer",
+					Reason:     "Review the implementation.",
+					WorkerKind: "first",
+				},
+				{
+					ID:         "repair",
+					Role:       "repairer",
+					Reason:     "Repair review findings.",
+					WorkerKind: "second",
+					DependsOn:  []string{"review"},
+				},
+			},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "wait",
+			Rationale: "review worker failed",
+			Message:   "retry review",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"first": eventThenFailRunner{
+			kind: "first",
+			err:  errors.New("review command failed"),
+		},
+		"second": &blockingEventRunner{kind: "second", started: secondStarted, release: secondRelease, summary: "repaired"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Dependent follow-up graph",
+		Prompt: "Implement, review, then repair.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-secondStarted:
+		close(secondRelease)
+		t.Fatal("dependent follow-up worker started after failed dependency")
+	case <-time.After(100 * time.Millisecond):
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	failed := brain.states[0].Results[1]
+	if failed.Status != core.WorkerFailed || !strings.Contains(failed.Error, "review command failed") {
+		t.Fatalf("follow-up dependency result = %+v", failed)
 	}
 }
 
@@ -10283,6 +10415,133 @@ func TestRetryWorkerExecutionPromptDeduplicatesSteering(t *testing.T) {
 	}, "")
 	if got := strings.Count(prompt, "You need to use release-lite builds of deno. Debug is not accurate"); got != 1 {
 		t.Fatalf("steering occurrence count = %d, want 1:\n%s", got, prompt)
+	}
+}
+
+func TestRetryPlanForTaskNarrowsInitialWorkerGraphToCanceledWorker(t *testing.T) {
+	taskID := "task-1"
+	initial := Plan{
+		Rationale: "run a broad graph",
+		Workers: []WorkerRequest{
+			{
+				ID:         "scout",
+				Role:       "scout",
+				Reason:     "Find options.",
+				WorkerKind: "claude",
+				Prompt:     "Scout options.",
+			},
+			{
+				ID:         "implement",
+				Role:       "implementer",
+				Reason:     "Implement selected option.",
+				WorkerKind: "codex",
+				Prompt:     "Implement.",
+			},
+			{
+				ID:         "validate",
+				Role:       "validator",
+				Reason:     "Validate implementation.",
+				WorkerKind: "claude",
+				Prompt:     "Validate.",
+				DependsOn:  []string{"implement"},
+			},
+		},
+		Actions: []PlanAction{{
+			Kind:     "publish_pull_request",
+			When:     "after_success",
+			WorkerID: "validate",
+		}},
+	}
+	snapshot := core.Snapshot{
+		ExecutionNodes: []core.ExecutionNode{{
+			ID:         "node-validate",
+			TaskID:     taskID,
+			WorkerID:   "worker-validate",
+			WorkerKind: "claude",
+			Status:     core.WorkerCanceled,
+			SpawnID:    "validate",
+			Role:       "validator",
+		}},
+		Events: []core.Event{{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(initial),
+		}, {
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: "worker-implement",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+				"metadata": map[string]any{
+					"spawnID":   "implement",
+					"spawnRole": "implementer",
+				},
+			}),
+		}, {
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "worker-implement",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "implemented candidate",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+				},
+			}),
+		}, {
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: "worker-validate",
+			Payload: core.MustJSON(map[string]any{
+				"workerId":   "worker-validate",
+				"workerKind": "claude",
+				"nodeId":     "node-validate",
+				"spawnId":    "validate",
+				"role":       "validator",
+			}),
+		}, {
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "worker-validate",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.WorkerCanceled,
+			}),
+		}},
+	}
+
+	retry, err := retryPlanForTask(snapshot, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retry.Workers) != 0 {
+		t.Fatalf("retry workers = %+v, want direct single-worker retry", retry.Workers)
+	}
+	if retry.WorkerKind != "claude" || retry.Prompt == "Scout options." || !strings.Contains(retry.Prompt, "Validate.") {
+		t.Fatalf("retry plan = %+v", retry)
+	}
+	if !strings.Contains(retry.Prompt, "implemented candidate") {
+		t.Fatalf("retry prompt missing dependency result:\n%s", retry.Prompt)
+	}
+	if got := stringMetadata(retry.Metadata, "retryFromWorkerID"); got != "worker-validate" {
+		t.Fatalf("retryFromWorkerID = %q, want worker-validate; metadata = %+v", got, retry.Metadata)
+	}
+	if got := stringMetadata(retry.Metadata, "spawnID"); got != "validate" {
+		t.Fatalf("spawnID = %q, want validate; metadata = %+v", got, retry.Metadata)
+	}
+	if len(retry.Actions) != 1 || retry.Actions[0].WorkerID != "validate" {
+		t.Fatalf("retry actions = %+v", retry.Actions)
+	}
+}
+
+func TestWorkerRunStateFailsEmptyRetainedRetrySuccess(t *testing.T) {
+	state := &workerRunState{}
+	state.observe(worker.Event{Kind: worker.EventLog, Text: "did some work but produced no final answer"})
+	status, err := state.normalizeCompletionStatus(Plan{
+		Metadata: map[string]any{"retryFromWorkerID": "worker-old"},
+	}, core.WorkerSucceeded, nil, WorkspaceChanges{})
+	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "without a final summary") {
+		t.Fatalf("status = %q err = %v, want failed empty retry success", status, err)
 	}
 }
 
