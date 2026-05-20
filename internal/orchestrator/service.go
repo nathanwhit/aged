@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -3881,10 +3882,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	if err != nil {
 		return WorkerTurnResult{}, err
 	}
-	remoteWorkDir, err := resolveRemoteCheckout(project, target)
+	remoteSourceDir, err := resolveRemoteCheckout(project, target)
 	if err != nil {
 		return WorkerTurnResult{}, fmt.Errorf("prepare remote checkout: %w", err)
 	}
+	remoteWorkDir := remoteSourceDir
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
 	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
@@ -3931,7 +3933,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		checkoutLog, err := s.sshRunner.PrepareCheckout(ctx, target, RemoteCheckoutSpec{
 			RepoURL:     projectCloneURL(project),
-			WorkDir:     remoteWorkDir,
+			WorkDir:     remoteSourceDir,
 			DefaultBase: checkoutBase,
 			BaseRef:     checkoutBaseRef,
 		})
@@ -3940,6 +3942,16 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		if checkoutLog != "" {
 			plan.Metadata["remoteCheckout"] = checkoutLog
+		}
+		remoteWorkDir = path.Join(remoteRun.RunDir, "repo")
+		worktreeLog, err := s.sshRunner.PrepareWorktree(ctx, target, remoteSourceDir, remoteWorkDir)
+		if err != nil {
+			return WorkerTurnResult{}, fmt.Errorf("prepare remote worktree: %w: %s", err, worktreeLog)
+		}
+		remoteRun.WorkDir = remoteWorkDir
+		plan.Metadata["remoteSourceDir"] = remoteSourceDir
+		if worktreeLog != "" {
+			plan.Metadata["remoteWorktree"] = worktreeLog
 		}
 		if baseWorkerID != "" {
 			patch, baseChanges, err := s.workerHandoffPatch(ctx, baseWorkerID)
@@ -3969,7 +3981,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	workspace := PreparedWorkspace{
 		Root:       remoteWorkDir,
 		CWD:        remoteWorkDir,
-		SourceRoot: remoteWorkDir,
+		SourceRoot: remoteSourceDir,
 		Mode:       "remote",
 		VCSType:    "ssh",
 		WorkerID:   workerID,
@@ -4006,7 +4018,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	command := runner.BuildCommand(spec)
 	workspace.Root = remoteRun.RunDir
 	workspace.CWD = remoteRun.WorkDir
-	workspace.SourceRoot = remoteRun.WorkDir
+	workspace.SourceRoot = remoteSourceDir
 	workspace.WorkspaceName = remoteRun.Session
 	plan.Metadata["remoteSession"] = remoteRun.Session
 	plan.Metadata["remoteRunDir"] = remoteRun.RunDir
