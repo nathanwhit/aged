@@ -1254,20 +1254,21 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 		Type:   core.EventPRFollowUp,
 		TaskID: pr.TaskID,
 		Payload: core.MustJSON(map[string]any{
-			"id":           pr.ID,
-			"attempt":      attempt,
-			"reason":       "pull_request_needs_work",
-			"status":       "queued",
-			"repo":         pr.Repo,
-			"number":       pr.Number,
-			"url":          pr.URL,
-			"branch":       pr.Branch,
-			"base":         pr.Base,
-			"state":        pr.State,
-			"checksStatus": pr.ChecksStatus,
-			"mergeStatus":  pr.MergeStatus,
-			"reviewStatus": pr.ReviewStatus,
-			"prompt":       prompt,
+			"id":                pr.ID,
+			"attempt":           attempt,
+			"reason":            "pull_request_needs_work",
+			"status":            "queued",
+			"repo":              pr.Repo,
+			"number":            pr.Number,
+			"url":               pr.URL,
+			"branch":            pr.Branch,
+			"base":              pr.Base,
+			"state":             pr.State,
+			"checksStatus":      pr.ChecksStatus,
+			"mergeStatus":       pr.MergeStatus,
+			"reviewStatus":      pr.ReviewStatus,
+			"feedbackSignature": pullRequestFeedbackSignature(pr.Metadata),
+			"prompt":            prompt,
 		}),
 	}); err != nil {
 		return err
@@ -1704,24 +1705,26 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 		}
 	}
 	var items []PullRequestFeedbackItem
+	itemByPullRequest := map[string]int{}
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID || event.Type != core.EventPRFollowUp || event.ID <= latestPlanned {
 			continue
 		}
 		var payload struct {
-			ID           string `json:"id"`
-			Attempt      int    `json:"attempt"`
-			Reason       string `json:"reason"`
-			Repo         string `json:"repo"`
-			Number       int    `json:"number"`
-			URL          string `json:"url"`
-			Branch       string `json:"branch"`
-			Base         string `json:"base"`
-			State        string `json:"state"`
-			ChecksStatus string `json:"checksStatus"`
-			MergeStatus  string `json:"mergeStatus"`
-			ReviewStatus string `json:"reviewStatus"`
-			Prompt       string `json:"prompt"`
+			ID                string `json:"id"`
+			Attempt           int    `json:"attempt"`
+			Reason            string `json:"reason"`
+			Repo              string `json:"repo"`
+			Number            int    `json:"number"`
+			URL               string `json:"url"`
+			Branch            string `json:"branch"`
+			Base              string `json:"base"`
+			State             string `json:"state"`
+			ChecksStatus      string `json:"checksStatus"`
+			MergeStatus       string `json:"mergeStatus"`
+			ReviewStatus      string `json:"reviewStatus"`
+			FeedbackSignature string `json:"feedbackSignature"`
+			Prompt            string `json:"prompt"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
 			continue
@@ -1740,29 +1743,62 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 				payload.Prompt = pullRequestFollowUpPrompt(pr)
 			}
 		}
-		items = append(items, PullRequestFeedbackItem{
-			EventID:       event.ID,
-			PullRequestID: payload.ID,
-			Attempt:       payload.Attempt,
-			Reason:        payload.Reason,
-			Repo:          payload.Repo,
-			Number:        payload.Number,
-			URL:           payload.URL,
-			Branch:        payload.Branch,
-			Base:          payload.Base,
-			State:         payload.State,
-			ChecksStatus:  payload.ChecksStatus,
-			MergeStatus:   payload.MergeStatus,
-			ReviewStatus:  payload.ReviewStatus,
-			Prompt:        payload.Prompt,
-		})
+		item := PullRequestFeedbackItem{
+			EventID:           event.ID,
+			PullRequestID:     payload.ID,
+			Attempt:           payload.Attempt,
+			Reason:            payload.Reason,
+			Repo:              payload.Repo,
+			Number:            payload.Number,
+			URL:               payload.URL,
+			Branch:            payload.Branch,
+			Base:              payload.Base,
+			State:             payload.State,
+			ChecksStatus:      payload.ChecksStatus,
+			MergeStatus:       payload.MergeStatus,
+			ReviewStatus:      payload.ReviewStatus,
+			FeedbackSignature: payload.FeedbackSignature,
+			Prompt:            payload.Prompt,
+		}
+		if index, ok := itemByPullRequest[item.PullRequestID]; ok {
+			items[index] = item
+			continue
+		}
+		itemByPullRequest[item.PullRequestID] = len(items)
+		items = append(items, item)
 	}
 	return items
 }
 
 func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, prID string) bool {
-	for _, item := range pendingPullRequestFeedback(snapshot, taskID) {
-		if item.PullRequestID == prID {
+	var current core.PullRequest
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == prID {
+			current = pr
+			break
+		}
+	}
+	currentSignature := pullRequestFeedbackSignature(current.Metadata)
+	hasUntriggeredFeedback := currentSignature != "" && pullRequestHasUntriggeredFeedback(current)
+	latestPlanned := int64(0)
+	for _, event := range snapshot.Events {
+		if event.TaskID == taskID && event.Type == core.EventTaskPlanned && event.ID > latestPlanned {
+			latestPlanned = event.ID
+		}
+	}
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp || event.ID <= latestPlanned {
+			continue
+		}
+		var payload struct {
+			ID                string `json:"id"`
+			FeedbackSignature string `json:"feedbackSignature"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.ID != prID {
+			continue
+		}
+		signature := strings.TrimSpace(payload.FeedbackSignature)
+		if currentSignature == "" || signature == currentSignature || (signature == "" && !hasUntriggeredFeedback) {
 			return true
 		}
 	}

@@ -420,6 +420,59 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	}
 }
 
+func TestServiceDefaultPullRequestMonitorQueuesNewFeedbackWhenOldFollowUpPending(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "COMMENTED", core.MustJSON(map[string]any{
+		"latestPullRequestFeedbackSignature":          "2026-05-20T18:57:36Z:review_thread:PRRC_2",
+		"latestPullRequestFeedbackTriggeredSignature": "2026-05-20T18:25:57Z:conversation:IC_1",
+		"latestPullRequestFeedbackBody":               "Please add focused tests.",
+	}))}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskPlanned,
+		TaskID: "task-1",
+		Payload: core.MustJSON(Plan{
+			WorkerKind: "mock",
+			Prompt:     "repair pending checks",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"status":  "queued",
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEventCount(t, store, core.EventPRFollowUp, "task-1", 2)
+	followUp := latestPullRequestFollowUpPayload(t, snapshot, "task-1")
+	if followUp.FeedbackSignature != "2026-05-20T18:57:36Z:review_thread:PRRC_2" {
+		t.Fatalf("follow-up feedback signature = %q", followUp.FeedbackSignature)
+	}
+	if followUp.Attempt != 2 {
+		t.Fatalf("follow-up attempt = %d, want 2", followUp.Attempt)
+	}
+	pending := pendingPullRequestFeedback(snapshot, "task-1")
+	if len(pending) != 1 || pending[0].FeedbackSignature != followUp.FeedbackSignature {
+		t.Fatalf("pending feedback = %+v, want only latest signature", pending)
+	}
+}
+
 func TestServicePullRequestFeedbackQueueResumesWaitingTaskWithPendingState(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -690,13 +743,14 @@ func appendTrackedPullRequestWithRepo(t *testing.T, ctx context.Context, store *
 }
 
 type testPullRequestFollowUpPayload struct {
-	ID           string `json:"id"`
-	Attempt      int    `json:"attempt"`
-	Status       string `json:"status"`
-	Prompt       string `json:"prompt"`
-	ChecksStatus string `json:"checksStatus"`
-	MergeStatus  string `json:"mergeStatus"`
-	ReviewStatus string `json:"reviewStatus"`
+	ID                string `json:"id"`
+	Attempt           int    `json:"attempt"`
+	Status            string `json:"status"`
+	Prompt            string `json:"prompt"`
+	ChecksStatus      string `json:"checksStatus"`
+	MergeStatus       string `json:"mergeStatus"`
+	ReviewStatus      string `json:"reviewStatus"`
+	FeedbackSignature string `json:"feedbackSignature"`
 }
 
 func latestPullRequestFollowUpPayload(t *testing.T, snapshot core.Snapshot, taskID string) testPullRequestFollowUpPayload {
