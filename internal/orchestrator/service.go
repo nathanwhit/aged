@@ -4947,22 +4947,45 @@ func buildCodeReviewGatePrompt(task core.Task, candidate WorkerTurnResult, polic
 }
 
 func codeReviewBlocksPublication(result WorkerTurnResult, policy core.ReviewPolicy) bool {
-	text := strings.ToLower(strings.Join([]string{result.Summary, result.Error}, "\n"))
-	normalized := strings.Join(strings.Fields(text), " ")
+	text := strings.Join([]string{result.Summary, result.Error}, "\n")
+	normalized := strings.Join(strings.Fields(strings.ToLower(text)), " ")
 	if normalized == "" {
 		return false
 	}
-	if strings.Contains(normalized, "decision: request_changes") ||
-		strings.Contains(normalized, "decision: request changes") ||
-		strings.Contains(normalized, "changes requested") ||
+	if decision, ok := codeReviewDecision(text); ok {
+		return decision == "request_changes"
+	}
+	if strings.Contains(normalized, "changes requested") ||
 		strings.Contains(normalized, "request changes") {
 		return true
 	}
-	if strings.Contains(normalized, "decision: approve") &&
-		!containsBlockingSeverity(normalized, policy.BlockingSeverities) {
-		return false
-	}
 	return containsBlockingSeverity(normalized, policy.BlockingSeverities)
+}
+
+func codeReviewDecision(text string) (string, bool) {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if !strings.HasPrefix(lower, "decision:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(lower, "decision:"))
+		value = strings.Trim(value, "`*_ ")
+		value = strings.ReplaceAll(value, "-", "_")
+		value = strings.Join(strings.Fields(value), " ")
+		switch value {
+		case "approve", "approved":
+			return "approve", true
+		case "request_changes", "request changes", "changes requested":
+			return "request_changes", true
+		default:
+			return "", false
+		}
+	}
+	return "", false
 }
 
 func containsBlockingSeverity(text string, severities []string) bool {
