@@ -355,6 +355,81 @@ func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t 
 	}
 }
 
+func TestUpdateGitPullRequestUsesForceWithLeaseForDivergedBranch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "origin", remote)
+	runTestGit(t, repo, "push", "-u", "origin", "main")
+
+	runTestGit(t, repo, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("original pr\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "feature.txt")
+	runTestGit(t, repo, "commit", "-m", "original pr")
+	runTestGit(t, repo, "push", "-u", "origin", "feature")
+	runTestGit(t, repo, "checkout", "--detach", "main")
+
+	updater := filepath.Join(t.TempDir(), "updater")
+	runTestGit(t, t.TempDir(), "clone", remote, updater)
+	runTestGit(t, updater, "config", "user.name", "aged-test")
+	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, updater, "config", "commit.gpgsign", "false")
+	runTestGit(t, updater, "checkout", "feature")
+	if err := os.WriteFile(filepath.Join(updater, "feature.txt"), []byte("remote review change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, updater, "commit", "-am", "remote review change")
+	remoteFeature := strings.TrimSpace(runTestGit(t, updater, "rev-parse", "HEAD"))
+	runTestGit(t, updater, "push", "origin", "feature")
+
+	if err := os.WriteFile(filepath.Join(repo, "tests.txt"), []byte("worker follow-up\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stub := newPullRequestCommandStub(t, "owner/repo", 13, "Fix", "feature", "main")
+	stub.before = func(ctx context.Context, dir string, name string, args ...string) (string, bool, error) {
+		if name == "git" && len(args) > 0 && args[0] == "push" {
+			out, err := runCommand(ctx, dir, name, args...)
+			return out, true, err
+		}
+		return "", false, nil
+	}
+
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Update(ctx, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 13,
+		URL:    "https://github.com/owner/repo/pull/13",
+		Branch: "feature",
+		Base:   "main",
+		State:  "OPEN",
+	}, PullRequestPublishSpec{
+		TaskID:         "task-1",
+		WorkDir:        repo,
+		Repo:           "owner/repo",
+		Base:           "main",
+		Branch:         "feature",
+		ForceWithLease: true,
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	assertCommandContains(t, stub.calls, []string{"git", "ls-remote", "--heads", "origin", "feature"})
+	assertCommandContains(t, stub.calls, []string{"git", "push", "-u", "--force-with-lease=refs/heads/feature:" + remoteFeature, "origin", "feature"})
+	remoteHead := strings.TrimSpace(runTestGit(t, remote, "rev-parse", "refs/heads/feature"))
+	localFeature := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "feature"))
+	if remoteHead != localFeature {
+		t.Fatalf("remote feature = %q, local feature = %q", remoteHead, localFeature)
+	}
+	if contents := runTestGit(t, remote, "show", "refs/heads/feature:tests.txt"); contents != "worker follow-up\n" {
+		t.Fatalf("updated branch missing worker change: %q", contents)
+	}
+}
+
 func TestIsBranchInUseByWorktreeErrorMatchesGitMessage(t *testing.T) {
 	if !isBranchInUseByWorktreeError(errors.New("fatal: cannot force update the branch 'feature' used by worktree at '/tmp/wt'")) {
 		t.Fatal("expected branch-in-use error to be recognized")
