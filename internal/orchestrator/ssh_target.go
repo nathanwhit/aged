@@ -485,6 +485,23 @@ func (r SSHRunner) PrepareCheckout(ctx context.Context, target TargetConfig, spe
 	return strings.TrimSpace(out), nil
 }
 
+func (r SSHRunner) PrepareWorktree(ctx context.Context, target TargetConfig, sourceDir string, worktreeDir string) (string, error) {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	if strings.TrimSpace(sourceDir) == "" {
+		return "", errors.New("remote sourceDir is required")
+	}
+	if strings.TrimSpace(worktreeDir) == "" {
+		return "", errors.New("remote worktreeDir is required")
+	}
+	out, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", remotePrepareWorktreeScript(sourceDir, worktreeDir)))
+	if err != nil {
+		return strings.TrimSpace(out), err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (r SSHRunner) ApplyPatch(ctx context.Context, target TargetConfig, workDir string, runDir string, patchText string) error {
 	patchText = normalizePatchText(patchText)
 	if patchText == "" {
@@ -1091,10 +1108,11 @@ if [ -d "$work_dir/.git" ]; then
     stash_ref=$(git rev-parse --short stash@{0} 2>/dev/null || true)
     echo "stashed dirty remote checkout ${stash_ref:-stash@{0}}: $stash_message"
   fi
-  if [ -n "$repo_url" ] && ! git remote get-url origin >/dev/null 2>&1; then
-    git remote add origin "$repo_url"
+  fetch_remote=origin
+  if git remote get-url upstream >/dev/null 2>&1; then
+    fetch_remote=upstream
   fi
-  git fetch origin --prune
+  git fetch "$fetch_remote" --prune
 elif [ -d "$work_dir/.jj" ] && [ ! -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(jj diff --stat)" ]; then
@@ -1111,21 +1129,38 @@ else
   mkdir -p "$(dirname "$work_dir")"
   git clone "$repo_url" "$work_dir"
   cd "$work_dir"
-  git fetch origin --prune
+  fetch_remote=origin
+  git fetch "$fetch_remote" --prune
 fi
 if [ -n "$base" ]; then
-  if git rev-parse --verify --quiet "origin/$base" >/dev/null; then
-    git checkout --detach "origin/$base"
+  if git rev-parse --verify --quiet "$fetch_remote/$base" >/dev/null; then
+    git checkout --detach "$fetch_remote/$base"
   elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
     git checkout --detach "$base_ref"
   else
     git checkout "$base"
-    git pull --ff-only
   fi
 elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
   git checkout --detach "$base_ref"
 fi
 echo "prepared git checkout $work_dir"`, shellQuote(spec.WorkDir), shellQuote(spec.RepoURL), shellQuote(spec.DefaultBase), shellQuote(spec.BaseRef))
+}
+
+func remotePrepareWorktreeScript(sourceDir string, worktreeDir string) string {
+	return fmt.Sprintf(`set -eu
+source_dir=%[1]s
+worktree_dir=%[2]s
+if [ ! -d "$source_dir/.git" ]; then
+  echo "remote source checkout is not a git checkout: $source_dir"
+  exit 22
+fi
+mkdir -p "$(dirname "$worktree_dir")"
+if [ -e "$worktree_dir" ]; then
+  git -C "$source_dir" worktree remove --force "$worktree_dir" >/dev/null 2>&1 || rm -rf "$worktree_dir"
+fi
+git -C "$source_dir" worktree prune
+git -C "$source_dir" worktree add --detach "$worktree_dir" HEAD
+echo "prepared git worktree $worktree_dir from $source_dir"`, shellQuote(sourceDir), shellQuote(worktreeDir))
 }
 
 func remoteApplyPatchScript(workDir string, patchPath string) string {
