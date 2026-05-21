@@ -2847,6 +2847,9 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		if !ok {
 			return
 		}
+		if s.handleWorkerSetFailureWithReplan(ctx, task, plan, results, results) {
+			return
+		}
 	} else {
 		result, err := s.runPlannedWorker(ctx, task, plan)
 		if err != nil {
@@ -2902,7 +2905,7 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 	if len(results) == 0 {
 		return false
 	}
-	failure := results[len(results)-1]
+	failure := latestWorkerResultWithStatus(results, core.WorkerFailed)
 	if failure.Status != core.WorkerFailed {
 		return false
 	}
@@ -2959,6 +2962,17 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 	})
 	_ = s.completeTask(ctx, task.ID, results, selectedWorkerID, reason)
 	return true
+}
+
+func (s *Service) handleWorkerSetFailureWithReplan(ctx context.Context, task core.Task, plan Plan, failedResults []WorkerTurnResult, allResults []WorkerTurnResult) bool {
+	failure := latestWorkerResultWithStatus(failedResults, core.WorkerFailed)
+	if failure.Status != core.WorkerFailed {
+		return false
+	}
+	if s.recoverWorkerFailureWithReplan(ctx, task, plan, allResults, nil) {
+		return true
+	}
+	return !s.finishOrContinueTask(ctx, task.ID, failure)
 }
 
 func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, waiting WorkerTurnResult) {
@@ -3367,6 +3381,9 @@ func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Pla
 		results = append(results, graphResults...)
 		if err != nil || !ok {
 			return results, ok, err
+		}
+		if s.handleWorkerSetFailureWithReplan(ctx, task, plan, graphResults, results) {
+			return results, false, nil
 		}
 		return results, true, nil
 	}
@@ -8782,6 +8799,15 @@ func latestWorkerResult(results []WorkerTurnResult) WorkerTurnResult {
 		return WorkerTurnResult{}
 	}
 	return results[len(results)-1]
+}
+
+func latestWorkerResultWithStatus(results []WorkerTurnResult, status core.WorkerStatus) WorkerTurnResult {
+	for i := len(results) - 1; i >= 0; i-- {
+		if results[i].Status == status {
+			return results[i]
+		}
+	}
+	return WorkerTurnResult{}
 }
 
 func firstWorkerResultWithStatus(results []WorkerTurnResult, status core.WorkerStatus) WorkerTurnResult {
