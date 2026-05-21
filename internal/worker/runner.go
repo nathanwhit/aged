@@ -31,6 +31,7 @@ type Spec struct {
 	ReasoningEffort string
 	TargetID        string
 	TargetKind      string
+	Env             map[string]string
 	Steering        <-chan string
 }
 
@@ -175,6 +176,7 @@ func (r CommandRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 	}
 
 	cmd := newWorkerCommand(ctx, argv, spec.WorkDir)
+	applyWorkerEnv(cmd, spec.Env)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -306,6 +308,7 @@ func (r PluginRunner) Run(ctx context.Context, spec Spec, sink Sink) error {
 		return errors.New("empty plugin runner command")
 	}
 	cmd := newWorkerCommand(ctx, argv, spec.WorkDir)
+	applyWorkerEnv(cmd, spec.Env)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -345,6 +348,20 @@ func newWorkerCommand(ctx context.Context, argv []string, workDir string) *exec.
 		cmd.Dir = workDir
 	}
 	return cmd
+}
+
+func applyWorkerEnv(cmd *exec.Cmd, env map[string]string) {
+	if len(env) == 0 {
+		return
+	}
+	cmd.Env = append([]string{}, cmd.Environ()...)
+	for key, value := range env {
+		key = strings.TrimSpace(key)
+		if key == "" || strings.Contains(key, "=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 }
 
 func killOnCancel(ctx context.Context, cmd *exec.Cmd) func() {

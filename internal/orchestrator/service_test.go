@@ -74,6 +74,44 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestServiceProvidesSharedArtifactWorkspaceToLocalWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	sharedRoot := filepath.Join(t.TempDir(), "shared-task")
+	runner := &recordingEventRunner{
+		kind:   "codex",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "done"}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "build a baseline binary",
+	}}, map[string]worker.Runner{"codex": runner}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sharedRoot: sharedRoot,
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Bench", Prompt: "Save a baseline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	spec := runner.specValue()
+	if spec.Env["AGED_SHARED_DIR"] != sharedRoot {
+		t.Fatalf("AGED_SHARED_DIR = %q, want %q", spec.Env["AGED_SHARED_DIR"], sharedRoot)
+	}
+	if spec.Env["AGED_SHARED_ARTIFACTS_DIR"] != filepath.Join(sharedRoot, "artifacts") {
+		t.Fatalf("AGED_SHARED_ARTIFACTS_DIR = %q", spec.Env["AGED_SHARED_ARTIFACTS_DIR"])
+	}
+	if !strings.Contains(spec.Prompt, "shared artifact workspace") || !strings.Contains(spec.Prompt, sharedRoot) {
+		t.Fatalf("prompt missing shared workspace guidance: %q", spec.Prompt)
+	}
+	if _, err := os.Stat(filepath.Join(sharedRoot, "workers", shortID(spec.ID))); err != nil {
+		t.Fatalf("worker scratch dir was not created: %v", err)
+	}
+}
+
 func TestCreateTasksActionCreatesGenericChildTasks(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -12879,6 +12917,7 @@ type recordingEventRunner struct {
 	events  []worker.Event
 	prompt  string
 	workDir string
+	spec    worker.Spec
 	calls   int
 }
 
@@ -12991,6 +13030,7 @@ func (r *recordingEventRunner) Run(ctx context.Context, spec worker.Spec, sink w
 	r.mu.Lock()
 	r.prompt = spec.Prompt
 	r.workDir = spec.WorkDir
+	r.spec = spec
 	r.calls++
 	r.mu.Unlock()
 	for _, event := range r.events {
@@ -13011,6 +13051,12 @@ func (r *recordingEventRunner) callsValue() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+func (r *recordingEventRunner) specValue() worker.Spec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.spec
 }
 
 func (r *sequenceEventRunner) Kind() string {
@@ -13325,6 +13371,7 @@ func (r *recordingRunner) Run(_ context.Context, spec worker.Spec, _ worker.Sink
 type fakeWorkspaceManager struct {
 	cwd          string
 	sourceRoot   string
+	sharedRoot   string
 	baseWorkDir  string
 	baseRevision string
 	changes      WorkspaceChanges
@@ -13491,6 +13538,25 @@ func (m fakeWorkspaceManager) Prepare(_ context.Context, spec WorkspaceSpec) (Pr
 		WorkerID:   spec.WorkerID,
 		TaskID:     spec.TaskID,
 	}, nil
+}
+
+func (m fakeWorkspaceManager) PrepareShared(_ context.Context, spec WorkspaceSpec) (SharedWorkspace, error) {
+	root := m.sharedRoot
+	if root == "" {
+		root = filepath.Join(nonEmpty(m.cwd, os.TempDir()), ".aged-shared", shortID(spec.TaskID))
+	}
+	shared := SharedWorkspace{
+		Root:         root,
+		ArtifactsDir: filepath.Join(root, "artifacts"),
+		WorkersDir:   filepath.Join(root, "workers"),
+		WorkerDir:    filepath.Join(root, "workers", shortID(spec.WorkerID)),
+	}
+	for _, dir := range []string{shared.Root, shared.ArtifactsDir, shared.WorkersDir, shared.WorkerDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return SharedWorkspace{}, err
+		}
+	}
+	return shared, nil
 }
 
 func (m fakeWorkspaceManager) Cleanup(_ context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {

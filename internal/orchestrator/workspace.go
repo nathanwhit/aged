@@ -30,24 +30,34 @@ type WorkspaceSpec struct {
 	WorkerSummary string
 }
 
+type SharedWorkspace struct {
+	Root         string `json:"root"`
+	ArtifactsDir string `json:"artifactsDir"`
+	WorkersDir   string `json:"workersDir"`
+	WorkerDir    string `json:"workerDir"`
+}
+
 type PreparedWorkspace struct {
-	Root          string `json:"root"`
-	CWD           string `json:"cwd"`
-	SourceRoot    string `json:"sourceRoot"`
-	WorkspaceName string `json:"workspaceName"`
-	Change        string `json:"change"`
-	BaseChange    string `json:"baseChange"`
-	Status        string `json:"status"`
-	SourceStatus  string `json:"sourceStatus"`
-	Mode          string `json:"mode"`
-	Dirty         bool   `json:"dirty"`
-	SourceDirty   bool   `json:"sourceDirty"`
-	VCSType       string `json:"vcsType"`
-	CleanupPolicy string `json:"cleanupPolicy"`
-	WorkerID      string `json:"workerId"`
-	TaskID        string `json:"taskId"`
-	TargetID      string `json:"targetId,omitempty"`
-	TargetKind    string `json:"targetKind,omitempty"`
+	Root               string `json:"root"`
+	CWD                string `json:"cwd"`
+	SourceRoot         string `json:"sourceRoot"`
+	WorkspaceName      string `json:"workspaceName"`
+	Change             string `json:"change"`
+	BaseChange         string `json:"baseChange"`
+	Status             string `json:"status"`
+	SourceStatus       string `json:"sourceStatus"`
+	Mode               string `json:"mode"`
+	Dirty              bool   `json:"dirty"`
+	SourceDirty        bool   `json:"sourceDirty"`
+	VCSType            string `json:"vcsType"`
+	CleanupPolicy      string `json:"cleanupPolicy"`
+	WorkerID           string `json:"workerId"`
+	TaskID             string `json:"taskId"`
+	TargetID           string `json:"targetId,omitempty"`
+	TargetKind         string `json:"targetKind,omitempty"`
+	SharedRoot         string `json:"sharedRoot,omitempty"`
+	SharedArtifactsDir string `json:"sharedArtifactsDir,omitempty"`
+	SharedWorkerDir    string `json:"sharedWorkerDir,omitempty"`
 }
 
 type WorkspaceChangedFile struct {
@@ -149,6 +159,10 @@ func NewWorkspaceManager(vcs WorkspaceVCS, mode WorkspaceMode, workspaceRoot str
 	}
 }
 
+type sharedWorkspacePreparer interface {
+	PrepareShared(ctx context.Context, spec WorkspaceSpec) (SharedWorkspace, error)
+}
+
 type AutoWorkspaceManager struct {
 	Mode          WorkspaceMode
 	WorkspaceRoot string
@@ -167,6 +181,20 @@ func (m AutoWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (
 		return NewGitWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy()).Prepare(ctx, spec)
 	}
 	return PreparedWorkspace{}, fmt.Errorf("workdir is not inside a supported VCS workspace: %s", absWorkDir)
+}
+
+func (m AutoWorkspaceManager) PrepareShared(ctx context.Context, spec WorkspaceSpec) (SharedWorkspace, error) {
+	absWorkDir, err := filepath.Abs(spec.WorkDir)
+	if err != nil {
+		return SharedWorkspace{}, err
+	}
+	if _, err := runJJ(ctx, absWorkDir, "root"); err == nil {
+		return NewJJWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy()).PrepareShared(ctx, spec)
+	}
+	if _, err := runGit(ctx, absWorkDir, "rev-parse", "--show-toplevel"); err == nil {
+		return NewGitWorkspaceManager(m.Mode, m.WorkspaceRoot, m.cleanupPolicy()).PrepareShared(ctx, spec)
+	}
+	return SharedWorkspace{}, fmt.Errorf("workdir is not inside a supported VCS workspace: %s", absWorkDir)
 }
 
 func (m AutoWorkspaceManager) Cleanup(ctx context.Context, workspace PreparedWorkspace, result WorkspaceResult) (WorkspaceCleanup, error) {
@@ -382,6 +410,10 @@ func (m JJWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (Pr
 		WorkerID:      spec.WorkerID,
 		TaskID:        spec.TaskID,
 	}, nil
+}
+
+func (m JJWorkspaceManager) PrepareShared(_ context.Context, spec WorkspaceSpec) (SharedWorkspace, error) {
+	return prepareSharedWorkspaceAt(m.WorkspaceRoot, spec)
 }
 
 func (m JJWorkspaceManager) cleanupPolicy() string {
@@ -639,6 +671,32 @@ func (m GitWorkspaceManager) Prepare(ctx context.Context, spec WorkspaceSpec) (P
 		WorkerID:      spec.WorkerID,
 		TaskID:        spec.TaskID,
 	}, nil
+}
+
+func (m GitWorkspaceManager) PrepareShared(_ context.Context, spec WorkspaceSpec) (SharedWorkspace, error) {
+	return prepareSharedWorkspaceAt(m.WorkspaceRoot, spec)
+}
+
+func prepareSharedWorkspaceAt(workspaceRoot string, spec WorkspaceSpec) (SharedWorkspace, error) {
+	_, workspaceRoot, _ = workspaceManagerDefaults("", workspaceRoot, "")
+	taskID := shortID(spec.TaskID)
+	if taskID == "worker" {
+		taskID = "task"
+	}
+	workerID := shortID(spec.WorkerID)
+	root := filepath.Join(workspaceRoot, "shared", taskID)
+	shared := SharedWorkspace{
+		Root:         root,
+		ArtifactsDir: filepath.Join(root, "artifacts"),
+		WorkersDir:   filepath.Join(root, "workers"),
+		WorkerDir:    filepath.Join(root, "workers", workerID),
+	}
+	for _, dir := range []string{shared.Root, shared.ArtifactsDir, shared.WorkersDir, shared.WorkerDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return SharedWorkspace{}, err
+		}
+	}
+	return shared, nil
 }
 
 func (m GitWorkspaceManager) cleanupPolicy() string {
