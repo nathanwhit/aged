@@ -9359,6 +9359,92 @@ func TestServiceReplansInitialWorkerGraphAfterErroredDeferredSuccess(t *testing.
 	}
 }
 
+func TestServiceReplansInitialWorkerGraphValidatorRejectionBeforePublishAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			Rationale: "initial worker graph validates a candidate before publication",
+			Workers: []WorkerRequest{
+				{
+					ID:         "implement_first_candidate",
+					Role:       "implementer",
+					Reason:     "Implement the first candidate.",
+					WorkerKind: "implementer",
+					Prompt:     "Implement one candidate.",
+				},
+				{
+					ID:         "validate_first_candidate",
+					Role:       "independent validator",
+					Reason:     "Validate the candidate.",
+					WorkerKind: "validator",
+					Prompt:     "Reject bad candidates.",
+					DependsOn:  []string{"implement_first_candidate"},
+				},
+			},
+			Actions: []PlanAction{{
+				Kind:     "publish_pull_request",
+				When:     "after_success",
+				Reason:   "Publish only after validation succeeds.",
+				WorkerID: "validate_first_candidate",
+				Inputs: map[string]any{
+					"repo":                 "owner/repo",
+					"title":                "Reduce Deno binary size",
+					"body":                 "## Summary\n- Reduce binary size.\n\n## Validation\n- release-lite build.",
+					"continueAfterPublish": true,
+				},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "wait",
+			Rationale: "validator rejected the candidate",
+			Message:   "move on to another candidate",
+		}},
+	}
+	service, _ := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
+		runners: map[string]worker.Runner{
+			"implementer": eventRunner{kind: "implementer", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented a candidate"}}},
+			"validator": eventThenFailRunner{
+				kind:   "validator",
+				events: []worker.Event{{Kind: worker.EventResult, Text: "Rejecting the candidate because it does not reduce shipped binary size. Recommended next turns: try another candidate."}},
+				err:    errors.New("validator rejected candidate"),
+			},
+		},
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "Cargo.toml", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Shrink Deno Binary Size",
+		Prompt: "Find multiple reviewable binary size reductions.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want rejected validator candidate not published", publisher.publishCalls)
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "started") {
+		t.Fatalf("publish action ran after validator rejected candidate")
+	}
+	if len(brain.states) != 1 || len(brain.states[0].Results) != 2 {
+		t.Fatalf("replan states = %+v", brain.states)
+	}
+	failed := brain.states[0].Results[1]
+	if failed.Status != core.WorkerFailed || !strings.Contains(failed.Summary, "Rejecting the candidate") || !strings.Contains(failed.Error, "validator rejected candidate") {
+		t.Fatalf("validator result = %+v, want failed rejection in replan context", failed)
+	}
+}
+
 func TestServiceHonorsSpawnDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
