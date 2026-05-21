@@ -143,30 +143,42 @@ func compactTaskCardMetadata(metadata json.RawMessage) json.RawMessage {
 func compactCardWorkers(workers map[string]core.Worker) map[string]core.Worker {
 	out := make(map[string]core.Worker, len(workers))
 	for id, worker := range workers {
-		worker.Prompt = ""
-		worker.PromptError = truncateCardText(worker.PromptError, 1200)
-		worker.Metadata = nil
-		out[id] = worker
+		out[id] = compactCardWorker(worker)
 	}
 	return out
+}
+
+func compactCardWorker(worker core.Worker) core.Worker {
+	worker.Prompt = ""
+	worker.PromptError = truncateCardText(worker.PromptError, 1200)
+	worker.Metadata = nil
+	return worker
 }
 
 func compactCardExecutionNodes(nodes map[string]core.ExecutionNode) map[string]core.ExecutionNode {
 	out := make(map[string]core.ExecutionNode, len(nodes))
 	for id, node := range nodes {
-		node.Metadata = nil
-		out[id] = node
+		out[id] = compactCardExecutionNode(node)
 	}
 	return out
+}
+
+func compactCardExecutionNode(node core.ExecutionNode) core.ExecutionNode {
+	node.Metadata = nil
+	return node
 }
 
 func compactCardPullRequests(pullRequests map[string]core.PullRequest) map[string]core.PullRequest {
 	out := make(map[string]core.PullRequest, len(pullRequests))
 	for id, pullRequest := range pullRequests {
-		pullRequest.Metadata = nil
-		out[id] = pullRequest
+		out[id] = compactCardPullRequest(pullRequest)
 	}
 	return out
+}
+
+func compactCardPullRequest(pullRequest core.PullRequest) core.PullRequest {
+	pullRequest.Metadata = nil
+	return pullRequest
 }
 
 func truncateCardText(value string, limit int) string {
@@ -655,12 +667,12 @@ func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents 
 }
 
 func (s *SQLiteStore) snapshotTaskCardsFromProjection(ctx context.Context) (core.Snapshot, error) {
-	state, lastEventID, current, err := s.loadCurrentSnapshotProjection(ctx)
+	state, lastEventID, current, err := s.loadCurrentSnapshotTaskCardsProjection(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildSnapshotProjection(ctx)
+		state, lastEventID, err = s.rebuildSnapshotTaskCardsProjection(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
@@ -673,6 +685,41 @@ func (s *SQLiteStore) snapshotTaskCardsFromProjection(ctx context.Context) (core
 		return core.Snapshot{}, err
 	}
 	return state.taskCardsSnapshot(lastEventID), nil
+}
+
+func (s *SQLiteStore) loadCurrentSnapshotTaskCardsProjection(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
+	state, lastEventID, ok, err := loadSnapshotTaskCardsProjection(ctx, s.db)
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	latestEventID, err := s.latestEventID(ctx)
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if !ok {
+		if latestEventID == 0 {
+			return newSnapshotProjectionState(), 0, true, nil
+		}
+		return snapshotProjectionState{}, 0, false, nil
+	}
+	return state, lastEventID, lastEventID == latestEventID, nil
+}
+
+func (s *SQLiteStore) rebuildSnapshotTaskCardsProjection(ctx context.Context) (snapshotProjectionState, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	defer tx.Rollback()
+
+	state, lastEventID, err := rebuildSnapshotTaskCardsProjectionTx(ctx, tx)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	return state, lastEventID, nil
 }
 
 func (s *SQLiteStore) loadCurrentSnapshotProjection(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
@@ -716,19 +763,30 @@ func updateSnapshotProjectionTx(ctx context.Context, tx *sql.Tx, event core.Even
 		return err
 	}
 	if !ok || lastEventID != event.ID-1 {
-		_, _, err := rebuildSnapshotProjectionTx(ctx, tx)
-		return err
+		if _, _, err := rebuildSnapshotProjectionTx(ctx, tx); err != nil {
+			return err
+		}
+		if _, _, err := rebuildSnapshotTaskCardsProjectionTx(ctx, tx); err != nil {
+			return err
+		}
+		return nil
 	}
 	if event.Type == core.EventWorkerOutput {
 		if err := saveSnapshotWorkerOutput(ctx, tx, event); err != nil {
 			return err
 		}
-		return advanceSnapshotProjection(ctx, tx, event.ID)
+		if err := advanceSnapshotProjection(ctx, tx, event.ID); err != nil {
+			return err
+		}
+		return updateSnapshotTaskCardsProjectionTx(ctx, tx, event)
 	}
 	if err := state.apply(event); err != nil {
 		return err
 	}
-	return saveSnapshotProjection(ctx, tx, state, event.ID)
+	if err := saveSnapshotProjection(ctx, tx, state, event.ID); err != nil {
+		return err
+	}
+	return updateSnapshotTaskCardsProjectionTx(ctx, tx, event)
 }
 
 func rebuildSnapshotProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
@@ -750,6 +808,112 @@ func rebuildSnapshotProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProje
 	return state, lastEventID, nil
 }
 
+func updateSnapshotTaskCardsProjectionTx(ctx context.Context, tx *sql.Tx, event core.Event) error {
+	state, lastEventID, ok, err := loadSnapshotTaskCardsProjection(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !ok || lastEventID != event.ID-1 {
+		_, _, err := rebuildSnapshotTaskCardsProjectionTx(ctx, tx)
+		return err
+	}
+	if event.Type == core.EventWorkerOutput {
+		return advanceSnapshotTaskCardsProjection(ctx, tx, event.ID)
+	}
+	if err := applySnapshotTaskCardProjectionEvent(&state, event); err != nil {
+		return err
+	}
+	return saveSnapshotTaskCardsProjection(ctx, tx, state, event.ID)
+}
+
+func rebuildSnapshotTaskCardsProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
+	events, err := projectionInputEvents(ctx, tx, 0)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	state := newSnapshotProjectionState()
+	var lastEventID int64
+	for _, event := range events {
+		if err := applySnapshotTaskCardProjectionEvent(&state, event); err != nil {
+			return snapshotProjectionState{}, 0, err
+		}
+		lastEventID = event.ID
+	}
+	if err := saveSnapshotTaskCardsProjection(ctx, tx, state, lastEventID); err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	return state, lastEventID, nil
+}
+
+func applySnapshotTaskCardProjectionEvent(state *snapshotProjectionState, event core.Event) error {
+	if err := state.apply(event); err != nil {
+		return err
+	}
+	if task := state.Tasks[event.TaskID]; task.ID != "" {
+		state.Tasks[event.TaskID] = compactTaskCard(task)
+		if state.ClearedTasks[event.TaskID] || isTerminalTaskStatus(task.Status) {
+			dropTaskCardDetails(state, event.TaskID)
+		}
+	}
+	if worker := state.Workers[event.WorkerID]; worker.ID != "" {
+		if taskIsActiveForCardDetails(state, worker.TaskID) {
+			state.Workers[event.WorkerID] = compactCardWorker(worker)
+		} else {
+			delete(state.Workers, event.WorkerID)
+		}
+	}
+	if nodeID := state.WorkerNodes[event.WorkerID]; nodeID != "" {
+		if node := state.Nodes[nodeID]; node.ID != "" {
+			if taskIsActiveForCardDetails(state, node.TaskID) {
+				state.Nodes[nodeID] = compactCardExecutionNode(node)
+			} else {
+				delete(state.Nodes, nodeID)
+			}
+		}
+	}
+	for id, pullRequest := range state.PullRequests {
+		if taskIsActiveForCardDetails(state, pullRequest.TaskID) {
+			state.PullRequests[id] = compactCardPullRequest(pullRequest)
+		} else {
+			delete(state.PullRequests, id)
+		}
+	}
+	state.WorkspaceMetadata = map[string]json.RawMessage{}
+	return nil
+}
+
+func taskIsActiveForCardDetails(state *snapshotProjectionState, taskID string) bool {
+	if taskID == "" || state.ClearedTasks[taskID] {
+		return false
+	}
+	task := state.Tasks[taskID]
+	return task.ID != "" && !isTerminalTaskStatus(task.Status)
+}
+
+func dropTaskCardDetails(state *snapshotProjectionState, taskID string) {
+	for id, worker := range state.Workers {
+		if worker.TaskID == taskID {
+			delete(state.Workers, id)
+		}
+	}
+	for id, node := range state.Nodes {
+		if node.TaskID == taskID {
+			delete(state.Nodes, id)
+		}
+	}
+	for id, pullRequest := range state.PullRequests {
+		if pullRequest.TaskID == taskID {
+			delete(state.PullRequests, id)
+		}
+	}
+	for workerID, nodeID := range state.WorkerNodes {
+		node := state.Nodes[nodeID]
+		if node.ID == "" || node.TaskID == taskID {
+			delete(state.WorkerNodes, workerID)
+		}
+	}
+}
+
 type snapshotProjectionQuerier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -762,6 +926,27 @@ func loadSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier) (s
 	err := q.QueryRowContext(ctx, `
 SELECT last_event_id, state
 FROM snapshot_projection
+WHERE id = 1`).Scan(&lastEventID, &data)
+	if errorsIsNoRows(err) {
+		return snapshotProjectionState{}, 0, false, nil
+	}
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	state := newSnapshotProjectionState()
+	if err := json.Unmarshal([]byte(data), &state); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	state.ensure()
+	return state, lastEventID, true, nil
+}
+
+func loadSnapshotTaskCardsProjection(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
+	var lastEventID int64
+	var data string
+	err := q.QueryRowContext(ctx, `
+SELECT last_event_id, state
+FROM snapshot_task_cards_projection
 WHERE id = 1`).Scan(&lastEventID, &data)
 	if errorsIsNoRows(err) {
 		return snapshotProjectionState{}, 0, false, nil
@@ -797,9 +982,40 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
+func saveSnapshotTaskCardsProjection(ctx context.Context, q snapshotProjectionQuerier, state snapshotProjectionState, lastEventID int64) error {
+	state.ensure()
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `
+INSERT INTO snapshot_task_cards_projection (id, last_event_id, state, updated_at)
+VALUES (1, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	last_event_id = excluded.last_event_id,
+	state = excluded.state,
+	updated_at = excluded.updated_at`,
+		lastEventID,
+		string(data),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
 func advanceSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
 	_, err := q.ExecContext(ctx, `
 UPDATE snapshot_projection
+SET last_event_id = ?, updated_at = ?
+WHERE id = 1`,
+		lastEventID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func advanceSnapshotTaskCardsProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
+	_, err := q.ExecContext(ctx, `
+UPDATE snapshot_task_cards_projection
 SET last_event_id = ?, updated_at = ?
 WHERE id = 1`,
 		lastEventID,

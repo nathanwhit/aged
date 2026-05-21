@@ -742,6 +742,176 @@ func TestSnapshotProjectionAppendRebuildsStaleProjection(t *testing.T) {
 	}
 }
 
+func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	largeText := strings.Repeat("large-payload-", 1000)
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Compact cards",
+				"prompt": largeText,
+				"metadata": map[string]any{
+					"completionMode": "github",
+					"large":          largeText,
+				},
+			}),
+		},
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-cards-compact",
+			WorkerID: "worker-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-cards-compact",
+				"workerId":   "worker-cards-compact",
+				"workerKind": "codex",
+				"metadata":   map[string]any{"large": largeText},
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   "task-cards-compact",
+			WorkerID: "worker-cards-compact",
+			Payload:  core.MustJSON(map[string]any{"workspace": largeText}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-cards-compact",
+			WorkerID: "worker-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"kind":     "codex",
+				"prompt":   largeText,
+				"metadata": map[string]any{"large": largeText},
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskWorkPlan,
+			TaskID: "task-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"items": []map[string]any{{"id": "one", "title": largeText}},
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: "task-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"id":       "denoland/deno#1",
+				"repo":     "denoland/deno",
+				"number":   1,
+				"url":      "https://github.com/denoland/deno/pull/1",
+				"branch":   "codex/cards",
+				"base":     "main",
+				"title":    "Compact card projection",
+				"metadata": map[string]any{"large": largeText},
+			}),
+		},
+	)
+
+	var fullBytes int
+	var cardBytes int
+	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_projection WHERE id = 1`).Scan(&fullBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_task_cards_projection WHERE id = 1`).Scan(&cardBytes); err != nil {
+		t.Fatal(err)
+	}
+	if cardBytes >= fullBytes/4 {
+		t.Fatalf("task card projection length = %d, full projection length = %d; want card projection much smaller", cardBytes, fullBytes)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET state = '{' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SnapshotSummary(ctx); err == nil {
+		t.Fatal("SnapshotSummary succeeded after corrupting the full projection")
+	}
+	snapshot, err := store.SnapshotTaskCards(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Prompt != "" || snapshot.Tasks[0].WorkPlan != nil {
+		t.Fatalf("card task was not compacted: %+v", snapshot.Tasks)
+	}
+	if len(snapshot.Workers) != 1 || snapshot.Workers[0].Prompt != "" || len(snapshot.Workers[0].Metadata) != 0 {
+		t.Fatalf("card worker was not compacted: %+v", snapshot.Workers)
+	}
+	if len(snapshot.ExecutionNodes) != 1 || len(snapshot.ExecutionNodes[0].Metadata) != 0 {
+		t.Fatalf("card node was not compacted: %+v", snapshot.ExecutionNodes)
+	}
+	if len(snapshot.PullRequests) != 1 || len(snapshot.PullRequests[0].Metadata) != 0 {
+		t.Fatalf("card pull request was not compacted: %+v", snapshot.PullRequests)
+	}
+}
+
+func TestSnapshotTaskCardsProjectionPrunesTerminalDetails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-cards-terminal",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Terminal cards",
+				"prompt": "Terminal task details should not stay in the card projection.",
+			}),
+		},
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-cards-terminal",
+			WorkerID: "worker-cards-terminal",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-cards-terminal",
+				"workerId":   "worker-cards-terminal",
+				"workerKind": "codex",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-cards-terminal",
+			WorkerID: "worker-cards-terminal",
+			Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: "task-cards-terminal",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "denoland/deno#2",
+				"repo":   "denoland/deno",
+				"number": 2,
+				"url":    "https://github.com/denoland/deno/pull/2",
+				"branch": "codex/cards-terminal",
+				"base":   "main",
+				"title":  "Terminal card projection",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: "task-cards-terminal",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskSucceeded,
+			}),
+		},
+	)
+
+	state, _, ok, err := loadSnapshotTaskCardsProjection(ctx, store.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("task card projection was not saved")
+	}
+	if len(state.Tasks) != 1 || state.Tasks["task-cards-terminal"].Prompt != "" {
+		t.Fatalf("card projection task = %+v", state.Tasks)
+	}
+	if len(state.Workers) != 0 || len(state.Nodes) != 0 || len(state.PullRequests) != 0 || len(state.WorkerNodes) != 0 {
+		t.Fatalf("terminal details were retained: workers=%+v nodes=%+v pullRequests=%+v workerNodes=%+v", state.Workers, state.Nodes, state.PullRequests, state.WorkerNodes)
+	}
+}
+
 func assertSnapshotsEqual(tb testing.TB, got core.Snapshot, want core.Snapshot) {
 	tb.Helper()
 
