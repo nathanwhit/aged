@@ -79,18 +79,17 @@ func (p *snapshotProjectionState) taskCardsSnapshot(lastEventID int64) core.Snap
 	activeTasks := map[string]bool{}
 	taskCards := make(map[string]core.Task, len(filteredTasks))
 	for id, task := range filteredTasks {
-		if isTerminalTaskStatus(task.Status) {
-			task.Prompt = ""
-			task.Milestones = nil
-			task.Artifacts = nil
-		} else {
+		if !isTerminalTaskStatus(task.Status) {
 			activeTasks[id] = true
 		}
-		taskCards[id] = task
+		taskCards[id] = compactTaskCard(task)
 	}
 	workers := filterTasks(p.Workers, p.ClearedTasks, activeTasks, func(worker core.Worker) string { return worker.TaskID })
 	nodes := filterTasks(p.Nodes, p.ClearedTasks, activeTasks, func(node core.ExecutionNode) string { return node.TaskID })
 	pullRequests := filterTasks(p.PullRequests, p.ClearedTasks, activeTasks, func(pr core.PullRequest) string { return pr.TaskID })
+	workers = compactCardWorkers(workers)
+	nodes = compactCardExecutionNodes(nodes)
+	pullRequests = compactCardPullRequests(pullRequests)
 	return core.Snapshot{
 		Tasks:               orderedTasks(taskCards),
 		Workers:             orderedWorkers(workers),
@@ -99,6 +98,82 @@ func (p *snapshotProjectionState) taskCardsSnapshot(lastEventID int64) core.Snap
 		OrchestrationGraphs: orchestrationGraphs(taskCards, nodes),
 		LastEventID:         lastEventID,
 	}
+}
+
+func compactTaskCard(task core.Task) core.Task {
+	task.Prompt = ""
+	task.Error = truncateCardText(task.Error, 1200)
+	task.Metadata = compactTaskCardMetadata(task.Metadata)
+	task.Milestones = nil
+	task.WorkPlan = nil
+	task.Artifacts = nil
+	return task
+}
+
+func compactTaskCardMetadata(metadata json.RawMessage) json.RawMessage {
+	if len(metadata) == 0 || string(metadata) == "null" {
+		return nil
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(metadata, &decoded); err != nil {
+		return nil
+	}
+	kept := map[string]any{}
+	for _, key := range []string{
+		"completionMode",
+		"executionMode",
+		"objectiveMode",
+		"loopIntervalSeconds",
+		"requiredTargetID",
+	} {
+		if value, ok := decoded[key]; ok && value != nil {
+			kept[key] = value
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(kept)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func compactCardWorkers(workers map[string]core.Worker) map[string]core.Worker {
+	out := make(map[string]core.Worker, len(workers))
+	for id, worker := range workers {
+		worker.Prompt = ""
+		worker.PromptError = truncateCardText(worker.PromptError, 1200)
+		worker.Metadata = nil
+		out[id] = worker
+	}
+	return out
+}
+
+func compactCardExecutionNodes(nodes map[string]core.ExecutionNode) map[string]core.ExecutionNode {
+	out := make(map[string]core.ExecutionNode, len(nodes))
+	for id, node := range nodes {
+		node.Metadata = nil
+		out[id] = node
+	}
+	return out
+}
+
+func compactCardPullRequests(pullRequests map[string]core.PullRequest) map[string]core.PullRequest {
+	out := make(map[string]core.PullRequest, len(pullRequests))
+	for id, pullRequest := range pullRequests {
+		pullRequest.Metadata = nil
+		out[id] = pullRequest
+	}
+	return out
+}
+
+func truncateCardText(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
 }
 
 func activeProjectionTasks(tasks map[string]core.Task, cleared map[string]bool) map[string]bool {

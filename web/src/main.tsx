@@ -134,7 +134,7 @@ function App() {
   async function refresh() {
     const next = normalizeSnapshot(await getSnapshot({ events: "none", tasks: "cards" }));
     setSnapshot(next);
-    setHydratedTaskIds(new Set(next.tasks.filter((task) => !isTerminalTask(task)).map((task) => task.id)));
+    setHydratedTaskIds(new Set(next.tasks.filter(taskHasDetailPayload).map((task) => task.id)));
     setInitialSnapshotStatus("ready");
     setSelectedTaskId((current) => (next.tasks.some((task) => task.id === current) ? current : preferredTask(next.tasks)?.id || ""));
   }
@@ -170,7 +170,7 @@ function App() {
     if (!selectedTask?.id || initialSnapshotStatus !== "ready") {
       return;
     }
-    if (isTerminalTask(selectedTask) && !hydratedTaskIds.has(selectedTask.id)) {
+    if (!hydratedTaskIds.has(selectedTask.id)) {
       let active = true;
       getTaskSnapshot(selectedTask.id)
         .then((taskSnapshot) => {
@@ -928,6 +928,10 @@ function preferredTask(tasks: Task[]): Task | undefined {
 
 function isRetryableTask(task: Task): boolean {
   return task.status === "failed" || task.status === "canceled";
+}
+
+function taskHasDetailPayload(task: Task): boolean {
+  return task.prompt.length > 0 || Boolean(task.workPlan) || Boolean(task.artifacts?.length) || Boolean(task.milestones?.length);
 }
 
 function isDurableLoopMetadata(metadata: Record<string, unknown> | undefined): boolean {
