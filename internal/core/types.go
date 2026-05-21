@@ -137,6 +137,7 @@ type WorkPlanItem struct {
 	Status    string   `json:"status,omitempty"`
 	DoneWhen  string   `json:"doneWhen,omitempty"`
 	DependsOn []string `json:"dependsOn,omitempty"`
+	Scope     []string `json:"scope,omitempty"`
 }
 
 type Worker struct {
@@ -164,6 +165,8 @@ type ExecutionNode struct {
 	SpawnID       string          `json:"spawnId,omitempty"`
 	Role          string          `json:"role,omitempty"`
 	Reason        string          `json:"reason,omitempty"`
+	SliceID       string          `json:"sliceId,omitempty"`
+	SliceScope    []string        `json:"sliceScope,omitempty"`
 	TargetID      string          `json:"targetId,omitempty"`
 	TargetKind    string          `json:"targetKind,omitempty"`
 	RemoteSession string          `json:"remoteSession,omitempty"`
@@ -370,6 +373,8 @@ type OrchestrationGraphNode struct {
 	Role       string       `json:"role,omitempty"`
 	Reason     string       `json:"reason,omitempty"`
 	SpawnID    string       `json:"spawnId,omitempty"`
+	SliceID    string       `json:"sliceId,omitempty"`
+	SliceScope []string     `json:"sliceScope,omitempty"`
 	TargetID   string       `json:"targetId,omitempty"`
 	TargetKind string       `json:"targetKind,omitempty"`
 }

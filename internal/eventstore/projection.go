@@ -302,6 +302,8 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 			SpawnID       string          `json:"spawnId,omitempty"`
 			Role          string          `json:"role,omitempty"`
 			Reason        string          `json:"reason,omitempty"`
+			SliceID       string          `json:"sliceId,omitempty"`
+			SliceScope    []string        `json:"sliceScope,omitempty"`
 			TargetID      string          `json:"targetId,omitempty"`
 			TargetKind    string          `json:"targetKind,omitempty"`
 			RemoteSession string          `json:"remoteSession,omitempty"`
@@ -324,6 +326,8 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 			SpawnID:       payload.SpawnID,
 			Role:          payload.Role,
 			Reason:        payload.Reason,
+			SliceID:       payload.SliceID,
+			SliceScope:    payload.SliceScope,
 			TargetID:      payload.TargetID,
 			TargetKind:    payload.TargetKind,
 			RemoteSession: payload.RemoteSession,
