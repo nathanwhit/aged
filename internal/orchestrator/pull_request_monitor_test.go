@@ -233,6 +233,86 @@ func TestServicePullRequestMonitorDoesNotTerminalizeIntermediatePullRequest(t *t
 	}
 }
 
+func TestServicePullRequestMonitorReplansAfterIntermediatePullRequestMerged(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	status := monitoredPullRequestStatusWithMetadata("success", "CLEAN", "APPROVED", core.MustJSON(map[string]any{
+		"continueAfterPublish": true,
+		"publicationPhase":     "intermediate",
+	}))
+	status.State = "MERGED"
+	publisher := &fakePullRequestPublisher{status: status}
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "continue after the merged intermediate PR",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskPlanned,
+		TaskID: "task-1",
+		Payload: core.MustJSON(Plan{
+			WorkerKind: "mock",
+			Prompt:     "first slice",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "mock",
+			"metadata": map[string]any{"workerKind": "mock"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   "task-1",
+		WorkerID: "worker-1",
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "published first slice",
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, "task-1", "intermediate_pull_request_terminal_replan", "started") &&
+			countEvents(snapshot.Events, core.EventTaskReplanned, "task-1") > 0
+	}, func(snapshot core.Snapshot) string {
+		return "missing intermediate PR terminal replan"
+	})
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskFailed || task.Status == core.TaskCanceled {
+		t.Fatalf("task status = %q, want intermediate PR merge to keep objective resumable", task.Status)
+	}
+	if len(brain.states) == 0 {
+		t.Fatalf("intermediate PR merge did not enter dynamic replanning")
+	}
+}
+
 func TestServicePullRequestMonitorAutoMergesReadyPRsWhenAllowed(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

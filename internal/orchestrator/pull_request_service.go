@@ -936,7 +936,7 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 			return core.PullRequest{}, err
 		}
 		if !pullRequestTerminalizesTask(snapshot, checked) {
-			if err := s.updateTaskObjective(ctx, checked.TaskID, core.ObjectiveActive, "intermediate_pr_merged", "Intermediate pull request merged; objective continues."); err != nil {
+			if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_merged", "Intermediate pull request merged; objective continues."); err != nil {
 				return core.PullRequest{}, err
 			}
 			return checked, nil
@@ -957,7 +957,7 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 			return core.PullRequest{}, err
 		}
 		if !pullRequestTerminalizesTask(snapshot, checked) {
-			if err := s.updateTaskObjective(ctx, checked.TaskID, core.ObjectiveActive, "intermediate_pr_closed", "Intermediate pull request closed; objective continues."); err != nil {
+			if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_closed", "Intermediate pull request closed; objective continues."); err != nil {
 				return core.PullRequest{}, err
 			}
 			return checked, nil
@@ -970,6 +970,71 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		}
 	}
 	return checked, nil
+}
+
+func (s *Service) continueTaskAfterIntermediatePullRequest(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, phase string, summary string) error {
+	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, phase, summary); err != nil {
+		return err
+	}
+	if _, ok := s.brain.(ReplanProvider); !ok {
+		return nil
+	}
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok || taskHasActiveWorkers(snapshot, pr.TaskID) || intermediatePullRequestContinuationRecorded(snapshot, pr) {
+		return nil
+	}
+	switch task.Status {
+	case core.TaskWaiting, core.TaskRunning, core.TaskFailed:
+	default:
+		return nil
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, pr.TaskID)
+	if err != nil {
+		return nil
+	}
+	if err := s.recordTaskAction(ctx, pr.TaskID, map[string]any{
+		"kind":          "intermediate_pull_request_terminal_replan",
+		"status":        "started",
+		"reason":        summary,
+		"phase":         phase,
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+	}); err != nil {
+		return err
+	}
+	if err := s.setTaskStatus(ctx, pr.TaskID, core.TaskPlanning); err != nil {
+		return err
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = phase
+	s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
+		s.retryGraphTask(taskCtx, task, initial, results)
+	})
+	return nil
+}
+
+func intermediatePullRequestContinuationRecorded(snapshot core.Snapshot, pr core.PullRequest) bool {
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != pr.TaskID || event.Type != core.EventTaskAction {
+			continue
+		}
+		var payload struct {
+			Kind          string `json:"kind"`
+			PullRequestID string `json:"pullRequestId"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if payload.Kind == "intermediate_pull_request_terminal_replan" && payload.PullRequestID == pr.ID {
+			return true
+		}
+	}
+	return false
 }
 
 func pullRequestReadyForAutoMerge(pr core.PullRequest) bool {
