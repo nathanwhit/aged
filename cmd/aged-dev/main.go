@@ -67,6 +67,7 @@ type daemonConfig struct {
 	artifactCleanup   bool
 	artifactDryRun    bool
 	artifactMinAge    time.Duration
+	artifactInterval  time.Duration
 	usageAware        bool
 	usageTTL          time.Duration
 	githubDriverPath  string
@@ -93,6 +94,7 @@ func main() {
 		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "aged daemon retained workspace artifact cleanup")
 		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "aged daemon retained workspace artifact cleanup dry run")
 		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "aged daemon retained workspace artifact cleanup minimum age")
+		artifactInterval  = flag.Duration("workspace-artifact-cleanup-interval", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_INTERVAL", time.Hour), "aged daemon retained workspace artifact cleanup scan interval")
 		usageAware        = flag.Bool("usage-aware-scheduling", envutil.Bool("AGED_USAGE_AWARE_SCHEDULING", true), "aged daemon Codex/Claude usage-aware worker scheduling")
 		usageTTL          = flag.Duration("usage-aware-scheduling-ttl", envutil.Duration("AGED_USAGE_AWARE_SCHEDULING_TTL", 5*time.Minute), "aged daemon Codex/Claude usage probe cache ttl")
 		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
@@ -135,6 +137,7 @@ func main() {
 			artifactCleanup:   *artifactCleanup,
 			artifactDryRun:    *artifactDryRun,
 			artifactMinAge:    *artifactMinAge,
+			artifactInterval:  *artifactInterval,
 			usageAware:        *usageAware,
 			usageTTL:          *usageTTL,
 			githubDriverPath:  githubDriverPath.String(),
@@ -207,6 +210,7 @@ func buildDaemonArgs(config daemonConfig) []string {
 		"-workspace-artifact-cleanup=" + strconv.FormatBool(config.artifactCleanup),
 		"-workspace-artifact-cleanup-dry-run=" + strconv.FormatBool(config.artifactDryRun),
 		"-workspace-artifact-cleanup-min-age", config.artifactMinAge.String(),
+		"-workspace-artifact-cleanup-interval", config.artifactInterval.String(),
 		"-usage-aware-scheduling=" + strconv.FormatBool(config.usageAware),
 		"-usage-aware-scheduling-ttl", config.usageTTL.String(),
 		"-github-driver=" + config.githubDriverPath,

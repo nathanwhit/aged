@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 )
 
 const defaultRetainedArtifactCleanupMinAge = 24 * time.Hour
+const defaultRetainedArtifactCleanupInterval = time.Hour
 
 var defaultRetainedArtifactDirNames = []string{"target"}
 
@@ -34,6 +36,36 @@ type RetainedWorkspaceArtifactCleanupReport struct {
 	Skipped          int                `json:"skipped"`
 	BytesRemoved     int64              `json:"bytesRemoved"`
 	Workspaces       []WorkspaceCleanup `json:"workspaces,omitempty"`
+}
+
+func (s *Service) StartRetainedWorkspaceArtifactCleanup(ctx context.Context, interval time.Duration, options RetainedWorkspaceArtifactCleanupOptions) {
+	if s == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = defaultRetainedArtifactCleanupInterval
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.cleanupRetainedWorkspaceArtifactsLogged(ctx, options)
+			}
+		}
+	}()
+}
+
+func (s *Service) cleanupRetainedWorkspaceArtifactsLogged(ctx context.Context, options RetainedWorkspaceArtifactCleanupOptions) {
+	report, err := s.CleanupRetainedWorkspaceArtifacts(ctx, options)
+	if err != nil {
+		slog.Warn("cleanup retained workspace artifacts", "error", err)
+	} else if report.Scanned > 0 {
+		slog.Info("cleanup retained workspace artifacts", "scanned", report.Scanned, "cleaned", report.Cleaned, "skipped", report.Skipped, "bytesRemoved", report.BytesRemoved, "dryRun", report.DryRun)
+	}
 }
 
 func (s *Service) CleanupRetainedWorkspaceArtifacts(ctx context.Context, options RetainedWorkspaceArtifactCleanupOptions) (RetainedWorkspaceArtifactCleanupReport, error) {
