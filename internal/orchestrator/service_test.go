@@ -2153,6 +2153,64 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	}
 }
 
+func TestServiceIntermediatePublishConflictContinuesToReplan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{errCount: 1}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "find the first optimization",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "ship the first optimization and keep researching",
+				Inputs: map[string]any{
+					"repo":                 "owner/repo",
+					"title":                "perf: reduce binary size",
+					"body":                 "## Summary\n- Reduce binary size.\n\n## Validation\n- Focused tests passed.",
+					"continueAfterPublish": true,
+				},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:  "wait",
+			Message: "try a different PR-sized candidate",
+		}},
+	}
+	service, _ := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     brain,
+		publisher: publisher,
+		runners: map[string]worker.Runner{
+			"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "optimized"}}},
+		},
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Perf research", Prompt: "Keep producing optimization PRs."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "failed") {
+		t.Fatalf("publish action was recorded as terminal failure")
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "continued") {
+		t.Fatalf("missing continued publish_pull_request action")
+	}
+	if len(brain.states) == 0 {
+		t.Fatalf("intermediate publish conflict did not re-enter dynamic replanning")
+	}
+	if len(brain.states[0].Results) == 0 || !strings.Contains(brain.states[0].Results[0].Error, "intermediate publish failed") {
+		t.Fatalf("replan state did not include blocked publish candidate: %+v", brain.states[0].Results)
+	}
+}
+
 func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -10580,6 +10638,19 @@ func TestWorkerRunStateFailsEmptyRetainedRetrySuccess(t *testing.T) {
 	}, core.WorkerSucceeded, nil, WorkspaceChanges{})
 	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "without a final summary") {
 		t.Fatalf("status = %q err = %v, want failed empty retry success", status, err)
+	}
+}
+
+func TestWorkerRunStateFailsSuccessThatDefersNextValidation(t *testing.T) {
+	state := &workerRunState{}
+	state.observe(worker.Event{Kind: worker.EventError, Text: "command failed: exit status 1"})
+	state.observe(worker.Event{Kind: worker.EventResult, Text: "The exact FFI-symbol search returned no matches. I'm running the focused Node zlib test next."})
+	status, err := state.normalizeCompletionStatus(Plan{}, core.WorkerSucceeded, nil, WorkspaceChanges{
+		Dirty:        true,
+		ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+	})
+	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "deferring completion") {
+		t.Fatalf("status = %q err = %v, want failed deferred validation success", status, err)
 	}
 }
 

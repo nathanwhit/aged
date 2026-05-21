@@ -31,6 +31,7 @@ type WorkerChangesReview struct {
 
 var (
 	standaloneNoPRPattern     = regexp.MustCompile(`\bno\s+pr\b`)
+	deferredNextWorkPattern   = regexp.MustCompile(`\b(?:i am|i'm|i will|i'll|will|going to|about to)\s+(?:run|running|rerun|execute|start|try|check|validate|test|rebuild|build)\b.*\bnext\b`)
 	errWorkerCallbackDeferred = errors.New("worker callback deferred")
 )
 
@@ -5826,6 +5827,24 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		_, err = s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
 		if err != nil {
+			if boolMetadata(action.Inputs, "continueAfterPublish") && isRecoverablePublishConflict(err) {
+				results = annotateFinalCandidateFailure(results, workerID, "intermediate publish failed", err)
+				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":     action.Kind,
+					"when":     nonEmpty(action.When, "after_success"),
+					"reason":   "Intermediate pull request publication failed with a recoverable patch conflict; continuing dynamic replanning with the failed candidate blocked.",
+					"inputs":   action.Inputs,
+					"workerId": workerID,
+					"status":   "continued",
+					"error":    err.Error(),
+				}); actionErr != nil {
+					return false, results, actionErr
+				}
+				if objectiveErr := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "intermediate_pr_publish_failed", "Intermediate pull request publication failed; objective continues with replanning."); objectiveErr != nil {
+					return false, results, objectiveErr
+				}
+				return true, results, nil
+			}
 			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":     action.Kind,
@@ -9838,6 +9857,11 @@ func workerSummaryDefersCompletion(summary string) bool {
 	if normalized == "" {
 		return false
 	}
+	normalized = strings.NewReplacer(
+		"\u2018", "'",
+		"\u2019", "'",
+	).Replace(normalized)
+	normalized = strings.Join(strings.Fields(normalized), " ")
 	for _, marker := range []string{
 		"waiting for",
 		"will re-invoke",
@@ -9854,7 +9878,7 @@ func workerSummaryDefersCompletion(summary string) bool {
 			return true
 		}
 	}
-	return false
+	return deferredNextWorkPattern.MatchString(normalized)
 }
 
 func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr error, changes WorkspaceChanges) map[string]any {
