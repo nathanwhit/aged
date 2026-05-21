@@ -6893,7 +6893,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			} else if terminal && !options.FinalizationRecovery {
 				return false, "", "", results
 			}
-			if failed := firstWorkerResultWithStatus(nextResults, core.WorkerFailed); failed.WorkerID != "" {
+			if failed := firstWorkerResultWithStatus(nextResults, core.WorkerFailed); failed.Status == core.WorkerFailed {
 				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failed.Error, failed.Summary)); ok {
 					if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, next, failed, blocker) {
 						stalledTurns++
@@ -9894,6 +9894,15 @@ func workerSummaryDefersCompletion(summary string) bool {
 		"re-invoke when",
 		"wakeup",
 		"wake up",
+		"still active",
+		"still running",
+		"still progressing",
+		"still no errors",
+		"continues without errors",
+		"continuing until",
+		"continuing to poll",
+		"waiting for final",
+		"wait for final",
 		"continue later",
 		"continue when",
 		"not complete",

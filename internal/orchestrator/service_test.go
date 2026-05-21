@@ -9054,6 +9054,85 @@ func TestServiceReplansAfterInitialWorkerSetupError(t *testing.T) {
 	}
 }
 
+func TestServiceRecoversDynamicReplanGraphSetupErrorWithoutWorkerID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	prepareCalls := 0
+	workspaceErr := errors.New("apply base worker patch on remote target: repository lacks the necessary blob to perform 3-way merge")
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement the first slice",
+			Spawns: []SpawnRequest{{
+				ID:         "review",
+				Role:       "reviewer",
+				Reason:     "Review the implementation output.",
+				WorkerKind: "reviewer",
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "review found a repairable issue",
+			Plan: &Plan{
+				Rationale: "repair the implementation with an initial worker graph",
+				Workers: []WorkerRequest{{
+					ID:         "repair",
+					Role:       "repairer",
+					Reason:     "Repair the rejected candidate.",
+					WorkerKind: "codex",
+					Prompt:     "Repair the candidate.",
+				}},
+			},
+		}, {
+			Action:    "wait",
+			Rationale: "repair setup failed and should be visible to the replanner",
+			Message:   "retry after the setup issue is repaired",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":    eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "implemented"}}},
+		"reviewer": eventRunner{kind: "reviewer", events: []worker.Event{{Kind: worker.EventResult, Text: "review found a repairable issue"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:              t.TempDir(),
+		prepareCalls:     &prepareCalls,
+		failPrepareAfter: 2,
+		prepareErr:       workspaceErr,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "internal/recovered.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Recover dynamic graph setup",
+		Prompt: "Implement, review, then repair from a graph worker.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].Status != core.TaskWaiting {
+		t.Fatalf("task status = %q, want waiting", snapshot.Tasks[0].Status)
+	}
+	if len(brain.states) < 2 {
+		t.Fatalf("replan states = %+v, want setup failure to trigger another replan turn", brain.states)
+	}
+	if !replanStatesContainResultError(brain.states, "necessary blob") {
+		t.Fatalf("replan states missing setup error: %+v", brain.states)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "worker_failure_recovery", "continued") {
+		t.Fatalf("missing continued worker failure recovery action:\n%s", taskEventSummary(snapshot.Events, task.ID))
+	}
+	for _, event := range snapshot.Events {
+		if event.Type == core.EventTaskStatus && event.TaskID == task.ID && strings.Contains(string(event.Payload), string(core.TaskFailed)) {
+			t.Fatalf("task should not have been terminal-failed after graph setup error: %s", event.Payload)
+		}
+	}
+}
+
 func TestServiceBasesFollowUpWorkspaceOnLatestCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -10737,6 +10816,19 @@ func TestWorkerRunStateFailsSuccessThatDefersNextValidation(t *testing.T) {
 	})
 	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "deferring completion") {
 		t.Fatalf("status = %q err = %v, want failed deferred validation success", status, err)
+	}
+}
+
+func TestWorkerRunStateFailsSuccessWithPriorErrorAndProgressOnlySummary(t *testing.T) {
+	state := &workerRunState{}
+	state.observe(worker.Event{Kind: worker.EventError, Text: "cargo test failed: exit status 101"})
+	state.observe(worker.Event{Kind: worker.EventResult, Text: "The full check has reached `deno_runtime` and CLI support crates. It's long, but still no errors."})
+	status, err := state.normalizeCompletionStatus(Plan{}, core.WorkerSucceeded, nil, WorkspaceChanges{
+		Dirty:        true,
+		ChangedFiles: []WorkspaceChangedFile{{Path: "libs/cache_dir/npm.rs", Status: "modified"}},
+	})
+	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "deferring completion") {
+		t.Fatalf("status = %q err = %v, want failed progress-only success", status, err)
 	}
 }
 
