@@ -160,6 +160,13 @@ CREATE TABLE IF NOT EXISTS snapshot_projection (
 	updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS snapshot_task_cards_projection (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	last_event_id INTEGER NOT NULL,
+	state TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS snapshot_worker_outputs (
 	worker_id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL DEFAULT '',
