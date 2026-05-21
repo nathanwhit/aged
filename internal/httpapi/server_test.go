@@ -209,11 +209,25 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	defer store.Close()
 
 	for _, event := range []core.Event{
-		{Type: core.EventTaskCreated, TaskID: "done", Payload: core.MustJSON(map[string]any{"title": "Done", "prompt": "large prompt"})},
+		{Type: core.EventTaskCreated, TaskID: "done", Payload: core.MustJSON(map[string]any{
+			"title":  "Done",
+			"prompt": "large prompt",
+			"metadata": map[string]any{
+				"completionMode": "github",
+				"loopPrompt":     strings.Repeat("x", 2048),
+			},
+		})},
 		{Type: core.EventWorkerCreated, TaskID: "done", WorkerID: "done-worker", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
 		{Type: core.EventTaskStatus, TaskID: "done", Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
-		{Type: core.EventTaskCreated, TaskID: "active", Payload: core.MustJSON(map[string]any{"title": "Active", "prompt": "active prompt"})},
-		{Type: core.EventWorkerCreated, TaskID: "active", WorkerID: "active-worker", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventTaskCreated, TaskID: "active", Payload: core.MustJSON(map[string]any{
+			"title":  "Active",
+			"prompt": "active prompt",
+			"metadata": map[string]any{
+				"executionMode": "loop",
+				"loopPrompt":    strings.Repeat("y", 2048),
+			},
+		})},
+		{Type: core.EventWorkerCreated, TaskID: "active", WorkerID: "active-worker", Payload: core.MustJSON(map[string]any{"kind": "mock", "prompt": strings.Repeat("z", 2048), "metadata": map[string]any{"large": strings.Repeat("m", 2048)}})},
 		{Type: core.EventTaskStatus, TaskID: "active", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})},
 	} {
 		if _, err := store.Append(ctx, event); err != nil {
@@ -243,8 +257,20 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	if taskByID(snapshot.Tasks, "done").Prompt != "" {
 		t.Fatalf("terminal task prompt = %q, want stripped card payload", taskByID(snapshot.Tasks, "done").Prompt)
 	}
+	if taskByID(snapshot.Tasks, "active").Prompt != "" {
+		t.Fatalf("active task prompt = %q, want stripped card payload", taskByID(snapshot.Tasks, "active").Prompt)
+	}
+	if strings.Contains(string(taskByID(snapshot.Tasks, "done").Metadata), "loopPrompt") {
+		t.Fatalf("task card metadata kept large loopPrompt: %s", taskByID(snapshot.Tasks, "done").Metadata)
+	}
+	if !strings.Contains(string(taskByID(snapshot.Tasks, "done").Metadata), "completionMode") {
+		t.Fatalf("task card metadata dropped card metadata: %s", taskByID(snapshot.Tasks, "done").Metadata)
+	}
 	if len(snapshot.Workers) != 1 || snapshot.Workers[0].TaskID != "active" {
 		t.Fatalf("workers = %+v, want only active task workers", snapshot.Workers)
+	}
+	if snapshot.Workers[0].Prompt != "" || len(snapshot.Workers[0].Metadata) != 0 {
+		t.Fatalf("worker card kept detail payload: %+v", snapshot.Workers[0])
 	}
 
 	taskRes, err := http.Get(server.URL + "/api/tasks/done")
