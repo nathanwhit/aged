@@ -42,14 +42,17 @@ type RemoteWorkerCallback struct {
 }
 
 type remoteRun struct {
-	Target    TargetConfig `json:"target"`
-	Session   string       `json:"session"`
-	RunDir    string       `json:"runDir"`
-	WorkDir   string       `json:"workDir"`
-	TaskID    string       `json:"taskId,omitempty"`
-	WorkerID  string       `json:"workerId,omitempty"`
-	Status    string       `json:"status"`
-	StartedAt time.Time    `json:"startedAt"`
+	Target             TargetConfig `json:"target"`
+	Session            string       `json:"session"`
+	RunDir             string       `json:"runDir"`
+	WorkDir            string       `json:"workDir"`
+	TaskID             string       `json:"taskId,omitempty"`
+	WorkerID           string       `json:"workerId,omitempty"`
+	SharedRoot         string       `json:"sharedRoot,omitempty"`
+	SharedArtifactsDir string       `json:"sharedArtifactsDir,omitempty"`
+	SharedWorkerDir    string       `json:"sharedWorkerDir,omitempty"`
+	Status             string       `json:"status"`
+	StartedAt          time.Time    `json:"startedAt"`
 }
 
 type RemoteCheckoutSpec struct {
@@ -102,6 +105,24 @@ func NewRemoteRun(target TargetConfig, spec worker.Spec) remoteRun {
 		Status:    "running",
 		StartedAt: time.Now().UTC(),
 	}
+}
+
+func (r SSHRunner) PrepareSharedWorkspace(ctx context.Context, target TargetConfig, taskID string, workerID string) (SharedWorkspace, error) {
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	root := path.Join(nonEmpty(target.WorkRoot, "/tmp/aged-workers"), "shared", shortID(taskID))
+	shared := SharedWorkspace{
+		Root:         root,
+		ArtifactsDir: path.Join(root, "artifacts"),
+		WorkersDir:   path.Join(root, "workers"),
+		WorkerDir:    path.Join(root, "workers", shortID(workerID)),
+	}
+	script := "mkdir -p " + shellQuote(shared.Root) + " " + shellQuote(shared.ArtifactsDir) + " " + shellQuote(shared.WorkersDir) + " " + shellQuote(shared.WorkerDir)
+	if _, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", script)); err != nil {
+		return SharedWorkspace{}, err
+	}
+	return shared, nil
 }
 
 func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string, stdin string) error {
@@ -762,6 +783,13 @@ func remoteCallbackEnv(run remoteRun) string {
 		"export AGED_PARENT_TASK_ID=" + shellQuote(run.TaskID),
 		"export AGED_PARENT_WORKER_ID=" + shellQuote(run.WorkerID),
 		"export AGED_WORKER_CALLBACK_DIR=" + shellQuote(remoteCallbackDir(run)),
+	}
+	if strings.TrimSpace(run.SharedRoot) != "" {
+		lines = append(lines,
+			"export AGED_SHARED_DIR="+shellQuote(run.SharedRoot),
+			"export AGED_SHARED_ARTIFACTS_DIR="+shellQuote(run.SharedArtifactsDir),
+			"export AGED_WORKER_SCRATCH_DIR="+shellQuote(run.SharedWorkerDir),
+		)
 	}
 	return strings.Join(lines, "\n") + "\n"
 }

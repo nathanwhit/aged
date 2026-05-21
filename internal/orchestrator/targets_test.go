@@ -373,6 +373,35 @@ func TestSSHRunnerStartsTmuxAndPollsStatus(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPreparesSharedWorkspaceAndExportsEnv(t *testing.T) {
+	ctx := context.Background()
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	target := TargetConfig{ID: "vm", Host: "vm", WorkRoot: "/runs"}
+
+	shared, err := runner.PrepareSharedWorkspace(ctx, target, "task-1234567890", "worker-abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.Root != "/runs/shared/task-1234567" {
+		t.Fatalf("shared root = %q", shared.Root)
+	}
+	run := NewRemoteRun(target, worker.Spec{ID: "worker-abcdef", TaskID: "task-1234567890", WorkDir: "/repo"})
+	run.SharedRoot = shared.Root
+	run.SharedArtifactsDir = shared.ArtifactsDir
+	run.SharedWorkerDir = shared.WorkerDir
+	env := remoteCallbackEnv(run)
+	for _, want := range []string{
+		"export AGED_SHARED_DIR='/runs/shared/task-1234567'",
+		"export AGED_SHARED_ARTIFACTS_DIR='/runs/shared/task-1234567/artifacts'",
+		"export AGED_WORKER_SCRATCH_DIR='/runs/shared/task-1234567/workers/worker-abcde'",
+	} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("remote callback env missing %q:\n%s", want, env)
+		}
+	}
+}
+
 func TestSSHRunnerPollsLargeRemoteLogLine(t *testing.T) {
 	largeLine := strings.Repeat("r", 2*1024*1024)
 	executor := &scriptedPollExecutor{

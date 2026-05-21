@@ -167,6 +167,24 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 		b.WriteString(helper)
 		b.WriteString(" --title \"Short PR title\"`. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
 	}
+	if sharedRoot := strings.TrimSpace(workspace.SharedRoot); sharedRoot != "" {
+		b.WriteString("# Shared Artifact Workspace\n\n")
+		b.WriteString("This task has a shared artifact workspace for non-repo assets such as baseline binaries, benchmark harnesses, profiling captures, generated data, and logs that should survive across worker turns without becoming pull request changes.\n\n")
+		b.WriteString("Shared root: ")
+		b.WriteString(sharedRoot)
+		b.WriteString("\n")
+		if dir := strings.TrimSpace(workspace.SharedArtifactsDir); dir != "" {
+			b.WriteString("Published artifacts directory: ")
+			b.WriteString(dir)
+			b.WriteString("\n")
+		}
+		if dir := strings.TrimSpace(workspace.SharedWorkerDir); dir != "" {
+			b.WriteString("This worker's scratch directory: ")
+			b.WriteString(dir)
+			b.WriteString("\n")
+		}
+		b.WriteString("\nThe environment exports `AGED_SHARED_DIR`, `AGED_SHARED_ARTIFACTS_DIR`, and `AGED_WORKER_SCRATCH_DIR` when these paths are available. Keep repo changes in the execution workspace; keep task-local scratch assets in the shared artifact workspace. Treat files under the published artifacts directory as durable/versioned outputs and avoid overwriting another worker's artifact in place.\n\n")
+	}
 	b.WriteString("# Worker Task\n\n")
 	b.WriteString(strings.TrimSpace(prompt))
 	return b.String()
@@ -205,6 +223,30 @@ func workspaceCallbackDir(workspace PreparedWorkspace) string {
 		return ""
 	}
 	return filepath.Join(base, "callbacks")
+}
+
+func workspaceSharedEnv(workspace PreparedWorkspace) map[string]string {
+	env := map[string]string{}
+	if dir := strings.TrimSpace(workspace.SharedRoot); dir != "" {
+		env["AGED_SHARED_DIR"] = dir
+	}
+	if dir := strings.TrimSpace(workspace.SharedArtifactsDir); dir != "" {
+		env["AGED_SHARED_ARTIFACTS_DIR"] = dir
+	}
+	if dir := strings.TrimSpace(workspace.SharedWorkerDir); dir != "" {
+		env["AGED_WORKER_SCRATCH_DIR"] = dir
+	}
+	if len(env) == 0 {
+		return nil
+	}
+	return env
+}
+
+func applySharedWorkspace(workspace PreparedWorkspace, shared SharedWorkspace) PreparedWorkspace {
+	workspace.SharedRoot = shared.Root
+	workspace.SharedArtifactsDir = shared.ArtifactsDir
+	workspace.SharedWorkerDir = shared.WorkerDir
+	return workspace
 }
 
 func installLocalCreateTaskHelper(workspace PreparedWorkspace) (string, string, error) {
@@ -271,7 +313,7 @@ func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace) str
 	b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
 	b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
 	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
-	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, and `AGED_WORKER_CALLBACK_DIR`.\n\n")
+	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, `AGED_WORKER_CALLBACK_DIR`, and the shared artifact workspace variables when available.\n\n")
 	b.WriteString(prompt)
 	return b.String()
 }
@@ -3547,6 +3589,13 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			}
 		}
 	}
+	sharedWorkspace, err := s.prepareSharedWorkspace(ctx, workspaceSpec)
+	if err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, fmt.Errorf("prepare shared artifact workspace: %w", err)
+	}
+	workspace = applySharedWorkspace(workspace, sharedWorkspace)
+	plan.Metadata["sharedWorkspace"] = sharedWorkspace.Root
 	workspace.TargetID = target.ID
 	workspace.TargetKind = string(target.Kind)
 	if _, err := s.append(ctx, core.Event{
@@ -3598,6 +3647,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		ReasoningEffort: plan.ReasoningEffort,
 		TargetID:        target.ID,
 		TargetKind:      string(target.Kind),
+		Env:             workspaceSharedEnv(workspace),
 		Steering:        steering,
 	}
 	command := runner.BuildCommand(spec)
@@ -3871,6 +3921,13 @@ func isRemotePreStartFallbackError(err error) bool {
 	return strings.Contains(err.Error(), "prepare remote checkout:")
 }
 
+func (s *Service) prepareSharedWorkspace(ctx context.Context, spec WorkspaceSpec) (SharedWorkspace, error) {
+	if preparer, ok := s.workspaces.(sharedWorkspacePreparer); ok {
+		return preparer.PrepareShared(ctx, spec)
+	}
+	return prepareSharedWorkspaceAt("", spec)
+}
+
 func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan Plan, runner worker.Runner, target TargetConfig) (WorkerTurnResult, error) {
 	workerID := uuid.NewString()
 	nodeID := stringMetadata(plan.Metadata, "nodeID")
@@ -3922,6 +3979,13 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 	}
 	remoteRun := NewRemoteRun(target, worker.Spec{ID: workerID, TaskID: task.ID, WorkDir: remoteWorkDir})
+	sharedWorkspace, err := s.sshRunner.PrepareSharedWorkspace(ctx, target, task.ID, workerID)
+	if err != nil {
+		return WorkerTurnResult{}, fmt.Errorf("prepare remote shared artifact workspace: %w", err)
+	}
+	remoteRun.SharedRoot = sharedWorkspace.Root
+	remoteRun.SharedArtifactsDir = sharedWorkspace.ArtifactsDir
+	remoteRun.SharedWorkerDir = sharedWorkspace.WorkerDir
 	if !reusedWorkspace {
 		checkoutBase := project.DefaultBase
 		checkoutBaseRef := projectWorkspaceBaseCommit(ctx, project)
@@ -3984,15 +4048,18 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 	}
 	workspace := PreparedWorkspace{
-		Root:       remoteWorkDir,
-		CWD:        remoteWorkDir,
-		SourceRoot: remoteSourceDir,
-		Mode:       "remote",
-		VCSType:    "ssh",
-		WorkerID:   workerID,
-		TaskID:     task.ID,
-		TargetID:   target.ID,
-		TargetKind: string(target.Kind),
+		Root:               remoteWorkDir,
+		CWD:                remoteWorkDir,
+		SourceRoot:         remoteSourceDir,
+		Mode:               "remote",
+		VCSType:            "ssh",
+		WorkerID:           workerID,
+		TaskID:             task.ID,
+		TargetID:           target.ID,
+		TargetKind:         string(target.Kind),
+		SharedRoot:         sharedWorkspace.Root,
+		SharedArtifactsDir: sharedWorkspace.ArtifactsDir,
+		SharedWorkerDir:    sharedWorkspace.WorkerDir,
 	}
 	capabilities := worker.RunnerCapabilities(runner)
 	capabilities.LiveSteering = false
@@ -4006,6 +4073,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		ReasoningEffort: plan.ReasoningEffort,
 		TargetID:        target.ID,
 		TargetKind:      string(target.Kind),
+		Env:             workspaceSharedEnv(workspace),
 	}
 	if reusedWorkspace {
 		if !capabilities.ResumeSession {
@@ -4028,6 +4096,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	plan.Metadata["remoteSession"] = remoteRun.Session
 	plan.Metadata["remoteRunDir"] = remoteRun.RunDir
 	plan.Metadata["remoteWorkDir"] = remoteRun.WorkDir
+	plan.Metadata["sharedWorkspace"] = sharedWorkspace.Root
 
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventExecutionPlanned,
