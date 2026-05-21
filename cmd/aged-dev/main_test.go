@@ -26,6 +26,7 @@ func TestBuildDaemonArgsKeepsFlagsAfterBooleanOptionsParseable(t *testing.T) {
 		artifactCleanup:   true,
 		artifactDryRun:    false,
 		artifactMinAge:    24 * time.Hour,
+		artifactInterval:  time.Hour,
 		usageAware:        true,
 		usageTTL:          5 * time.Minute,
 		githubDriverPath:  ".config/gh.json",
@@ -90,6 +91,7 @@ func registerDaemonTestFlags(flags *flag.FlagSet, artifactCleanup *bool, artifac
 	flags.BoolVar(artifactCleanup, "workspace-artifact-cleanup", false, "")
 	flags.BoolVar(artifactDryRun, "workspace-artifact-cleanup-dry-run", false, "")
 	flags.Duration("workspace-artifact-cleanup-min-age", 0, "")
+	flags.Duration("workspace-artifact-cleanup-interval", 0, "")
 	flags.Bool("usage-aware-scheduling", false, "")
 	flags.Duration("usage-aware-scheduling-ttl", 0, "")
 	flags.Var(githubDriver, "github-driver", "")

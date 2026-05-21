@@ -48,6 +48,7 @@ func main() {
 		artifactCleanup   = flag.Bool("workspace-artifact-cleanup", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP", true), "remove allowlisted build artifact directories from stale retained worker workspaces")
 		artifactDryRun    = flag.Bool("workspace-artifact-cleanup-dry-run", envutil.Bool("AGED_WORKSPACE_ARTIFACT_CLEANUP_DRY_RUN", false), "report stale retained worker artifact cleanup without deleting directories")
 		artifactMinAge    = flag.Duration("workspace-artifact-cleanup-min-age", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_MIN_AGE", 24*time.Hour), "minimum terminal worker age before retained workspace artifact cleanup")
+		artifactInterval  = flag.Duration("workspace-artifact-cleanup-interval", envutil.Duration("AGED_WORKSPACE_ARTIFACT_CLEANUP_INTERVAL", time.Hour), "interval between retained worker artifact cleanup scans")
 		targetsPath       = flag.String("targets", envutil.String("AGED_TARGETS", ""), "JSON execution target pool config")
 		githubDriverPath  = flagutil.NewOptionalValue(envutil.String("AGED_GITHUB_DRIVER", ""))
 		prMonitor         = flag.Bool("pull-request-monitor", envutil.Bool("AGED_PULL_REQUEST_MONITOR", true), "periodically refresh tracked pull requests and resume tasks that need follow-up")
@@ -209,15 +210,17 @@ func main() {
 		slog.Warn("recover workers", "error", err)
 	}
 	if *artifactCleanup {
-		report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, orchestrator.RetainedWorkspaceArtifactCleanupOptions{
+		cleanupOptions := orchestrator.RetainedWorkspaceArtifactCleanupOptions{
 			MinAge: *artifactMinAge,
 			DryRun: *artifactDryRun,
-		})
+		}
+		report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, cleanupOptions)
 		if err != nil {
 			slog.Warn("cleanup retained workspace artifacts", "error", err)
 		} else if report.Scanned > 0 {
 			slog.Info("cleanup retained workspace artifacts", "scanned", report.Scanned, "cleaned", report.Cleaned, "skipped", report.Skipped, "bytesRemoved", report.BytesRemoved, "dryRun", report.DryRun)
 		}
+		service.StartRetainedWorkspaceArtifactCleanup(ctx, *artifactInterval, cleanupOptions)
 	}
 	service.StartTargetProbes(ctx, 30*time.Second)
 	if *prMonitor {

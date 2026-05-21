@@ -42,6 +42,32 @@ func TestCleanupRetainedWorkspaceArtifactsRemovesIgnoredTarget(t *testing.T) {
 	}
 }
 
+func TestStartRetainedWorkspaceArtifactCleanupRemovesOldTargetOnInterval(t *testing.T) {
+	fixture := newRetainedCleanupFixture(t, "task-interval-clean", "worker-interval-clean", core.WorkerSucceeded, true)
+	writeRetainedTargetFile(t, fixture.repo, "debug/artifact.bin", "build output\n")
+	ctx, cancel := context.WithCancel(fixture.ctx)
+	defer cancel()
+
+	fixture.service.StartRetainedWorkspaceArtifactCleanup(ctx, 10*time.Millisecond, RetainedWorkspaceArtifactCleanupOptions{
+		MinAge: time.Hour,
+		Now:    fixture.now,
+	})
+
+	waitForSnapshot(t, fixture.store, func(snapshot core.Snapshot) bool {
+		for _, event := range snapshot.Events {
+			if event.Type == core.EventWorkerCleanup && event.WorkerID == "worker-interval-clean" {
+				return true
+			}
+		}
+		return false
+	}, func(snapshot core.Snapshot) string {
+		return "periodic retained artifact cleanup did not emit cleanup event"
+	})
+	if _, err := os.Stat(filepath.Join(fixture.repo, "target")); !os.IsNotExist(err) {
+		t.Fatalf("target stat err = %v, want not exist", err)
+	}
+}
+
 func TestCleanupRetainedWorkspaceArtifactsProtectsActiveWorkers(t *testing.T) {
 	fixture := newRetainedCleanupFixture(t, "task-active", "worker-active", core.WorkerRunning, true)
 	writeRetainedTargetFile(t, fixture.repo, "artifact.bin", "build output\n")
