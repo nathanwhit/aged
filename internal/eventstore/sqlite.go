@@ -883,6 +883,57 @@ func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, err
 	return s.snapshotTaskCardsFromProjection(ctx)
 }
 
+func (s *SQLiteStore) TaskStatus(ctx context.Context, taskID string) (core.TaskStatus, bool, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", false, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT type, payload
+FROM events
+WHERE task_id = ? AND type IN ('task.created', 'task.status', 'task.cleared')
+ORDER BY id ASC`, taskID)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	status := core.TaskQueued
+	found := false
+	cleared := false
+	for rows.Next() {
+		var eventType core.EventType
+		var payload string
+		if err := rows.Scan(&eventType, &payload); err != nil {
+			return "", false, err
+		}
+		switch eventType {
+		case core.EventTaskCreated:
+			found = true
+			cleared = false
+			status = core.TaskQueued
+		case core.EventTaskStatus:
+			var decoded struct {
+				Status core.TaskStatus `json:"status"`
+			}
+			if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+				return "", false, fmt.Errorf("decode task.status: %w", err)
+			}
+			if decoded.Status != "" {
+				status = decoded.Status
+			}
+		case core.EventTaskCleared:
+			cleared = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if !found || cleared {
+		return "", false, nil
+	}
+	return status, true, nil
+}
+
 func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {
 	lastEventID, err := s.latestEventID(ctx)
 	if err != nil {
