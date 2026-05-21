@@ -3263,6 +3263,9 @@ func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) 
 	if len(pendingWorkerSteering(snapshot, taskID)) == 0 {
 		return
 	}
+	if s.resumeCodeReviewGateSteering(ctx, task, snapshot) {
+		return
+	}
 	initial, results, err := retryGraphStateForTask(snapshot, taskID)
 	if err != nil {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
@@ -3285,6 +3288,91 @@ func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) 
 		return
 	}
 	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
+func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
+	steering, ok := firstPendingWorkerSteering(snapshot, task.ID)
+	if !ok || steering.SpawnID != "code-review-gate" || strings.TrimSpace(steering.CandidateWorkerID) == "" {
+		return false
+	}
+	phase := nonEmpty(steering.ReviewPhase, "completion")
+	if phase != "completion" {
+		return false
+	}
+	_, results, err := retryGraphStateForTask(snapshot, task.ID)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   "worker_steering_queue",
+			"status": "waiting",
+			"reason": "queued code review steering could not resume automatically",
+			"error":  err.Error(),
+		})
+		return true
+	}
+	candidate, ok := workerResultByID(results, steering.CandidateWorkerID)
+	if !ok {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":              "worker_steering_queue",
+			"status":            "waiting",
+			"reason":            "queued code review steering references a missing candidate",
+			"candidateWorkerId": steering.CandidateWorkerID,
+			"workerId":          steering.WorkerID,
+		})
+		return true
+	}
+	project, err := s.projectForTask(task)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return true
+	}
+	policy := normalizedReviewPolicy(project.ReviewPolicy)
+	workerKind := s.preferredWorkerKindFromSteering(steering.Message)
+	plan := s.codeReviewGatePlan(task, candidate, policy, phase, workerKind)
+	plan = annotateWorkerSteeringPlan(plan, steering)
+	plan.Rationale = "retrying failed code review gate with user steering"
+	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
+		return true
+	}
+	task.Status = core.TaskPlanning
+	task.Error = ""
+	task.ObjectiveStatus = core.ObjectiveActive
+	task.ObjectivePhase = "worker_steering"
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return true
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		result = failedFollowUpResult(plan, err)
+	}
+	results = append(results, result)
+	if result.Status != core.WorkerSucceeded {
+		reason := nonEmpty(result.Error, result.Summary, "code review worker did not complete successfully")
+		_ = s.recordCodeReviewGateResult(ctx, task.ID, candidate.WorkerID, phase, result, "failed", reason)
+		_ = s.waitForUserAction(ctx, task.ID, result.WorkerID, "code_review_gate", "Code review worker failed before it could approve or reject publication.\n\n"+reason+"\n\nSteer the failed review worker to retry the review, choose a different review provider, or steer the task to take another path.", map[string]any{
+			"candidateWorkerId": candidate.WorkerID,
+			"reviewWorkerId":    result.WorkerID,
+			"phase":             phase,
+			"error":             reason,
+		})
+		return true
+	}
+	if codeReviewBlocksPublication(result, policy) {
+		reason := nonEmpty(result.Summary, "code review requested changes")
+		_ = s.recordCodeReviewGateResult(ctx, task.ID, candidate.WorkerID, phase, result, "blocked", reason)
+		if handled, recoverErr := s.recoverCodeReviewBlockedCandidate(ctx, task.ID, results, candidate.WorkerID, reason); handled && recoverErr != nil {
+			_ = s.failTask(ctx, task.ID, recoverErr)
+		}
+		return true
+	}
+	reason := nonEmpty(result.Summary, "code review approved publication")
+	_ = s.recordCodeReviewGateResult(ctx, task.ID, candidate.WorkerID, phase, result, "passed", reason)
+	_ = s.completeTaskWithPublishRecovery(ctx, task.ID, results, candidate.WorkerID, reason, publishRecoveryState{})
+	return true
 }
 
 func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
@@ -4830,6 +4918,15 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 		}
 		results = review.Results
 		if !review.Ready {
+			if review.Status == "failed" {
+				_ = s.waitForUserAction(ctx, taskID, review.ReviewWorkerID, "code_review_gate", "Code review worker failed before it could approve or reject publication.\n\n"+review.Reason+"\n\nSteer the failed review worker to retry the review, choose a different review provider, or steer the task to take another path.", map[string]any{
+					"candidateWorkerId": candidateWorkerID,
+					"reviewWorkerId":    review.ReviewWorkerID,
+					"phase":             "completion",
+					"error":             review.Reason,
+				})
+				return nil
+			}
 			if handled, recoverErr := s.recoverCodeReviewBlockedCandidate(ctx, taskID, results, candidateWorkerID, review.Reason); handled {
 				return recoverErr
 			}
@@ -4859,6 +4956,7 @@ type codeReviewGateResult struct {
 	Results        []WorkerTurnResult
 	Reason         string
 	ReviewWorkerID string
+	Status         string
 }
 
 func (s *Service) reviewCandidateBeforePullRequest(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, phase string) (codeReviewGateResult, error) {
@@ -4905,21 +5003,7 @@ func (s *Service) reviewCandidateBeforePullRequest(ctx context.Context, taskID s
 	if !ok {
 		return out, nil
 	}
-	plan := Plan{
-		WorkerKind:      s.codeReviewWorkerKind(policy, task, candidate),
-		Prompt:          s.codeReviewGatePrompt(task, candidate, policy, phase),
-		ReasoningEffort: "high",
-		Rationale:       "project review policy requires code review before pull request publication",
-		Metadata: map[string]any{
-			"baseWorkerID":      candidateWorkerID,
-			"codeReviewGate":    true,
-			"reviewPhase":       phase,
-			"spawnID":           "code-review-gate",
-			"spawnRole":         "review",
-			"spawnReason":       "Project review policy requires an independent code review before publishing this candidate.",
-			"candidateWorkerID": candidateWorkerID,
-		},
-	}
+	plan := s.codeReviewGatePlan(task, candidate, policy, phase, "")
 	if _, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskPlanned,
 		TaskID:  taskID,
@@ -4935,20 +5019,45 @@ func (s *Service) reviewCandidateBeforePullRequest(ctx context.Context, taskID s
 	out.ReviewWorkerID = result.WorkerID
 	if result.Status != core.WorkerSucceeded {
 		out.Ready = false
+		out.Status = "failed"
 		out.Reason = nonEmpty(result.Error, result.Summary, "code review worker did not complete successfully")
 		_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "failed", out.Reason)
 		return out, nil
 	}
 	if codeReviewBlocksPublication(result, policy) {
 		out.Ready = false
+		out.Status = "blocked"
 		out.Reason = nonEmpty(result.Summary, "code review requested changes")
 		_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "blocked", out.Reason)
 		return out, nil
 	}
 	out.Ready = true
+	out.Status = "passed"
 	out.Reason = nonEmpty(result.Summary, "code review approved publication")
 	_ = s.recordCodeReviewGateResult(ctx, taskID, candidateWorkerID, phase, result, "passed", out.Reason)
 	return out, nil
+}
+
+func (s *Service) codeReviewGatePlan(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string, workerKindOverride string) Plan {
+	workerKind := strings.TrimSpace(workerKindOverride)
+	if workerKind == "" {
+		workerKind = s.codeReviewWorkerKind(policy, task, candidate)
+	}
+	return Plan{
+		WorkerKind:      workerKind,
+		Prompt:          s.codeReviewGatePrompt(task, candidate, policy, phase),
+		ReasoningEffort: "high",
+		Rationale:       "project review policy requires code review before pull request publication",
+		Metadata: map[string]any{
+			"baseWorkerID":      candidate.WorkerID,
+			"codeReviewGate":    true,
+			"reviewPhase":       phase,
+			"spawnID":           "code-review-gate",
+			"spawnRole":         "review",
+			"spawnReason":       "Project review policy requires an independent code review before publishing this candidate.",
+			"candidateWorkerID": candidate.WorkerID,
+		},
+	}
 }
 
 func normalizedReviewPolicy(policy core.ReviewPolicy) core.ReviewPolicy {
@@ -5004,6 +5113,37 @@ func (s *Service) codeReviewWorkerKind(policy core.ReviewPolicy, task core.Task,
 		return kind
 	}
 	return candidate.Kind
+}
+
+func (s *Service) preferredWorkerKindFromSteering(message string) string {
+	words := steeringWords(message)
+	if len(words) == 0 {
+		return ""
+	}
+	kinds := make([]string, 0, len(s.runners))
+	for kind := range s.runners {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	for _, kind := range kinds {
+		if words[strings.ToLower(strings.TrimSpace(kind))] {
+			return kind
+		}
+	}
+	return ""
+}
+
+func steeringWords(message string) map[string]bool {
+	words := map[string]bool{}
+	for _, field := range strings.FieldsFunc(strings.ToLower(message), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+	}) {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			words[field] = true
+		}
+	}
+	return words
 }
 
 func (s *Service) codeReviewGatePrompt(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) string {
@@ -5805,6 +5945,15 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		results = review.Results
 		if !review.Ready {
+			if review.Status == "failed" {
+				_ = s.waitForUserAction(ctx, task.ID, review.ReviewWorkerID, "code_review_gate", "Code review worker failed before it could approve or reject publication.\n\n"+review.Reason+"\n\nSteer the failed review worker to retry the review, choose a different review provider, or steer the task to take another path.", map[string]any{
+					"candidateWorkerId": workerID,
+					"reviewWorkerId":    review.ReviewWorkerID,
+					"phase":             "intermediate",
+					"error":             review.Reason,
+				})
+				return false, results, nil
+			}
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 				"kind":              action.Kind,
 				"when":              nonEmpty(action.When, "after_success"),
@@ -8510,22 +8659,32 @@ func pendingWorkerSteering(snapshot core.Snapshot, taskID string) []WorkerSteeri
 		if worker, ok := workers[payload.WorkerID]; ok {
 			payload.WorkerKind = nonEmpty(payload.WorkerKind, worker.Kind)
 		}
+		candidateWorkerID := ""
+		reviewPhase := ""
 		if node, ok := nodes[payload.WorkerID]; ok {
 			payload.NodeID = nonEmpty(payload.NodeID, node.ID)
 			payload.WorkerKind = nonEmpty(payload.WorkerKind, node.WorkerKind)
 			payload.Role = nonEmpty(payload.Role, node.Role)
 			payload.SpawnID = nonEmpty(payload.SpawnID, node.SpawnID)
+			var metadata map[string]any
+			if len(node.Metadata) > 0 && json.Unmarshal(node.Metadata, &metadata) == nil {
+				candidateWorkerID = stringMetadata(metadata, "candidateWorkerID")
+				reviewPhase = stringMetadata(metadata, "reviewPhase")
+				payload.WorkerKind = nonEmpty(payload.WorkerKind, stringMetadata(metadata, "workerKind"))
+			}
 		}
 		items = append(items, WorkerSteeringItem{
-			EventID:    event.ID,
-			WorkerID:   payload.WorkerID,
-			NodeID:     payload.NodeID,
-			WorkerKind: payload.WorkerKind,
-			Role:       payload.Role,
-			SpawnID:    payload.SpawnID,
-			Status:     payload.Status,
-			Reason:     payload.Reason,
-			Message:    payload.Message,
+			EventID:           event.ID,
+			WorkerID:          payload.WorkerID,
+			NodeID:            payload.NodeID,
+			WorkerKind:        payload.WorkerKind,
+			Role:              payload.Role,
+			SpawnID:           payload.SpawnID,
+			CandidateWorkerID: candidateWorkerID,
+			ReviewPhase:       reviewPhase,
+			Status:            payload.Status,
+			Reason:            payload.Reason,
+			Message:           payload.Message,
 		})
 	}
 	return items

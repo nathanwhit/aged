@@ -138,15 +138,17 @@ type PullRequestFeedbackItem struct {
 }
 
 type WorkerSteeringItem struct {
-	EventID    int64  `json:"eventId"`
-	WorkerID   string `json:"workerId"`
-	NodeID     string `json:"nodeId,omitempty"`
-	WorkerKind string `json:"workerKind,omitempty"`
-	Role       string `json:"role,omitempty"`
-	SpawnID    string `json:"spawnId,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Message    string `json:"message"`
+	EventID           int64  `json:"eventId"`
+	WorkerID          string `json:"workerId"`
+	NodeID            string `json:"nodeId,omitempty"`
+	WorkerKind        string `json:"workerKind,omitempty"`
+	Role              string `json:"role,omitempty"`
+	SpawnID           string `json:"spawnId,omitempty"`
+	CandidateWorkerID string `json:"candidateWorkerId,omitempty"`
+	ReviewPhase       string `json:"reviewPhase,omitempty"`
+	Status            string `json:"status,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	Message           string `json:"message"`
 }
 
 type ContextLedgerEntry struct {
