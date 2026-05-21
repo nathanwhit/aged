@@ -392,6 +392,66 @@ func TestSnapshotSummaryOmitsWorkerOutputEventsAndTracksLastEvent(t *testing.T) 
 	}
 }
 
+func TestTaskStatusUsesIndexedTaskEvents(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-status",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task status",
+				"prompt": "Look up task status without rebuilding a snapshot.",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerOutput,
+			TaskID:   "task-status",
+			WorkerID: "worker-status",
+			Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("large output", 1024)}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: "task-status",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+	)
+
+	status, ok, err := store.TaskStatus(ctx, "task-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || status != core.TaskWaiting {
+		t.Fatalf("status = %q ok = %v, want waiting true", status, ok)
+	}
+
+	status, ok, err = store.TaskStatus(ctx, "missing-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok || status != "" {
+		t.Fatalf("missing status = %q ok = %v, want empty false", status, ok)
+	}
+
+	appendSQLiteEvents(t, ctx, store, core.Event{
+		Type:   core.EventTaskCleared,
+		TaskID: "task-status",
+		Payload: core.MustJSON(map[string]any{
+			"reason": "user cleared task",
+		}),
+	})
+	status, ok, err = store.TaskStatus(ctx, "task-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("cleared status = %q ok = %v, want false", status, ok)
+	}
+}
+
 func TestSnapshotProjectionRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)

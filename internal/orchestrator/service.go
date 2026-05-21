@@ -1774,11 +1774,11 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	if req.Message == "" {
 		return errors.New("message is required")
 	}
-	snapshot, err := s.store.Snapshot(ctx)
+	status, ok, err := s.store.TaskStatus(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	if _, ok := findTask(snapshot, taskID); !ok {
+	if !ok {
 		return eventstore.ErrNotFound
 	}
 	_, err = s.append(ctx, core.Event{
@@ -1830,12 +1830,11 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		restartWorkers = append(restartWorkers, active)
 		restartWorkerIDs = append(restartWorkerIDs, active.ID)
 	}
-	snapshot, snapshotErr := s.store.Snapshot(ctx)
-	if snapshotErr == nil && taskStatus(snapshot, taskID) == core.TaskWaiting {
+	if status == core.TaskWaiting {
 		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
 		})
-	} else if snapshotErr == nil && len(restartWorkerIDs) > 0 {
+	} else if len(restartWorkerIDs) > 0 {
 		if !s.beginSteeringRestart(taskID) {
 			_ = s.recordTaskAction(ctx, taskID, map[string]any{
 				"kind":      "steering_restart",
