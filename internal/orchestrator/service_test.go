@@ -2491,6 +2491,195 @@ func TestServiceProjectReviewPolicyBlocksIntermediatePublication(t *testing.T) {
 	}
 }
 
+func TestServiceWorkerSteeringRetriesIntermediateReviewGateAndPublishes(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	projectDir := t.TempDir()
+	projects, err := NewProjectRegistry([]core.Project{{
+		ID:        "reviewed",
+		LocalPath: projectDir,
+		ReviewPolicy: core.ReviewPolicy{
+			Enabled:              true,
+			BeforeIntermediatePR: true,
+			ReviewerKinds:        []string{"claude"},
+			MaxAttempts:          2,
+		},
+	}}, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := &recordingEventRunner{
+		kind: "codex",
+		events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "Decision: approve\nFindings:\n- No P0/P1 issues.\nCommands Run:\n- Not run\nResidual Risk:\n- Low.",
+		}},
+	}
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{},
+		runners: map[string]worker.Runner{
+			"codex": reviewer,
+		},
+		workDir:    projectDir,
+		cwd:        projectDir,
+		sourceRoot: projectDir,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "cli/main.rs", Status: "modified"}},
+		},
+	})
+	service.SetProjects(projects)
+
+	taskID := "task-review-steering"
+	candidateID := "candidate-1"
+	reviewWorkerID := "review-old"
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":     "Publish candidate",
+				"prompt":    "Implement and publish after review.",
+				"projectId": "reviewed",
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskWaiting,
+			}),
+		},
+		{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   taskID,
+			WorkerID: candidateID,
+			Payload: core.MustJSON(PreparedWorkspace{
+				Root:       projectDir,
+				CWD:        projectDir,
+				SourceRoot: projectDir,
+				Mode:       string(WorkspaceModeShared),
+				VCSType:    "git",
+				WorkerID:   candidateID,
+				TaskID:     taskID,
+			}),
+		},
+		{
+			Type:   core.EventTaskPlanned,
+			TaskID: taskID,
+			Payload: core.MustJSON(Plan{
+				WorkerKind: "codex",
+				Prompt:     "implement the dependency reduction",
+				Actions: []PlanAction{{
+					Kind:     "publish_pull_request",
+					When:     "after_success",
+					Reason:   "publish the approved intermediate candidate",
+					WorkerID: candidateID,
+					Inputs: map[string]any{
+						"repo":                 "owner/repo",
+						"base":                 "main",
+						"body":                 "## Summary\n- Remove a dependency.\n\n## Validation\n- Checked by review gate.",
+						"continueAfterPublish": true,
+					},
+				}},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: candidateID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+				"metadata": map[string]any{
+					"spawnID":   "implement",
+					"spawnRole": "implementer",
+				},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: candidateID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "removed the dependency",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "cli/main.rs", Status: "modified"}},
+				},
+			}),
+		},
+		{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   taskID,
+			WorkerID: reviewWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "review-node-old",
+				"workerId":   reviewWorkerID,
+				"workerKind": "claude",
+				"role":       "review",
+				"spawnId":    "code-review-gate",
+				"metadata": map[string]any{
+					"candidateWorkerID": candidateID,
+					"reviewPhase":       "intermediate",
+				},
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: reviewWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"kind": "claude",
+			}),
+		},
+		{
+			Type:     core.EventWorkerSteered,
+			TaskID:   taskID,
+			WorkerID: reviewWorkerID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId": reviewWorkerID,
+				"message":  "Use codex for this review gate.",
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if !service.resumeCodeReviewGateSteering(ctx, task, snapshot) {
+		t.Fatal("code review gate steering was not handled")
+	}
+
+	snapshot = waitForPullRequests(t, store, taskID, 1)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	if publisher.published.WorkerID != candidateID {
+		t.Fatalf("published worker = %q, want %q", publisher.published.WorkerID, candidateID)
+	}
+	if reviewer.callsValue() != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", reviewer.callsValue())
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "code_review_gate", "passed") {
+		t.Fatalf("missing passed code_review_gate action")
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "publish_pull_request", "started") {
+		t.Fatalf("missing resumed publish action")
+	}
+}
+
 func TestCodeReviewBlocksPublicationHonorsApproveDecision(t *testing.T) {
 	result := WorkerTurnResult{
 		Status: core.WorkerSucceeded,

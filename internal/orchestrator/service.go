@@ -3296,10 +3296,10 @@ func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Ta
 		return false
 	}
 	phase := nonEmpty(steering.ReviewPhase, "completion")
-	if phase != "completion" {
+	if phase != "completion" && phase != "intermediate" {
 		return false
 	}
-	_, results, err := retryGraphStateForTask(snapshot, task.ID)
+	initial, results, err := retryGraphStateForTask(snapshot, task.ID)
 	if err != nil {
 		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":   "worker_steering_queue",
@@ -3371,8 +3371,60 @@ func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Ta
 	}
 	reason := nonEmpty(result.Summary, "code review approved publication")
 	_ = s.recordCodeReviewGateResult(ctx, task.ID, candidate.WorkerID, phase, result, "passed", reason)
+	if phase == "intermediate" {
+		action, ok := latestPublishPullRequestPlanActionForCandidate(snapshot, task.ID, results, candidate.WorkerID)
+		if !ok {
+			_ = s.waitForUserAction(ctx, task.ID, result.WorkerID, "code_review_gate", "Code review approved publication, but aged could not find the interrupted intermediate pull request action to resume. Steer the task to publish the approved candidate or continue another path.", map[string]any{
+				"candidateWorkerId": candidate.WorkerID,
+				"reviewWorkerId":    result.WorkerID,
+				"phase":             phase,
+			})
+			return true
+		}
+		ok, results, err := s.executePlanAction(ctx, task, action, results)
+		if err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+			return true
+		}
+		if !ok {
+			return true
+		}
+		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+		if !replanOK {
+			return true
+		}
+		_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+		return true
+	}
 	_ = s.completeTaskWithPublishRecovery(ctx, task.ID, results, candidate.WorkerID, reason, publishRecoveryState{})
 	return true
+}
+
+func latestPublishPullRequestPlanActionForCandidate(snapshot core.Snapshot, taskID string, results []WorkerTurnResult, candidateWorkerID string) (PlanAction, bool) {
+	candidateWorkerID = strings.TrimSpace(candidateWorkerID)
+	if candidateWorkerID == "" {
+		return PlanAction{}, false
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.Type != core.EventTaskPlanned || event.TaskID != taskID {
+			continue
+		}
+		var plan Plan
+		if err := json.Unmarshal(event.Payload, &plan); err != nil {
+			continue
+		}
+		for j := len(plan.Actions) - 1; j >= 0; j-- {
+			action := plan.Actions[j]
+			if strings.TrimSpace(action.Kind) != "publish_pull_request" {
+				continue
+			}
+			if planActionWorkerID(results, action.WorkerID) == candidateWorkerID {
+				return action, true
+			}
+		}
+	}
+	return PlanAction{}, false
 }
 
 func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
