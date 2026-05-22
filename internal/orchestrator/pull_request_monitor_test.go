@@ -137,6 +137,45 @@ func TestServiceDefaultPullRequestMonitorSkipsCleanPRs(t *testing.T) {
 	}
 }
 
+func TestServicePullRequestMonitorDoesNotRewriteUnchangedPRState(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatus("success", "CLEAN", "APPROVED")}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := waitForEvent(t, store, core.EventPRStatusChecked, "task-1")
+	firstEventCount := len(first.Events)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publisher.inspectCalls != 2 {
+		t.Fatalf("inspect calls = %d, want 2", publisher.inspectCalls)
+	}
+	if len(second.Events) != firstEventCount {
+		t.Fatalf("event count after unchanged poll = %d, want %d", len(second.Events), firstEventCount)
+	}
+	if countEvents(second.Events, core.EventPRStatusChecked, "task-1") != 1 {
+		t.Fatalf("status check events = %d, want 1", countEvents(second.Events, core.EventPRStatusChecked, "task-1"))
+	}
+	if countEvents(second.Events, core.EventTaskArtifact, "task-1") != 1 {
+		t.Fatalf("artifact events = %d, want 1", countEvents(second.Events, core.EventTaskArtifact, "task-1"))
+	}
+	if countEvents(second.Events, core.EventTaskObjective, "task-1") != 1 {
+		t.Fatalf("objective events = %d, want 1", countEvents(second.Events, core.EventTaskObjective, "task-1"))
+	}
+}
+
 func TestServiceDefaultPullRequestMonitorSkipsBlockedPendingPRs(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

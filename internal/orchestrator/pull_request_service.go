@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,7 +89,7 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 			}
 			continue
 		}
-		checked, err := s.RefreshPullRequest(ctx, pr.ID)
+		checked, err := s.refreshPullRequest(ctx, snapshot, pr)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s refresh pr: %v", pr.ID, err))
 			continue
@@ -789,6 +790,13 @@ func (s *Service) RefreshPullRequest(ctx context.Context, prID string) (core.Pul
 	if !ok {
 		return core.PullRequest{}, eventstore.ErrNotFound
 	}
+	return s.refreshPullRequest(ctx, snapshot, pr)
+}
+
+func (s *Service) refreshPullRequest(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest) (core.PullRequest, error) {
+	if s.prPublisher == nil {
+		return core.PullRequest{}, errors.New("pull request publisher is not configured")
+	}
 	checked, err := s.prPublisher.Inspect(ctx, pr)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -900,6 +908,10 @@ func (s *Service) recordPullRequestAutoMergeFailure(ctx context.Context, snapsho
 }
 
 func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Snapshot, checked core.PullRequest) (core.PullRequest, error) {
+	previous, hasPrevious := pullRequestByID(snapshot, checked.ID)
+	if hasPrevious && pullRequestStatusEventNoop(previous, checked) {
+		return previous, nil
+	}
 	event, err := s.append(ctx, core.Event{
 		Type:   core.EventPRStatusChecked,
 		TaskID: checked.TaskID,
@@ -919,11 +931,11 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		return core.PullRequest{}, err
 	}
 	checked.UpdatedAt = event.At
-	if err := s.recordPullRequestArtifact(ctx, checked); err != nil {
+	if err := s.recordPullRequestArtifactIfChanged(ctx, snapshot, checked); err != nil {
 		return core.PullRequest{}, err
 	}
 	status, phase := objectiveForPullRequest(checked)
-	if phase != "" {
+	if phase != "" && !taskObjectiveMatches(snapshot, checked.TaskID, status, phase) {
 		if err := s.updateTaskObjective(ctx, checked.TaskID, status, phase, pullRequestObjectiveSummary(checked, phase)); err != nil {
 			return core.PullRequest{}, err
 		}
@@ -1460,6 +1472,112 @@ func (s *Service) recordPullRequestArtifact(ctx context.Context, pr core.PullReq
 		"mergeable":        pr.Mergeable,
 		"reviewStatus":     pr.ReviewStatus,
 	})
+}
+
+func (s *Service) recordPullRequestArtifactIfChanged(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest) error {
+	if pullRequestArtifactMatches(snapshot, pr) {
+		return nil
+	}
+	return s.recordPullRequestArtifact(ctx, pr)
+}
+
+func pullRequestByID(snapshot core.Snapshot, id string) (core.PullRequest, bool) {
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID == id {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
+}
+
+func pullRequestStatusEventNoop(previous core.PullRequest, checked core.PullRequest) bool {
+	if previous.State != checked.State ||
+		previous.Draft != checked.Draft ||
+		previous.ChecksStatus != checked.ChecksStatus ||
+		previous.ChecksConclusion != checked.ChecksConclusion ||
+		previous.MergeStatus != checked.MergeStatus ||
+		previous.Mergeable != checked.Mergeable ||
+		previous.ReviewStatus != checked.ReviewStatus {
+		return false
+	}
+	return pullRequestMetadataMergeNoop(previous.Metadata, checked.Metadata)
+}
+
+func pullRequestMetadataMergeNoop(previous json.RawMessage, incoming json.RawMessage) bool {
+	if len(bytes.TrimSpace(incoming)) == 0 {
+		return true
+	}
+	if jsonRawEqual(previous, incoming) {
+		return true
+	}
+	merged := map[string]any{}
+	if len(bytes.TrimSpace(previous)) > 0 {
+		if err := json.Unmarshal(previous, &merged); err != nil || merged == nil {
+			return false
+		}
+	}
+	next := map[string]any{}
+	if err := json.Unmarshal(incoming, &next); err != nil || next == nil {
+		return false
+	}
+	maps.Copy(merged, next)
+	clearMissingTriggeredFeedbackMetadata(merged, next, "latestPullRequestFeedback")
+	clearMissingTriggeredFeedbackMetadata(merged, next, "latestConversationComment")
+	return jsonRawEqual(previous, core.MustJSON(merged))
+}
+
+func clearMissingTriggeredFeedbackMetadata(merged map[string]any, incoming map[string]any, prefix string) {
+	signatureKey := prefix + "Signature"
+	triggeredKey := prefix + "TriggeredSignature"
+	if _, ok := incoming[signatureKey]; !ok {
+		return
+	}
+	if _, ok := incoming[triggeredKey]; ok {
+		return
+	}
+	delete(merged, triggeredKey)
+}
+
+func taskObjectiveMatches(snapshot core.Snapshot, taskID string, status core.ObjectiveStatus, phase string) bool {
+	task, ok := findTask(snapshot, taskID)
+	return ok && task.ObjectiveStatus == status && task.ObjectivePhase == phase
+}
+
+func pullRequestArtifactMatches(snapshot core.Snapshot, pr core.PullRequest) bool {
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return false
+	}
+	name := pr.Title
+	if name == "" {
+		name = fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+	}
+	metadata := core.MustJSON(map[string]any{
+		"repo":             pr.Repo,
+		"number":           pr.Number,
+		"state":            pr.State,
+		"draft":            pr.Draft,
+		"checksStatus":     pr.ChecksStatus,
+		"checksConclusion": pr.ChecksConclusion,
+		"mergeStatus":      pr.MergeStatus,
+		"mergeable":        pr.Mergeable,
+		"reviewStatus":     pr.ReviewStatus,
+	})
+	for _, artifact := range task.Artifacts {
+		if artifact.ID != pr.ID {
+			continue
+		}
+		return artifact.Kind == "github_pull_request" &&
+			artifact.Name == name &&
+			artifact.URL == pr.URL &&
+			artifact.Ref == pr.Branch &&
+			jsonRawEqual(artifact.Metadata, metadata)
+	}
+	return false
+}
+
+func jsonRawEqual(a json.RawMessage, b json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(a), bytes.TrimSpace(b))
 }
 
 func (s *Service) recordPullRequestPublished(ctx context.Context, pr core.PullRequest) error {
