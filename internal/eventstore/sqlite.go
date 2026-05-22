@@ -220,11 +220,94 @@ CREATE TABLE IF NOT EXISTS snapshot_workspace_metadata (
 	data TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_task_cards_projection (
+CREATE TABLE IF NOT EXISTS task_card_meta (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
 	last_event_id INTEGER NOT NULL,
-	state TEXT NOT NULL,
 	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_cards (
+	id TEXT PRIMARY KEY,
+	project_id TEXT NOT NULL DEFAULT '',
+	workstream_id TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '',
+	objective_status TEXT NOT NULL DEFAULT '',
+	objective_phase TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT '',
+	final_candidate_worker_id TEXT NOT NULL DEFAULT '',
+	applied_worker_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS task_cards_status_idx ON task_cards(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS task_card_workers (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	kind TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	command TEXT NOT NULL DEFAULT '[]',
+	prompt_path TEXT NOT NULL DEFAULT '',
+	prompt_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_card_workers_task_idx ON task_card_workers(task_id);
+
+CREATE TABLE IF NOT EXISTS task_card_execution_nodes (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	worker_id TEXT NOT NULL DEFAULT '',
+	worker_kind TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	plan_id TEXT NOT NULL DEFAULT '',
+	parent_node_id TEXT NOT NULL DEFAULT '',
+	spawn_id TEXT NOT NULL DEFAULT '',
+	role TEXT NOT NULL DEFAULT '',
+	reason TEXT NOT NULL DEFAULT '',
+	target_id TEXT NOT NULL DEFAULT '',
+	target_kind TEXT NOT NULL DEFAULT '',
+	remote_session TEXT NOT NULL DEFAULT '',
+	remote_run_dir TEXT NOT NULL DEFAULT '',
+	remote_work_dir TEXT NOT NULL DEFAULT '',
+	depends_on TEXT NOT NULL DEFAULT '[]',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_card_execution_nodes_task_idx ON task_card_execution_nodes(task_id);
+CREATE INDEX IF NOT EXISTS task_card_execution_nodes_worker_idx ON task_card_execution_nodes(worker_id);
+
+CREATE TABLE IF NOT EXISTS task_card_pull_requests (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	repo TEXT NOT NULL DEFAULT '',
+	number INTEGER NOT NULL DEFAULT 0,
+	url TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL DEFAULT '',
+	base TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT '',
+	draft INTEGER NOT NULL DEFAULT 0,
+	checks_status TEXT NOT NULL DEFAULT '',
+	checks_conclusion TEXT NOT NULL DEFAULT '',
+	merge_status TEXT NOT NULL DEFAULT '',
+	mergeable TEXT NOT NULL DEFAULT '',
+	review_status TEXT NOT NULL DEFAULT '',
+	babysitter_task_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_card_pull_requests_task_idx ON task_card_pull_requests(task_id);
+
+CREATE TABLE IF NOT EXISTS task_card_worker_nodes (
+	worker_id TEXT PRIMARY KEY,
+	node_id TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS snapshot_worker_outputs (
@@ -947,7 +1030,7 @@ func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error
 }
 
 func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, error) {
-	return s.snapshotTaskCardsFromProjection(ctx)
+	return s.taskCardsFromReadModel(ctx)
 }
 
 func (s *SQLiteStore) TaskStatus(ctx context.Context, taskID string) (core.TaskStatus, bool, error) {

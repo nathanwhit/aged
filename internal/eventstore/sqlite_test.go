@@ -832,6 +832,31 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 	if len(cardJSON) >= len(fullJSON)/4 {
 		t.Fatalf("task card snapshot length = %d, full snapshot length = %d; want card snapshot much smaller", len(cardJSON), len(fullJSON))
 	}
+	var fullRowBytes int
+	var cardRowBytes int
+	if err := store.db.QueryRowContext(ctx, `
+SELECT coalesce(sum(length(data)), 0)
+FROM (
+	SELECT data FROM snapshot_tasks
+	UNION ALL SELECT data FROM snapshot_workers
+	UNION ALL SELECT data FROM snapshot_execution_nodes
+	UNION ALL SELECT data FROM snapshot_pull_requests
+)`).Scan(&fullRowBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `
+SELECT coalesce(sum(row_bytes), 0)
+FROM (
+	SELECT length(title) + length(error) + length(metadata) AS row_bytes FROM task_cards
+	UNION ALL SELECT length(kind) + length(status) + length(command) + length(prompt_error) FROM task_card_workers
+	UNION ALL SELECT length(worker_kind) + length(status) + length(reason) + length(depends_on) FROM task_card_execution_nodes
+	UNION ALL SELECT length(repo) + length(url) + length(branch) + length(base) + length(title) + length(state) FROM task_card_pull_requests
+)`).Scan(&cardRowBytes); err != nil {
+		t.Fatal(err)
+	}
+	if cardRowBytes >= fullRowBytes/4 {
+		t.Fatalf("task card read model bytes = %d, full table bytes = %d; want card read model much smaller", cardRowBytes, fullRowBytes)
+	}
 
 	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET state = '{' WHERE id = 1`); err != nil {
 		t.Fatal(err)
