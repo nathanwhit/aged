@@ -251,7 +251,7 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deleteSnapshotProjection(t, ctx, dbPath)
+	deleteProjectionMeta(t, ctx, dbPath)
 
 	replayedStore, err := eventstore.OpenSQLite(ctx, dbPath)
 	if err != nil {
@@ -313,7 +313,7 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 	}
 }
 
-func deleteSnapshotProjection(t *testing.T, ctx context.Context, dbPath string) {
+func deleteProjectionMeta(t *testing.T, ctx context.Context, dbPath string) {
 	t.Helper()
 
 	db, err := sql.Open("sqlite", dbPath)
@@ -321,7 +321,7 @@ func deleteSnapshotProjection(t *testing.T, ctx context.Context, dbPath string) 
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.ExecContext(ctx, `DELETE FROM snapshot_projection`); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM projection_meta`); err != nil {
 		t.Fatal(err)
 	}
 }

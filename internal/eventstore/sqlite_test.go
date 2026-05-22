@@ -452,7 +452,7 @@ func TestTaskStatusUsesIndexedTaskEvents(t *testing.T) {
 	}
 }
 
-func TestSnapshotProjectionRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
+func TestReadModelRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -485,7 +485,7 @@ func TestSnapshotProjectionRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
 		})
 	}
 
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_projection`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM projection_meta`); err != nil {
 		t.Fatal(err)
 	}
 	summary, err := store.SnapshotSummary(ctx)
@@ -511,7 +511,7 @@ func TestSnapshotProjectionRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
 	}
 }
 
-func TestSnapshotProjectionMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
+func TestReadModelMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -586,7 +586,7 @@ func TestSnapshotProjectionMatchesReplayAndTracksNonProjectionEvents(t *testing.
 	assertSnapshotsEqual(t, projected, replayed)
 }
 
-func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
+func TestReadModelWorkerOutputDoesNotRewriteRows(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -598,7 +598,7 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 			TaskID: "task-output-watermark",
 			Payload: core.MustJSON(map[string]any{
 				"title":  "Output watermark",
-				"prompt": "Avoid rewriting the snapshot blob for output events.",
+				"prompt": "Avoid rewriting read-model rows for output events.",
 			}),
 		},
 		core.Event{
@@ -629,7 +629,7 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 	)
 
 	var workerBefore string
-	if err := store.db.QueryRowContext(ctx, `SELECT data FROM snapshot_workers WHERE id = ?`, "worker-output-watermark").Scan(&workerBefore); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM worker_read_models WHERE id = ?`, "worker-output-watermark").Scan(&workerBefore); err != nil {
 		t.Fatal(err)
 	}
 
@@ -643,18 +643,18 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 	})
 
 	var lastEventID int64
-	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_state_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM projection_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
 		t.Fatal(err)
 	}
 	if lastEventID != 5 {
 		t.Fatalf("last event id = %d, want 5", lastEventID)
 	}
 	var workerAfter string
-	if err := store.db.QueryRowContext(ctx, `SELECT data FROM snapshot_workers WHERE id = ?`, "worker-output-watermark").Scan(&workerAfter); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT updated_at FROM worker_read_models WHERE id = ?`, "worker-output-watermark").Scan(&workerAfter); err != nil {
 		t.Fatal(err)
 	}
 	if workerAfter != workerBefore {
-		t.Fatal("worker output rewrote snapshot worker row")
+		t.Fatal("worker output rewrote worker read-model row")
 	}
 
 	snapshot, err := store.SnapshotSummary(ctx)
@@ -669,7 +669,7 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 	}
 }
 
-func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
+func TestReadModelRecoversWhenMissing(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -691,7 +691,7 @@ func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 		},
 	)
 
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_state_meta`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM projection_meta`); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.SnapshotSummary(ctx)
@@ -702,7 +702,7 @@ func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 		t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
 	}
 	var lastEventID int64
-	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_state_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM projection_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
 		t.Fatal(err)
 	}
 	if lastEventID != snapshot.LastEventID {
@@ -710,7 +710,7 @@ func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 	}
 }
 
-func TestSnapshotProjectionAppendRebuildsStaleProjection(t *testing.T) {
+func TestReadModelAppendRebuildsStaleProjection(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -722,7 +722,7 @@ func TestSnapshotProjectionAppendRebuildsStaleProjection(t *testing.T) {
 			"prompt": "Repair during append.",
 		}),
 	})
-	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_state_meta SET last_event_id = 0 WHERE id = 1`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE projection_meta SET last_event_id = 0 WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
 	appendSQLiteEvents(t, ctx, store, core.Event{
@@ -837,10 +837,10 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `
 SELECT coalesce(sum(length(data)), 0)
 FROM (
-	SELECT data FROM snapshot_tasks
-	UNION ALL SELECT data FROM snapshot_workers
-	UNION ALL SELECT data FROM snapshot_execution_nodes
-	UNION ALL SELECT data FROM snapshot_pull_requests
+	SELECT prompt || metadata || milestones || artifacts AS data FROM task_read_models
+	UNION ALL SELECT prompt || metadata FROM worker_read_models
+	UNION ALL SELECT metadata FROM execution_node_read_models
+	UNION ALL SELECT metadata FROM pull_request_read_models
 )`).Scan(&fullRowBytes); err != nil {
 		t.Fatal(err)
 	}
@@ -858,11 +858,15 @@ FROM (
 		t.Fatalf("task card read model bytes = %d, full table bytes = %d; want card read model much smaller", cardRowBytes, fullRowBytes)
 	}
 
-	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET state = '{' WHERE id = 1`); err != nil {
+	var legacyBlobTables int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_projection'`).Scan(&legacyBlobTables); err != nil {
 		t.Fatal(err)
 	}
+	if legacyBlobTables != 0 {
+		t.Fatalf("legacy snapshot_projection table exists")
+	}
 	if _, err := store.SnapshotSummary(ctx); err != nil {
-		t.Fatalf("SnapshotSummary should ignore corrupt legacy projection blob: %v", err)
+		t.Fatalf("SnapshotSummary should not depend on legacy projection blob: %v", err)
 	}
 	snapshot, err := store.SnapshotTaskCards(ctx)
 	if err != nil {
@@ -1103,7 +1107,7 @@ func BenchmarkSnapshotSummarySkipsWorkerOutput(b *testing.B) {
 	})
 }
 
-func BenchmarkSnapshotProjectionLargeHistory(b *testing.B) {
+func BenchmarkReadModelLargeHistory(b *testing.B) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(b, ctx)
 
@@ -1251,7 +1255,7 @@ VALUES (?, ?, ?, ?, ?)`,
 	if err := tx.Commit(); err != nil {
 		tb.Fatal(err)
 	}
-	if _, _, err := store.rebuildSnapshotProjection(ctx); err != nil {
+	if _, _, err := store.rebuildReadModel(ctx); err != nil {
 		tb.Fatal(err)
 	}
 }

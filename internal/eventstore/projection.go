@@ -10,7 +10,7 @@ import (
 	"aged/internal/core"
 )
 
-type snapshotProjectionState struct {
+type readModelState struct {
 	Tasks                 map[string]core.Task          `json:"tasks"`
 	Workers               map[string]core.Worker        `json:"workers"`
 	Nodes                 map[string]core.ExecutionNode `json:"nodes"`
@@ -22,13 +22,13 @@ type snapshotProjectionState struct {
 	WorkspaceMetadata     map[string]json.RawMessage    `json:"workspaceMetadata"`
 }
 
-func newSnapshotProjectionState() snapshotProjectionState {
-	state := snapshotProjectionState{}
+func newReadModelState() readModelState {
+	state := readModelState{}
 	state.ensure()
 	return state
 }
 
-func (p *snapshotProjectionState) ensure() {
+func (p *readModelState) ensure() {
 	if p.Tasks == nil {
 		p.Tasks = map[string]core.Task{}
 	}
@@ -58,7 +58,7 @@ func (p *snapshotProjectionState) ensure() {
 	}
 }
 
-func (p *snapshotProjectionState) snapshot(lastEventID int64, events []core.Event, includeEvents bool) core.Snapshot {
+func (p *readModelState) snapshot(lastEventID int64, events []core.Event, includeEvents bool) core.Snapshot {
 	p.ensure()
 	filteredTasks := filterClearedTasks(p.Tasks, p.ClearedTasks)
 	filteredNodes := filterClearedExecutionNodes(p.Nodes, p.ClearedTasks)
@@ -73,7 +73,7 @@ func (p *snapshotProjectionState) snapshot(lastEventID int64, events []core.Even
 	}
 }
 
-func (p *snapshotProjectionState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
+func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 	p.ensure()
 	filteredTasks := filterClearedTasks(p.Tasks, p.ClearedTasks)
 	activeTasks := map[string]bool{}
@@ -211,7 +211,7 @@ func filterTasks[T any](values map[string]T, cleared map[string]bool, keptTasks 
 	return out
 }
 
-func (p *snapshotProjectionState) apply(event core.Event) error {
+func (p *readModelState) apply(event core.Event) error {
 	p.ensure()
 	switch event.Type {
 	case core.EventTaskCreated:
@@ -642,18 +642,18 @@ func (p *snapshotProjectionState) apply(event core.Event) error {
 	return nil
 }
 
-func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents bool) (core.Snapshot, error) {
-	state, lastEventID, current, err := s.loadCurrentSnapshotTables(ctx)
+func (s *SQLiteStore) snapshotFromReadModel(ctx context.Context, includeEvents bool) (core.Snapshot, error) {
+	state, lastEventID, current, err := s.loadCurrentReadModel(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildSnapshotTables(ctx)
+		state, lastEventID, err = s.rebuildReadModel(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
 	}
-	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state, nil); err != nil {
+	if err := applyWorkerOutputWatermarks(ctx, s.db, &state, nil); err != nil {
 		return core.Snapshot{}, err
 	}
 	var events []core.Event
@@ -672,7 +672,7 @@ func (s *SQLiteStore) taskCardsFromReadModel(ctx context.Context) (core.Snapshot
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildSnapshotTables(ctx)
+		state, lastEventID, err = s.rebuildReadModel(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
@@ -682,114 +682,79 @@ func (s *SQLiteStore) taskCardsFromReadModel(ctx context.Context) (core.Snapshot
 	state.Workers = filterTasks(state.Workers, state.ClearedTasks, activeTasks, func(worker core.Worker) string { return worker.TaskID })
 	state.Nodes = filterTasks(state.Nodes, state.ClearedTasks, activeTasks, func(node core.ExecutionNode) string { return node.TaskID })
 	state.PullRequests = filterTasks(state.PullRequests, state.ClearedTasks, activeTasks, func(pr core.PullRequest) string { return pr.TaskID })
-	if err := applySnapshotWorkerOutputTimestamps(ctx, s.db, &state, activeTasks); err != nil {
+	if err := applyWorkerOutputWatermarks(ctx, s.db, &state, activeTasks); err != nil {
 		return core.Snapshot{}, err
 	}
 	return state.taskCardsSnapshot(lastEventID), nil
 }
 
-func (s *SQLiteStore) loadCurrentTaskCardReadModel(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
+func (s *SQLiteStore) loadCurrentTaskCardReadModel(ctx context.Context) (readModelState, int64, bool, error) {
 	state, lastEventID, ok, err := loadTaskCardReadModel(ctx, s.db)
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	latestEventID, err := s.latestEventID(ctx)
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	if !ok {
 		if latestEventID == 0 {
-			return newSnapshotProjectionState(), 0, true, nil
+			return newReadModelState(), 0, true, nil
 		}
-		return snapshotProjectionState{}, 0, false, nil
+		return readModelState{}, 0, false, nil
 	}
 	return state, lastEventID, lastEventID == latestEventID, nil
 }
 
-func (s *SQLiteStore) loadCurrentSnapshotTables(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
-	state, lastEventID, ok, err := loadSnapshotTables(ctx, s.db)
+func (s *SQLiteStore) loadCurrentReadModel(ctx context.Context) (readModelState, int64, bool, error) {
+	state, lastEventID, ok, err := loadProjectionReadModel(ctx, s.db)
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	latestEventID, err := s.latestEventID(ctx)
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	if !ok {
 		if latestEventID == 0 {
-			return newSnapshotProjectionState(), 0, true, nil
+			return newReadModelState(), 0, true, nil
 		}
-		return snapshotProjectionState{}, 0, false, nil
+		return readModelState{}, 0, false, nil
 	}
 	return state, lastEventID, lastEventID == latestEventID, nil
 }
 
-func (s *SQLiteStore) rebuildSnapshotTables(ctx context.Context) (snapshotProjectionState, int64, error) {
+func (s *SQLiteStore) rebuildReadModel(ctx context.Context) (readModelState, int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return snapshotProjectionState{}, 0, err
+		return readModelState{}, 0, err
 	}
 	defer tx.Rollback()
 
-	state, lastEventID, err := rebuildSnapshotTablesTx(ctx, tx)
+	state, lastEventID, err := rebuildReadModelTx(ctx, tx)
 	if err != nil {
-		return snapshotProjectionState{}, 0, err
+		return readModelState{}, 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return snapshotProjectionState{}, 0, err
+		return readModelState{}, 0, err
 	}
 	return state, lastEventID, nil
 }
 
-func (s *SQLiteStore) loadCurrentSnapshotProjection(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
-	state, lastEventID, ok, err := loadSnapshotProjection(ctx, s.db)
-	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
-	}
-	latestEventID, err := s.latestEventID(ctx)
-	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
-	}
-	if !ok {
-		if latestEventID == 0 {
-			return newSnapshotProjectionState(), 0, true, nil
-		}
-		return snapshotProjectionState{}, 0, false, nil
-	}
-	return state, lastEventID, lastEventID == latestEventID, nil
-}
-
-func (s *SQLiteStore) rebuildSnapshotProjection(ctx context.Context) (snapshotProjectionState, int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	defer tx.Rollback()
-
-	state, lastEventID, err := rebuildSnapshotProjectionTx(ctx, tx)
-	if err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	return state, lastEventID, nil
-}
-
-func updateSnapshotProjectionTx(ctx context.Context, tx *sql.Tx, event core.Event) error {
-	state, lastEventID, ok, err := loadSnapshotTables(ctx, tx)
+func updateProjectionReadModelTx(ctx context.Context, tx *sql.Tx, event core.Event) error {
+	state, lastEventID, ok, err := loadProjectionReadModel(ctx, tx)
 	if err != nil {
 		return err
 	}
 	if !ok || lastEventID != event.ID-1 {
-		_, _, err := rebuildSnapshotTablesTx(ctx, tx)
+		_, _, err := rebuildReadModelTx(ctx, tx)
 		return err
 	}
 	if event.Type == core.EventWorkerOutput {
-		if err := saveSnapshotWorkerOutput(ctx, tx, event); err != nil {
+		if err := saveWorkerOutputWatermark(ctx, tx, event); err != nil {
 			return err
 		}
-		if err := advanceSnapshotTables(ctx, tx, event.ID); err != nil {
+		if err := advanceProjectionReadModel(ctx, tx, event.ID); err != nil {
 			return err
 		}
 		return advanceTaskCardReadModel(ctx, tx, event.ID)
@@ -797,131 +762,361 @@ func updateSnapshotProjectionTx(ctx context.Context, tx *sql.Tx, event core.Even
 	if err := state.apply(event); err != nil {
 		return err
 	}
-	return saveSnapshotTables(ctx, tx, state, event.ID)
+	return saveProjectionReadModel(ctx, tx, state, event.ID)
 }
 
-func rebuildSnapshotTablesTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
+func rebuildReadModelTx(ctx context.Context, tx *sql.Tx) (readModelState, int64, error) {
 	events, err := projectionInputEvents(ctx, tx, 0)
 	if err != nil {
-		return snapshotProjectionState{}, 0, err
+		return readModelState{}, 0, err
 	}
-	state := newSnapshotProjectionState()
+	state := newReadModelState()
 	var lastEventID int64
 	for _, event := range events {
 		if err := state.apply(event); err != nil {
-			return snapshotProjectionState{}, 0, err
+			return readModelState{}, 0, err
 		}
 		lastEventID = event.ID
 	}
-	if err := saveSnapshotTables(ctx, tx, state, lastEventID); err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	if err := saveTaskCardReadModel(ctx, tx, state, lastEventID); err != nil {
-		return snapshotProjectionState{}, 0, err
+	if err := saveProjectionReadModel(ctx, tx, state, lastEventID); err != nil {
+		return readModelState{}, 0, err
 	}
 	return state, lastEventID, nil
 }
 
-func rebuildSnapshotProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
-	events, err := projectionInputEvents(ctx, tx, 0)
-	if err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	state := newSnapshotProjectionState()
-	var lastEventID int64
-	for _, event := range events {
-		if err := state.apply(event); err != nil {
-			return snapshotProjectionState{}, 0, err
-		}
-		lastEventID = event.ID
-	}
-	if err := saveSnapshotProjection(ctx, tx, state, lastEventID); err != nil {
-		return snapshotProjectionState{}, 0, err
-	}
-	return state, lastEventID, nil
-}
-
-type snapshotProjectionQuerier interface {
+type projectionQuerier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
-func loadSnapshotTables(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
+func loadProjectionReadModel(ctx context.Context, q projectionQuerier) (readModelState, int64, bool, error) {
 	var lastEventID int64
 	err := q.QueryRowContext(ctx, `
 SELECT last_event_id
-FROM snapshot_state_meta
+FROM projection_meta
 WHERE id = 1`).Scan(&lastEventID)
 	if errorsIsNoRows(err) {
-		return snapshotProjectionState{}, 0, false, nil
+		return readModelState{}, 0, false, nil
 	}
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
-	state := newSnapshotProjectionState()
-	if err := loadSnapshotJSONRows(ctx, q, `snapshot_tasks`, state.Tasks); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	state := newReadModelState()
+	if err := loadProjectionTasks(ctx, q, state.Tasks); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotJSONRows(ctx, q, `snapshot_workers`, state.Workers); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadProjectionWorkers(ctx, q, state.Workers); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotJSONRows(ctx, q, `snapshot_execution_nodes`, state.Nodes); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadProjectionExecutionNodes(ctx, q, state.Nodes); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotJSONRows(ctx, q, `snapshot_pull_requests`, state.PullRequests); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadProjectionPullRequests(ctx, q, state.PullRequests); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotStringMap(ctx, q, `snapshot_pull_request_aliases`, `alias`, `id`, state.PullRequestAliases); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadStringMap(ctx, q, `pull_request_aliases`, `alias`, `id`, state.PullRequestAliases); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotStringMap(ctx, q, `snapshot_pull_request_identities`, `identity`, `id`, state.PullRequestIdentities); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadStringMap(ctx, q, `pull_request_identities`, `identity`, `id`, state.PullRequestIdentities); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotClearedTasks(ctx, q, `snapshot_cleared_tasks`, state.ClearedTasks); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadClearedTasks(ctx, q, `cleared_tasks`, state.ClearedTasks); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotStringMap(ctx, q, `snapshot_worker_nodes`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadStringMap(ctx, q, `worker_node_links`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotRawMessageMap(ctx, q, `snapshot_workspace_metadata`, `worker_id`, `data`, state.WorkspaceMetadata); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadRawMessageMap(ctx, q, `worker_workspace_metadata`, `worker_id`, `data`, state.WorkspaceMetadata); err != nil {
+		return readModelState{}, 0, false, err
 	}
 	return state, lastEventID, true, nil
 }
 
-func loadTaskCardReadModel(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
+func loadProjectionTasks(ctx context.Context, q projectionQuerier, out map[string]core.Task) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, project_id, workstream_id, title, prompt, status, error, objective_status, objective_phase,
+	created_at, updated_at, metadata, final_candidate_worker_id, applied_worker_id, milestones, work_plan, artifacts
+FROM task_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var task core.Task
+		var status string
+		var objectiveStatus string
+		var createdAtRaw string
+		var updatedAtRaw string
+		var metadata string
+		var milestones string
+		var workPlan string
+		var artifacts string
+		if err := rows.Scan(
+			&task.ID,
+			&task.ProjectID,
+			&task.WorkstreamID,
+			&task.Title,
+			&task.Prompt,
+			&status,
+			&task.Error,
+			&objectiveStatus,
+			&task.ObjectivePhase,
+			&createdAtRaw,
+			&updatedAtRaw,
+			&metadata,
+			&task.FinalCandidateWorkerID,
+			&task.AppliedWorkerID,
+			&milestones,
+			&workPlan,
+			&artifacts,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		if milestones != "" {
+			if err := json.Unmarshal([]byte(milestones), &task.Milestones); err != nil {
+				return err
+			}
+		}
+		if workPlan != "" {
+			var plan core.WorkPlan
+			if err := json.Unmarshal([]byte(workPlan), &plan); err != nil {
+				return err
+			}
+			task.WorkPlan = &plan
+		}
+		if artifacts != "" {
+			if err := json.Unmarshal([]byte(artifacts), &task.Artifacts); err != nil {
+				return err
+			}
+		}
+		task.Status = core.TaskStatus(status)
+		task.ObjectiveStatus = core.ObjectiveStatus(objectiveStatus)
+		task.CreatedAt = createdAt
+		task.UpdatedAt = updatedAt
+		if metadata != "" {
+			task.Metadata = json.RawMessage(metadata)
+		}
+		out[task.ID] = task
+	}
+	return rows.Err()
+}
+
+func loadProjectionWorkers(ctx context.Context, q projectionQuerier, out map[string]core.Worker) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, kind, status, command, prompt, prompt_path, prompt_error, created_at, updated_at, metadata
+FROM worker_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var worker core.Worker
+		var status string
+		var command string
+		var createdAtRaw string
+		var updatedAtRaw string
+		var metadata string
+		if err := rows.Scan(
+			&worker.ID,
+			&worker.TaskID,
+			&worker.Kind,
+			&status,
+			&command,
+			&worker.Prompt,
+			&worker.PromptPath,
+			&worker.PromptError,
+			&createdAtRaw,
+			&updatedAtRaw,
+			&metadata,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		if command != "" {
+			if err := json.Unmarshal([]byte(command), &worker.Command); err != nil {
+				return err
+			}
+		}
+		worker.Status = core.WorkerStatus(status)
+		worker.CreatedAt = createdAt
+		worker.UpdatedAt = updatedAt
+		if metadata != "" {
+			worker.Metadata = json.RawMessage(metadata)
+		}
+		out[worker.ID] = worker
+	}
+	return rows.Err()
+}
+
+func loadProjectionExecutionNodes(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
+	reason, target_id, target_kind, remote_session, remote_run_dir, remote_work_dir, depends_on,
+	created_at, updated_at, metadata
+FROM execution_node_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var node core.ExecutionNode
+		var status string
+		var dependsOn string
+		var createdAtRaw string
+		var updatedAtRaw string
+		var metadata string
+		if err := rows.Scan(
+			&node.ID,
+			&node.TaskID,
+			&node.WorkerID,
+			&node.WorkerKind,
+			&status,
+			&node.PlanID,
+			&node.ParentNodeID,
+			&node.SpawnID,
+			&node.Role,
+			&node.Reason,
+			&node.TargetID,
+			&node.TargetKind,
+			&node.RemoteSession,
+			&node.RemoteRunDir,
+			&node.RemoteWorkDir,
+			&dependsOn,
+			&createdAtRaw,
+			&updatedAtRaw,
+			&metadata,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		if dependsOn != "" {
+			if err := json.Unmarshal([]byte(dependsOn), &node.DependsOn); err != nil {
+				return err
+			}
+		}
+		node.Status = core.WorkerStatus(status)
+		node.CreatedAt = createdAt
+		node.UpdatedAt = updatedAt
+		if metadata != "" {
+			node.Metadata = json.RawMessage(metadata)
+		}
+		out[node.ID] = node
+	}
+	return rows.Err()
+}
+
+func loadProjectionPullRequests(ctx context.Context, q projectionQuerier, out map[string]core.PullRequest) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
+	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id, created_at, updated_at, metadata
+FROM pull_request_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pr core.PullRequest
+		var draft int
+		var createdAtRaw string
+		var updatedAtRaw string
+		var metadata string
+		if err := rows.Scan(
+			&pr.ID,
+			&pr.TaskID,
+			&pr.Repo,
+			&pr.Number,
+			&pr.URL,
+			&pr.Branch,
+			&pr.Base,
+			&pr.Title,
+			&pr.State,
+			&draft,
+			&pr.ChecksStatus,
+			&pr.ChecksConclusion,
+			&pr.MergeStatus,
+			&pr.Mergeable,
+			&pr.ReviewStatus,
+			&pr.BabysitterTaskID,
+			&createdAtRaw,
+			&updatedAtRaw,
+			&metadata,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		pr.Draft = draft != 0
+		pr.CreatedAt = createdAt
+		pr.UpdatedAt = updatedAt
+		if metadata != "" {
+			pr.Metadata = json.RawMessage(metadata)
+		}
+		out[pr.ID] = pr
+	}
+	return rows.Err()
+}
+
+func loadTaskCardReadModel(ctx context.Context, q projectionQuerier) (readModelState, int64, bool, error) {
 	var lastEventID int64
 	err := q.QueryRowContext(ctx, `
 SELECT last_event_id
 FROM task_card_meta
 WHERE id = 1`).Scan(&lastEventID)
 	if errorsIsNoRows(err) {
-		return snapshotProjectionState{}, 0, false, nil
+		return readModelState{}, 0, false, nil
 	}
 	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
-	state := newSnapshotProjectionState()
+	state := newReadModelState()
 	if err := loadTaskCardTasks(ctx, q, state.Tasks); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	if err := loadTaskCardWorkers(ctx, q, state.Workers); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	if err := loadTaskCardExecutionNodes(ctx, q, state.Nodes); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
 	if err := loadTaskCardPullRequests(ctx, q, state.PullRequests); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+		return readModelState{}, 0, false, err
 	}
-	if err := loadSnapshotStringMap(ctx, q, `task_card_worker_nodes`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
-		return snapshotProjectionState{}, 0, false, err
+	if err := loadStringMap(ctx, q, `task_card_worker_nodes`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
+		return readModelState{}, 0, false, err
 	}
 	return state, lastEventID, true, nil
 }
 
-func loadTaskCardTasks(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.Task) error {
+func loadTaskCardTasks(ctx context.Context, q projectionQuerier, out map[string]core.Task) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, project_id, workstream_id, title, status, error, objective_status, objective_phase,
 	created_at, updated_at, metadata, final_candidate_worker_id, applied_worker_id
@@ -954,11 +1149,11 @@ FROM task_cards`)
 		); err != nil {
 			return err
 		}
-		createdAt, err := parseSnapshotTime(createdAtRaw)
+		createdAt, err := parseReadModelTime(createdAtRaw)
 		if err != nil {
 			return err
 		}
-		updatedAt, err := parseSnapshotTime(updatedAtRaw)
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
 		if err != nil {
 			return err
 		}
@@ -974,7 +1169,7 @@ FROM task_cards`)
 	return rows.Err()
 }
 
-func loadTaskCardWorkers(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.Worker) error {
+func loadTaskCardWorkers(ctx context.Context, q projectionQuerier, out map[string]core.Worker) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, kind, status, command, prompt_path, prompt_error, created_at, updated_at
 FROM task_card_workers`)
@@ -1001,11 +1196,11 @@ FROM task_card_workers`)
 		); err != nil {
 			return err
 		}
-		createdAt, err := parseSnapshotTime(createdAtRaw)
+		createdAt, err := parseReadModelTime(createdAtRaw)
 		if err != nil {
 			return err
 		}
-		updatedAt, err := parseSnapshotTime(updatedAtRaw)
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
 		if err != nil {
 			return err
 		}
@@ -1022,7 +1217,7 @@ FROM task_card_workers`)
 	return rows.Err()
 }
 
-func loadTaskCardExecutionNodes(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.ExecutionNode) error {
+func loadTaskCardExecutionNodes(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
 	reason, target_id, target_kind, remote_session, remote_run_dir, remote_work_dir, depends_on,
@@ -1060,11 +1255,11 @@ FROM task_card_execution_nodes`)
 		); err != nil {
 			return err
 		}
-		createdAt, err := parseSnapshotTime(createdAtRaw)
+		createdAt, err := parseReadModelTime(createdAtRaw)
 		if err != nil {
 			return err
 		}
-		updatedAt, err := parseSnapshotTime(updatedAtRaw)
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
 		if err != nil {
 			return err
 		}
@@ -1081,7 +1276,7 @@ FROM task_card_execution_nodes`)
 	return rows.Err()
 }
 
-func loadTaskCardPullRequests(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.PullRequest) error {
+func loadTaskCardPullRequests(ctx context.Context, q projectionQuerier, out map[string]core.PullRequest) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
 	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id, created_at, updated_at
@@ -1117,11 +1312,11 @@ FROM task_card_pull_requests`)
 		); err != nil {
 			return err
 		}
-		createdAt, err := parseSnapshotTime(createdAtRaw)
+		createdAt, err := parseReadModelTime(createdAtRaw)
 		if err != nil {
 			return err
 		}
-		updatedAt, err := parseSnapshotTime(updatedAtRaw)
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
 		if err != nil {
 			return err
 		}
@@ -1133,35 +1328,14 @@ FROM task_card_pull_requests`)
 	return rows.Err()
 }
 
-func parseSnapshotTime(value string) (time.Time, error) {
+func parseReadModelTime(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
 	return time.Parse(time.RFC3339Nano, value)
 }
 
-func loadSnapshotJSONRows[T any](ctx context.Context, q snapshotProjectionQuerier, table string, out map[string]T) error {
-	rows, err := q.QueryContext(ctx, `SELECT id, data FROM `+table)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var data string
-		if err := rows.Scan(&id, &data); err != nil {
-			return err
-		}
-		var value T
-		if err := json.Unmarshal([]byte(data), &value); err != nil {
-			return err
-		}
-		out[id] = value
-	}
-	return rows.Err()
-}
-
-func loadSnapshotStringMap(ctx context.Context, q snapshotProjectionQuerier, table string, keyColumn string, valueColumn string, out map[string]string) error {
+func loadStringMap(ctx context.Context, q projectionQuerier, table string, keyColumn string, valueColumn string, out map[string]string) error {
 	rows, err := q.QueryContext(ctx, `SELECT `+keyColumn+`, `+valueColumn+` FROM `+table)
 	if err != nil {
 		return err
@@ -1178,7 +1352,7 @@ func loadSnapshotStringMap(ctx context.Context, q snapshotProjectionQuerier, tab
 	return rows.Err()
 }
 
-func loadSnapshotRawMessageMap(ctx context.Context, q snapshotProjectionQuerier, table string, keyColumn string, valueColumn string, out map[string]json.RawMessage) error {
+func loadRawMessageMap(ctx context.Context, q projectionQuerier, table string, keyColumn string, valueColumn string, out map[string]json.RawMessage) error {
 	rows, err := q.QueryContext(ctx, `SELECT `+keyColumn+`, `+valueColumn+` FROM `+table)
 	if err != nil {
 		return err
@@ -1195,7 +1369,7 @@ func loadSnapshotRawMessageMap(ctx context.Context, q snapshotProjectionQuerier,
 	return rows.Err()
 }
 
-func loadSnapshotClearedTasks(ctx context.Context, q snapshotProjectionQuerier, table string, out map[string]bool) error {
+func loadClearedTasks(ctx context.Context, q projectionQuerier, table string, out map[string]bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT task_id FROM `+table)
 	if err != nil {
 		return err
@@ -1211,64 +1385,37 @@ func loadSnapshotClearedTasks(ctx context.Context, q snapshotProjectionQuerier, 
 	return rows.Err()
 }
 
-func loadSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
-	var lastEventID int64
-	var data string
-	err := q.QueryRowContext(ctx, `
-SELECT last_event_id, state
-FROM snapshot_projection
-WHERE id = 1`).Scan(&lastEventID, &data)
-	if errorsIsNoRows(err) {
-		return snapshotProjectionState{}, 0, false, nil
-	}
-	if err != nil {
-		return snapshotProjectionState{}, 0, false, err
-	}
-	state := newSnapshotProjectionState()
-	if err := json.Unmarshal([]byte(data), &state); err != nil {
-		return snapshotProjectionState{}, 0, false, err
-	}
+func saveProjectionReadModel(ctx context.Context, q projectionQuerier, state readModelState, lastEventID int64) error {
 	state.ensure()
-	return state, lastEventID, true, nil
-}
-
-func saveSnapshotTables(ctx context.Context, q snapshotProjectionQuerier, state snapshotProjectionState, lastEventID int64) error {
-	state.ensure()
-	if err := saveSnapshotJSONRows(ctx, q, `snapshot_tasks`, `id`, state.Tasks, func(task core.Task) string { return task.ID }, nil); err != nil {
+	if err := saveProjectionTasks(ctx, q, state.Tasks); err != nil {
 		return err
 	}
-	if err := saveSnapshotJSONRows(ctx, q, `snapshot_workers`, `id`, state.Workers, func(worker core.Worker) string { return worker.ID }, func(worker core.Worker) []any {
-		return []any{worker.TaskID}
-	}); err != nil {
+	if err := saveProjectionWorkers(ctx, q, state.Workers); err != nil {
 		return err
 	}
-	if err := saveSnapshotJSONRows(ctx, q, `snapshot_execution_nodes`, `id`, state.Nodes, func(node core.ExecutionNode) string { return node.ID }, func(node core.ExecutionNode) []any {
-		return []any{node.TaskID, node.WorkerID}
-	}); err != nil {
+	if err := saveProjectionExecutionNodes(ctx, q, state.Nodes); err != nil {
 		return err
 	}
-	if err := saveSnapshotJSONRows(ctx, q, `snapshot_pull_requests`, `id`, state.PullRequests, func(pr core.PullRequest) string { return pr.ID }, func(pr core.PullRequest) []any {
-		return []any{pr.TaskID}
-	}); err != nil {
+	if err := saveProjectionPullRequests(ctx, q, state.PullRequests); err != nil {
 		return err
 	}
-	if err := saveSnapshotStringMap(ctx, q, `snapshot_pull_request_aliases`, `alias`, `id`, state.PullRequestAliases); err != nil {
+	if err := saveStringMap(ctx, q, `pull_request_aliases`, `alias`, `id`, state.PullRequestAliases); err != nil {
 		return err
 	}
-	if err := saveSnapshotStringMap(ctx, q, `snapshot_pull_request_identities`, `identity`, `id`, state.PullRequestIdentities); err != nil {
+	if err := saveStringMap(ctx, q, `pull_request_identities`, `identity`, `id`, state.PullRequestIdentities); err != nil {
 		return err
 	}
-	if err := saveSnapshotClearedTasks(ctx, q, `snapshot_cleared_tasks`, state.ClearedTasks); err != nil {
+	if err := saveClearedTasks(ctx, q, `cleared_tasks`, state.ClearedTasks); err != nil {
 		return err
 	}
-	if err := saveSnapshotStringMap(ctx, q, `snapshot_worker_nodes`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
+	if err := saveStringMap(ctx, q, `worker_node_links`, `worker_id`, `node_id`, state.WorkerNodes); err != nil {
 		return err
 	}
-	if err := saveSnapshotRawMessageMap(ctx, q, `snapshot_workspace_metadata`, `worker_id`, `data`, state.WorkspaceMetadata); err != nil {
+	if err := saveRawMessageMap(ctx, q, `worker_workspace_metadata`, `worker_id`, `data`, state.WorkspaceMetadata); err != nil {
 		return err
 	}
 	_, err := q.ExecContext(ctx, `
-INSERT INTO snapshot_state_meta (id, last_event_id, updated_at)
+INSERT INTO projection_meta (id, last_event_id, updated_at)
 VALUES (1, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	last_event_id = excluded.last_event_id,
@@ -1282,7 +1429,246 @@ ON CONFLICT(id) DO UPDATE SET
 	return saveTaskCardReadModel(ctx, q, state, lastEventID)
 }
 
-func saveTaskCardReadModel(ctx context.Context, q snapshotProjectionQuerier, state snapshotProjectionState, lastEventID int64) error {
+func saveProjectionTasks(ctx context.Context, q projectionQuerier, tasks map[string]core.Task) error {
+	seen := map[string]bool{}
+	for _, task := range tasks {
+		if task.ID == "" {
+			continue
+		}
+		seen[task.ID] = true
+		milestones, err := jsonString(task.Milestones, "[]")
+		if err != nil {
+			return err
+		}
+		workPlan := ""
+		if task.WorkPlan != nil {
+			workPlan, err = jsonString(task.WorkPlan, "")
+			if err != nil {
+				return err
+			}
+		}
+		artifacts, err := jsonString(task.Artifacts, "[]")
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO task_read_models (
+	id, project_id, workstream_id, title, prompt, status, error, objective_status, objective_phase,
+	created_at, updated_at, metadata, final_candidate_worker_id, applied_worker_id, milestones, work_plan, artifacts
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	project_id = excluded.project_id,
+	workstream_id = excluded.workstream_id,
+	title = excluded.title,
+	prompt = excluded.prompt,
+	status = excluded.status,
+	error = excluded.error,
+	objective_status = excluded.objective_status,
+	objective_phase = excluded.objective_phase,
+	created_at = excluded.created_at,
+	updated_at = excluded.updated_at,
+	metadata = excluded.metadata,
+	final_candidate_worker_id = excluded.final_candidate_worker_id,
+	applied_worker_id = excluded.applied_worker_id,
+	milestones = excluded.milestones,
+	work_plan = excluded.work_plan,
+	artifacts = excluded.artifacts`,
+			task.ID,
+			task.ProjectID,
+			task.WorkstreamID,
+			task.Title,
+			task.Prompt,
+			string(task.Status),
+			task.Error,
+			string(task.ObjectiveStatus),
+			task.ObjectivePhase,
+			task.CreatedAt.Format(time.RFC3339Nano),
+			task.UpdatedAt.Format(time.RFC3339Nano),
+			string(task.Metadata),
+			task.FinalCandidateWorkerID,
+			task.AppliedWorkerID,
+			milestones,
+			workPlan,
+			artifacts,
+		); err != nil {
+			return err
+		}
+	}
+	return deleteMissingRows(ctx, q, `task_read_models`, `id`, seen)
+}
+
+func saveProjectionWorkers(ctx context.Context, q projectionQuerier, workers map[string]core.Worker) error {
+	seen := map[string]bool{}
+	for _, worker := range workers {
+		if worker.ID == "" {
+			continue
+		}
+		seen[worker.ID] = true
+		command, err := jsonString(worker.Command, "[]")
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO worker_read_models (
+	id, task_id, kind, status, command, prompt, prompt_path, prompt_error, created_at, updated_at, metadata
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	kind = excluded.kind,
+	status = excluded.status,
+	command = excluded.command,
+	prompt = excluded.prompt,
+	prompt_path = excluded.prompt_path,
+	prompt_error = excluded.prompt_error,
+	created_at = excluded.created_at,
+	updated_at = excluded.updated_at,
+	metadata = excluded.metadata`,
+			worker.ID,
+			worker.TaskID,
+			worker.Kind,
+			string(worker.Status),
+			command,
+			worker.Prompt,
+			worker.PromptPath,
+			worker.PromptError,
+			worker.CreatedAt.Format(time.RFC3339Nano),
+			worker.UpdatedAt.Format(time.RFC3339Nano),
+			string(worker.Metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return deleteMissingRows(ctx, q, `worker_read_models`, `id`, seen)
+}
+
+func saveProjectionExecutionNodes(ctx context.Context, q projectionQuerier, nodes map[string]core.ExecutionNode) error {
+	seen := map[string]bool{}
+	for _, node := range nodes {
+		if node.ID == "" {
+			continue
+		}
+		seen[node.ID] = true
+		dependsOn, err := jsonString(node.DependsOn, "[]")
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO execution_node_read_models (
+	id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
+	reason, target_id, target_kind, remote_session, remote_run_dir, remote_work_dir, depends_on,
+	created_at, updated_at, metadata
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	worker_id = excluded.worker_id,
+	worker_kind = excluded.worker_kind,
+	status = excluded.status,
+	plan_id = excluded.plan_id,
+	parent_node_id = excluded.parent_node_id,
+	spawn_id = excluded.spawn_id,
+	role = excluded.role,
+	reason = excluded.reason,
+	target_id = excluded.target_id,
+	target_kind = excluded.target_kind,
+	remote_session = excluded.remote_session,
+	remote_run_dir = excluded.remote_run_dir,
+	remote_work_dir = excluded.remote_work_dir,
+	depends_on = excluded.depends_on,
+	created_at = excluded.created_at,
+	updated_at = excluded.updated_at,
+	metadata = excluded.metadata`,
+			node.ID,
+			node.TaskID,
+			node.WorkerID,
+			node.WorkerKind,
+			string(node.Status),
+			node.PlanID,
+			node.ParentNodeID,
+			node.SpawnID,
+			node.Role,
+			node.Reason,
+			node.TargetID,
+			node.TargetKind,
+			node.RemoteSession,
+			node.RemoteRunDir,
+			node.RemoteWorkDir,
+			dependsOn,
+			node.CreatedAt.Format(time.RFC3339Nano),
+			node.UpdatedAt.Format(time.RFC3339Nano),
+			string(node.Metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return deleteMissingRows(ctx, q, `execution_node_read_models`, `id`, seen)
+}
+
+func saveProjectionPullRequests(ctx context.Context, q projectionQuerier, pullRequests map[string]core.PullRequest) error {
+	seen := map[string]bool{}
+	for _, pr := range pullRequests {
+		if pr.ID == "" {
+			continue
+		}
+		seen[pr.ID] = true
+		draft := 0
+		if pr.Draft {
+			draft = 1
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO pull_request_read_models (
+	id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
+	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id, created_at, updated_at, metadata
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	repo = excluded.repo,
+	number = excluded.number,
+	url = excluded.url,
+	branch = excluded.branch,
+	base = excluded.base,
+	title = excluded.title,
+	state = excluded.state,
+	draft = excluded.draft,
+	checks_status = excluded.checks_status,
+	checks_conclusion = excluded.checks_conclusion,
+	merge_status = excluded.merge_status,
+	mergeable = excluded.mergeable,
+	review_status = excluded.review_status,
+	babysitter_task_id = excluded.babysitter_task_id,
+	created_at = excluded.created_at,
+	updated_at = excluded.updated_at,
+	metadata = excluded.metadata`,
+			pr.ID,
+			pr.TaskID,
+			pr.Repo,
+			pr.Number,
+			pr.URL,
+			pr.Branch,
+			pr.Base,
+			pr.Title,
+			pr.State,
+			draft,
+			pr.ChecksStatus,
+			pr.ChecksConclusion,
+			pr.MergeStatus,
+			pr.Mergeable,
+			pr.ReviewStatus,
+			pr.BabysitterTaskID,
+			pr.CreatedAt.Format(time.RFC3339Nano),
+			pr.UpdatedAt.Format(time.RFC3339Nano),
+			string(pr.Metadata),
+		); err != nil {
+			return err
+		}
+	}
+	return deleteMissingRows(ctx, q, `pull_request_read_models`, `id`, seen)
+}
+
+func saveTaskCardReadModel(ctx context.Context, q projectionQuerier, state readModelState, lastEventID int64) error {
 	cardState := compactSnapshotCardState(state)
 	if err := saveTaskCards(ctx, q, cardState.Tasks); err != nil {
 		return err
@@ -1296,7 +1682,7 @@ func saveTaskCardReadModel(ctx context.Context, q snapshotProjectionQuerier, sta
 	if err := saveTaskCardPullRequests(ctx, q, cardState.PullRequests); err != nil {
 		return err
 	}
-	if err := saveSnapshotStringMap(ctx, q, `task_card_worker_nodes`, `worker_id`, `node_id`, cardState.WorkerNodes); err != nil {
+	if err := saveStringMap(ctx, q, `task_card_worker_nodes`, `worker_id`, `node_id`, cardState.WorkerNodes); err != nil {
 		return err
 	}
 	_, err := q.ExecContext(ctx, `
@@ -1311,7 +1697,7 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
-func saveTaskCards(ctx context.Context, q snapshotProjectionQuerier, tasks map[string]core.Task) error {
+func saveTaskCards(ctx context.Context, q projectionQuerier, tasks map[string]core.Task) error {
 	seen := map[string]bool{}
 	for _, task := range tasks {
 		if task.ID == "" {
@@ -1354,10 +1740,10 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, `task_cards`, `id`, seen)
+	return deleteMissingRows(ctx, q, `task_cards`, `id`, seen)
 }
 
-func saveTaskCardWorkers(ctx context.Context, q snapshotProjectionQuerier, workers map[string]core.Worker) error {
+func saveTaskCardWorkers(ctx context.Context, q projectionQuerier, workers map[string]core.Worker) error {
 	seen := map[string]bool{}
 	for _, worker := range workers {
 		if worker.ID == "" {
@@ -1395,10 +1781,10 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, `task_card_workers`, `id`, seen)
+	return deleteMissingRows(ctx, q, `task_card_workers`, `id`, seen)
 }
 
-func saveTaskCardExecutionNodes(ctx context.Context, q snapshotProjectionQuerier, nodes map[string]core.ExecutionNode) error {
+func saveTaskCardExecutionNodes(ctx context.Context, q projectionQuerier, nodes map[string]core.ExecutionNode) error {
 	seen := map[string]bool{}
 	for _, node := range nodes {
 		if node.ID == "" {
@@ -1456,10 +1842,10 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, `task_card_execution_nodes`, `id`, seen)
+	return deleteMissingRows(ctx, q, `task_card_execution_nodes`, `id`, seen)
 }
 
-func saveTaskCardPullRequests(ctx context.Context, q snapshotProjectionQuerier, pullRequests map[string]core.PullRequest) error {
+func saveTaskCardPullRequests(ctx context.Context, q projectionQuerier, pullRequests map[string]core.PullRequest) error {
 	seen := map[string]bool{}
 	for _, pr := range pullRequests {
 		if pr.ID == "" {
@@ -1516,12 +1902,12 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, `task_card_pull_requests`, `id`, seen)
+	return deleteMissingRows(ctx, q, `task_card_pull_requests`, `id`, seen)
 }
 
-func compactSnapshotCardState(state snapshotProjectionState) snapshotProjectionState {
+func compactSnapshotCardState(state readModelState) readModelState {
 	state.ensure()
-	out := newSnapshotProjectionState()
+	out := newReadModelState()
 	for id, cleared := range state.ClearedTasks {
 		if cleared {
 			out.ClearedTasks[id] = true
@@ -1567,71 +1953,7 @@ func compactSnapshotCardState(state snapshotProjectionState) snapshotProjectionS
 	return out
 }
 
-func saveSnapshotJSONRows[T any](ctx context.Context, q snapshotProjectionQuerier, table string, keyColumn string, values map[string]T, id func(T) string, extra func(T) []any) error {
-	seen := map[string]bool{}
-	for _, value := range values {
-		key := id(value)
-		if key == "" {
-			continue
-		}
-		seen[key] = true
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		switch table {
-		case `snapshot_workers`:
-			args := append([]any{key}, extra(value)...)
-			args = append(args, string(data))
-			if _, err := q.ExecContext(ctx, `
-INSERT INTO `+table+` (id, task_id, data)
-VALUES (?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-	task_id = excluded.task_id,
-	data = excluded.data
-WHERE task_id != excluded.task_id OR data != excluded.data`, args...); err != nil {
-				return err
-			}
-		case `snapshot_execution_nodes`:
-			args := append([]any{key}, extra(value)...)
-			args = append(args, string(data))
-			if _, err := q.ExecContext(ctx, `
-INSERT INTO `+table+` (id, task_id, worker_id, data)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-	task_id = excluded.task_id,
-	worker_id = excluded.worker_id,
-	data = excluded.data
-WHERE task_id != excluded.task_id OR worker_id != excluded.worker_id OR data != excluded.data`, args...); err != nil {
-				return err
-			}
-		case `snapshot_pull_requests`:
-			args := append([]any{key}, extra(value)...)
-			args = append(args, string(data))
-			if _, err := q.ExecContext(ctx, `
-INSERT INTO `+table+` (id, task_id, data)
-VALUES (?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-	task_id = excluded.task_id,
-	data = excluded.data
-WHERE task_id != excluded.task_id OR data != excluded.data`, args...); err != nil {
-				return err
-			}
-		default:
-			if _, err := q.ExecContext(ctx, `
-INSERT INTO `+table+` (`+keyColumn+`, data)
-VALUES (?, ?)
-ON CONFLICT(`+keyColumn+`) DO UPDATE SET
-	data = excluded.data
-WHERE data != excluded.data`, key, string(data)); err != nil {
-				return err
-			}
-		}
-	}
-	return deleteMissingSnapshotRows(ctx, q, table, keyColumn, seen)
-}
-
-func saveSnapshotStringMap(ctx context.Context, q snapshotProjectionQuerier, table string, keyColumn string, valueColumn string, values map[string]string) error {
+func saveStringMap(ctx context.Context, q projectionQuerier, table string, keyColumn string, valueColumn string, values map[string]string) error {
 	seen := map[string]bool{}
 	for key, value := range values {
 		seen[key] = true
@@ -1644,10 +1966,10 @@ WHERE `+valueColumn+` != excluded.`+valueColumn, key, value); err != nil {
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, table, keyColumn, seen)
+	return deleteMissingRows(ctx, q, table, keyColumn, seen)
 }
 
-func saveSnapshotRawMessageMap(ctx context.Context, q snapshotProjectionQuerier, table string, keyColumn string, valueColumn string, values map[string]json.RawMessage) error {
+func saveRawMessageMap(ctx context.Context, q projectionQuerier, table string, keyColumn string, valueColumn string, values map[string]json.RawMessage) error {
 	seen := map[string]bool{}
 	for key, value := range values {
 		seen[key] = true
@@ -1660,10 +1982,10 @@ WHERE `+valueColumn+` != excluded.`+valueColumn, key, string(value)); err != nil
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, table, keyColumn, seen)
+	return deleteMissingRows(ctx, q, table, keyColumn, seen)
 }
 
-func saveSnapshotClearedTasks(ctx context.Context, q snapshotProjectionQuerier, table string, values map[string]bool) error {
+func saveClearedTasks(ctx context.Context, q projectionQuerier, table string, values map[string]bool) error {
 	seen := map[string]bool{}
 	for taskID, cleared := range values {
 		if !cleared {
@@ -1677,10 +1999,10 @@ ON CONFLICT(task_id) DO NOTHING`, taskID); err != nil {
 			return err
 		}
 	}
-	return deleteMissingSnapshotRows(ctx, q, table, `task_id`, seen)
+	return deleteMissingRows(ctx, q, table, `task_id`, seen)
 }
 
-func deleteMissingSnapshotRows(ctx context.Context, q snapshotProjectionQuerier, table string, key string, keep map[string]bool) error {
+func deleteMissingRows(ctx context.Context, q projectionQuerier, table string, key string, keep map[string]bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT `+key+` FROM `+table)
 	if err != nil {
 		return err
@@ -1711,29 +2033,9 @@ func deleteMissingSnapshotRows(ctx context.Context, q snapshotProjectionQuerier,
 	return nil
 }
 
-func saveSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier, state snapshotProjectionState, lastEventID int64) error {
-	state.ensure()
-	data, err := json.Marshal(state)
-	if err != nil {
-		return err
-	}
-	_, err = q.ExecContext(ctx, `
-INSERT INTO snapshot_projection (id, last_event_id, state, updated_at)
-VALUES (1, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-	last_event_id = excluded.last_event_id,
-	state = excluded.state,
-	updated_at = excluded.updated_at`,
-		lastEventID,
-		string(data),
-		time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	return err
-}
-
-func advanceSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
+func advanceProjectionReadModel(ctx context.Context, q projectionQuerier, lastEventID int64) error {
 	_, err := q.ExecContext(ctx, `
-UPDATE snapshot_projection
+UPDATE projection_meta
 SET last_event_id = ?, updated_at = ?
 WHERE id = 1`,
 		lastEventID,
@@ -1742,18 +2044,7 @@ WHERE id = 1`,
 	return err
 }
 
-func advanceSnapshotTables(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
-	_, err := q.ExecContext(ctx, `
-UPDATE snapshot_state_meta
-SET last_event_id = ?, updated_at = ?
-WHERE id = 1`,
-		lastEventID,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	return err
-}
-
-func advanceTaskCardReadModel(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
+func advanceTaskCardReadModel(ctx context.Context, q projectionQuerier, lastEventID int64) error {
 	_, err := q.ExecContext(ctx, `
 UPDATE task_card_meta
 SET last_event_id = ?, updated_at = ?
@@ -1764,15 +2055,15 @@ WHERE id = 1`,
 	return err
 }
 
-func saveSnapshotWorkerOutput(ctx context.Context, q snapshotProjectionQuerier, event core.Event) error {
+func saveWorkerOutputWatermark(ctx context.Context, q projectionQuerier, event core.Event) error {
 	_, err := q.ExecContext(ctx, `
-INSERT INTO snapshot_worker_outputs (worker_id, task_id, event_id, at)
+INSERT INTO worker_output_watermarks (worker_id, task_id, event_id, at)
 VALUES (?, ?, ?, ?)
 ON CONFLICT(worker_id) DO UPDATE SET
 	task_id = excluded.task_id,
 	event_id = excluded.event_id,
 	at = excluded.at
-WHERE excluded.event_id > snapshot_worker_outputs.event_id`,
+WHERE excluded.event_id > worker_output_watermarks.event_id`,
 		event.WorkerID,
 		event.TaskID,
 		event.ID,
@@ -1781,10 +2072,10 @@ WHERE excluded.event_id > snapshot_worker_outputs.event_id`,
 	return err
 }
 
-func applySnapshotWorkerOutputTimestamps(ctx context.Context, q snapshotProjectionQuerier, state *snapshotProjectionState, taskIDs map[string]bool) error {
+func applyWorkerOutputWatermarks(ctx context.Context, q projectionQuerier, state *readModelState, taskIDs map[string]bool) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT worker_id, task_id, at
-FROM snapshot_worker_outputs
+FROM worker_output_watermarks
 ORDER BY event_id ASC`)
 	if err != nil {
 		return err
@@ -1820,7 +2111,7 @@ ORDER BY event_id ASC`)
 	return rows.Err()
 }
 
-func projectionInputEvents(ctx context.Context, q snapshotProjectionQuerier, afterID int64) ([]core.Event, error) {
+func projectionInputEvents(ctx context.Context, q projectionQuerier, afterID int64) ([]core.Event, error) {
 	rows, err := q.QueryContext(ctx, `
 WITH latest_worker_output AS (
 	SELECT MAX(id) AS id
