@@ -347,6 +347,45 @@ func TestPublishGitPatchBranchFetchesRemoteBaseBeforeApplyingPatch(t *testing.T)
 	assertCommandContains(t, stub.calls, []string{"git", "fetch", "upstream", "--prune"})
 }
 
+func TestPublishGitPatchBranchDoesNotUsePatchBaseAsBranchBase(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	runTestGit(t, repo, "checkout", "-b", "previous-intermediate")
+	if err := os.WriteFile(filepath.Join(repo, "previous.txt"), []byte("previous intermediate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "previous.txt")
+	runTestGit(t, repo, "commit", "-m", "previous intermediate")
+	previousCommit := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	patch := newFilePatch("current.txt", "current intermediate\n")
+	runTestGit(t, repo, "checkout", "main")
+
+	stub := newPullRequestCommandStub(t, "owner/repo", 13, "Current", "feature", "main")
+
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(ctx, PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkDir:       repo,
+		Repo:          "owner/repo",
+		Base:          "main",
+		Branch:        "feature",
+		Title:         "Current",
+		Body:          "Body",
+		Patch:         patch,
+		PatchFromBase: true,
+		PatchBaseRef:  previousCommit,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents := runTestGit(t, repo, "show", "feature:current.txt"); contents != "current intermediate\n" {
+		t.Fatalf("published branch current.txt = %q, want current change", contents)
+	}
+	if _, err := runCommand(ctx, repo, "git", "cat-file", "-e", "feature:previous.txt"); err == nil {
+		t.Fatal("published branch included previous intermediate PR commit")
+	}
+}
+
 func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
