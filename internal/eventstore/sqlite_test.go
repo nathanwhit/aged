@@ -113,6 +113,39 @@ func TestSQLiteStoreAppendWaitsForBusyWriter(t *testing.T) {
 	}
 }
 
+func TestSnapshotTaskCardsCanReadDuringStoreWriteTx(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: "task-read-during-write",
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Read during write",
+			"prompt": "Dashboard reads should not wait for unrelated write transactions to release a connection.",
+		}),
+	})
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ('held_store_write', '1')`); err != nil {
+		t.Fatal(err)
+	}
+
+	readCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	snapshot, err := store.SnapshotTaskCards(readCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Tasks) != 1 {
+		t.Fatalf("tasks = %d, want 1", len(snapshot.Tasks))
+	}
+}
+
 func sqliteTestTaskByID(tasks []core.Task, id string) (core.Task, bool) {
 	for _, task := range tasks {
 		if task.ID == id {

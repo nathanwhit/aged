@@ -3662,6 +3662,94 @@ func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	}
 }
 
+func TestServiceRefreshPullRequestDefersCompletionPRWhileWorkerActive(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	publisher := &fakePullRequestPublisher{status: core.PullRequest{
+		ID:           "pr-1",
+		Repo:         "owner/repo",
+		Number:       12,
+		URL:          "https://github.com/owner/repo/pull/12",
+		Branch:       "codex/aged-test",
+		Base:         "main",
+		Title:        "Implement feature",
+		State:        "MERGED",
+		ChecksStatus: "success",
+		MergeStatus:  "CLEAN",
+		ReviewStatus: "APPROVED",
+	}}
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: fixedBrain{plan: Plan{
+			WorkerKind: "change",
+			Prompt:     "make change",
+		}},
+		runners: map[string]worker.Runner{
+			"change": &blockingEventRunner{kind: "change", started: started, release: release, summary: "implemented"},
+		},
+		publisher: publisher,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "README.md", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:    "Implement feature",
+		Prompt:   "Do it.",
+		Metadata: core.MustJSON(map[string]any{"completionMode": "github"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:           "pr-1",
+		TaskID:       task.ID,
+		Repo:         "owner/repo",
+		Number:       12,
+		URL:          "https://github.com/owner/repo/pull/12",
+		Branch:       "codex/aged-test",
+		Base:         "main",
+		Title:        "Implement feature",
+		State:        "OPEN",
+		ChecksStatus: "pending",
+		MergeStatus:  "UNKNOWN",
+		ReviewStatus: "REVIEW_REQUIRED",
+		Metadata:     core.MustJSON(map[string]any{"publicationPhase": "completion"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publisher.status.TaskID = task.ID
+	if _, err := service.RefreshPullRequest(ctx, "pr-1"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatalf("missing task %s", task.ID)
+	}
+	if task.ObjectiveStatus != core.ObjectiveSatisfied || task.ObjectivePhase != "merged" {
+		t.Fatalf("objective while worker active = %q/%q, want satisfied/merged", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+
+	close(release)
+	snapshot = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	task = snapshot.Tasks[0]
+	if task.ObjectiveStatus != core.ObjectiveSatisfied || task.ObjectivePhase != "merged" {
+		t.Fatalf("final objective = %q/%q, want satisfied/merged", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want terminal completion PR to suppress duplicate publish", publisher.publishCalls)
+	}
+}
+
 func TestServiceRefreshPullRequestCompletesLegacyBabysitterTask(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

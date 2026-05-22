@@ -803,6 +803,7 @@ func (s *Service) refreshPullRequest(ctx context.Context, snapshot core.Snapshot
 	}
 	checked.ID = pr.ID
 	checked.TaskID = pr.TaskID
+	checked.Metadata = mergePullRequestMetadata(pr.Metadata, checked.Metadata)
 	checked = normalizePullRequestStatusFields(checked)
 	return s.recordPullRequestStatus(ctx, snapshot, checked)
 }
@@ -950,7 +951,11 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 			return core.PullRequest{}, err
 		}
 		if !pullRequestTerminalizesTask(snapshot, checked) {
-			if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_merged", "Intermediate pull request merged; objective continues."); err != nil {
+			if pullRequestTerminalStatusContinuesTask(snapshot, checked) {
+				if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_merged", "Intermediate pull request merged; objective continues."); err != nil {
+					return core.PullRequest{}, err
+				}
+			} else if _, err := s.finalizeTerminalCompletionPullRequestTask(ctx, checked); err != nil {
 				return core.PullRequest{}, err
 			}
 			return checked, nil
@@ -971,7 +976,11 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 			return core.PullRequest{}, err
 		}
 		if !pullRequestTerminalizesTask(snapshot, checked) {
-			if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_closed", "Intermediate pull request closed; objective continues."); err != nil {
+			if pullRequestTerminalStatusContinuesTask(snapshot, checked) {
+				if err := s.continueTaskAfterIntermediatePullRequest(ctx, snapshot, checked, "intermediate_pr_closed", "Intermediate pull request closed; objective continues."); err != nil {
+					return core.PullRequest{}, err
+				}
+			} else if _, err := s.finalizeTerminalCompletionPullRequestTask(ctx, checked); err != nil {
 				return core.PullRequest{}, err
 			}
 			return checked, nil
@@ -1172,6 +1181,20 @@ func pullRequestContinuesTask(pr core.PullRequest) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(stringMetadataValue(metadata["publicationPhase"])), "intermediate")
+}
+
+func pullRequestTerminalStatusContinuesTask(snapshot core.Snapshot, pr core.PullRequest) bool {
+	if pullRequestContinuesTask(pr) {
+		return true
+	}
+	if strings.TrimSpace(pullRequestMetadataString(pr, "publicationPhase")) != "" {
+		return false
+	}
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return false
+	}
+	return task.Status == core.TaskRunning || task.Status == core.TaskPlanning || taskHasActiveWorkers(snapshot, pr.TaskID)
 }
 
 func pullRequestTerminalizesTask(snapshot core.Snapshot, pr core.PullRequest) bool {
@@ -1524,6 +1547,27 @@ func pullRequestMetadataMergeNoop(previous json.RawMessage, incoming json.RawMes
 	clearMissingTriggeredFeedbackMetadata(merged, next, "latestPullRequestFeedback")
 	clearMissingTriggeredFeedbackMetadata(merged, next, "latestConversationComment")
 	return jsonRawEqual(previous, core.MustJSON(merged))
+}
+
+func mergePullRequestMetadata(previous json.RawMessage, incoming json.RawMessage) json.RawMessage {
+	if len(bytes.TrimSpace(incoming)) == 0 {
+		return previous
+	}
+	if len(bytes.TrimSpace(previous)) == 0 {
+		return incoming
+	}
+	merged := map[string]any{}
+	if err := json.Unmarshal(previous, &merged); err != nil || merged == nil {
+		return incoming
+	}
+	next := map[string]any{}
+	if err := json.Unmarshal(incoming, &next); err != nil || next == nil {
+		return incoming
+	}
+	maps.Copy(merged, next)
+	clearMissingTriggeredFeedbackMetadata(merged, next, "latestPullRequestFeedback")
+	clearMissingTriggeredFeedbackMetadata(merged, next, "latestConversationComment")
+	return core.MustJSON(merged)
 }
 
 func clearMissingTriggeredFeedbackMetadata(merged map[string]any, incoming map[string]any, prefix string) {
@@ -2191,6 +2235,50 @@ func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (co
 		}
 	}
 	return core.PullRequest{}, false
+}
+
+func (s *Service) terminalCompletionPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false
+	}
+	var latest core.PullRequest
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || !isTerminalPullRequestState(pr.State) || pullRequestContinuesTask(pr) {
+			continue
+		}
+		if latest.ID == "" || pr.UpdatedAt.After(latest.UpdatedAt) {
+			latest = pr
+		}
+	}
+	return latest, latest.ID != ""
+}
+
+func (s *Service) finalizeTerminalCompletionPullRequestTask(ctx context.Context, pr core.PullRequest) (bool, error) {
+	if pullRequestContinuesTask(pr) {
+		return false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !pullRequestTerminalizesTask(snapshot, pr) {
+		return false, nil
+	}
+	switch {
+	case strings.EqualFold(pr.State, "MERGED"):
+		if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveSatisfied, "merged", pullRequestObjectiveSummary(pr, "merged")); err != nil {
+			return false, err
+		}
+		return true, s.setTaskStatus(ctx, pr.TaskID, core.TaskSucceeded)
+	case strings.EqualFold(pr.State, "CLOSED"):
+		if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveAbandoned, "pr_closed", pullRequestObjectiveSummary(pr, "pr_closed")); err != nil {
+			return false, err
+		}
+		return true, s.setTaskStatus(ctx, pr.TaskID, core.TaskCanceled)
+	default:
+		return false, nil
+	}
 }
 
 func (s *Service) pullRequestForUpdateAction(ctx context.Context, taskID string, action PlanAction) (core.PullRequest, error) {
