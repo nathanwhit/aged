@@ -648,7 +648,7 @@ func (s *SQLiteStore) snapshotFromReadModel(ctx context.Context, includeEvents b
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildReadModel(ctx)
+		state, lastEventID, err = s.catchUpReadModel(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
@@ -672,7 +672,7 @@ func (s *SQLiteStore) taskCardsFromReadModel(ctx context.Context) (core.Snapshot
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildReadModel(ctx)
+		state, lastEventID, err = s.catchUpReadModel(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
@@ -725,20 +725,25 @@ func (s *SQLiteStore) loadCurrentReadModel(ctx context.Context) (readModelState,
 }
 
 func (s *SQLiteStore) rebuildReadModel(ctx context.Context) (readModelState, int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return readModelState{}, 0, err
-	}
-	defer tx.Rollback()
-
-	state, lastEventID, err := rebuildReadModelTx(ctx, tx)
-	if err != nil {
-		return readModelState{}, 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return readModelState{}, 0, err
-	}
+	var state readModelState
+	var lastEventID int64
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		state, lastEventID, err = rebuildReadModelTx(ctx, tx)
+		return err
+	})
 	return state, lastEventID, nil
+}
+
+func (s *SQLiteStore) catchUpReadModel(ctx context.Context) (readModelState, int64, error) {
+	var state readModelState
+	var lastEventID int64
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		state, lastEventID, err = catchUpReadModelTx(ctx, tx)
+		return err
+	})
+	return state, lastEventID, err
 }
 
 func updateProjectionReadModelTx(ctx context.Context, tx *sql.Tx, event core.Event) error {
@@ -747,7 +752,7 @@ func updateProjectionReadModelTx(ctx context.Context, tx *sql.Tx, event core.Eve
 		return err
 	}
 	if !ok || lastEventID != event.ID-1 {
-		_, _, err := rebuildReadModelTx(ctx, tx)
+		_, _, err := catchUpReadModelTx(ctx, tx)
 		return err
 	}
 	if event.Type == core.EventWorkerOutput {
@@ -763,6 +768,57 @@ func updateProjectionReadModelTx(ctx context.Context, tx *sql.Tx, event core.Eve
 		return err
 	}
 	return saveProjectionReadModel(ctx, tx, state, event.ID)
+}
+
+func catchUpReadModelTx(ctx context.Context, tx *sql.Tx) (readModelState, int64, error) {
+	state, lastEventID, ok, err := loadProjectionReadModel(ctx, tx)
+	if err != nil {
+		return readModelState{}, 0, err
+	}
+	latestEventID, err := latestEventIDFrom(ctx, tx)
+	if err != nil {
+		return readModelState{}, 0, err
+	}
+	if !ok {
+		if latestEventID == 0 {
+			return newReadModelState(), 0, nil
+		}
+		return rebuildReadModelTx(ctx, tx)
+	}
+	if lastEventID == latestEventID {
+		return state, lastEventID, nil
+	}
+	events, err := projectionInputEvents(ctx, tx, lastEventID)
+	if err != nil {
+		return readModelState{}, 0, err
+	}
+	changedState := false
+	for _, event := range events {
+		if event.Type == core.EventWorkerOutput {
+			if err := saveWorkerOutputWatermark(ctx, tx, event); err != nil {
+				return readModelState{}, 0, err
+			}
+		} else {
+			if err := state.apply(event); err != nil {
+				return readModelState{}, 0, err
+			}
+			changedState = true
+		}
+		lastEventID = event.ID
+	}
+	if changedState {
+		if err := saveProjectionReadModel(ctx, tx, state, lastEventID); err != nil {
+			return readModelState{}, 0, err
+		}
+		return state, lastEventID, nil
+	}
+	if err := advanceProjectionReadModel(ctx, tx, lastEventID); err != nil {
+		return readModelState{}, 0, err
+	}
+	if err := advanceTaskCardReadModel(ctx, tx, lastEventID); err != nil {
+		return readModelState{}, 0, err
+	}
+	return state, lastEventID, nil
 }
 
 func rebuildReadModelTx(ctx context.Context, tx *sql.Tx) (readModelState, int64, error) {
@@ -788,6 +844,17 @@ type projectionQuerier interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func latestEventIDFrom(ctx context.Context, q projectionQuerier) (int64, error) {
+	var id sql.NullInt64
+	if err := q.QueryRowContext(ctx, `SELECT MAX(id) FROM events`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if !id.Valid {
+		return 0, nil
+	}
+	return id.Int64, nil
 }
 
 func loadProjectionReadModel(ctx context.Context, q projectionQuerier) (readModelState, int64, bool, error) {

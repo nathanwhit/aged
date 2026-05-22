@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 type SQLiteStore struct {
 	db      *sql.DB
+	writeMu sync.Mutex
 	appends atomic.Uint64
 }
 
@@ -79,6 +81,8 @@ func isSQLiteBusy(err error) bool {
 }
 
 func (s *SQLiteStore) withWriteTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	return withSQLiteBusyRetry(ctx, func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -106,8 +110,8 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
 
 	store := &SQLiteStore{db: db}
 	if err := store.migrate(ctx); err != nil {
