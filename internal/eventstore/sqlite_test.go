@@ -628,8 +628,8 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 		},
 	)
 
-	var stateBefore string
-	if err := store.db.QueryRowContext(ctx, `SELECT state FROM snapshot_projection WHERE id = 1`).Scan(&stateBefore); err != nil {
+	var workerBefore string
+	if err := store.db.QueryRowContext(ctx, `SELECT data FROM snapshot_workers WHERE id = ?`, "worker-output-watermark").Scan(&workerBefore); err != nil {
 		t.Fatal(err)
 	}
 
@@ -643,15 +643,18 @@ func TestSnapshotProjectionWorkerOutputDoesNotRewriteStateBlob(t *testing.T) {
 	})
 
 	var lastEventID int64
-	var stateAfter string
-	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id, state FROM snapshot_projection WHERE id = 1`).Scan(&lastEventID, &stateAfter); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_state_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
 		t.Fatal(err)
 	}
 	if lastEventID != 5 {
 		t.Fatalf("last event id = %d, want 5", lastEventID)
 	}
-	if stateAfter != stateBefore {
-		t.Fatal("worker output rewrote snapshot projection state")
+	var workerAfter string
+	if err := store.db.QueryRowContext(ctx, `SELECT data FROM snapshot_workers WHERE id = ?`, "worker-output-watermark").Scan(&workerAfter); err != nil {
+		t.Fatal(err)
+	}
+	if workerAfter != workerBefore {
+		t.Fatal("worker output rewrote snapshot worker row")
 	}
 
 	snapshot, err := store.SnapshotSummary(ctx)
@@ -688,7 +691,7 @@ func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 		},
 	)
 
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_projection`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM snapshot_state_meta`); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.SnapshotSummary(ctx)
@@ -699,7 +702,7 @@ func TestSnapshotProjectionRecoversWhenMissing(t *testing.T) {
 		t.Fatalf("snapshot tasks = %+v", snapshot.Tasks)
 	}
 	var lastEventID int64
-	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_projection WHERE id = 1`).Scan(&lastEventID); err != nil {
+	if err := store.db.QueryRowContext(ctx, `SELECT last_event_id FROM snapshot_state_meta WHERE id = 1`).Scan(&lastEventID); err != nil {
 		t.Fatal(err)
 	}
 	if lastEventID != snapshot.LastEventID {
@@ -719,7 +722,7 @@ func TestSnapshotProjectionAppendRebuildsStaleProjection(t *testing.T) {
 			"prompt": "Repair during append.",
 		}),
 	})
-	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET last_event_id = 0, state = ? WHERE id = 1`, string(core.MustJSON(newSnapshotProjectionState()))); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_state_meta SET last_event_id = 0 WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
 	appendSQLiteEvents(t, ctx, store, core.Event{
@@ -810,23 +813,31 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 		},
 	)
 
-	var fullBytes int
-	var cardBytes int
-	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_projection WHERE id = 1`).Scan(&fullBytes); err != nil {
+	full, err := store.SnapshotSummary(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_task_cards_projection WHERE id = 1`).Scan(&cardBytes); err != nil {
+	cards, err := store.SnapshotTaskCards(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if cardBytes >= fullBytes/4 {
-		t.Fatalf("task card projection length = %d, full projection length = %d; want card projection much smaller", cardBytes, fullBytes)
+	fullJSON, err := json.Marshal(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cardJSON, err := json.Marshal(cards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cardJSON) >= len(fullJSON)/4 {
+		t.Fatalf("task card snapshot length = %d, full snapshot length = %d; want card snapshot much smaller", len(cardJSON), len(fullJSON))
 	}
 
 	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET state = '{' WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SnapshotSummary(ctx); err == nil {
-		t.Fatal("SnapshotSummary succeeded after corrupting the full projection")
+	if _, err := store.SnapshotSummary(ctx); err != nil {
+		t.Fatalf("SnapshotSummary should ignore corrupt legacy projection blob: %v", err)
 	}
 	snapshot, err := store.SnapshotTaskCards(ctx)
 	if err != nil {
@@ -897,18 +908,15 @@ func TestSnapshotTaskCardsProjectionPrunesTerminalDetails(t *testing.T) {
 		},
 	)
 
-	state, _, ok, err := loadSnapshotTaskCardsProjection(ctx, store.db)
+	snapshot, err := store.SnapshotTaskCards(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatal("task card projection was not saved")
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Prompt != "" {
+		t.Fatalf("card snapshot task = %+v", snapshot.Tasks)
 	}
-	if len(state.Tasks) != 1 || state.Tasks["task-cards-terminal"].Prompt != "" {
-		t.Fatalf("card projection task = %+v", state.Tasks)
-	}
-	if len(state.Workers) != 0 || len(state.Nodes) != 0 || len(state.PullRequests) != 0 || len(state.WorkerNodes) != 0 {
-		t.Fatalf("terminal details were retained: workers=%+v nodes=%+v pullRequests=%+v workerNodes=%+v", state.Workers, state.Nodes, state.PullRequests, state.WorkerNodes)
+	if len(snapshot.Workers) != 0 || len(snapshot.ExecutionNodes) != 0 || len(snapshot.PullRequests) != 0 {
+		t.Fatalf("terminal details were retained: workers=%+v nodes=%+v pullRequests=%+v", snapshot.Workers, snapshot.ExecutionNodes, snapshot.PullRequests)
 	}
 }
 
