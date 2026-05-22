@@ -546,6 +546,111 @@ func (r SSHRunner) ApplyPatch(ctx context.Context, target TargetConfig, workDir 
 	return err
 }
 
+func (r SSHRunner) cleanupRemoteArtifactDir(ctx context.Context, target TargetConfig, root string, name string, dryRun bool) ArtifactDirCleanup {
+	item := ArtifactDirCleanup{Name: name, DryRun: dryRun}
+	path, err := retainedRemoteArtifactPath(root, name)
+	if err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	item.Path = path
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	out, err := r.runPollCommand(ctx, target, remoteCleanupArtifactScript(root, name, dryRun))
+	if err != nil {
+		detail := strings.TrimSpace(out)
+		if detail != "" {
+			item.Error = fmt.Sprintf("%v: %s", err, detail)
+		} else {
+			item.Error = err.Error()
+		}
+		return item
+	}
+	values := parseProbeValues(out)
+	if remotePath := strings.TrimSpace(values["path"]); remotePath != "" {
+		item.Path = remotePath
+	}
+	item.Bytes = parseProbeInt(values["bytes"])
+	switch values["status"] {
+	case "missing":
+		item.Reason = "artifact directory does not exist"
+	case "symlink":
+		item.Reason = "artifact path is a symlink"
+	case "not_directory":
+		item.Reason = "artifact path is not a directory"
+	case "vcs_changes":
+		item.Reason = "artifact directory contains VCS-visible changes"
+	case "unsupported_vcs":
+		item.Reason = "retained artifact cleanup only supports remote git and jj workspaces"
+	case "dry_run":
+		item.WouldRemove = true
+		item.Reason = "dry run"
+	case "removed":
+		item.Removed = true
+	case "error":
+		item.Error = nonEmpty(values["error"], values["reason"])
+	default:
+		item.Error = "unexpected remote artifact cleanup response"
+	}
+	return item
+}
+
+func retainedRemoteArtifactPath(root string, name string) (string, error) {
+	root = path.Clean(strings.TrimSpace(root))
+	name = strings.TrimSpace(name)
+	if root == "" || root == "." {
+		return "", errors.New("remote workspace root is required")
+	}
+	if !path.IsAbs(root) {
+		return "", fmt.Errorf("remote workspace root must be absolute: %s", root)
+	}
+	if name == "" || path.IsAbs(name) || path.Clean(name) != name || strings.ContainsRune(name, '/') {
+		return "", fmt.Errorf("unsafe artifact directory name %q", name)
+	}
+	if name == "." || name == ".." {
+		return "", fmt.Errorf("unsafe artifact directory name %q", name)
+	}
+	cleanPath := path.Clean(path.Join(root, name))
+	if cleanPath == root || !strings.HasPrefix(cleanPath, root+"/") {
+		return "", fmt.Errorf("artifact path escapes workspace root: %s", name)
+	}
+	return cleanPath, nil
+}
+
+func remoteCleanupArtifactScript(root string, name string, dryRun bool) string {
+	dryRunValue := "0"
+	if dryRun {
+		dryRunValue = "1"
+	}
+	return fmt.Sprintf(`set -eu
+root=%[1]s
+name=%[2]s
+dry_run=%[3]s
+artifact="$root/$name"
+printf 'path=%%s\n' "$artifact"
+if [ ! -e "$artifact" ]; then printf 'status=missing\n'; exit 0; fi
+if [ -L "$artifact" ]; then printf 'status=symlink\n'; exit 0; fi
+if [ ! -d "$artifact" ]; then printf 'status=not_directory\n'; exit 0; fi
+if ! cd "$root"; then printf 'status=error\nerror=remote workspace cwd is not accessible\n'; exit 0; fi
+changes=
+if jj root >/dev/null 2>&1; then
+  changes="$(jj diff --summary -- "$name" 2>&1 || true)"
+elif git rev-parse --show-toplevel >/dev/null 2>&1; then
+  changes="$(git status --porcelain=v1 -- "$name" 2>&1 || true)"
+else
+  printf 'status=unsupported_vcs\n'
+  exit 0
+fi
+if [ -n "$changes" ]; then printf 'status=vcs_changes\n'; exit 0; fi
+bytes="$(du -sk "$artifact" 2>/dev/null | awk 'NR==1 { print $1 * 1024 }')"
+bytes="${bytes:-0}"
+printf 'bytes=%%s\n' "$bytes"
+if [ "$dry_run" = 1 ]; then printf 'status=dry_run\n'; exit 0; fi
+rm -rf -- "$artifact"
+printf 'status=removed\n'`, shellQuote(root), shellQuote(name), shellQuote(dryRunValue))
+}
+
 func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetHealth, core.TargetResources) {
 	if r.Executor == nil {
 		r.Executor = execRemoteExecutor{}

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -98,7 +99,7 @@ func (s *Service) CleanupRetainedWorkspaceArtifacts(ctx context.Context, options
 			return report, fmt.Errorf("decode retained workspace for worker %s: %w", workerID, err)
 		}
 		report.Scanned++
-		cleanup := cleanupRetainedWorkspaceArtifacts(ctx, workerState, workspace, options, activeNodes[workerID])
+		cleanup := s.cleanupRetainedWorkspaceArtifacts(ctx, workerState, workspace, options, activeNodes[workerID])
 		report.Workspaces = append(report.Workspaces, cleanup)
 		if cleanup.Cleaned {
 			report.Cleaned++
@@ -172,7 +173,14 @@ func cleanArtifactDirNames(names []string) []string {
 	return out
 }
 
-func cleanupRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, workspace PreparedWorkspace, options RetainedWorkspaceArtifactCleanupOptions, activeNodes []core.ExecutionNode) WorkspaceCleanup {
+func (s *Service) cleanupRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, workspace PreparedWorkspace, options RetainedWorkspaceArtifactCleanupOptions, activeNodes []core.ExecutionNode) WorkspaceCleanup {
+	if workspace.TargetKind == string(TargetKindSSH) || workspace.VCSType == "ssh" || workspace.Mode == "remote" {
+		return s.cleanupRemoteRetainedWorkspaceArtifacts(ctx, worker, workspace, options, activeNodes)
+	}
+	return cleanupLocalRetainedWorkspaceArtifacts(ctx, worker, workspace, options, activeNodes)
+}
+
+func retainedWorkspaceArtifactCleanupBase(worker core.Worker, workspace PreparedWorkspace, options RetainedWorkspaceArtifactCleanupOptions, activeNodes []core.ExecutionNode) (WorkspaceCleanup, bool) {
 	cleanup := WorkspaceCleanup{
 		Root:          workspace.Root,
 		CWD:           workspace.CWD,
@@ -190,22 +198,30 @@ func cleanupRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, 
 	}
 	if policy != WorkspaceCleanupRetain {
 		cleanup.Reason = "workspace cleanup policy is not retain"
-		return cleanup
+		return cleanup, false
 	}
 	if !isTerminalWorkerStatus(worker.Status) {
 		cleanup.Reason = "worker is not terminal"
-		return cleanup
+		return cleanup, false
 	}
 	if len(activeNodes) > 0 {
 		cleanup.Reason = "worker has active execution node"
-		return cleanup
+		return cleanup, false
 	}
 	if worker.UpdatedAt.IsZero() {
 		cleanup.Reason = "worker terminal time is unavailable"
-		return cleanup
+		return cleanup, false
 	}
 	if worker.UpdatedAt.After(options.Now.Add(-options.MinAge)) {
 		cleanup.Reason = "worker is newer than retained artifact cleanup age"
+		return cleanup, false
+	}
+	return cleanup, true
+}
+
+func cleanupLocalRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, workspace PreparedWorkspace, options RetainedWorkspaceArtifactCleanupOptions, activeNodes []core.ExecutionNode) WorkspaceCleanup {
+	cleanup, ok := retainedWorkspaceArtifactCleanupBase(worker, workspace, options, activeNodes)
+	if !ok {
 		return cleanup
 	}
 	if workspace.Mode != string(WorkspaceModeIsolated) {
@@ -223,6 +239,56 @@ func cleanupRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, 
 	}
 	for _, name := range options.ArtifactDirNames {
 		item := cleanupArtifactDir(ctx, workspace, root, name, options.DryRun)
+		cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
+		if item.Removed {
+			cleanup.Cleaned = true
+			cleanup.BytesRemoved += item.Bytes
+		}
+	}
+	if !cleanup.Cleaned {
+		cleanup.Reason = "no retained artifact directories removed"
+	}
+	return cleanup
+}
+
+func (s *Service) cleanupRemoteRetainedWorkspaceArtifacts(ctx context.Context, worker core.Worker, workspace PreparedWorkspace, options RetainedWorkspaceArtifactCleanupOptions, activeNodes []core.ExecutionNode) WorkspaceCleanup {
+	cleanup, ok := retainedWorkspaceArtifactCleanupBase(worker, workspace, options, activeNodes)
+	if !ok {
+		return cleanup
+	}
+	if workspace.Mode != "remote" {
+		cleanup.Reason = "workspace is not a remote workspace"
+		return cleanup
+	}
+	if workspace.VCSType != "ssh" {
+		cleanup.Reason = "retained remote artifact cleanup only supports ssh workspaces"
+		return cleanup
+	}
+	if s == nil || s.targets == nil {
+		cleanup.Reason = "remote target registry is not configured"
+		return cleanup
+	}
+	targetID := strings.TrimSpace(workspace.TargetID)
+	if targetID == "" {
+		cleanup.Reason = "remote workspace target id is unavailable"
+		return cleanup
+	}
+	target, found := s.targets.Get(targetID)
+	if !found || target.Kind != TargetKindSSH {
+		cleanup.Reason = "remote target is not configured"
+		return cleanup
+	}
+	root := strings.TrimSpace(workspace.CWD)
+	if root == "" {
+		cleanup.Reason = "remote workspace cwd is required"
+		return cleanup
+	}
+	if !path.IsAbs(root) {
+		cleanup.Reason = "remote workspace cwd must be absolute"
+		return cleanup
+	}
+	for _, name := range options.ArtifactDirNames {
+		item := s.sshRunner.cleanupRemoteArtifactDir(ctx, target, root, name, options.DryRun)
 		cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
 		if item.Removed {
 			cleanup.Cleaned = true
