@@ -295,6 +295,58 @@ func TestPublishGitPatchBranchStartsFromBaseAndPreservesDirtyWorkspace(t *testin
 	assertCommandContains(t, stub.calls, []string{"git", "push", "-u", "origin", "feature"})
 }
 
+func TestPublishGitPatchBranchFetchesRemoteBaseBeforeApplyingPatch(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	if err := os.WriteFile(filepath.Join(repo, "Cargo.toml"), []byte("dependency = \"old\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "Cargo.toml")
+	runTestGit(t, repo, "commit", "-m", "add cargo manifest")
+
+	upstream := t.TempDir()
+	runTestGit(t, upstream, "init", "--bare")
+	runTestGit(t, repo, "remote", "add", "upstream", upstream)
+	runTestGit(t, repo, "push", "-u", "upstream", "main")
+
+	updater := filepath.Join(t.TempDir(), "updater")
+	runTestGit(t, t.TempDir(), "clone", "--branch", "main", upstream, updater)
+	runTestGit(t, updater, "config", "user.name", "aged-test")
+	runTestGit(t, updater, "config", "user.email", "aged-test@example.invalid")
+	runTestGit(t, updater, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(updater, "Cargo.toml"), []byte("dependency = \"upstream\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, updater, "commit", "-am", "update dependency")
+	if err := os.WriteFile(filepath.Join(updater, "Cargo.toml"), []byte("dependency = \"worker\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := runTestGit(t, updater, "diff", "--binary", "HEAD")
+	runTestGit(t, updater, "push", "origin", "main")
+
+	stub := newPullRequestCommandStub(t, "owner/repo", 12, "Fix", "feature", "main")
+
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Publish(ctx, PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkDir:       repo,
+		Repo:          "owner/repo",
+		Base:          "main",
+		Branch:        "feature",
+		Title:         "Fix",
+		Body:          "Body",
+		Patch:         patch,
+		PatchFromBase: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents := runTestGit(t, repo, "show", "feature:Cargo.toml"); contents != "dependency = \"worker\"\n" {
+		t.Fatalf("published branch Cargo.toml = %q, want worker change", contents)
+	}
+	assertCommandContains(t, stub.calls, []string{"git", "fetch", "upstream", "--prune"})
+}
+
 func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
@@ -863,25 +915,32 @@ func TestPullRequestPublishPatchPrefersPublishDiffForSSHWorkspace(t *testing.T) 
 	changes := WorkspaceChanges{
 		Diff:        "per-worker delta\n",
 		PublishDiff: "cumulative from head\n",
+		PublishBase: "abc123",
 	}
-	patch, fromBase := pullRequestPublishPatch(workspace, changes)
+	patch, fromBase, patchBase := pullRequestPublishPatch(workspace, changes)
 	if !fromBase {
 		t.Fatalf("expected fromBase=true for ssh workspace")
 	}
 	if patch != changes.PublishDiff {
 		t.Fatalf("expected publish diff %q, got %q", changes.PublishDiff, patch)
 	}
+	if patchBase != changes.PublishBase {
+		t.Fatalf("expected patch base %q, got %q", changes.PublishBase, patchBase)
+	}
 }
 
 func TestPullRequestPublishPatchFallsBackToPerWorkerDiffWhenPublishDiffMissing(t *testing.T) {
 	workspace := PreparedWorkspace{VCSType: "ssh"}
 	changes := WorkspaceChanges{Diff: "per-worker delta\n"}
-	patch, fromBase := pullRequestPublishPatch(workspace, changes)
+	patch, fromBase, patchBase := pullRequestPublishPatch(workspace, changes)
 	if !fromBase {
 		t.Fatalf("expected fromBase=true for ssh workspace")
 	}
 	if patch != changes.Diff {
 		t.Fatalf("expected fallback to %q, got %q", changes.Diff, patch)
+	}
+	if patchBase != "" {
+		t.Fatalf("expected empty patch base for fallback diff, got %q", patchBase)
 	}
 }
 

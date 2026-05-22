@@ -32,6 +32,7 @@ type PullRequestPublishSpec struct {
 	Draft          bool
 	Patch          string
 	PatchFromBase  bool
+	PatchBaseRef   string
 	ResetWorkDir   bool
 	ForceWithLease bool
 	Metadata       map[string]any
@@ -350,7 +351,8 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 }
 
 func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec commandExecutor, dir string, branch string, base string, remote string, spec PullRequestPublishSpec) error {
-	baseRef := gitPublishBaseRef(ctx, exec, dir, base)
+	refreshGitPublishBaseRefs(ctx, exec, dir)
+	baseRef := gitPublishPatchBaseRef(ctx, exec, dir, base, spec.PatchBaseRef)
 	if baseRef == "" {
 		return fmt.Errorf("prepare git patch worktree: base %q is not available", nonEmpty(base, "main"))
 	}
@@ -553,6 +555,25 @@ func gitPublishBaseRef(ctx context.Context, exec commandExecutor, dir string, ba
 		}
 	}
 	return ""
+}
+
+func gitPublishPatchBaseRef(ctx context.Context, exec commandExecutor, dir string, base string, patchBaseRef string) string {
+	patchBaseRef = strings.TrimSpace(patchBaseRef)
+	if patchBaseRef != "" {
+		if _, err := exec(ctx, dir, "git", "rev-parse", "--verify", "--quiet", patchBaseRef+"^{commit}"); err == nil {
+			return patchBaseRef
+		}
+	}
+	return gitPublishBaseRef(ctx, exec, dir, base)
+}
+
+func refreshGitPublishBaseRefs(ctx context.Context, exec commandExecutor, dir string) {
+	for _, remote := range []string{"upstream", "origin"} {
+		if _, err := exec(ctx, dir, "git", "remote", "get-url", remote); err != nil {
+			continue
+		}
+		_, _ = exec(ctx, dir, "git", "fetch", remote, "--prune")
+	}
 }
 
 func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error) {

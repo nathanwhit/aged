@@ -75,6 +75,7 @@ type WorkspaceChanges struct {
 	DiffStat      string                 `json:"diffStat"`
 	Diff          string                 `json:"diff,omitempty"`
 	PublishDiff   string                 `json:"publishDiff,omitempty"`
+	PublishBase   string                 `json:"publishBase,omitempty"`
 	ChangedFiles  []WorkspaceChangedFile `json:"changedFiles"`
 	Dirty         bool                   `json:"dirty"`
 	Error         string                 `json:"error,omitempty"`
