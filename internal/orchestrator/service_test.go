@@ -2153,6 +2153,81 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	}
 }
 
+func TestServiceIntermediatePullRequestKeepsObjectiveRunning(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	secondStarted := make(chan string, 1)
+	releaseSecond := make(chan struct{})
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			WorkerKind: "first",
+			Prompt:     "produce first slice",
+			Actions: []PlanAction{{
+				Kind:   "publish_pull_request",
+				When:   "after_success",
+				Reason: "ship the first slice and continue the objective",
+				Inputs: map[string]any{"repo": "owner/repo", "continueAfterPublish": true, "body": "Ship the first slice."},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "keep working after the intermediate PR",
+			Plan: &Plan{
+				WorkerKind: "second",
+				Prompt:     "produce second slice",
+			},
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"first":  eventRunner{kind: "first", events: []worker.Event{{Kind: worker.EventResult, Text: "first slice"}}},
+		"second": &blockingEventRunner{kind: "second", started: secondStarted, release: releaseSecond, summary: "second slice"},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "slice.go", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Broad objective",
+		Prompt: "Produce multiple reviewable slices.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitForPullRequests(t, store, task.ID, 1)
+	<-secondStarted
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskRunning || task.ObjectiveStatus != core.ObjectiveActive {
+		t.Fatalf("task status = %q objective = %q/%q, want running active", task.Status, task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if task.ObjectivePhase != "continuing_after_pr" {
+		t.Fatalf("objective phase = %q, want continuing_after_pr", task.ObjectivePhase)
+	}
+	if !hasEvent(snapshot.Events, core.EventPRBabysitter, task.ID, "") {
+		t.Fatalf("missing PR babysitter event")
+	}
+	if len(publisher.publishedSpecs) != 1 || !boolMetadata(publisher.publishedSpecs[0].Metadata, "continueAfterPublish") {
+		t.Fatalf("published specs = %+v, want one intermediate PR", publisher.publishedSpecs)
+	}
+
+	close(releaseSecond)
+	_ = waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+}
+
 func TestServiceIntermediatePublishConflictContinuesToReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

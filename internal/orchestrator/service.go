@@ -6560,10 +6560,10 @@ func (s *Service) waitForUserAction(ctx context.Context, taskID string, workerID
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingUser, "approval_needed", question); err != nil {
 		return err
 	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+	if err := s.recordUserActionNeeded(ctx, taskID, workerID, reason, question, metadata); err != nil {
 		return err
 	}
-	return s.recordUserActionNeeded(ctx, taskID, workerID, reason, question, metadata)
+	return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
 }
 
 func (s *Service) recordUserActionNeeded(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {
