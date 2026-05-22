@@ -815,11 +815,18 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_projection WHERE id = 1`).Scan(&fullBytes); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRowContext(ctx, `SELECT length(state) FROM snapshot_task_cards_projection WHERE id = 1`).Scan(&cardBytes); err != nil {
+	if err := store.db.QueryRowContext(ctx, `
+SELECT coalesce(sum(length(data)), 0)
+FROM (
+	SELECT data FROM snapshot_task_card_tasks
+	UNION ALL SELECT data FROM snapshot_task_card_workers
+	UNION ALL SELECT data FROM snapshot_task_card_nodes
+	UNION ALL SELECT data FROM snapshot_task_card_pull_requests
+)`).Scan(&cardBytes); err != nil {
 		t.Fatal(err)
 	}
 	if cardBytes >= fullBytes/4 {
-		t.Fatalf("task card projection length = %d, full projection length = %d; want card projection much smaller", cardBytes, fullBytes)
+		t.Fatalf("task card table bytes = %d, full projection length = %d; want card rows much smaller", cardBytes, fullBytes)
 	}
 
 	if _, err := store.db.ExecContext(ctx, `UPDATE snapshot_projection SET state = '{' WHERE id = 1`); err != nil {
@@ -897,7 +904,7 @@ func TestSnapshotTaskCardsProjectionPrunesTerminalDetails(t *testing.T) {
 		},
 	)
 
-	state, _, ok, err := loadSnapshotTaskCardsProjection(ctx, store.db)
+	state, _, ok, err := loadSnapshotTaskCardTables(ctx, store.db)
 	if err != nil {
 		t.Fatal(err)
 	}

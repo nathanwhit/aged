@@ -667,12 +667,12 @@ func (s *SQLiteStore) snapshotFromProjection(ctx context.Context, includeEvents 
 }
 
 func (s *SQLiteStore) snapshotTaskCardsFromProjection(ctx context.Context) (core.Snapshot, error) {
-	state, lastEventID, current, err := s.loadCurrentSnapshotTaskCardsProjection(ctx)
+	state, lastEventID, current, err := s.loadCurrentSnapshotTaskCardTables(ctx)
 	if err != nil {
 		return core.Snapshot{}, err
 	}
 	if !current {
-		state, lastEventID, err = s.rebuildSnapshotTaskCardsProjection(ctx)
+		state, lastEventID, err = s.rebuildSnapshotTaskCardTables(ctx)
 		if err != nil {
 			return core.Snapshot{}, err
 		}
@@ -685,6 +685,41 @@ func (s *SQLiteStore) snapshotTaskCardsFromProjection(ctx context.Context) (core
 		return core.Snapshot{}, err
 	}
 	return state.taskCardsSnapshot(lastEventID), nil
+}
+
+func (s *SQLiteStore) loadCurrentSnapshotTaskCardTables(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
+	state, lastEventID, ok, err := loadSnapshotTaskCardTables(ctx, s.db)
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	latestEventID, err := s.latestEventID(ctx)
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if !ok {
+		if latestEventID == 0 {
+			return newSnapshotProjectionState(), 0, true, nil
+		}
+		return snapshotProjectionState{}, 0, false, nil
+	}
+	return state, lastEventID, lastEventID == latestEventID, nil
+}
+
+func (s *SQLiteStore) rebuildSnapshotTaskCardTables(ctx context.Context) (snapshotProjectionState, int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	defer tx.Rollback()
+
+	state, lastEventID, err := rebuildSnapshotTaskCardTablesTx(ctx, tx)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	return state, lastEventID, nil
 }
 
 func (s *SQLiteStore) loadCurrentSnapshotTaskCardsProjection(ctx context.Context) (snapshotProjectionState, int64, bool, error) {
@@ -766,7 +801,7 @@ func updateSnapshotProjectionTx(ctx context.Context, tx *sql.Tx, event core.Even
 		if _, _, err := rebuildSnapshotProjectionTx(ctx, tx); err != nil {
 			return err
 		}
-		if _, _, err := rebuildSnapshotTaskCardsProjectionTx(ctx, tx); err != nil {
+		if _, _, err := rebuildSnapshotTaskCardTablesTx(ctx, tx); err != nil {
 			return err
 		}
 		return nil
@@ -809,21 +844,40 @@ func rebuildSnapshotProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProje
 }
 
 func updateSnapshotTaskCardsProjectionTx(ctx context.Context, tx *sql.Tx, event core.Event) error {
-	state, lastEventID, ok, err := loadSnapshotTaskCardsProjection(ctx, tx)
+	state, lastEventID, ok, err := loadSnapshotTaskCardTables(ctx, tx)
 	if err != nil {
 		return err
 	}
 	if !ok || lastEventID != event.ID-1 {
-		_, _, err := rebuildSnapshotTaskCardsProjectionTx(ctx, tx)
+		_, _, err := rebuildSnapshotTaskCardTablesTx(ctx, tx)
 		return err
 	}
 	if event.Type == core.EventWorkerOutput {
-		return advanceSnapshotTaskCardsProjection(ctx, tx, event.ID)
+		return advanceSnapshotTaskCardTables(ctx, tx, event.ID)
 	}
 	if err := applySnapshotTaskCardProjectionEvent(&state, event); err != nil {
 		return err
 	}
-	return saveSnapshotTaskCardsProjection(ctx, tx, state, event.ID)
+	return saveSnapshotTaskCardTables(ctx, tx, state, event.ID)
+}
+
+func rebuildSnapshotTaskCardTablesTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
+	events, err := projectionInputEvents(ctx, tx, 0)
+	if err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	state := newSnapshotProjectionState()
+	var lastEventID int64
+	for _, event := range events {
+		if err := applySnapshotTaskCardProjectionEvent(&state, event); err != nil {
+			return snapshotProjectionState{}, 0, err
+		}
+		lastEventID = event.ID
+	}
+	if err := saveSnapshotTaskCardTables(ctx, tx, state, lastEventID); err != nil {
+		return snapshotProjectionState{}, 0, err
+	}
+	return state, lastEventID, nil
 }
 
 func rebuildSnapshotTaskCardsProjectionTx(ctx context.Context, tx *sql.Tx) (snapshotProjectionState, int64, error) {
@@ -920,6 +974,197 @@ type snapshotProjectionQuerier interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
+func loadSnapshotTaskCardTables(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
+	var lastEventID int64
+	err := q.QueryRowContext(ctx, `
+SELECT last_event_id
+FROM snapshot_task_card_meta
+WHERE id = 1`).Scan(&lastEventID)
+	if errorsIsNoRows(err) {
+		return snapshotProjectionState{}, 0, false, nil
+	}
+	if err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	state := newSnapshotProjectionState()
+	if err := loadSnapshotTaskCardTasks(ctx, q, state.Tasks); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardWorkers(ctx, q, state.Workers); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardNodes(ctx, q, state.Nodes); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardPullRequests(ctx, q, state.PullRequests); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardPullRequestAliases(ctx, q, state.PullRequestAliases); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardPullRequestIdentities(ctx, q, state.PullRequestIdentities); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardClearedTasks(ctx, q, state.ClearedTasks); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	if err := loadSnapshotTaskCardWorkerNodes(ctx, q, state.WorkerNodes); err != nil {
+		return snapshotProjectionState{}, 0, false, err
+	}
+	return state, lastEventID, true, nil
+}
+
+func loadSnapshotTaskCardTasks(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.Task) error {
+	rows, err := q.QueryContext(ctx, `SELECT id, data FROM snapshot_task_card_tasks`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var data string
+		if err := rows.Scan(&id, &data); err != nil {
+			return err
+		}
+		var task core.Task
+		if err := json.Unmarshal([]byte(data), &task); err != nil {
+			return err
+		}
+		out[id] = task
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardWorkers(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.Worker) error {
+	rows, err := q.QueryContext(ctx, `SELECT id, data FROM snapshot_task_card_workers`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var data string
+		if err := rows.Scan(&id, &data); err != nil {
+			return err
+		}
+		var worker core.Worker
+		if err := json.Unmarshal([]byte(data), &worker); err != nil {
+			return err
+		}
+		out[id] = worker
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardNodes(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.ExecutionNode) error {
+	rows, err := q.QueryContext(ctx, `SELECT id, data FROM snapshot_task_card_nodes`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var data string
+		if err := rows.Scan(&id, &data); err != nil {
+			return err
+		}
+		var node core.ExecutionNode
+		if err := json.Unmarshal([]byte(data), &node); err != nil {
+			return err
+		}
+		out[id] = node
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardPullRequests(ctx context.Context, q snapshotProjectionQuerier, out map[string]core.PullRequest) error {
+	rows, err := q.QueryContext(ctx, `SELECT id, data FROM snapshot_task_card_pull_requests`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var data string
+		if err := rows.Scan(&id, &data); err != nil {
+			return err
+		}
+		var pr core.PullRequest
+		if err := json.Unmarshal([]byte(data), &pr); err != nil {
+			return err
+		}
+		out[id] = pr
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardPullRequestAliases(ctx context.Context, q snapshotProjectionQuerier, out map[string]string) error {
+	rows, err := q.QueryContext(ctx, `SELECT alias, id FROM snapshot_task_card_pull_request_aliases`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var alias string
+		var id string
+		if err := rows.Scan(&alias, &id); err != nil {
+			return err
+		}
+		out[alias] = id
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardPullRequestIdentities(ctx context.Context, q snapshotProjectionQuerier, out map[string]string) error {
+	rows, err := q.QueryContext(ctx, `SELECT identity, id FROM snapshot_task_card_pull_request_identities`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var identity string
+		var id string
+		if err := rows.Scan(&identity, &id); err != nil {
+			return err
+		}
+		out[identity] = id
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardClearedTasks(ctx context.Context, q snapshotProjectionQuerier, out map[string]bool) error {
+	rows, err := q.QueryContext(ctx, `SELECT task_id FROM snapshot_task_card_cleared_tasks`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			return err
+		}
+		out[taskID] = true
+	}
+	return rows.Err()
+}
+
+func loadSnapshotTaskCardWorkerNodes(ctx context.Context, q snapshotProjectionQuerier, out map[string]string) error {
+	rows, err := q.QueryContext(ctx, `SELECT worker_id, node_id FROM snapshot_task_card_worker_nodes`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var workerID string
+		var nodeID string
+		if err := rows.Scan(&workerID, &nodeID); err != nil {
+			return err
+		}
+		out[workerID] = nodeID
+	}
+	return rows.Err()
+}
+
 func loadSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier) (snapshotProjectionState, int64, bool, error) {
 	var lastEventID int64
 	var data string
@@ -1002,6 +1247,192 @@ ON CONFLICT(id) DO UPDATE SET
 	return err
 }
 
+func saveSnapshotTaskCardTables(ctx context.Context, q snapshotProjectionQuerier, state snapshotProjectionState, lastEventID int64) error {
+	state.ensure()
+	seenTasks := map[string]bool{}
+	for id, task := range state.Tasks {
+		seenTasks[id] = true
+		data, err := json.Marshal(task)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_tasks (id, data)
+VALUES (?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	data = excluded.data
+WHERE data != excluded.data`, id, string(data)); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_tasks`, `id`, seenTasks); err != nil {
+		return err
+	}
+	seenWorkers := map[string]bool{}
+	for id, worker := range state.Workers {
+		seenWorkers[id] = true
+		data, err := json.Marshal(worker)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_workers (id, task_id, data)
+VALUES (?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	data = excluded.data
+WHERE task_id != excluded.task_id OR data != excluded.data`, id, worker.TaskID, string(data)); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_workers`, `id`, seenWorkers); err != nil {
+		return err
+	}
+	seenNodes := map[string]bool{}
+	for id, node := range state.Nodes {
+		seenNodes[id] = true
+		data, err := json.Marshal(node)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_nodes (id, task_id, worker_id, data)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	worker_id = excluded.worker_id,
+	data = excluded.data
+WHERE task_id != excluded.task_id OR worker_id != excluded.worker_id OR data != excluded.data`, id, node.TaskID, node.WorkerID, string(data)); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_nodes`, `id`, seenNodes); err != nil {
+		return err
+	}
+	seenPullRequests := map[string]bool{}
+	for id, pr := range state.PullRequests {
+		seenPullRequests[id] = true
+		data, err := json.Marshal(pr)
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_pull_requests (id, task_id, data)
+VALUES (?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	task_id = excluded.task_id,
+	data = excluded.data
+WHERE task_id != excluded.task_id OR data != excluded.data`, id, pr.TaskID, string(data)); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_pull_requests`, `id`, seenPullRequests); err != nil {
+		return err
+	}
+	seenAliases := map[string]bool{}
+	for alias, id := range state.PullRequestAliases {
+		seenAliases[alias] = true
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_pull_request_aliases (alias, id)
+VALUES (?, ?)
+ON CONFLICT(alias) DO UPDATE SET
+	id = excluded.id
+WHERE id != excluded.id`, alias, id); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_pull_request_aliases`, `alias`, seenAliases); err != nil {
+		return err
+	}
+	seenIdentities := map[string]bool{}
+	for identity, id := range state.PullRequestIdentities {
+		seenIdentities[identity] = true
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_pull_request_identities (identity, id)
+VALUES (?, ?)
+ON CONFLICT(identity) DO UPDATE SET
+	id = excluded.id
+WHERE id != excluded.id`, identity, id); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_pull_request_identities`, `identity`, seenIdentities); err != nil {
+		return err
+	}
+	seenCleared := map[string]bool{}
+	for taskID, cleared := range state.ClearedTasks {
+		if !cleared {
+			continue
+		}
+		seenCleared[taskID] = true
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_cleared_tasks (task_id)
+VALUES (?)
+ON CONFLICT(task_id) DO NOTHING`, taskID); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_cleared_tasks`, `task_id`, seenCleared); err != nil {
+		return err
+	}
+	seenWorkerNodes := map[string]bool{}
+	for workerID, nodeID := range state.WorkerNodes {
+		seenWorkerNodes[workerID] = true
+		if _, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_worker_nodes (worker_id, node_id)
+VALUES (?, ?)
+ON CONFLICT(worker_id) DO UPDATE SET
+	node_id = excluded.node_id
+WHERE node_id != excluded.node_id`, workerID, nodeID); err != nil {
+			return err
+		}
+	}
+	if err := deleteMissingSnapshotTaskCardRows(ctx, q, `snapshot_task_card_worker_nodes`, `worker_id`, seenWorkerNodes); err != nil {
+		return err
+	}
+	_, err := q.ExecContext(ctx, `
+INSERT INTO snapshot_task_card_meta (id, last_event_id, updated_at)
+VALUES (1, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+	last_event_id = excluded.last_event_id,
+	updated_at = excluded.updated_at`,
+		lastEventID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func deleteMissingSnapshotTaskCardRows(ctx context.Context, q snapshotProjectionQuerier, table string, key string, keep map[string]bool) error {
+	rows, err := q.QueryContext(ctx, `SELECT `+key+` FROM `+table)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		if !keep[id] {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range stale {
+		if _, err := q.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+key+` = ?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func advanceSnapshotProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
 	_, err := q.ExecContext(ctx, `
 UPDATE snapshot_projection
@@ -1016,6 +1447,17 @@ WHERE id = 1`,
 func advanceSnapshotTaskCardsProjection(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
 	_, err := q.ExecContext(ctx, `
 UPDATE snapshot_task_cards_projection
+SET last_event_id = ?, updated_at = ?
+WHERE id = 1`,
+		lastEventID,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func advanceSnapshotTaskCardTables(ctx context.Context, q snapshotProjectionQuerier, lastEventID int64) error {
+	_, err := q.ExecContext(ctx, `
+UPDATE snapshot_task_card_meta
 SET last_event_id = ?, updated_at = ?
 WHERE id = 1`,
 		lastEventID,

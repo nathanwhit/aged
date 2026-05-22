@@ -167,6 +167,61 @@ CREATE TABLE IF NOT EXISTS snapshot_task_cards_projection (
 	updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS snapshot_task_card_meta (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	last_event_id INTEGER NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_tasks (
+	id TEXT PRIMARY KEY,
+	data TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_workers (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS snapshot_task_card_workers_task_idx ON snapshot_task_card_workers(task_id);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_nodes (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	worker_id TEXT NOT NULL DEFAULT '',
+	data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS snapshot_task_card_nodes_task_idx ON snapshot_task_card_nodes(task_id);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_pull_requests (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS snapshot_task_card_pull_requests_task_idx ON snapshot_task_card_pull_requests(task_id);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_pull_request_aliases (
+	alias TEXT PRIMARY KEY,
+	id TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_pull_request_identities (
+	identity TEXT PRIMARY KEY,
+	id TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_cleared_tasks (
+	task_id TEXT PRIMARY KEY
+);
+
+CREATE TABLE IF NOT EXISTS snapshot_task_card_worker_nodes (
+	worker_id TEXT PRIMARY KEY,
+	node_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS snapshot_worker_outputs (
 	worker_id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL DEFAULT '',
