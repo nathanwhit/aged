@@ -42,6 +42,57 @@ func TestCleanupRetainedWorkspaceArtifactsRemovesIgnoredTarget(t *testing.T) {
 	}
 }
 
+func TestCleanupRetainedWorkspaceArtifactsRemovesRemoteTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	workspace := PreparedWorkspace{
+		Root:          "/runs/worker-remote-clean",
+		CWD:           "/runs/worker-remote-clean/repo",
+		SourceRoot:    "/repo",
+		WorkspaceName: "aged-worker-remote-clean",
+		Mode:          "remote",
+		VCSType:       "ssh",
+		CleanupPolicy: string(WorkspaceCleanupRetain),
+		TaskID:        "task-remote-clean",
+		WorkerID:      "worker-remote-clean",
+		TargetID:      "vm-clean",
+		TargetKind:    string(TargetKindSSH),
+	}
+	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
+	executor := &retainedArtifactRemoteExecutor{output: "path=/runs/worker-remote-clean/repo/target\nbytes=4096\nstatus=removed\n"}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-clean",
+		Kind:     TargetKindSSH,
+		Host:     "vm-clean",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor})
+
+	report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, RetainedWorkspaceArtifactCleanupOptions{
+		MinAge: time.Hour,
+		Now:    now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Cleaned != 1 || report.BytesRemoved != 4096 {
+		t.Fatalf("report = %+v, want remote target cleaned", report)
+	}
+	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-remote-clean")
+	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 1 || !cleanup.ArtifactDirs[0].Removed {
+		t.Fatalf("cleanup event = %+v, want removed remote target", cleanup)
+	}
+	if cleanup.ArtifactDirs[0].Path != "/runs/worker-remote-clean/repo/target" {
+		t.Fatalf("remote artifact path = %q", cleanup.ArtifactDirs[0].Path)
+	}
+	if len(executor.commands) != 1 || !strings.Contains(strings.Join(executor.commands[0], " "), "/runs/worker-remote-clean/repo") {
+		t.Fatalf("remote cleanup commands = %+v, want cleanup under remote workdir", executor.commands)
+	}
+}
+
 func TestStartRetainedWorkspaceArtifactCleanupRemovesOldTargetOnInterval(t *testing.T) {
 	fixture := newRetainedCleanupFixture(t, "task-interval-clean", "worker-interval-clean", core.WorkerSucceeded, true)
 	writeRetainedTargetFile(t, fixture.repo, "debug/artifact.bin", "build output\n")
@@ -243,6 +294,20 @@ type retainedCleanupFixture struct {
 	now       time.Time
 	workspace PreparedWorkspace
 	service   *Service
+}
+
+type retainedArtifactRemoteExecutor struct {
+	commands [][]string
+	output   string
+	err      error
+}
+
+func (e *retainedArtifactRemoteExecutor) Run(_ context.Context, argv []string) (string, error) {
+	e.commands = append(e.commands, append([]string(nil), argv...))
+	if e.output != "" || e.err != nil {
+		return e.output, e.err
+	}
+	return "path=/repo/target\nbytes=1024\nstatus=removed\n", nil
 }
 
 func newRetainedCleanupFixture(t *testing.T, taskID string, workerID string, status core.WorkerStatus, ignoreTarget bool) retainedCleanupFixture {
