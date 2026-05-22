@@ -4945,6 +4945,20 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 			return err
 		}
 	}
+	if pr, ok := s.terminalCompletionPullRequestForTask(ctx, taskID); ok {
+		switch {
+		case strings.EqualFold(pr.State, "MERGED"):
+			if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "merged", pullRequestObjectiveSummary(pr, "merged")); err != nil {
+				return err
+			}
+			return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
+		case strings.EqualFold(pr.State, "CLOSED"):
+			if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveAbandoned, "pr_closed", pullRequestObjectiveSummary(pr, "pr_closed")); err != nil {
+				return err
+			}
+			return s.setTaskStatus(ctx, taskID, core.TaskCanceled)
+		}
+	}
 	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
 		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
 			return err
@@ -6062,8 +6076,8 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				}
 				return true, results, nil
 			}
-			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
-				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			if blocker, ok := classifyUserRecoverableBlocker(err.Error()); ok {
+				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":     action.Kind,
 					"when":     nonEmpty(action.When, "after_success"),
 					"reason":   action.Reason,
@@ -6071,6 +6085,13 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 					"workerId": workerID,
 					"status":   "waiting",
 					"error":    err.Error(),
+				}); actionErr != nil {
+					return false, results, actionErr
+				}
+				_ = s.waitForUserAction(ctx, task.ID, workerID, blocker.Reason, blocker.Question, map[string]any{
+					"summary":    blocker.Summary,
+					"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
+					"error":      err.Error(),
 				})
 				return false, results, nil
 			}
@@ -6536,13 +6557,13 @@ func (s *Service) recordRejectedReplanCompletion(ctx context.Context, taskID str
 }
 
 func (s *Service) waitForUserAction(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {
-	if err := s.recordUserActionNeeded(ctx, taskID, workerID, reason, question, metadata); err != nil {
-		return err
-	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingUser, "approval_needed", question); err != nil {
 		return err
 	}
-	return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+		return err
+	}
+	return s.recordUserActionNeeded(ctx, taskID, workerID, reason, question, metadata)
 }
 
 func (s *Service) recordUserActionNeeded(ctx context.Context, taskID string, workerID string, reason string, question string, metadata map[string]any) error {

@@ -732,7 +732,7 @@ func (s *SQLiteStore) rebuildReadModel(ctx context.Context) (readModelState, int
 		state, lastEventID, err = rebuildReadModelTx(ctx, tx)
 		return err
 	})
-	return state, lastEventID, nil
+	return state, lastEventID, err
 }
 
 func (s *SQLiteStore) catchUpReadModel(ctx context.Context) (readModelState, int64, error) {
