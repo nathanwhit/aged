@@ -47,6 +47,7 @@ func (s *Service) StartRetainedWorkspaceArtifactCleanup(ctx context.Context, int
 		interval = defaultRetainedArtifactCleanupInterval
 	}
 	go func() {
+		s.cleanupRetainedWorkspaceArtifactsLogged(ctx, options)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
