@@ -214,12 +214,6 @@ func main() {
 			MinAge: *artifactMinAge,
 			DryRun: *artifactDryRun,
 		}
-		report, err := service.CleanupRetainedWorkspaceArtifacts(ctx, cleanupOptions)
-		if err != nil {
-			slog.Warn("cleanup retained workspace artifacts", "error", err)
-		} else if report.Scanned > 0 {
-			slog.Info("cleanup retained workspace artifacts", "scanned", report.Scanned, "cleaned", report.Cleaned, "skipped", report.Skipped, "bytesRemoved", report.BytesRemoved, "dryRun", report.DryRun)
-		}
 		service.StartRetainedWorkspaceArtifactCleanup(ctx, *artifactInterval, cleanupOptions)
 	}
 	service.StartTargetProbes(ctx, 30*time.Second)
