@@ -153,69 +153,119 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_task_idx ON events(task_id, id);
 CREATE INDEX IF NOT EXISTS events_worker_idx ON events(worker_id, id);
 
-CREATE TABLE IF NOT EXISTS snapshot_projection (
-	id INTEGER PRIMARY KEY CHECK (id = 1),
-	last_event_id INTEGER NOT NULL,
-	state TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS snapshot_state_meta (
+CREATE TABLE IF NOT EXISTS projection_meta (
 	id INTEGER PRIMARY KEY CHECK (id = 1),
 	last_event_id INTEGER NOT NULL,
 	updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_tasks (
+CREATE TABLE IF NOT EXISTS task_read_models (
 	id TEXT PRIMARY KEY,
-	data TEXT NOT NULL
+	project_id TEXT NOT NULL DEFAULT '',
+	workstream_id TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	error TEXT NOT NULL DEFAULT '',
+	objective_status TEXT NOT NULL DEFAULT '',
+	objective_phase TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT '',
+	final_candidate_worker_id TEXT NOT NULL DEFAULT '',
+	applied_worker_id TEXT NOT NULL DEFAULT '',
+	milestones TEXT NOT NULL DEFAULT '[]',
+	work_plan TEXT NOT NULL DEFAULT '',
+	artifacts TEXT NOT NULL DEFAULT '[]'
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_workers (
+CREATE INDEX IF NOT EXISTS task_read_models_status_idx ON task_read_models(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS worker_read_models (
 	id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL,
-	data TEXT NOT NULL
+	kind TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	command TEXT NOT NULL DEFAULT '[]',
+	prompt TEXT NOT NULL DEFAULT '',
+	prompt_path TEXT NOT NULL DEFAULT '',
+	prompt_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS snapshot_workers_task_idx ON snapshot_workers(task_id);
+CREATE INDEX IF NOT EXISTS worker_read_models_task_idx ON worker_read_models(task_id);
 
-CREATE TABLE IF NOT EXISTS snapshot_execution_nodes (
+CREATE TABLE IF NOT EXISTS execution_node_read_models (
 	id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL,
 	worker_id TEXT NOT NULL DEFAULT '',
-	data TEXT NOT NULL
+	worker_kind TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	plan_id TEXT NOT NULL DEFAULT '',
+	parent_node_id TEXT NOT NULL DEFAULT '',
+	spawn_id TEXT NOT NULL DEFAULT '',
+	role TEXT NOT NULL DEFAULT '',
+	reason TEXT NOT NULL DEFAULT '',
+	target_id TEXT NOT NULL DEFAULT '',
+	target_kind TEXT NOT NULL DEFAULT '',
+	remote_session TEXT NOT NULL DEFAULT '',
+	remote_run_dir TEXT NOT NULL DEFAULT '',
+	remote_work_dir TEXT NOT NULL DEFAULT '',
+	depends_on TEXT NOT NULL DEFAULT '[]',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS snapshot_execution_nodes_task_idx ON snapshot_execution_nodes(task_id);
+CREATE INDEX IF NOT EXISTS execution_node_read_models_task_idx ON execution_node_read_models(task_id);
+CREATE INDEX IF NOT EXISTS execution_node_read_models_worker_idx ON execution_node_read_models(worker_id);
 
-CREATE TABLE IF NOT EXISTS snapshot_pull_requests (
+CREATE TABLE IF NOT EXISTS pull_request_read_models (
 	id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL,
-	data TEXT NOT NULL
+	repo TEXT NOT NULL DEFAULT '',
+	number INTEGER NOT NULL DEFAULT 0,
+	url TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL DEFAULT '',
+	base TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT '',
+	draft INTEGER NOT NULL DEFAULT 0,
+	checks_status TEXT NOT NULL DEFAULT '',
+	checks_conclusion TEXT NOT NULL DEFAULT '',
+	merge_status TEXT NOT NULL DEFAULT '',
+	mergeable TEXT NOT NULL DEFAULT '',
+	review_status TEXT NOT NULL DEFAULT '',
+	babysitter_task_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS snapshot_pull_requests_task_idx ON snapshot_pull_requests(task_id);
+CREATE INDEX IF NOT EXISTS pull_request_read_models_task_idx ON pull_request_read_models(task_id);
 
-CREATE TABLE IF NOT EXISTS snapshot_pull_request_aliases (
+CREATE TABLE IF NOT EXISTS pull_request_aliases (
 	alias TEXT PRIMARY KEY,
 	id TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_pull_request_identities (
+CREATE TABLE IF NOT EXISTS pull_request_identities (
 	identity TEXT PRIMARY KEY,
 	id TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_cleared_tasks (
+CREATE TABLE IF NOT EXISTS cleared_tasks (
 	task_id TEXT PRIMARY KEY
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_worker_nodes (
+CREATE TABLE IF NOT EXISTS worker_node_links (
 	worker_id TEXT PRIMARY KEY,
 	node_id TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_workspace_metadata (
+CREATE TABLE IF NOT EXISTS worker_workspace_metadata (
 	worker_id TEXT PRIMARY KEY,
 	data TEXT NOT NULL
 );
@@ -310,7 +360,7 @@ CREATE TABLE IF NOT EXISTS task_card_worker_nodes (
 	node_id TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS snapshot_worker_outputs (
+CREATE TABLE IF NOT EXISTS worker_output_watermarks (
 	worker_id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL DEFAULT '',
 	event_id INTEGER NOT NULL,
@@ -700,7 +750,7 @@ VALUES (?, ?, ?, ?, ?)`,
 			return err
 		}
 		next.ID = id
-		if err := updateSnapshotProjectionTx(ctx, tx, next); err != nil {
+		if err := updateProjectionReadModelTx(ctx, tx, next); err != nil {
 			return err
 		}
 		appended = next
@@ -1022,11 +1072,11 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, nextID); err != nil {
 }
 
 func (s *SQLiteStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
-	return s.snapshotFromProjection(ctx, true)
+	return s.snapshotFromReadModel(ctx, true)
 }
 
 func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
-	return s.snapshotFromProjection(ctx, false)
+	return s.snapshotFromReadModel(ctx, false)
 }
 
 func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, error) {
