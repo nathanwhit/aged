@@ -102,6 +102,10 @@ const DASHBOARD_MIN_HEIGHT = 0;
 const DASHBOARD_MAX_HEIGHT = 900;
 const DASHBOARD_HEIGHT_STEP = 48;
 const SELECTED_TASK_OUTPUT_EVENT_LIMIT = 250;
+const EMPTY_WORKERS: Worker[] = [];
+const EMPTY_EXECUTION_NODES: ExecutionNode[] = [];
+const EMPTY_EVENTS: EventRecord[] = [];
+const EMPTY_PULL_REQUESTS: PullRequestState[] = [];
 const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "task-detail", span: 12, minHeight: 0 },
   { id: "current-state", span: 4, minHeight: 0 },
@@ -117,6 +121,30 @@ const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function groupByTask<T>(items: T[], taskId: (item: T) => string | undefined): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const id = taskId(item);
+    if (!id) continue;
+    const group = groups.get(id);
+    if (group) {
+      group.push(item);
+    } else {
+      groups.set(id, [item]);
+    }
+  }
+  return groups;
+}
+
+function mapByTask<T>(items: T[], taskId: (item: T) => string | undefined): Map<string, T> {
+  const byTask = new Map<string, T>();
+  for (const item of items) {
+    const id = taskId(item);
+    if (id) byTask.set(id, item);
+  }
+  return byTask;
 }
 
 function App() {
@@ -161,10 +189,13 @@ function App() {
     return () => source.close();
   }, [initialSnapshotStatus]);
 
-  const selectedTask = useMemo(
-    () => snapshot.tasks.find((task) => task.id === selectedTaskId) ?? preferredTask(snapshot.tasks),
-    [selectedTaskId, snapshot.tasks],
-  );
+  const taskById = useMemo(() => new Map(snapshot.tasks.map((task) => [task.id, task])), [snapshot.tasks]);
+  const workersByTask = useMemo(() => groupByTask(snapshot.workers, (worker) => worker.taskId), [snapshot.workers]);
+  const nodesByTask = useMemo(() => groupByTask(snapshot.executionNodes, (node) => node.taskId), [snapshot.executionNodes]);
+  const eventsByTask = useMemo(() => groupByTask(snapshot.events, (event) => event.taskId), [snapshot.events]);
+  const pullRequestsByTask = useMemo(() => groupByTask(snapshot.pullRequests, (pr) => pr.taskId), [snapshot.pullRequests]);
+  const graphByTask = useMemo(() => mapByTask(snapshot.orchestrationGraphs, (graph) => graph.taskId), [snapshot.orchestrationGraphs]);
+  const selectedTask = taskById.get(selectedTaskId) ?? preferredTask(snapshot.tasks);
 
   useEffect(() => {
     if (!selectedTask?.id || initialSnapshotStatus !== "ready") {
@@ -197,18 +228,18 @@ function App() {
       active = false;
     };
   }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
-  const selectedWorkers = snapshot.workers.filter((worker) => worker.taskId === selectedTask?.id);
-  const selectedNodes = snapshot.executionNodes.filter((node) => node.taskId === selectedTask?.id);
-  const selectedGraph = snapshot.orchestrationGraphs.find((graph) => graph.taskId === selectedTask?.id);
-  const selectedEvents = snapshot.events.filter((event) => event.taskId === selectedTask?.id);
-  const selectedPullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === selectedTask?.id);
+  const selectedWorkers = selectedTask ? workersByTask.get(selectedTask.id) ?? EMPTY_WORKERS : EMPTY_WORKERS;
+  const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
+  const selectedGraph = selectedTask ? graphByTask.get(selectedTask.id) : undefined;
+  const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
+  const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
   const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
   const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
-  const hasTerminalTasks = snapshot.tasks.some(isTerminalTask);
-  const activeTasks = snapshot.tasks.filter((task) => !isTerminalTask(task));
-  const completedTasks = tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask));
+  const hasTerminalTasks = useMemo(() => snapshot.tasks.some(isTerminalTask), [snapshot.tasks]);
+  const activeTasks = useMemo(() => snapshot.tasks.filter((task) => !isTerminalTask(task)), [snapshot.tasks]);
+  const completedTasks = useMemo(() => tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask)), [snapshot.tasks]);
   async function handleClearTask(taskId: string) {
     try {
       setError("");

@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_task_idx ON events(task_id, id);
+CREATE INDEX IF NOT EXISTS events_task_type_idx ON events(task_id, type, id);
 CREATE INDEX IF NOT EXISTS events_worker_idx ON events(worker_id, id);
 
 CREATE TABLE IF NOT EXISTS projection_meta (
@@ -815,18 +816,22 @@ ORDER BY id ASC`, taskID)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-WITH recent_output AS (
-	SELECT id
+	WITH recent_output AS (
+		SELECT id
+		FROM events
+		WHERE task_id = ? AND type = 'worker.output'
+		ORDER BY id DESC
+		LIMIT ?
+	)
+	SELECT id, at, type, task_id, worker_id, payload
 	FROM events
-	WHERE task_id = ? AND type = 'worker.output'
-	ORDER BY id DESC
-	LIMIT ?
-)
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE task_id = ?
-	AND (type != 'worker.output' OR id IN (SELECT id FROM recent_output))
-ORDER BY id ASC`, taskID, limit, taskID)
+	WHERE task_id = ?
+		AND type != 'worker.output'
+	UNION ALL
+	SELECT events.id, events.at, events.type, events.task_id, events.worker_id, events.payload
+	FROM events
+	JOIN recent_output ON recent_output.id = events.id
+	ORDER BY id ASC`, taskID, limit, taskID)
 	if err != nil {
 		return nil, err
 	}

@@ -1043,6 +1043,50 @@ func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 	}
 }
 
+func TestListTaskEventsUsesTaskTypeIndex(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	rows, err := store.db.QueryContext(ctx, `
+EXPLAIN QUERY PLAN
+WITH recent_output AS (
+	SELECT id
+	FROM events
+	WHERE task_id = ? AND type = 'worker.output'
+	ORDER BY id DESC
+	LIMIT ?
+)
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE task_id = ?
+	AND type != 'worker.output'
+UNION ALL
+SELECT events.id, events.at, events.type, events.task_id, events.worker_id, events.payload
+FROM events
+JOIN recent_output ON recent_output.id = events.id
+ORDER BY id ASC`, "task-events", 250, "task-events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "events_task_type_idx") {
+		t.Fatalf("query plan did not use events_task_type_idx:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
 func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
