@@ -6105,8 +6105,12 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		return false, results, s.setTaskStatus(ctx, task.ID, core.TaskWaiting)
 	case "update_pull_request":
-		workerID := planActionWorkerID(results, action.WorkerID)
-		if workerID == "" {
+		metadataOnly := updatePullRequestActionMetadataOnly(action)
+		workerID := ""
+		if strings.TrimSpace(action.WorkerID) != "" || !metadataOnly {
+			workerID = planActionWorkerID(results, action.WorkerID)
+		}
+		if workerID == "" && !metadataOnly {
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 				"kind":   action.Kind,
 				"when":   nonEmpty(action.When, "after_success"),
@@ -6119,19 +6123,21 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			}
 			return true, results, nil
 		}
-		if result, ok := workerResultByID(results, workerID); ok && !resultHasCandidateChanges(result) {
-			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
-				"kind":     action.Kind,
-				"when":     nonEmpty(action.When, "after_success"),
-				"reason":   action.Reason,
-				"inputs":   action.Inputs,
-				"workerId": workerID,
-				"status":   "skipped",
-				"error":    "follow-up worker produced no candidate changes to update pull request",
-			}); err != nil {
-				return false, results, err
+		if !metadataOnly {
+			if result, ok := workerResultByID(results, workerID); ok && !resultHasCandidateChanges(result) {
+				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":     action.Kind,
+					"when":     nonEmpty(action.When, "after_success"),
+					"reason":   action.Reason,
+					"inputs":   action.Inputs,
+					"workerId": workerID,
+					"status":   "skipped",
+					"error":    "follow-up worker produced no candidate changes to update pull request",
+				}); err != nil {
+					return false, results, err
+				}
+				return true, results, nil
 			}
-			return true, results, nil
 		}
 		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
 		if err != nil {
@@ -6177,6 +6183,25 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 					"error":         err.Error(),
 				})
 				return false, results, nil
+			}
+			if pullRequestContinuesTask(pr) {
+				results = annotateFinalCandidateFailure(results, workerID, "intermediate pull request update failed", err)
+				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":          action.Kind,
+					"when":          nonEmpty(action.When, "after_success"),
+					"reason":        "Intermediate pull request update failed; continuing objective ownership instead of failing the task.",
+					"inputs":        action.Inputs,
+					"workerId":      workerID,
+					"pullRequestId": pr.ID,
+					"status":        "continued",
+					"error":         err.Error(),
+				}); actionErr != nil {
+					return false, results, actionErr
+				}
+				if objectiveErr := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "intermediate_pr_update_failed", "Intermediate pull request update failed; objective continues with replanning and PR monitoring."); objectiveErr != nil {
+					return false, results, objectiveErr
+				}
+				return true, results, nil
 			}
 			return false, results, err
 		}

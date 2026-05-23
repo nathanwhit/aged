@@ -35,6 +35,7 @@ type PullRequestPublishSpec struct {
 	PatchBaseRef   string
 	ResetWorkDir   bool
 	ForceWithLease bool
+	MetadataOnly   bool
 	Metadata       map[string]any
 }
 
@@ -209,32 +210,13 @@ func (p LocalPullRequestPublisher) Update(ctx context.Context, pr core.PullReque
 	spec.Repo = repo
 	spec.Base = base
 	spec.Branch = branch
-	if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
-		return core.PullRequest{}, err
+	if !spec.MetadataOnly {
+		if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	if strings.TrimSpace(spec.Title) != "" || strings.TrimSpace(spec.Body) != "" {
-		ref := pr.URL
-		if ref == "" && pr.Number > 0 {
-			ref = strconv.Itoa(pr.Number)
-		}
-		if ref == "" {
-			return core.PullRequest{}, errors.New("update pull request metadata requires pull request url or number")
-		}
-		args := []string{"pr", "edit", ref, "--repo", repo}
-		if title := strings.TrimSpace(spec.Title); title != "" {
-			args = append(args, "--title", title)
-		}
-		var bodyFile string
-		if body := strings.TrimSpace(spec.Body); body != "" {
-			var err error
-			bodyFile, err = writePullRequestBodyFile(body)
-			if err != nil {
-				return core.PullRequest{}, err
-			}
-			defer os.Remove(bodyFile)
-			args = append(args, "--body-file", bodyFile)
-		}
-		if _, err := exec(ctx, spec.WorkDir, "gh", args...); err != nil {
+		if err := updatePullRequestMetadata(ctx, exec, spec.WorkDir, repo, pr, spec); err != nil {
 			return core.PullRequest{}, wrapGitHubCommandError("edit GitHub pull request", err)
 		}
 	}
@@ -256,6 +238,48 @@ func (p LocalPullRequestPublisher) Update(ctx context.Context, pr core.PullReque
 		inspected.Metadata = core.MustJSON(spec.Metadata)
 	}
 	return inspected, nil
+}
+
+func updatePullRequestMetadata(ctx context.Context, exec commandExecutor, dir string, repo string, pr core.PullRequest, spec PullRequestPublishSpec) error {
+	number := pr.Number
+	if number <= 0 {
+		parsedRepo, parsedNumber := parsePullRequestURL(pr.URL)
+		number = parsedNumber
+		if strings.TrimSpace(repo) == "" {
+			repo = parsedRepo
+		}
+	}
+	if number <= 0 {
+		return errors.New("update pull request metadata requires pull request url or number")
+	}
+	if strings.TrimSpace(repo) == "" {
+		return errors.New("update pull request metadata requires repo")
+	}
+	payload := map[string]string{}
+	if title := strings.TrimSpace(spec.Title); title != "" {
+		payload["title"] = title
+	}
+	if body := strings.TrimSpace(spec.Body); body != "" {
+		payload["body"] = body
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	file, err := os.CreateTemp("", "aged-pr-edit-*.json")
+	if err != nil {
+		return fmt.Errorf("create pull request edit payload: %w", err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+	if err := json.NewEncoder(file).Encode(payload); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write pull request edit payload: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close pull request edit payload: %w", err)
+	}
+	_, err = exec(ctx, dir, "gh", "api", "--method", "PATCH", "repos/"+repo+"/pulls/"+strconv.Itoa(number), "--input", path)
+	return err
 }
 
 func writePullRequestBodyFile(body string) (string, error) {
