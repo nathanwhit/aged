@@ -816,22 +816,15 @@ ORDER BY id ASC`, taskID)
 		limit = 1000
 	}
 	rows, err := s.db.QueryContext(ctx, `
-	WITH recent_output AS (
-		SELECT id
+	SELECT id, at, type, task_id, worker_id, payload
+	FROM (
+		SELECT id, at, type, task_id, worker_id, payload
 		FROM events
-		WHERE task_id = ? AND type = 'worker.output'
+		WHERE task_id = ?
 		ORDER BY id DESC
 		LIMIT ?
 	)
-	SELECT id, at, type, task_id, worker_id, payload
-	FROM events
-	WHERE task_id = ?
-		AND type != 'worker.output'
-	UNION ALL
-	SELECT events.id, events.at, events.type, events.task_id, events.worker_id, events.payload
-	FROM events
-	JOIN recent_output ON recent_output.id = events.id
-	ORDER BY id ASC`, taskID, limit, taskID)
+	ORDER BY id ASC`, taskID, limit)
 	if err != nil {
 		return nil, err
 	}

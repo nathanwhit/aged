@@ -102,6 +102,7 @@ const DASHBOARD_MIN_HEIGHT = 0;
 const DASHBOARD_MAX_HEIGHT = 900;
 const DASHBOARD_HEIGHT_STEP = 48;
 const SELECTED_TASK_OUTPUT_EVENT_LIMIT = 250;
+const TASK_EVENT_HISTORY_LIMIT = 300;
 const EMPTY_WORKERS: Worker[] = [];
 const EMPTY_EXECUTION_NODES: ExecutionNode[] = [];
 const EMPTY_EVENTS: EventRecord[] = [];
@@ -145,6 +146,20 @@ function mapByTask<T>(items: T[], taskId: (item: T) => string | undefined): Map<
     if (id) byTask.set(id, item);
   }
   return byTask;
+}
+
+function groupByWorker(events: EventRecord[]): Map<string, EventRecord[]> {
+  const groups = new Map<string, EventRecord[]>();
+  for (const event of events) {
+    if (!event.workerId) continue;
+    const group = groups.get(event.workerId);
+    if (group) {
+      group.push(event);
+    } else {
+      groups.set(event.workerId, [event]);
+    }
+  }
+  return groups;
 }
 
 function App() {
@@ -232,10 +247,11 @@ function App() {
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
   const selectedGraph = selectedTask ? graphByTask.get(selectedTask.id) : undefined;
   const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
+  const selectedEventsByWorker = useMemo(() => groupByWorker(selectedEvents), [selectedEvents]);
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
   const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
-  const selectedWorkerEvents = selectedEvents.filter((event) => event.workerId === selectedWorker?.id);
+  const selectedWorkerEvents = selectedWorker ? selectedEventsByWorker.get(selectedWorker.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = useMemo(() => snapshot.tasks.some(isTerminalTask), [snapshot.tasks]);
   const activeTasks = useMemo(() => snapshot.tasks.filter((task) => !isTerminalTask(task)), [snapshot.tasks]);
@@ -396,7 +412,7 @@ function App() {
               graph={selectedGraph}
               progress={progress}
               task={selectedTask}
-              events={selectedEvents}
+              eventsByWorker={selectedEventsByWorker}
               selectedWorkerId={selectedWorkerId}
               onSelect={setSelectedWorkerId}
               onReview={getWorkerChanges}
@@ -1792,11 +1808,13 @@ function TaskDetail({
   const requiredTargetID = requiredTargetIDFromMetadata(task.metadata);
   const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
   const finalWorkerId = task.finalCandidateWorkerId ?? "";
-  const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(events, finalWorkerId));
+  const eventsByWorker = useMemo(() => groupByWorker(events), [events]);
+  const finalWorkerEvents = finalWorkerId ? eventsByWorker.get(finalWorkerId) ?? EMPTY_EVENTS : EMPTY_EVENTS;
+  const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(finalWorkerEvents, finalWorkerId));
   const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
-  const finalCompletion = finalWorkerId ? latestWorkerCompletion(events, finalWorkerId) : {};
+  const finalCompletion = finalWorkerId ? latestWorkerCompletion(finalWorkerEvents, finalWorkerId) : {};
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
-  const workerUpdate = currentWorkerUpdate(workers, nodes, events);
+  const workerUpdate = currentWorkerUpdate(workers, nodes, eventsByWorker);
   const approvals = approvalStates(events);
   const pendingApprovals = task.objectiveStatus === "waiting_user" ? approvals.filter((approval) => !approval.decided).slice(0, 1) : [];
   const taskError = task.error || latestTaskStatusError(events);
@@ -2236,7 +2254,7 @@ function WorkerList({
   nodes,
   graph,
   progress,
-  events,
+  eventsByWorker,
   selectedWorkerId,
   onSelect,
   onReview,
@@ -2251,7 +2269,7 @@ function WorkerList({
   nodes: ExecutionNode[];
   graph: OrchestrationGraph | undefined;
   progress: WorkProgress;
-  events: EventRecord[];
+  eventsByWorker: Map<string, EventRecord[]>;
   selectedWorkerId: string;
   onSelect: (id: string) => void;
   onReview: (id: string) => Promise<WorkerChangesReview>;
@@ -2343,17 +2361,17 @@ function WorkerList({
         <>
           <WorkerNavigator rows={rows} progress={progress} selectedWorkerId={selectedWorkerId} onSelect={selectWorker} />
           <div className="worker-grid">
-          {rows.map(({ worker, node, graphNode }) => {
-            const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
-            const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
-            const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
-            const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
-            const completion = workerId ? latestWorkerCompletion(events, workerId) : {};
-            const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
-            const applied = workerId ? workerChangesApplied(events, workerId) : false;
-            const isFinalCandidate = task.finalCandidateWorkerId === workerId;
-            const workerEvents = workerId ? events.filter((event) => event.workerId === workerId) : [];
-            const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
+            {rows.map(({ worker, node, graphNode }) => {
+              const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
+              const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
+              const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
+              const workerEvents = workerId ? eventsByWorker.get(workerId) ?? EMPTY_EVENTS : EMPTY_EVENTS;
+              const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
+              const completion = workerId ? latestWorkerCompletion(workerEvents, workerId) : {};
+              const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
+              const applied = workerId ? workerChangesApplied(workerEvents, workerId) : false;
+              const isFinalCandidate = task.finalCandidateWorkerId === workerId;
+              const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
             const diff = workerId ? diffs[workerId] : undefined;
             const dependencies = node?.dependsOn ?? graph?.edges.filter((edge) => edge.to === (graphNode?.id ?? node?.id)).map((edge) => edge.from) ?? [];
             const blockers = dependencies.filter((dependencyId) => {
@@ -3764,7 +3782,7 @@ function approvalStates(events: EventRecord[]): ApprovalState[] {
     .reverse();
 }
 
-function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: EventRecord[]): WorkerProgressUpdate | undefined {
+function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], eventsByWorker: Map<string, EventRecord[]>): WorkerProgressUpdate | undefined {
   if (workers.length === 0 && nodes.length === 0) {
     return undefined;
   }
@@ -3775,7 +3793,7 @@ function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: 
     .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   const progressCandidates = candidates
     .map((worker) => {
-      const progressEvent = latestWorkerProgressEvent(events.filter((event) => event.workerId === worker.id));
+      const progressEvent = latestWorkerProgressEvent(eventsByWorker.get(worker.id) ?? EMPTY_EVENTS);
       return { worker, progressEvent };
     })
     .filter((candidate): candidate is { worker: Worker; progressEvent: EventRecord } => Boolean(candidate.progressEvent))
@@ -3796,7 +3814,7 @@ function currentWorkerUpdate(workers: Worker[], nodes: ExecutionNode[], events: 
   }
 
   for (const worker of candidates) {
-    const workerEvents = events.filter((event) => event.workerId === worker.id);
+    const workerEvents = eventsByWorker.get(worker.id) ?? EMPTY_EVENTS;
     const latestEvent = latestInspectableWorkerEvent(workerEvents);
     if (latestEvent) {
       return {
@@ -4914,7 +4932,26 @@ function mergeEvents(current: EventRecord[], next: EventRecord[]): EventRecord[]
   const byId = new Map<number, EventRecord>();
   for (const event of current) byId.set(event.id, event);
   for (const event of next) byId.set(event.id, event);
-  return [...byId.values()].sort((left, right) => left.id - right.id);
+  return trimTaskEventHistory([...byId.values()].sort((left, right) => left.id - right.id));
+}
+
+function trimTaskEventHistory(events: EventRecord[]): EventRecord[] {
+  const taskCounts = new Map<string, number>();
+  const kept: EventRecord[] = [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (!event.taskId) {
+      kept.push(event);
+      continue;
+    }
+    const count = taskCounts.get(event.taskId) ?? 0;
+    if (count >= TASK_EVENT_HISTORY_LIMIT) {
+      continue;
+    }
+    taskCounts.set(event.taskId, count + 1);
+    kept.push(event);
+  }
+  return kept.reverse();
 }
 
 function maxEventId(events: EventRecord[]): number {
