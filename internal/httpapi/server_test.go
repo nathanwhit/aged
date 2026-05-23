@@ -360,7 +360,7 @@ func readSSEFrame(reader *bufio.Reader) (string, error) {
 	}
 }
 
-func TestTaskEventsEndpointLimitsWorkerOutput(t *testing.T) {
+func TestTaskEventsEndpointLimitsTotalHistory(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
 	if err != nil {
@@ -397,17 +397,11 @@ func TestTaskEventsEndpointLimitsWorkerOutput(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&events); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 4 {
-		t.Fatalf("events = %d, want 4", len(events))
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
 	}
-	var outputCount int
-	for _, event := range events {
-		if event.Type == core.EventWorkerOutput {
-			outputCount++
-		}
-	}
-	if outputCount != 1 {
-		t.Fatalf("worker.output events = %d, want 1; events = %+v", outputCount, events)
+	if events[0].Type != core.EventWorkerCompleted {
+		t.Fatalf("event type = %q, want worker.completed; events = %+v", events[0].Type, events)
 	}
 }
 

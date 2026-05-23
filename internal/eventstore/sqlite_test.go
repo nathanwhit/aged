@@ -998,7 +998,7 @@ func assertSnapshotsEqual(tb testing.TB, got core.Snapshot, want core.Snapshot) 
 	}
 }
 
-func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
+func TestListTaskEventsLimitsTotalHistory(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
@@ -1026,45 +1026,32 @@ func TestListTaskEventsLimitsOnlyWorkerOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(limited) != 5 {
-		t.Fatalf("events = %d, want 5", len(limited))
+	if len(limited) != 2 {
+		t.Fatalf("events = %d, want 2", len(limited))
 	}
-	var outputCount int
-	for _, event := range limited {
-		if event.Type == core.EventWorkerOutput {
-			outputCount++
-		}
+	if limited[0].Type != core.EventWorkerOutput || limited[0].Payload == nil {
+		t.Fatalf("first event = %+v, want recent worker.output", limited[0])
 	}
-	if outputCount != 2 {
-		t.Fatalf("worker.output events = %d, want 2; events = %+v", outputCount, limited)
-	}
-	if limited[len(limited)-1].Type != core.EventWorkerCompleted {
-		t.Fatalf("last event type = %q, want worker.completed", limited[len(limited)-1].Type)
+	if limited[1].Type != core.EventWorkerCompleted {
+		t.Fatalf("last event type = %q, want worker.completed", limited[1].Type)
 	}
 }
 
-func TestListTaskEventsUsesTaskTypeIndex(t *testing.T) {
+func TestListTaskEventsUsesTaskIndex(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
 
 	rows, err := store.db.QueryContext(ctx, `
 EXPLAIN QUERY PLAN
-WITH recent_output AS (
-	SELECT id
+SELECT id, at, type, task_id, worker_id, payload
+FROM (
+	SELECT id, at, type, task_id, worker_id, payload
 	FROM events
-	WHERE task_id = ? AND type = 'worker.output'
+	WHERE task_id = ?
 	ORDER BY id DESC
 	LIMIT ?
 )
-SELECT id, at, type, task_id, worker_id, payload
-FROM events
-WHERE task_id = ?
-	AND type != 'worker.output'
-UNION ALL
-SELECT events.id, events.at, events.type, events.task_id, events.worker_id, events.payload
-FROM events
-JOIN recent_output ON recent_output.id = events.id
-ORDER BY id ASC`, "task-events", 250, "task-events")
+ORDER BY id ASC`, "task-events", 250)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1082,8 +1069,8 @@ ORDER BY id ASC`, "task-events", 250, "task-events")
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(plan, "\n"), "events_task_type_idx") {
-		t.Fatalf("query plan did not use events_task_type_idx:\n%s", strings.Join(plan, "\n"))
+	if !strings.Contains(strings.Join(plan, "\n"), "events_task_idx") {
+		t.Fatalf("query plan did not use events_task_idx:\n%s", strings.Join(plan, "\n"))
 	}
 }
 
