@@ -2526,10 +2526,11 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 		WorkerID: "metadata-repair",
 		Reason:   "fix PR title and body",
 		Inputs: map[string]any{
-			"repo":   "owner/repo",
-			"number": 7,
-			"title":  "refactor: remove os_pipe dependency",
-			"body":   "## Summary\n- Replace os_pipe.\n\n## Validation\n- Not run.",
+			"repo":         "owner/repo",
+			"number":       7,
+			"title":        "refactor: remove os_pipe dependency",
+			"body":         "## Summary\n- Replace os_pipe.\n\n## Validation\n- Not run.",
+			"metadataOnly": true,
 		},
 	}, results)
 	if err != nil {
@@ -2546,6 +2547,188 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 	}
 	if publisher.updated.Patch != "" || publisher.updated.PatchFromBase {
 		t.Fatalf("metadata-only update included worker patch: %+v", publisher.updated)
+	}
+}
+
+func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "repair.go", Status: "modified"}},
+			Diff:         "diff --git a/repair.go b/repair.go\n",
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-pr-code-and-metadata", Title: "Repair PR"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Repair the pull request.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-open",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/slice",
+		Base:   "main",
+		Title:  "Generic title",
+		State:  "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []core.Event{
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   task.ID,
+			WorkerID: "repair-worker",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "codex",
+			}),
+		},
+		{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   task.ID,
+			WorkerID: "repair-worker",
+			Payload: core.MustJSON(PreparedWorkspace{
+				Root:       "/repo",
+				CWD:        "/repo",
+				SourceRoot: "/repo",
+				VCSType:    "jj",
+				TaskID:     task.ID,
+				WorkerID:   "repair-worker",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   task.ID,
+			WorkerID: "repair-worker",
+			Payload: core.MustJSON(map[string]any{
+				"status": core.WorkerSucceeded,
+				"workspaceChanges": WorkspaceChanges{
+					Root:         "/repo",
+					CWD:          "/repo",
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "repair.go", Status: "modified"}},
+					Diff:         "diff --git a/repair.go b/repair.go\n",
+				},
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "repair-worker",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "repair.go", Status: "modified"}},
+			Diff:         "diff --git a/repair.go b/repair.go\n",
+		},
+	}}
+	_, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "repair-worker",
+		Reason:   "fix PR code and title",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 7,
+			"title":  "fix: repair behavior",
+			"body":   "## Summary\n- Repair behavior.\n\n## Validation\n- go test.",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publisher.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", publisher.updateCalls)
+	}
+	if publisher.updated.MetadataOnly {
+		t.Fatalf("update unexpectedly metadata-only: %+v", publisher.updated)
+	}
+	if publisher.updated.WorkerID != "repair-worker" {
+		t.Fatalf("worker id = %q, want repair-worker", publisher.updated.WorkerID)
+	}
+}
+
+func TestServicePlanPullRequestUpdateWithMetadataFallsBackWhenWorkerHasNoChanges(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-pr-metadata-fallback", Title: "Repair PR metadata"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Repair the pull request metadata.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-open",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/slice",
+		Base:   "main",
+		Title:  "Generic title",
+		State:  "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "metadata-worker",
+		Status:   core.WorkerSucceeded,
+	}}
+	_, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "metadata-worker",
+		Reason:   "fix PR title",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 7,
+			"title":  "fix: clearer title",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publisher.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", publisher.updateCalls)
+	}
+	if !publisher.updated.MetadataOnly {
+		t.Fatalf("metadata fallback sent MetadataOnly=false: %+v", publisher.updated)
 	}
 }
 

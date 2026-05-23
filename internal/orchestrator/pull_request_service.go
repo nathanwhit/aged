@@ -309,6 +309,9 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	if len(pr.Metadata) > 0 {
 		_ = json.Unmarshal(pr.Metadata, &metadata)
 	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	metadata["workerId"] = workerID
 	metadata["taskTitle"] = task.Title
 	metadata["workDir"] = sourceRoot
@@ -2523,11 +2526,19 @@ func updatePullRequestRequestFromAction(action PlanAction) core.PublishPullReque
 
 func updatePullRequestActionMetadataOnly(action PlanAction) bool {
 	inputs := action.Inputs
-	if boolMetadata(inputs, "includeChanges") ||
-		boolMetadata(inputs, "pushChanges") ||
-		boolMetadata(inputs, "updateBranch") {
-		return false
+	if value, ok := explicitBoolMetadata(inputs, "metadataOnly"); ok {
+		return value
 	}
+	for _, key := range []string{"includeChanges", "pushChanges", "updateBranch"} {
+		if value, ok := explicitBoolMetadata(inputs, key); ok {
+			return !value
+		}
+	}
+	return strings.TrimSpace(action.WorkerID) == "" && updatePullRequestActionHasMetadata(action)
+}
+
+func updatePullRequestActionHasMetadata(action PlanAction) bool {
+	inputs := action.Inputs
 	return strings.TrimSpace(stringMetadata(inputs, "title")) != "" ||
 		strings.TrimSpace(stringMetadata(inputs, "body")) != ""
 }

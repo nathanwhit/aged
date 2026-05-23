@@ -6136,18 +6136,22 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		if !metadataOnly {
 			if result, ok := workerResultByID(results, workerID); ok && !resultHasCandidateChanges(result) {
-				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
-					"kind":     action.Kind,
-					"when":     nonEmpty(action.When, "after_success"),
-					"reason":   action.Reason,
-					"inputs":   action.Inputs,
-					"workerId": workerID,
-					"status":   "skipped",
-					"error":    "follow-up worker produced no candidate changes to update pull request",
-				}); err != nil {
-					return false, results, err
+				if updatePullRequestActionHasMetadata(action) {
+					metadataOnly = true
+				} else {
+					if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+						"kind":     action.Kind,
+						"when":     nonEmpty(action.When, "after_success"),
+						"reason":   action.Reason,
+						"inputs":   action.Inputs,
+						"workerId": workerID,
+						"status":   "skipped",
+						"error":    "follow-up worker produced no candidate changes to update pull request",
+					}); err != nil {
+						return false, results, err
+					}
+					return true, results, nil
 				}
-				return true, results, nil
 			}
 		}
 		pr, err := s.pullRequestForUpdateAction(ctx, task.ID, action)
@@ -6168,6 +6172,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			return false, results, err
 		}
 		req := updatePullRequestRequestFromAction(action)
+		req.MetadataOnly = metadataOnly
 		req.WorkerID = workerID
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":          action.Kind,
@@ -9969,6 +9974,14 @@ func boolMetadata(metadata map[string]any, key string) bool {
 	}
 	value, _ := metadata[key].(bool)
 	return value
+}
+
+func explicitBoolMetadata(metadata map[string]any, key string) (bool, bool) {
+	if metadata == nil {
+		return false, false
+	}
+	value, ok := metadata[key].(bool)
+	return value, ok
 }
 
 func candidateBaseWorkerID(metadata map[string]any) string {
