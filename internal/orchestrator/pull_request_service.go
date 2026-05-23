@@ -246,6 +246,17 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	if err := s.recordPullRequestBabysitter(ctx, pr); err != nil {
 		return core.PullRequest{}, err
 	}
+	if req.ContinueAfterPublish {
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "continuing_after_pr", "Pull request opened; objective continues while aged babysits the PR."); err != nil {
+			return core.PullRequest{}, err
+		}
+		if !isTerminalTaskStatus(task.Status) {
+			if err := s.setTaskStatus(ctx, taskID, core.TaskRunning); err != nil {
+				return core.PullRequest{}, err
+			}
+		}
+		return pr, nil
+	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_opened", "Pull request opened; objective continues until the PR reaches its terminal condition."); err != nil {
 		return core.PullRequest{}, err
 	}
@@ -2230,7 +2241,7 @@ func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (co
 		return core.PullRequest{}, false
 	}
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID == taskID && !isTerminalPullRequestState(pr.State) {
+		if pr.TaskID == taskID && !isTerminalPullRequestState(pr.State) && !pullRequestContinuesTask(pr) {
 			return pr, true
 		}
 	}
