@@ -683,6 +683,55 @@ func TestServiceWatchPullRequestsReusesExistingPublishedPullRequest(t *testing.T
 	}
 }
 
+func TestServiceWatchPullRequestsDoesNotAttachRepoWideResultsToExistingTask(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{list: []core.PullRequest{{
+		ID:     "listed-existing",
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/aged-existing",
+		State:  "OPEN",
+	}, {
+		ID:     "listed-random",
+		Repo:   "owner/repo",
+		Number: 99,
+		URL:    "https://github.com/owner/repo/pull/99",
+		Branch: "unrelated",
+		State:  "OPEN",
+	}}}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+
+	prs, err := service.WatchPullRequests(ctx, "task-1", core.WatchPullRequestsRequest{
+		Repo:  "owner/repo",
+		State: "open",
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publisher.listCalls != 0 {
+		t.Fatalf("list calls = %d, want 0 for broad watch on task with existing PRs", publisher.listCalls)
+	}
+	if publisher.inspectCalls != 1 {
+		t.Fatalf("inspect calls = %d, want 1", publisher.inspectCalls)
+	}
+	if len(prs) != 1 || prs[0].ID != "pr-1" || prs[0].Number != 7 {
+		t.Fatalf("watched prs = %+v, want only existing task PR", prs)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 || snapshot.PullRequests[0].ID != "pr-1" {
+		t.Fatalf("snapshot pull requests = %+v", snapshot.PullRequests)
+	}
+}
+
 func TestServiceWatchPullRequestsReturnsPersistedNormalizedPullRequests(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
