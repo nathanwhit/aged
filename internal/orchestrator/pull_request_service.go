@@ -947,6 +947,10 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		return core.PullRequest{}, err
 	}
 	status, phase := objectiveForPullRequest(checked)
+	if pullRequestSupersededByNewerContinuingPullRequest(snapshot, checked) {
+		status = ""
+		phase = ""
+	}
 	if phase != "" && !taskObjectiveMatches(snapshot, checked.TaskID, status, phase) {
 		if err := s.updateTaskObjective(ctx, checked.TaskID, status, phase, pullRequestObjectiveSummary(checked, phase)); err != nil {
 			return core.PullRequest{}, err
@@ -1198,6 +1202,9 @@ func pullRequestTerminalStatusContinuesTask(snapshot core.Snapshot, pr core.Pull
 	if pullRequestContinuesTask(pr) {
 		return true
 	}
+	if pullRequestSupersededByNewerContinuingPullRequest(snapshot, pr) {
+		return false
+	}
 	if strings.TrimSpace(pullRequestMetadataString(pr, "publicationPhase")) != "" {
 		return false
 	}
@@ -1212,6 +1219,9 @@ func pullRequestTerminalizesTask(snapshot core.Snapshot, pr core.PullRequest) bo
 	if pullRequestContinuesTask(pr) {
 		return false
 	}
+	if pullRequestSupersededByNewerContinuingPullRequest(snapshot, pr) {
+		return false
+	}
 	if taskHasActiveWorkers(snapshot, pr.TaskID) {
 		return false
 	}
@@ -1222,6 +1232,29 @@ func pullRequestTerminalizesTask(snapshot core.Snapshot, pr core.PullRequest) bo
 		}
 	}
 	return true
+}
+
+func pullRequestSupersededByNewerContinuingPullRequest(snapshot core.Snapshot, pr core.PullRequest) bool {
+	if !isTerminalPullRequestState(pr.State) {
+		return false
+	}
+	prTime := pullRequestLastUpdated(pr)
+	for _, candidate := range snapshot.PullRequests {
+		if candidate.TaskID != pr.TaskID || candidate.ID == pr.ID || !pullRequestContinuesTask(candidate) {
+			continue
+		}
+		if pullRequestLastUpdated(candidate).After(prTime) {
+			return true
+		}
+	}
+	return false
+}
+
+func pullRequestLastUpdated(pr core.PullRequest) time.Time {
+	if !pr.UpdatedAt.IsZero() {
+		return pr.UpdatedAt
+	}
+	return pr.CreatedAt
 }
 
 func (s *Service) completeRelatedPullRequestTasks(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, taskStatus core.TaskStatus, objectiveStatus core.ObjectiveStatus, milestone string, phase string, summary string) error {
@@ -2240,12 +2273,52 @@ func (s *Service) openPullRequestForTask(ctx context.Context, taskID string) (co
 	if err != nil {
 		return core.PullRequest{}, false
 	}
+	var latest core.PullRequest
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID == taskID && !isTerminalPullRequestState(pr.State) && !pullRequestContinuesTask(pr) {
-			return pr, true
+		if pr.TaskID != taskID || isTerminalPullRequestState(pr.State) || pullRequestContinuesTask(pr) {
+			continue
+		}
+		if latest.ID == "" || pullRequestLastUpdated(pr).After(pullRequestLastUpdated(latest)) {
+			latest = pr
 		}
 	}
-	return core.PullRequest{}, false
+	return latest, latest.ID != ""
+}
+
+func (s *Service) supersedingOpenContinuingPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false
+	}
+	var latest core.PullRequest
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || isTerminalPullRequestState(pr.State) || !pullRequestContinuesTask(pr) {
+			continue
+		}
+		if !pullRequestSupersedesTerminalCompletionPullRequest(snapshot, pr) {
+			continue
+		}
+		if latest.ID == "" || pullRequestLastUpdated(pr).After(pullRequestLastUpdated(latest)) {
+			latest = pr
+		}
+	}
+	return latest, latest.ID != ""
+}
+
+func pullRequestSupersedesTerminalCompletionPullRequest(snapshot core.Snapshot, pr core.PullRequest) bool {
+	if !pullRequestContinuesTask(pr) {
+		return false
+	}
+	prTime := pullRequestLastUpdated(pr)
+	for _, candidate := range snapshot.PullRequests {
+		if candidate.TaskID != pr.TaskID || candidate.ID == pr.ID || !isTerminalPullRequestState(candidate.State) || pullRequestContinuesTask(candidate) {
+			continue
+		}
+		if prTime.After(pullRequestLastUpdated(candidate)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) terminalCompletionPullRequestForTask(ctx context.Context, taskID string) (core.PullRequest, bool) {
@@ -2255,10 +2328,10 @@ func (s *Service) terminalCompletionPullRequestForTask(ctx context.Context, task
 	}
 	var latest core.PullRequest
 	for _, pr := range snapshot.PullRequests {
-		if pr.TaskID != taskID || !isTerminalPullRequestState(pr.State) || pullRequestContinuesTask(pr) {
+		if pr.TaskID != taskID || !isTerminalPullRequestState(pr.State) || pullRequestContinuesTask(pr) || pullRequestSupersededByNewerContinuingPullRequest(snapshot, pr) {
 			continue
 		}
-		if latest.ID == "" || pr.UpdatedAt.After(latest.UpdatedAt) {
+		if latest.ID == "" || pullRequestLastUpdated(pr).After(pullRequestLastUpdated(latest)) {
 			latest = pr
 		}
 	}

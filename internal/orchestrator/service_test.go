@@ -3675,6 +3675,98 @@ func TestServiceCompleteTaskWithOpenPullRequestDoesNotRepublishCompletionCandida
 	}
 }
 
+func TestServiceCompleteTaskIgnoresStaleClosedCompletionPullRequestAfterIntermediatePR(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-stale-terminal-pr"
+	workerID := "worker-follow-up"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Broad performance work",
+			"prompt": "Publish each useful optimization as its own PR and continue.",
+			"metadata": map[string]any{
+				"completionMode": "github",
+				"objectiveMode":  "broad",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-old",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-old",
+			"base":   "main",
+			"title":  "Broad performance work",
+			"state":  "CLOSED",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-intermediate",
+			"repo":   "owner/repo",
+			"number": 8,
+			"url":    "https://github.com/owner/repo/pull/8",
+			"branch": "codex/aged-intermediate",
+			"base":   "main",
+			"title":  "perf: ship one optimization",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"continueAfterPublish": true,
+				"publicationPhase":     "intermediate",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	err := service.completeTask(ctx, taskID, []WorkerTurnResult{{
+		WorkerID: workerID,
+		Status:   core.WorkerSucceeded,
+		Kind:     "codex",
+		Summary:  "follow-up repair is ready",
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fast.go", Status: "modified"}},
+		},
+	}}, workerID, "retry final candidate publication")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.ObjectiveStatus == core.ObjectiveAbandoned || task.ObjectivePhase == "pr_closed" {
+		t.Fatalf("task objective = %s/%s, stale closed PR terminalized task", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want open intermediate PR to remain external objective", publisher.publishCalls)
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskStatus, taskID, `"status":"canceled"`) {
+		t.Fatalf("task was canceled by stale closed completion PR")
+	}
+}
+
 func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

@@ -4959,6 +4959,17 @@ func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID st
 			return s.setTaskStatus(ctx, taskID, core.TaskCanceled)
 		}
 	}
+	if pr, ok := s.supersedingOpenContinuingPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
+		status, phase := objectiveForPullRequest(pr)
+		if phase == "" {
+			status = core.ObjectiveWaitingExternal
+			phase = "pr_open"
+		}
+		if err := s.updateTaskObjective(ctx, taskID, status, phase, pullRequestObjectiveSummary(pr, phase)); err != nil {
+			return err
+		}
+		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
+	}
 	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
 		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
 			return err
