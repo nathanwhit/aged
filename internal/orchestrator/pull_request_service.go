@@ -2190,7 +2190,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
+	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. If you use aged-publish-pr, treat its output as queued until aged reports the published PR URL; do not comment that code changes were pushed or published based only on a queued callback. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
 	return b.String()
 }
 

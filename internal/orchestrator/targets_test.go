@@ -718,6 +718,25 @@ func TestSSHRunnerDescribeChangesTimesOutHungArtifactRead(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerDescribeChangesRefreshesRemoteChangeFiles(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	run := testSSHRun()
+
+	_ = runner.DescribeChanges(context.Background(), run)
+
+	if len(executor.commands) == 0 {
+		t.Fatal("expected remote commands")
+	}
+	first := strings.Join(executor.commands[0], " ")
+	if !strings.Contains(first, "aged_git_snapshot_tree") {
+		t.Fatalf("first command did not refresh remote change files:\n%s", first)
+	}
+	if strings.Contains(first, "if [ ! -f") {
+		t.Fatalf("remote change refresh should not be guarded by stale file existence checks:\n%s", first)
+	}
+}
+
 func TestSSHRunnerDescribeChangesReportsSSHTransportFailure(t *testing.T) {
 	executor := &sshTransportFailureExecutor{
 		errMessage: "exedev@uncle-storm.exe.xyz: Permission denied (publickey,keyboard-interactive).",
