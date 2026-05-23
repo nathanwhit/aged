@@ -13318,6 +13318,7 @@ type fakePullRequestPublisher struct {
 	inspectCalls     int
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
+	listCalls        int
 }
 
 type prPublishingServiceOptions struct {
@@ -13465,6 +13466,7 @@ func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullReques
 }
 
 func (p *fakePullRequestPublisher) List(_ context.Context, spec PullRequestListSpec) ([]core.PullRequest, error) {
+	p.listCalls++
 	p.listSpec = spec
 	if len(p.list) > 0 {
 		out := make([]core.PullRequest, len(p.list))

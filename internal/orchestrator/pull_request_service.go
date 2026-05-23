@@ -660,19 +660,28 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	if req.HeadBranch != "" {
 		metadata["headBranch"] = req.HeadBranch
 	}
-	prs, err := lister.List(ctx, PullRequestListSpec{
-		TaskID:     taskID,
-		Repo:       repo,
-		Number:     req.Number,
-		URL:        req.URL,
-		State:      req.State,
-		Author:     req.Author,
-		HeadBranch: req.HeadBranch,
-		Limit:      req.Limit,
-		Metadata:   metadata,
-	})
-	if err != nil {
-		return nil, err
+	var prs []core.PullRequest
+	if !watchRequestHasExplicitTarget(req) {
+		prs, err = s.existingTaskPullRequestsForWatch(ctx, snapshot, taskID, repo, req.State, metadata)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(prs) == 0 {
+		prs, err = lister.List(ctx, PullRequestListSpec{
+			TaskID:     taskID,
+			Repo:       repo,
+			Number:     req.Number,
+			URL:        req.URL,
+			State:      req.State,
+			Author:     req.Author,
+			HeadBranch: req.HeadBranch,
+			Limit:      req.Limit,
+			Metadata:   metadata,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	if len(prs) == 0 {
 		return nil, errors.New("no pull requests matched watch request")
@@ -711,6 +720,64 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		prs[index] = pr
 	}
 	return prs, nil
+}
+
+func watchRequestHasExplicitTarget(req core.WatchPullRequestsRequest) bool {
+	return req.Number > 0 ||
+		strings.TrimSpace(req.URL) != "" ||
+		strings.TrimSpace(req.HeadBranch) != ""
+}
+
+func (s *Service) existingTaskPullRequestsForWatch(ctx context.Context, snapshot core.Snapshot, taskID string, repo string, state string, metadata map[string]any) ([]core.PullRequest, error) {
+	var prs []core.PullRequest
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || !pullRequestMatchesWatchRepo(pr, repo) || !pullRequestMatchesWatchState(pr, state) {
+			continue
+		}
+		checked, err := s.prPublisher.Inspect(ctx, pr)
+		if err != nil {
+			return nil, err
+		}
+		if checked.ID == "" {
+			checked.ID = pr.ID
+		}
+		if checked.TaskID == "" {
+			checked.TaskID = taskID
+		}
+		if checked.Repo == "" {
+			checked.Repo = pr.Repo
+		}
+		if len(checked.Metadata) == 0 {
+			checked.Metadata = mergePullRequestMetadata(pr.Metadata, core.MustJSON(metadata))
+		} else {
+			checked.Metadata = mergePullRequestMetadata(pr.Metadata, checked.Metadata)
+		}
+		prs = append(prs, checked)
+	}
+	return prs, nil
+}
+
+func pullRequestMatchesWatchRepo(pr core.PullRequest, repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(pr.Repo), repo) {
+		return true
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		urlRepo, _ := parsePullRequestURL(pr.URL)
+		return strings.EqualFold(urlRepo, repo)
+	}
+	return false
+}
+
+func pullRequestMatchesWatchState(pr core.PullRequest, state string) bool {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" || state == "open" {
+		return !isTerminalPullRequestState(pr.State)
+	}
+	return strings.EqualFold(pr.State, state)
 }
 
 func (s *Service) watchRequestTargetsTerminalPullRequest(ctx context.Context, taskID string, req core.WatchPullRequestsRequest) bool {
