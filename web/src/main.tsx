@@ -1767,6 +1767,7 @@ function TaskDetail({
   const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, events);
   const approvals = approvalStates(events);
+  const pendingApprovals = task.objectiveStatus === "waiting_user" ? approvals.filter((approval) => !approval.decided).slice(0, 1) : [];
   const taskError = task.error || latestTaskStatusError(events);
 
   useEffect(() => {
@@ -1921,7 +1922,7 @@ function TaskDetail({
           <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
         </div>
       )}
-      {approvals.length > 0 && <ApprovalPanel approvals={approvals} onUseMessage={setMessage} />}
+      {pendingApprovals.length > 0 && <ApprovalPanel approvals={pendingApprovals} onUseMessage={setMessage} />}
       <WorkerProgressSpotlight update={workerUpdate} />
       {durableLoop && (
         <form className="loop-settings" onSubmit={updateLoopConfig}>
