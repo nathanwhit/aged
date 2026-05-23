@@ -782,9 +782,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 }
 
 func (r SSHRunner) ensureRemoteChangeFiles(ctx context.Context, run remoteRun) error {
-	runDir := shellQuote(run.RunDir)
-	script := fmt.Sprintf(`if [ ! -f %[1]s/vcs.txt ] || [ ! -f %[1]s/root.txt ] || [ ! -f %[1]s/changes.txt ] || [ ! -f %[1]s/diff.patch ]; then cd %[2]s && %[3]s; fi`,
-		runDir,
+	script := fmt.Sprintf(`cd %[1]s && %[2]s`,
 		shellQuote(run.WorkDir),
 		remoteChangeScript(run),
 	)
