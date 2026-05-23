@@ -521,6 +521,64 @@ func TestUpdateGitPullRequestUsesForceWithLeaseForDivergedBranch(t *testing.T) {
 	}
 }
 
+func TestUpdatePullRequestMetadataOnlySkipsBranchPush(t *testing.T) {
+	ctx := context.Background()
+	stub := newPullRequestCommandStub(t, "owner/repo", 13, "Old title", "feature", "main")
+	var payload map[string]string
+	stub.before = func(_ context.Context, _ string, name string, args ...string) (string, bool, error) {
+		if name == "git" {
+			t.Fatalf("metadata-only update should not run git command: git %v", args)
+		}
+		if name == "gh" && containsSubsequence(args, []string{"api", "--method", "PATCH", "repos/owner/repo/pulls/13"}) {
+			input := argAfter(args, "--input")
+			if input == "" {
+				t.Fatalf("missing --input in gh api args: %v", args)
+			}
+			data, err := os.ReadFile(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			return `{}`, true, nil
+		}
+		if name == "gh" && containsSubsequence(args, []string{"pr", "edit"}) {
+			t.Fatalf("metadata update should use gh api, not gh pr edit: %v", args)
+		}
+		return "", false, nil
+	}
+
+	updated, err := (LocalPullRequestPublisher{exec: stub.exec}).Update(ctx, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 13,
+		URL:    "https://github.com/owner/repo/pull/13",
+		Branch: "feature",
+		Base:   "main",
+		State:  "OPEN",
+	}, PullRequestPublishSpec{
+		TaskID:       "task-1",
+		WorkDir:      "/repo",
+		Repo:         "owner/repo",
+		Base:         "main",
+		Branch:       "feature",
+		Title:        "Better title",
+		Body:         "Better body",
+		MetadataOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+	if payload["title"] != "Better title" || payload["body"] != "Better body" {
+		t.Fatalf("metadata payload = %+v", payload)
+	}
+	if updated.Title != "Old title" {
+		t.Fatalf("updated title = %q, want inspected title", updated.Title)
+	}
+}
+
 func TestIsBranchInUseByWorktreeErrorMatchesGitMessage(t *testing.T) {
 	if !isBranchInUseByWorktreeError(errors.New("fatal: cannot force update the branch 'feature' used by worktree at '/tmp/wt'")) {
 		t.Fatal("expected branch-in-use error to be recognized")
@@ -933,6 +991,8 @@ func (s *pullRequestCommandStub) exec(ctx context.Context, dir string, name stri
 		return fmt.Sprintf(`{"number":%d,"url":"https://github.com/%s/pull/%d","state":"OPEN","title":%q,"isDraft":false,"headRefName":%q,"baseRefName":%q,"mergeStateStatus":"UNKNOWN","statusCheckRollup":[],"reviewDecision":%q}`,
 			s.number, s.repo, s.number, s.title, s.branch, s.base, s.reviewDecision), nil
 	case name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "graphql":
+		return `{}`, nil
+	case name == "gh" && containsSubsequence(args, []string{"api", "--method", "PATCH"}):
 		return `{}`, nil
 	default:
 		return s.fallback(ctx, dir, name, args...)

@@ -2465,6 +2465,189 @@ func TestServicePlanActionSkipsTerminalPullRequestUpdate(t *testing.T) {
 	}
 }
 
+func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "later-change.go", Status: "modified"}},
+			Diff:         "diff --git a/later-change.go b/later-change.go\n",
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-metadata-pr", Title: "Reduce dependency footprint"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Produce multiple independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-open",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/slice",
+		Base:   "main",
+		Title:  "Generic title",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"continueAfterPublish": true,
+			"publicationPhase":     "intermediate",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "metadata-repair",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "later-change.go", Status: "modified"}},
+			Diff:         "diff --git a/later-change.go b/later-change.go\n",
+		},
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "metadata-repair",
+		Reason:   "fix PR title and body",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 7,
+			"title":  "refactor: remove os_pipe dependency",
+			"body":   "## Summary\n- Replace os_pipe.\n\n## Validation\n- Not run.",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("metadata-only PR update should not stop the plan")
+	}
+	if publisher.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", publisher.updateCalls)
+	}
+	if !publisher.updated.MetadataOnly {
+		t.Fatalf("metadata-only update sent MetadataOnly=false: %+v", publisher.updated)
+	}
+	if publisher.updated.Patch != "" || publisher.updated.PatchFromBase {
+		t.Fatalf("metadata-only update included worker patch: %+v", publisher.updated)
+	}
+}
+
+func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *testing.T) {
+	plan := annotatePullRequestFollowUpPlan(Plan{
+		WorkerKind: "codex",
+		Prompt:     "Fix the failing PR.",
+	}, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 7,
+		Branch: "codex/slice",
+		Base:   "main",
+		State:  "OPEN",
+	})
+
+	if got := stringMetadata(plan.Metadata, "workspaceBaseRef"); got != "codex/slice" {
+		t.Fatalf("workspaceBaseRef = %q, want PR branch", got)
+	}
+	if got := stringMetadata(plan.Metadata, "workspaceBaseRefKind"); got != "pull_request_head" {
+		t.Fatalf("workspaceBaseRefKind = %q, want pull_request_head", got)
+	}
+	if shouldInheritLatestCandidate(plan.Metadata) {
+		t.Fatalf("PR follow-up plan should not inherit latest broad-objective candidate: %+v", plan.Metadata)
+	}
+}
+
+func TestServiceIntermediatePullRequestUpdateFailureContinuesObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{errCount: 1}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-intermediate-update-failed", Title: "Broad objective"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Keep producing independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-open",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/slice",
+		Base:   "main",
+		Title:  "Generic title",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"continueAfterPublish": true,
+			"publicationPhase":     "intermediate",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:   "update_pull_request",
+		When:   "after_success",
+		Reason: "fix PR title and body",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 7,
+			"title":  "refactor: remove os_pipe dependency",
+			"body":   "## Summary\n- Replace os_pipe.\n\n## Validation\n- Not run.",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("intermediate PR update failure should continue the plan")
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskFailed {
+		t.Fatalf("task failed after intermediate PR update error: %+v", task)
+	}
+	if task.ObjectiveStatus != core.ObjectiveActive || task.ObjectivePhase != "intermediate_pr_update_failed" {
+		t.Fatalf("objective = %q/%q, want active/intermediate_pr_update_failed", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "update_pull_request", "continued") {
+		t.Fatalf("missing continued update_pull_request action")
+	}
+}
+
 func TestServiceProjectReviewPolicyBlocksIntermediatePublication(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -14382,6 +14565,16 @@ func firstEventIDWithPayloadValue(events []core.Event, eventType core.EventType,
 
 func hasTaskAction(events []core.Event, taskID string, kind string, status string) bool {
 	return countTaskActions(events, taskID, kind, status) > 0
+}
+
+func taskActionPayloads(events []core.Event, taskID string) string {
+	var payloads []string
+	for _, event := range events {
+		if event.Type == core.EventTaskAction && event.TaskID == taskID {
+			payloads = append(payloads, string(event.Payload))
+		}
+	}
+	return strings.Join(payloads, "\n")
 }
 
 func countTaskActions(events []core.Event, taskID string, kind string, status string) int {

@@ -431,6 +431,7 @@ type PublishPullRequestRequest struct {
 	Body                 string `json:"body,omitempty"`
 	Draft                bool   `json:"draft,omitempty"`
 	ContinueAfterPublish bool   `json:"continueAfterPublish,omitempty"`
+	MetadataOnly         bool   `json:"metadataOnly,omitempty"`
 }
 
 type WatchPullRequestsRequest struct {
