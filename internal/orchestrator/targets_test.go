@@ -802,6 +802,25 @@ func TestRemoteChangeScriptIncludesUntrackedFilesInPatch(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerDescribeChangesRefreshesRemoteChangeFiles(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	run := testSSHRun()
+
+	_ = runner.DescribeChanges(context.Background(), run)
+
+	if len(executor.commands) == 0 {
+		t.Fatal("DescribeChanges did not run remote commands")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	if !strings.Contains(joined, "aged_git_snapshot_tree") {
+		t.Fatalf("first DescribeChanges command did not refresh change files:\n%s", joined)
+	}
+	if strings.Contains(joined, "if [ ! -f") {
+		t.Fatalf("DescribeChanges must refresh stale change files instead of using existence guard:\n%s", joined)
+	}
+}
+
 func TestRemoteChangeScriptFiltersPreExistingDirtyGitWorkspace(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)

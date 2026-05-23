@@ -222,7 +222,7 @@ Review status: %s
 %s
 %s
 
-Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should decide whether a GitHub PR comment is warranted, such as answering reviewer feedback, explaining that no code change is needed, or summarizing a completed fix; if so, it should leave a concise comment on the pull request and report what it posted. Keep this as the same long-running task objective; do not start a separate babysitter task.
+Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should decide whether a GitHub PR comment is warranted, such as answering reviewer feedback, explaining that no code change is needed, or summarizing a completed fix; if so, it should leave a concise comment on the pull request and report what it posted. If the worker uses aged-publish-pr, it must treat the callback as queued until aged reports a published PR URL and must not comment that code changes were pushed or published based only on a queued callback. Keep this as the same long-running task objective; do not start a separate babysitter task.
 `, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment, checkFailure, autoMergeError)
 }
 

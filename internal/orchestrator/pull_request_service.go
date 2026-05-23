@@ -286,18 +286,24 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		return core.PullRequest{}, err
 	}
 	sourceRoot := project.LocalPath
-	workerID, err := resolvePullRequestWorkerID(snapshot, task, req.WorkerID)
-	if err != nil {
-		return core.PullRequest{}, err
+	workerID := strings.TrimSpace(req.WorkerID)
+	if !req.MetadataOnly {
+		workerID, err = resolvePullRequestWorkerID(snapshot, task, req.WorkerID)
+		if err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	var publishWorkspace PreparedWorkspace
-	if workerID != "" {
+	if workerID != "" && !req.MetadataOnly {
 		sourceRoot, publishWorkspace, err = s.pullRequestPublishSourceRoot(ctx, snapshot, workerID, project)
 		if err != nil {
 			return core.PullRequest{}, err
 		}
 	}
-	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
+	changes := WorkspaceChanges{}
+	if !req.MetadataOnly {
+		changes = s.pullRequestWorkspaceChanges(ctx, workerID)
+	}
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
 	metadata := map[string]any{}
 	if len(pr.Metadata) > 0 {
@@ -309,6 +315,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	metadata["projectId"] = project.ID
 	metadata["updatedExistingPullRequest"] = true
 	metadata["pullRequestId"] = pr.ID
+	metadata["metadataOnly"] = req.MetadataOnly
 	repo := nonEmpty(req.Repo, pr.Repo, pullRequestTargetRepo(req, project, task))
 	base := nonEmpty(req.Base, pr.Base, project.DefaultBase)
 	branch := nonEmpty(req.Branch, pr.Branch)
@@ -331,6 +338,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		PatchBaseRef:   patchBaseRef,
 		ResetWorkDir:   !patchFromBase && shouldResetPullRequestWorkDirAfterPublish(publishWorkspace),
 		ForceWithLease: true,
+		MetadataOnly:   req.MetadataOnly,
 		Metadata:       metadata,
 	})
 	if err != nil {
@@ -2112,6 +2120,10 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 			plan.Metadata["workspaceBaseRef"] = pr.Branch
 			plan.Metadata["workspaceBaseRefKind"] = "pull_request_head"
 		}
+		if strings.EqualFold(stringMetadata(plan.Metadata, "workspaceBaseRefKind"), "pull_request_head") &&
+			candidateBaseWorkerID(plan.Metadata) == "" {
+			plan.Metadata["baseWorkerID"] = "source"
+		}
 	}
 	if strings.TrimSpace(pr.Base) != "" {
 		plan.Metadata["pullRequestBase"] = pr.Base
@@ -2145,7 +2157,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
+	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. If you use aged-publish-pr, treat its output as queued until aged reports the published PR URL; do not comment that code changes were pushed or published based only on a queued callback. In the final report, state whether you posted a PR comment and summarize its content.")
 	return b.String()
 }
 
@@ -2364,7 +2376,20 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 }
 
 func updatePullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
-	return publishPullRequestRequestFromAction(action)
+	req := publishPullRequestRequestFromAction(action)
+	req.MetadataOnly = updatePullRequestActionMetadataOnly(action)
+	return req
+}
+
+func updatePullRequestActionMetadataOnly(action PlanAction) bool {
+	inputs := action.Inputs
+	if boolMetadata(inputs, "includeChanges") ||
+		boolMetadata(inputs, "pushChanges") ||
+		boolMetadata(inputs, "updateBranch") {
+		return false
+	}
+	return strings.TrimSpace(stringMetadata(inputs, "title")) != "" ||
+		strings.TrimSpace(stringMetadata(inputs, "body")) != ""
 }
 
 func watchPullRequestsRequestFromAction(action PlanAction) core.WatchPullRequestsRequest {
