@@ -1332,6 +1332,8 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				SpawnID       string          `json:"spawnId,omitempty"`
 				Role          string          `json:"role,omitempty"`
 				Reason        string          `json:"reason,omitempty"`
+				SliceID       string          `json:"sliceId,omitempty"`
+				SliceScope    []string        `json:"sliceScope,omitempty"`
 				TargetID      string          `json:"targetId,omitempty"`
 				TargetKind    string          `json:"targetKind,omitempty"`
 				RemoteSession string          `json:"remoteSession,omitempty"`
@@ -1354,6 +1356,8 @@ func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Even
 				SpawnID:       payload.SpawnID,
 				Role:          payload.Role,
 				Reason:        payload.Reason,
+				SliceID:       payload.SliceID,
+				SliceScope:    payload.SliceScope,
 				TargetID:      payload.TargetID,
 				TargetKind:    payload.TargetKind,
 				RemoteSession: payload.RemoteSession,
@@ -1877,6 +1881,8 @@ func orchestrationGraphs(tasks map[string]core.Task, nodes map[string]core.Execu
 				Role:       node.Role,
 				Reason:     node.Reason,
 				SpawnID:    node.SpawnID,
+				SliceID:    node.SliceID,
+				SliceScope: node.SliceScope,
 				TargetID:   node.TargetID,
 				TargetKind: node.TargetKind,
 			})

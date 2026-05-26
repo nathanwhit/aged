@@ -436,7 +436,7 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 		"reasoningEffort": "medium",
 		"workPlan": {
 			"summary": "Audit the API and UI independently, then consolidate.",
-			"workstreams": [{"id": "api", "goal": "Inspect API paths.", "status": "pending", "doneWhen": "API findings are reported.", "dependsOn": []}],
+			"workstreams": [{"id": "api", "goal": "Inspect API paths.", "status": "pending", "doneWhen": "API findings are reported.", "dependsOn": [], "scope": ["internal/api/**"]}],
 			"validation": [{"id": "validate", "goal": "Check proposed fixes.", "status": "pending", "doneWhen": "Validation command is reported.", "dependsOn": ["api"]}],
 			"risks": ["The two audits may find overlapping issues."]
 		},
@@ -444,7 +444,7 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 		"requiredApprovals": [],
 		"actions": [],
 		"workers": [
-			{"id": "api", "role": "auditor", "reason": "Inspect API paths.", "workerKind": "claude", "workerPrompt": "Inspect the API paths.", "reasoningEffort": "low", "dependsOn": []},
+			{"id": "api", "role": "auditor", "reason": "Inspect API paths.", "workerKind": "claude", "workerPrompt": "Inspect the API paths.", "reasoningEffort": "low", "dependsOn": [], "sliceId": "api", "sliceScope": ["internal/api/**"]},
 			{"id": "ui", "role": "auditor", "reason": "Inspect UI paths.", "workerKind": "codex", "workerPrompt": "Inspect the UI paths.", "reasoningEffort": "low", "dependsOn": []}
 		],
 		"spawns": []
@@ -458,8 +458,14 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 	if plan.WorkPlan == nil || plan.WorkPlan.Workstreams[0].ID != "api" {
 		t.Fatalf("workPlan = %+v", plan.WorkPlan)
 	}
+	if !reflect.DeepEqual(plan.WorkPlan.Workstreams[0].Scope, []string{"internal/api/**"}) {
+		t.Fatalf("workPlan scope = %+v", plan.WorkPlan.Workstreams[0].Scope)
+	}
 	if plan.Workers[0].ID != "api" || plan.Workers[0].Prompt != "Inspect the API paths." {
 		t.Fatalf("first worker = %+v", plan.Workers[0])
+	}
+	if plan.Workers[0].SliceID != "api" || !reflect.DeepEqual(plan.Workers[0].SliceScope, []string{"internal/api/**"}) {
+		t.Fatalf("first worker slice = %q/%v", plan.Workers[0].SliceID, plan.Workers[0].SliceScope)
 	}
 	if err := plan.Validate(); err != nil {
 		t.Fatal(err)

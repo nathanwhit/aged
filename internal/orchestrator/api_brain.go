@@ -316,6 +316,12 @@ func planResponseFormat() map[string]any {
 								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
 								"workerPrompt":    map[string]any{"type": "string", "minLength": 1},
 								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
+								"sliceId":         map[string]any{"type": "string", "description": "Stable horizontal slice id when this worker owns one slice of a broad task; empty otherwise."},
+								"sliceScope": map[string]any{
+									"type":        "array",
+									"description": "Files, directories, packages, modules, or other bounded ownership hints for this horizontal slice.",
+									"items":       map[string]any{"type": "string"},
+								},
 								"dependsOn": map[string]any{
 									"type":  "array",
 									"items": map[string]any{"type": "string"},
@@ -335,6 +341,12 @@ func planResponseFormat() map[string]any {
 								"reason":          map[string]any{"type": "string"},
 								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
 								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
+								"sliceId":         map[string]any{"type": "string", "description": "Stable horizontal slice id when this worker owns one slice of a broad task; empty otherwise."},
+								"sliceScope": map[string]any{
+									"type":        "array",
+									"description": "Files, directories, packages, modules, or other bounded ownership hints for this horizontal slice.",
+									"items":       map[string]any{"type": "string"},
+								},
 								"dependsOn": map[string]any{
 									"type":  "array",
 									"items": map[string]any{"type": "string"},
@@ -380,6 +392,11 @@ func workPlanItemArraySchema() map[string]any {
 				"dependsOn": map[string]any{
 					"type":  "array",
 					"items": map[string]any{"type": "string"},
+				},
+				"scope": map[string]any{
+					"type":        "array",
+					"description": "Optional files, directories, packages, or modules owned by this work-plan item.",
+					"items":       map[string]any{"type": "string"},
 				},
 			},
 		},

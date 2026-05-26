@@ -941,10 +941,11 @@ Field rules:
 - When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workers, spawns.
 - The top-level "workPlan" is the durable task update. The continue plan's "workPlan" exists because continue plans use the scheduler schema; it should match the top-level "workPlan" when you are changing the durable plan for the next turn. If the current durable plan remains accurate, include the current work plan in plan.workPlan and set top-level "workPlan" to null.
 - The continue plan must use workers for initial execution. Each workers[] object must include id, role, reason, workerKind, workerPrompt, reasoningEffort, and dependsOn. Root workers with empty dependsOn can run in parallel immediately. Workers with dependencies wait until all dependency worker ids finish.
+- For wide tasks, decompose horizontally when independent slices can make progress in parallel. Put a stable sliceId and bounded sliceScope on each slice worker or spawn, where sliceScope lists the files, directories, packages, modules, or other ownership boundary for that slice. Use separate root workers for independent slices, dependency edges for slice-local validation, and an explicit consolidation/composition worker when results must be reconciled before publishing or completing.
 - Top-level workerKind and workerPrompt are legacy compatibility fallback fields only when workers is absent. Do not use them for new continue plans.
 - The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact. A publish_pull_request action must include inputs.title and inputs.body; do not rely on aged to generate either one. inputs.title must describe the specific PR-sized change, not the overall task or broad objective. Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use inputs.continueAfterPublish=true for broad, large, or long-running objectives when more slices should be pursued after opening this PR; after such an intermediate PR, the next plan should continue objective work immediately and leave the PR to the babysitter. Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened. Narrow GitHub-completion tasks should publish at most one completion PR. Use action kind "create_tasks" only when a genuinely separate user-facing task should be created; do not use it for internal setup, investigation, benchmark harnesses, validation, or PR slices inside the current objective. Use action kind "update_pull_request" only for an existing non-terminal PR that is still the right review artifact. When update_pull_request references a worker that produced code changes, aged will push those worker changes to the PR branch by default even if inputs.title or inputs.body are also present. Set inputs.metadataOnly=true or inputs.includeChanges=false only when the action must update title/body without pushing worker workspace changes. If a PR is closed, treat it as historical feedback and publish a fresh PR for new candidate work. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event that actually blocks further objective work. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
 - Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. Use workerId "" to mean the final successful candidate worker when unambiguous; when multiple workers can produce competing candidates, schedule consolidation or validation before publishing. Use inputs {} when no extra inputs are needed for non-publish actions.
-- Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
+- Each spawn object must include role and reason, and may include id, workerKind, dependsOn, sliceId, and sliceScope. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
 - Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
 - When action is not "continue", "plan" must be null or omitted.
 - "reasoningEffort" inside plan must be one of "default", "low", "medium", "high", "xhigh", or "max".
@@ -1081,10 +1082,14 @@ func compactPlanForPrompt(plan Plan) Plan {
 		plan.Workers[index].Role = truncateStringForPrompt(plan.Workers[index].Role, maxPromptRationaleBytes)
 		plan.Workers[index].Reason = truncateStringForPrompt(plan.Workers[index].Reason, maxPromptRationaleBytes)
 		plan.Workers[index].Prompt = truncateStringForPrompt(plan.Workers[index].Prompt, maxPromptPlanTextBytes)
+		plan.Workers[index].SliceID = truncateStringForPrompt(plan.Workers[index].SliceID, maxPromptRationaleBytes)
+		plan.Workers[index].SliceScope = compactStringSliceForPrompt(plan.Workers[index].SliceScope, maxPromptArtifacts)
 	}
 	for index := range plan.Spawns {
 		plan.Spawns[index].Role = truncateStringForPrompt(plan.Spawns[index].Role, maxPromptRationaleBytes)
 		plan.Spawns[index].Reason = truncateStringForPrompt(plan.Spawns[index].Reason, maxPromptRationaleBytes)
+		plan.Spawns[index].SliceID = truncateStringForPrompt(plan.Spawns[index].SliceID, maxPromptRationaleBytes)
+		plan.Spawns[index].SliceScope = compactStringSliceForPrompt(plan.Spawns[index].SliceScope, maxPromptArtifacts)
 	}
 	return plan
 }
@@ -1131,8 +1136,21 @@ func compactWorkPlanItemsForPrompt(items []core.WorkPlanItem) []core.WorkPlanIte
 		for depIndex := range items[index].DependsOn {
 			items[index].DependsOn[depIndex] = truncateStringForPrompt(items[index].DependsOn[depIndex], maxPromptRationaleBytes)
 		}
+		items[index].Scope = compactStringSliceForPrompt(items[index].Scope, maxPromptArtifacts)
 	}
 	return items
+}
+
+func compactStringSliceForPrompt(values []string, maxItems int) []string {
+	values = append([]string{}, values...)
+	if len(values) > maxItems {
+		omitted := len(values) - maxItems
+		values = append(values[:maxItems], fmt.Sprintf("... %d additional entries omitted ...", omitted))
+	}
+	for index := range values {
+		values[index] = truncateStringForPrompt(values[index], maxPromptRationaleBytes)
+	}
+	return values
 }
 
 func truncateStringForPrompt(value string, maxBytes int) string {

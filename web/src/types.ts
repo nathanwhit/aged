@@ -64,6 +64,7 @@ export type WorkPlanItem = {
   status?: string;
   doneWhen?: string;
   dependsOn?: string[];
+  scope?: string[];
 };
 
 export type TaskMilestone = {
@@ -330,6 +331,8 @@ export type ExecutionNode = {
   spawnId?: string;
   role?: string;
   reason?: string;
+  sliceId?: string;
+  sliceScope?: string[];
   targetId?: string;
   targetKind?: string;
   remoteSession?: string;
@@ -364,6 +367,8 @@ export type OrchestrationGraphNode = {
   role?: string;
   reason?: string;
   spawnId?: string;
+  sliceId?: string;
+  sliceScope?: string[];
   targetId?: string;
   targetKind?: string;
 };

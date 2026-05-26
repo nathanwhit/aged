@@ -360,6 +360,8 @@ type WorkerTurnResult struct {
 	Kind         string            `json:"kind"`
 	Role         string            `json:"role,omitempty"`
 	SpawnID      string            `json:"spawnId,omitempty"`
+	SliceID      string            `json:"sliceId,omitempty"`
+	SliceScope   []string          `json:"sliceScope,omitempty"`
 	BaseWorkerID string            `json:"baseWorkerId,omitempty"`
 	Summary      string            `json:"summary,omitempty"`
 	Error        string            `json:"error,omitempty"`
@@ -3697,6 +3699,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			"spawnId":      stringMetadata(plan.Metadata, "spawnID"),
 			"role":         stringMetadata(plan.Metadata, "spawnRole"),
 			"reason":       stringMetadata(plan.Metadata, "spawnReason"),
+			"sliceId":      stringMetadata(plan.Metadata, "sliceID"),
+			"sliceScope":   stringSliceMetadata(plan.Metadata, "sliceScope"),
 			"targetId":     target.ID,
 			"targetKind":   string(target.Kind),
 			"dependsOn":    stringSliceMetadata(plan.Metadata, "dependsOn"),
@@ -4268,6 +4272,8 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			"spawnId":       stringMetadata(plan.Metadata, "spawnID"),
 			"role":          stringMetadata(plan.Metadata, "spawnRole"),
 			"reason":        stringMetadata(plan.Metadata, "spawnReason"),
+			"sliceId":       stringMetadata(plan.Metadata, "sliceID"),
+			"sliceScope":    stringSliceMetadata(plan.Metadata, "sliceScope"),
 			"targetId":      target.ID,
 			"targetKind":    string(target.Kind),
 			"remoteSession": remoteRun.Session,
@@ -7712,6 +7718,12 @@ func (s *Service) initialWorkerPlan(initial Plan, worker WorkerRequest, results 
 	metadata["spawnRole"] = role
 	metadata["spawnReason"] = reason
 	metadata["dependsOn"] = dependsOn
+	if strings.TrimSpace(worker.SliceID) != "" {
+		metadata["sliceID"] = strings.TrimSpace(worker.SliceID)
+	}
+	if len(worker.SliceScope) > 0 {
+		metadata["sliceScope"] = trimStringSlice(worker.SliceScope)
+	}
 	metadata["turn"] = turn
 	metadata["parentRationale"] = initial.Rationale
 	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
@@ -7722,7 +7734,7 @@ func (s *Service) initialWorkerPlan(initial Plan, worker WorkerRequest, results 
 	}
 	return Plan{
 		WorkerKind:      worker.WorkerKind,
-		Prompt:          buildInitialWorkerPrompt(worker.Prompt, results, dependsOn),
+		Prompt:          buildInitialWorkerPrompt(worker.Prompt, results, dependsOn, worker.SliceID, worker.SliceScope),
 		ReasoningEffort: reasoningEffort,
 		Rationale:       "initial worker scheduled from plan: " + reason,
 		Steps: []PlanStep{{
@@ -7735,8 +7747,8 @@ func (s *Service) initialWorkerPlan(initial Plan, worker WorkerRequest, results 
 	}
 }
 
-func buildInitialWorkerPrompt(prompt string, results []WorkerTurnResult, dependsOn []string) string {
-	if len(dependsOn) == 0 {
+func buildInitialWorkerPrompt(prompt string, results []WorkerTurnResult, dependsOn []string, sliceID string, sliceScope []string) string {
+	if len(dependsOn) == 0 && strings.TrimSpace(sliceID) == "" && len(trimStringSlice(sliceScope)) == 0 {
 		return prompt
 	}
 	deps := map[string]bool{}
@@ -7744,39 +7756,66 @@ func buildInitialWorkerPrompt(prompt string, results []WorkerTurnResult, depends
 		deps[strings.TrimSpace(dep)] = true
 	}
 	var builder strings.Builder
-	builder.WriteString("Dependency worker results:\n")
-	for _, result := range results {
-		if !deps[result.SpawnID] {
-			continue
-		}
-		builder.WriteString("\n- ")
-		builder.WriteString(nonEmpty(result.SpawnID, result.WorkerID))
-		builder.WriteString(" status: ")
-		builder.WriteString(string(result.Status))
-		if result.Summary != "" {
-			builder.WriteString("\n  Summary: ")
-			builder.WriteString(result.Summary)
-		}
-		if result.Error != "" {
-			builder.WriteString("\n  Error: ")
-			builder.WriteString(result.Error)
-		}
-		if len(result.Changes.ChangedFiles) > 0 {
-			builder.WriteString("\n  Changed files:")
-			for _, file := range result.Changes.ChangedFiles {
-				builder.WriteString("\n  - ")
-				if file.Status != "" {
-					builder.WriteString(file.Status)
-					builder.WriteString(" ")
-				}
-				builder.WriteString(file.Path)
+	writeSliceAssignment(&builder, sliceID, sliceScope)
+	if len(dependsOn) > 0 {
+		builder.WriteString("Dependency worker results:\n")
+		for _, result := range results {
+			if !deps[result.SpawnID] {
+				continue
 			}
+			builder.WriteString("\n- ")
+			builder.WriteString(nonEmpty(result.SpawnID, result.WorkerID))
+			builder.WriteString(" status: ")
+			builder.WriteString(string(result.Status))
+			if result.Summary != "" {
+				builder.WriteString("\n  Summary: ")
+				builder.WriteString(result.Summary)
+			}
+			if result.Error != "" {
+				builder.WriteString("\n  Error: ")
+				builder.WriteString(result.Error)
+			}
+			if len(result.Changes.ChangedFiles) > 0 {
+				builder.WriteString("\n  Changed files:")
+				for _, file := range result.Changes.ChangedFiles {
+					builder.WriteString("\n  - ")
+					if file.Status != "" {
+						builder.WriteString(file.Status)
+						builder.WriteString(" ")
+					}
+					builder.WriteString(file.Path)
+				}
+			}
+			builder.WriteString("\n")
 		}
 		builder.WriteString("\n")
 	}
-	builder.WriteString("\nWorker instructions:\n")
+	builder.WriteString("Worker instructions:\n")
 	builder.WriteString(prompt)
 	return builder.String()
+}
+
+func writeSliceAssignment(builder *strings.Builder, sliceID string, sliceScope []string) {
+	sliceID = strings.TrimSpace(sliceID)
+	sliceScope = trimStringSlice(sliceScope)
+	if sliceID == "" && len(sliceScope) == 0 {
+		return
+	}
+	builder.WriteString("# Slice Assignment\n\n")
+	if sliceID != "" {
+		builder.WriteString("Slice ID: ")
+		builder.WriteString(sliceID)
+		builder.WriteString("\n")
+	}
+	if len(sliceScope) > 0 {
+		builder.WriteString("Owned scope:\n")
+		for _, scope := range sliceScope {
+			builder.WriteString("- ")
+			builder.WriteString(scope)
+			builder.WriteString("\n")
+		}
+	}
+	builder.WriteString("\nStay inside this slice unless the task is impossible without crossing boundaries. If you find cross-slice dependencies, report them clearly instead of silently broadening the change.\n\n")
 }
 
 func latestCandidateWorkerIDForDependencies(results []WorkerTurnResult, dependsOn []string) string {
@@ -7888,6 +7927,8 @@ func completedWorkerResultsForTask(snapshot core.Snapshot, taskID string) []Work
 			result.NodeID = stringMetadata(metadata, "nodeID")
 			result.Role = stringMetadata(metadata, "spawnRole")
 			result.SpawnID = stringMetadata(metadata, "spawnID")
+			result.SliceID = stringMetadata(metadata, "sliceID")
+			result.SliceScope = stringSliceMetadata(metadata, "sliceScope")
 			result.BaseWorkerID = stringMetadata(metadata, "baseWorkerID")
 			results = append(results, result)
 		}
@@ -8027,6 +8068,8 @@ func failedFollowUpResult(plan Plan, err error) WorkerTurnResult {
 		Kind:         plan.WorkerKind,
 		Role:         stringMetadata(plan.Metadata, "spawnRole"),
 		SpawnID:      stringMetadata(plan.Metadata, "spawnID"),
+		SliceID:      stringMetadata(plan.Metadata, "sliceID"),
+		SliceScope:   stringSliceMetadata(plan.Metadata, "sliceScope"),
 		BaseWorkerID: stringMetadata(plan.Metadata, "baseWorkerID"),
 		Summary:      "Follow-up worker setup failed before execution.",
 		Error:        err.Error(),
@@ -8036,7 +8079,7 @@ func failedFollowUpResult(plan Plan, err error) WorkerTurnResult {
 
 func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest, results []WorkerTurnResult, turn int, spawnID string, dependsOn []string, parentNodeID string) Plan {
 	workerKind := s.workerKindForSpawn(spawn, initial.WorkerKind)
-	prompt := buildFollowUpPrompt(task, spawn, results)
+	prompt := buildFollowUpPrompt(task, spawn, results, spawn.SliceID, spawn.SliceScope)
 	reasoningEffort := normalizeReasoningEffort(nonEmpty(spawn.ReasoningEffort, initial.ReasoningEffort))
 	baseWorkerID := latestCandidateWorkerID(results)
 	plan := Plan{
@@ -8061,6 +8104,12 @@ func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest,
 			"parentNodeID":    parentNodeID,
 			"parentRationale": initial.Rationale,
 		},
+	}
+	if strings.TrimSpace(spawn.SliceID) != "" {
+		plan.Metadata["sliceID"] = strings.TrimSpace(spawn.SliceID)
+	}
+	if len(spawn.SliceScope) > 0 {
+		plan.Metadata["sliceScope"] = trimStringSlice(spawn.SliceScope)
 	}
 	if baseWorkerID != "" {
 		plan.Metadata["baseWorkerID"] = baseWorkerID
@@ -8098,9 +8147,10 @@ func (s *Service) workerKindForSpawn(spawn SpawnRequest, fallback string) string
 	return fallback
 }
 
-func buildFollowUpPrompt(task core.Task, spawn SpawnRequest, results []WorkerTurnResult) string {
+func buildFollowUpPrompt(task core.Task, spawn SpawnRequest, results []WorkerTurnResult, sliceID string, sliceScope []string) string {
 	var builder strings.Builder
 	builder.WriteString("# Orchestrator Follow-up Worker Prompt\n\n")
+	writeSliceAssignment(&builder, sliceID, sliceScope)
 	builder.WriteString("Task: ")
 	builder.WriteString(task.Title)
 	builder.WriteString("\n\nOriginal user request:\n")
@@ -8923,6 +8973,12 @@ func planFromInitialWorkerRequest(initial Plan, request WorkerRequest, results [
 	metadata["spawnRole"] = role
 	metadata["spawnReason"] = reason
 	metadata["dependsOn"] = dependsOn
+	if strings.TrimSpace(request.SliceID) != "" {
+		metadata["sliceID"] = strings.TrimSpace(request.SliceID)
+	}
+	if len(request.SliceScope) > 0 {
+		metadata["sliceScope"] = trimStringSlice(request.SliceScope)
+	}
 	metadata["turn"] = turn
 	metadata["parentRationale"] = initial.Rationale
 	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
@@ -8933,7 +8989,7 @@ func planFromInitialWorkerRequest(initial Plan, request WorkerRequest, results [
 	}
 	return Plan{
 		WorkerKind:      request.WorkerKind,
-		Prompt:          buildInitialWorkerPrompt(request.Prompt, results, dependsOn),
+		Prompt:          buildInitialWorkerPrompt(request.Prompt, results, dependsOn, request.SliceID, request.SliceScope),
 		ReasoningEffort: reasoningEffort,
 		Rationale:       "retry initial worker from plan: " + reason,
 		Steps: []PlanStep{{
@@ -9148,6 +9204,8 @@ func retryGraphStateForTask(snapshot core.Snapshot, taskID string) (Plan, []Work
 			result.NodeID = stringMetadata(metadata, "nodeID")
 			result.Role = stringMetadata(metadata, "spawnRole")
 			result.SpawnID = stringMetadata(metadata, "spawnID")
+			result.SliceID = stringMetadata(metadata, "sliceID")
+			result.SliceScope = stringSliceMetadata(metadata, "sliceScope")
 			result.BaseWorkerID = stringMetadata(metadata, "baseWorkerID")
 			results = append(results, result)
 		}
@@ -9874,6 +9932,8 @@ func planMetadata(plan Plan) map[string]any {
 		"spawnID",
 		"spawnReason",
 		"spawnRole",
+		"sliceID",
+		"sliceScope",
 		"turn",
 		"dynamicReplanTurn",
 		"executionMode",
@@ -10244,6 +10304,10 @@ func (s *workerRunState) turnResult(workerID string, plan Plan, status core.Work
 		if spawnID, ok := plan.Metadata["spawnID"].(string); ok {
 			result.SpawnID = spawnID
 		}
+		if sliceID, ok := plan.Metadata["sliceID"].(string); ok {
+			result.SliceID = sliceID
+		}
+		result.SliceScope = stringSliceMetadata(plan.Metadata, "sliceScope")
 		if baseWorkerID, ok := plan.Metadata["baseWorkerID"].(string); ok {
 			result.BaseWorkerID = baseWorkerID
 		}

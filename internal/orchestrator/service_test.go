@@ -10116,6 +10116,123 @@ func TestServiceRunsInitialWorkersInParallel(t *testing.T) {
 	}
 }
 
+func TestServiceCarriesHorizontalSliceMetadataThroughInitialGraph(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	apiRunner := &recordingEventRunner{
+		kind:   "api",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "ported API slice"}},
+	}
+	uiRunner := &recordingEventRunner{
+		kind:   "ui",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "ported UI slice"}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "wide port can be split into independent slices",
+		WorkPlan: &core.WorkPlan{
+			Summary: "Port API and UI slices independently, then compose.",
+			Workstreams: []core.WorkPlanItem{{
+				ID:        "api",
+				Goal:      "Port API files.",
+				Status:    "pending",
+				DoneWhen:  "API slice is ported.",
+				DependsOn: []string{},
+				Scope:     []string{"src/api/**"},
+			}},
+		},
+		Workers: []WorkerRequest{
+			{
+				ID:              "api",
+				Role:            "API slice implementer",
+				Reason:          "Port API files independently.",
+				WorkerKind:      "api",
+				Prompt:          "Port the API files.",
+				ReasoningEffort: "medium",
+				SliceID:         "api",
+				SliceScope:      []string{"src/api/**", "tests/api/**"},
+			},
+			{
+				ID:              "ui",
+				Role:            "UI slice implementer",
+				Reason:          "Port UI files independently.",
+				WorkerKind:      "ui",
+				Prompt:          "Port the UI files.",
+				ReasoningEffort: "medium",
+				SliceID:         "ui",
+				SliceScope:      []string{"src/ui/**"},
+			},
+			{
+				ID:              "compose",
+				Role:            "composer",
+				Reason:          "Reconcile slice results.",
+				WorkerKind:      "compose",
+				Prompt:          "Compose the ported slices.",
+				ReasoningEffort: "medium",
+				DependsOn:       []string{"api", "ui"},
+			},
+		},
+	}}, map[string]worker.Runner{
+		"api":     apiRunner,
+		"ui":      uiRunner,
+		"compose": eventRunner{kind: "compose", events: []worker.Event{{Kind: worker.EventResult, Text: "composed slices"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Wide port",
+		Prompt: "Port the project in independent file slices.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if !strings.Contains(apiRunner.promptValue(), "# Slice Assignment") ||
+		!strings.Contains(apiRunner.promptValue(), "Slice ID: api") ||
+		!strings.Contains(apiRunner.promptValue(), "src/api/**") {
+		t.Fatalf("api prompt missing slice assignment:\n%s", apiRunner.promptValue())
+	}
+	if !strings.Contains(uiRunner.promptValue(), "Slice ID: ui") ||
+		!strings.Contains(uiRunner.promptValue(), "src/ui/**") {
+		t.Fatalf("ui prompt missing slice assignment:\n%s", uiRunner.promptValue())
+	}
+
+	var apiNode core.ExecutionNode
+	foundAPINode := false
+	for _, node := range snapshot.ExecutionNodes {
+		if node.SpawnID == "api" {
+			apiNode = node
+			foundAPINode = true
+			break
+		}
+	}
+	if !foundAPINode {
+		t.Fatalf("missing api execution node in %+v", snapshot.ExecutionNodes)
+	}
+	if apiNode.SliceID != "api" || !reflect.DeepEqual(apiNode.SliceScope, []string{"src/api/**", "tests/api/**"}) {
+		t.Fatalf("api execution node slice = %q/%v", apiNode.SliceID, apiNode.SliceScope)
+	}
+	if len(snapshot.OrchestrationGraphs) != 1 {
+		t.Fatalf("graphs = %+v", snapshot.OrchestrationGraphs)
+	}
+	var graphAPI core.OrchestrationGraphNode
+	foundGraphAPI := false
+	for _, node := range snapshot.OrchestrationGraphs[0].Nodes {
+		if node.SpawnID == "api" {
+			graphAPI = node
+			foundGraphAPI = true
+			break
+		}
+	}
+	if !foundGraphAPI {
+		t.Fatalf("missing api graph node in %+v", snapshot.OrchestrationGraphs[0].Nodes)
+	}
+	if graphAPI.SliceID != "api" || !reflect.DeepEqual(graphAPI.SliceScope, []string{"src/api/**", "tests/api/**"}) {
+		t.Fatalf("api graph node slice = %q/%v", graphAPI.SliceID, graphAPI.SliceScope)
+	}
+}
+
 func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

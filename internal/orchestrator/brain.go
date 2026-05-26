@@ -74,6 +74,8 @@ type WorkerRequest struct {
 	Prompt          string   `json:"workerPrompt"`
 	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	DependsOn       []string `json:"dependsOn,omitempty"`
+	SliceID         string   `json:"sliceId,omitempty"`
+	SliceScope      []string `json:"sliceScope,omitempty"`
 }
 
 type SpawnRequest struct {
@@ -83,6 +85,8 @@ type SpawnRequest struct {
 	WorkerKind      string   `json:"workerKind,omitempty"`
 	ReasoningEffort string   `json:"reasoningEffort,omitempty"`
 	DependsOn       []string `json:"dependsOn,omitempty"`
+	SliceID         string   `json:"sliceId,omitempty"`
+	SliceScope      []string `json:"sliceScope,omitempty"`
 }
 
 type OrchestrationState struct {
