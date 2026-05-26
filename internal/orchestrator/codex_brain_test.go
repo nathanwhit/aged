@@ -636,6 +636,32 @@ func TestCodexBrainReplanPromptInstructsHumanStylePRBody(t *testing.T) {
 	}
 }
 
+func TestCodexBrainReplanPromptDoesNotBlockBroadObjectivesOnIntermediatePRs(t *testing.T) {
+	brain := &CodexBrain{template: "schedule the work"}
+	prompt := brain.replanPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Port a project",
+		Prompt: "Port this project in multiple reviewable slices.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode": "broad",
+		}),
+	}, OrchestrationState{})
+
+	if strings.Contains(prompt, "then wait for GitHub state") {
+		t.Fatalf("replan prompt still tells broad intermediate PRs to wait:\n%s", prompt)
+	}
+	for _, required := range []string{
+		"continueAfterPublish",
+		"keep replanning the objective immediately",
+		"PR babysitting happens in parallel",
+		"Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("replan prompt missing %q:\n%s", required, prompt)
+		}
+	}
+}
+
 func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 	for _, path := range []string{"../../prompts/scheduler.md", "../../prompts/default/system.md", "../../prompts/default/replan.md"} {
 		data, err := os.ReadFile(path)
@@ -675,6 +701,13 @@ func TestDefaultPromptsKeepBroadObjectivesInTaskGraph(t *testing.T) {
 		}
 		if !strings.Contains(body, "continueAfterPublish") || !strings.Contains(body, "large") {
 			t.Fatalf("%s does not reserve continueAfterPublish for broad large objectives:\n%s", path, body)
+		}
+		if strings.Contains(body, "then wait for GitHub state") {
+			t.Fatalf("%s still tells intermediate PRs to wait for GitHub state:\n%s", path, body)
+		}
+		if !strings.Contains(body, "Do not wait on GitHub state merely because an intermediate PR was opened") &&
+			!strings.Contains(body, "Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened") {
+			t.Fatalf("%s does not keep intermediate PRs from blocking broad objectives:\n%s", path, body)
 		}
 		if !strings.Contains(body, "task's orchestration graph") && !strings.Contains(body, "this task's graph") {
 			t.Fatalf("%s does not keep broad objective setup inside the task graph:\n%s", path, body)
