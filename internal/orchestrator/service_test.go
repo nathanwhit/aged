@@ -11107,6 +11107,51 @@ func TestServiceCompletesWithFallbackWhenDynamicReplanningStallsPastLimit(t *tes
 	}
 }
 
+func TestServiceDoesNotApplyDynamicReplanLimitToBroadObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &continueForTurnsBrain{
+		plan: Plan{
+			WorkerKind: "codex",
+			Prompt:     "implement initial candidate",
+		},
+		continueTurns: maxConsecutiveUnproductiveReplanTurns + 1,
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial implementation"}}},
+		"follow": failingRunner{kind: "follow", err: errors.New("no useful follow-up progress")},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Broad stalled replan",
+		Prompt: "Keep trying follow-ups.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode": "broad",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns+2 {
+		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns+2)
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskReplanned, task.ID, `"fallback":true`) {
+		t.Fatalf("unexpected fallback replanned event for broad objective")
+	}
+	if snapshot.Tasks[0].FinalCandidateWorkerID == "" {
+		t.Fatalf("missing final candidate: %+v", snapshot.Tasks[0])
+	}
+}
+
 func TestServiceWaitsWhenDynamicReplanningStallsWithoutCandidate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
