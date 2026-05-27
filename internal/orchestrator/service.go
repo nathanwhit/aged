@@ -1096,21 +1096,65 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 			}
 			continue
 		}
+		if initial, results, err := retryGraphStateForTask(snapshot, task.ID); err == nil {
+			_, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskAction,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"kind":   "startup_planning_recovery",
+					"status": "resumed",
+					"reason": "daemon restarted while graph replanning was in progress; resuming from persisted graph results",
+				}),
+			})
+			if err != nil {
+				return err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "recovering"
+			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				s.retryGraphTask(taskCtx, task, initial, results)
+			})
+			continue
+		}
+		if plan, err := retryPlanForTask(snapshot, task.ID); err == nil {
+			_, err := s.append(ctx, core.Event{
+				Type:   core.EventTaskAction,
+				TaskID: task.ID,
+				Payload: core.MustJSON(map[string]any{
+					"kind":   "startup_planning_recovery",
+					"status": "resumed",
+					"reason": "daemon restarted while persisted plan execution was in progress; retrying the latest plan",
+				}),
+			})
+			if err != nil {
+				return err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "recovering"
+			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				s.retryTask(taskCtx, task, plan)
+			})
+			continue
+		}
 		_, err := s.append(ctx, core.Event{
 			Type:   core.EventTaskAction,
 			TaskID: task.ID,
 			Payload: core.MustJSON(map[string]any{
 				"kind":   "startup_planning_recovery",
-				"status": "waiting",
-				"reason": "daemon restarted while planning was in progress and no active worker could be recovered",
+				"status": "resumed",
+				"reason": "daemon restarted during initial planning before a plan or worker was recorded; restarting planning",
 			}),
 		})
 		if err != nil {
 			return err
 		}
-		if err := s.waitForUserAction(ctx, task.ID, "", "startup_planning_recovery", "Planning was interrupted by daemon restart before a plan or worker was recorded. Retry or steer the task to continue.", nil); err != nil {
-			return err
-		}
+		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			s.runTask(taskCtx, task)
+		})
 	}
 	return nil
 }

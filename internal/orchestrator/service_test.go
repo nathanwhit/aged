@@ -7273,7 +7273,7 @@ func TestRecoverRemoteWorkersResumesOrphanedPullRequestFollowUpPlanning(t *testi
 	}
 }
 
-func TestRecoverRemoteWorkersMovesGenericOrphanedPlanningTaskToWaiting(t *testing.T) {
+func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -7299,16 +7299,106 @@ func TestRecoverRemoteWorkersMovesGenericOrphanedPlanningTaskToWaiting(t *testin
 		t.Fatal(err)
 	}
 
-	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	runner := &recordingEventRunner{
+		kind:   "mock",
+		events: []worker.Event{{Kind: worker.EventResult, Text: "planned after restart"}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "continue after interrupted planning",
+	}}, map[string]worker.Runner{"mock": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir(), sourceRoot: t.TempDir()})
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForEvent(t, store, core.EventWorkerCreated, taskID)
+	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "resumed") {
+		t.Fatalf("missing startup planning recovery action")
+	}
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
+		t.Fatalf("planning recovery should not ask for user input")
+	}
+	if runner.callsValue() != 1 {
+		t.Fatalf("runner calls = %d, want 1", runner.callsValue())
+	}
+}
+
+func TestRecoverRemoteWorkersResumesOrphanedGraphReplanning(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-orphan-graph-replanning"
+	workerID := "worker-done"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Interrupted graph replanning",
+			"prompt": "Replan was interrupted by daemon restart.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(Plan{WorkerKind: "codex", Prompt: "initial"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":     "codex",
+			"metadata": map[string]any{"nodeID": "initial-scout"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.WorkerSucceeded,
+			"summary": "found next step",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskPlanning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:    "wait",
+		Rationale: "graph replanning resumed after restart",
+		Message:   "waiting from resumed graph replan",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
-	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "waiting") {
+	if len(brain.states) != 1 {
+		t.Fatalf("replan calls = %d, want 1", len(brain.states))
+	}
+	if got := len(brain.states[0].Results); got != 1 {
+		t.Fatalf("replan results = %d, want 1", got)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "resumed") {
 		t.Fatalf("missing startup planning recovery action")
 	}
-	if !hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
-		t.Fatalf("missing approval-needed event")
+	if eventPayloadContains(snapshot.Events, core.EventApprovalNeeded, taskID, "Planning was interrupted") {
+		t.Fatalf("planning recovery should not ask for user input")
 	}
 }
 
