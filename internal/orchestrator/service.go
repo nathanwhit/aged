@@ -8333,6 +8333,25 @@ func syncedProjectWorkspaceRefRevision(ctx context.Context, project core.Project
 	if _, err := runCommand(ctx, project.LocalPath, "git", "rev-parse", "--show-toplevel"); err != nil {
 		return projectWorkspaceRefRevision(ctx, project, ref), nil
 	}
+	if strings.HasPrefix(ref, "refs/pull/") {
+		var lastErr error
+		remoteSuffix := strings.TrimPrefix(ref, "refs/")
+		for _, remote := range projectFetchRemotes(project) {
+			remoteRef := "refs/remotes/" + remote + "/" + remoteSuffix
+			refspec := "+" + ref + ":" + remoteRef
+			if _, err := runCommand(ctx, project.LocalPath, "git", "fetch", "--prune", remote, refspec); err != nil {
+				lastErr = err
+				continue
+			}
+			if gitCommitRefExists(ctx, project.LocalPath, remoteRef) {
+				return remoteRef, nil
+			}
+		}
+		if lastErr != nil {
+			return "", fmt.Errorf("sync git ref %q: %w", ref, lastErr)
+		}
+		return "", fmt.Errorf("sync git ref %q: no configured remote contains ref", ref)
+	}
 	branch := pullRequestWorkspaceBranch(ref)
 	if branch == "" {
 		return "", nil

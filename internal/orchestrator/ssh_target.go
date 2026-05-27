@@ -1346,8 +1346,17 @@ else
   fetch_remote=origin
   git fetch "$fetch_remote" --prune
 fi
+pull_ref=
+case "$base" in
+  refs/pull/*)
+    pull_ref="refs/remotes/$fetch_remote/${base#refs/}"
+    git fetch "$fetch_remote" --prune "+$base:$pull_ref"
+    ;;
+esac
 if [ -n "$base" ]; then
-  if git rev-parse --verify --quiet "$fetch_remote/$base" >/dev/null; then
+  if [ -n "$pull_ref" ] && git rev-parse --verify --quiet "$pull_ref" >/dev/null; then
+    git checkout --detach "$pull_ref"
+  elif git rev-parse --verify --quiet "$fetch_remote/$base" >/dev/null; then
     git checkout --detach "$fetch_remote/$base"
   elif [ -n "$base_ref" ] && git cat-file -e "$base_ref^{commit}" 2>/dev/null; then
     git checkout --detach "$base_ref"

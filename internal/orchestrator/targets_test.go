@@ -1145,6 +1145,31 @@ func TestSSHRunnerPrepareCheckoutPrefersExistingUpstreamRemote(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPrepareCheckoutFetchesPullRequestHeadRef(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:     "https://github.com/denoland/deno.git",
+		WorkDir:     "/srv/aged/repos/deno",
+		DefaultBase: "refs/pull/34432/head",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing prepare command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		`pull_ref="refs/remotes/$fetch_remote/${base#refs/}"`,
+		`git fetch "$fetch_remote" --prune "+$base:$pull_ref"`,
+		`git checkout --detach "$pull_ref"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestSSHRunnerPrepareCheckoutStashesDirtyExistingGitCheckout(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}
