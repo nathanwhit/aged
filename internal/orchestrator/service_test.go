@@ -6401,6 +6401,109 @@ func TestServiceRetriesDynamicReplanFailureFromCompletedGraph(t *testing.T) {
 	}
 }
 
+func TestServiceRetriesGraphDependencyFailureWithoutCandidateChanges(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-retry-graph-no-candidate"
+	workerID := "worker-validate"
+	initial := Plan{
+		WorkerKind: "codex",
+		Prompt:     "Validate the http compressible size slice.",
+	}
+	invalidLatestPlan := Plan{
+		Workers: []WorkerRequest{{
+			ID:         "source_next_opportunity_scout",
+			WorkerKind: "codex",
+			Prompt:     "Find the next opportunity.",
+			DependsOn:  []string{"validate_http_compressible_size_slice"},
+		}},
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Broad graph retry",
+			"prompt": "Retry only replan.",
+			"metadata": map[string]any{
+				"completionMode": "github",
+				"objectiveMode":  "broad",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(initial)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+			"metadata": map[string]any{
+				"nodeID": "validate_http_compressible_size_slice",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status":           core.WorkerSucceeded,
+			"summary":          "validated the slice and found no publishable candidate yet",
+			"workspaceChanges": WorkspaceChanges{},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(invalidLatestPlan)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskFailed,
+			"error":  `worker "source_next_opportunity_scout" depends on unknown worker "validate_http_compressible_size_slice"`,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:    "wait",
+		Rationale: "graph dependency retry should ask the replanner",
+		Message:   "waiting after graph retry",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	retried, err := service.RetryTask(ctx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != core.TaskPlanning || retried.ObjectiveStatus != core.ObjectiveActive || retried.ObjectivePhase != "retrying" {
+		t.Fatalf("retried = %+v", retried)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if len(brain.states) != 1 {
+		t.Fatalf("replan calls = %d, want 1", len(brain.states))
+	}
+	if got := len(brain.states[0].Results); got != 1 {
+		t.Fatalf("replan result count = %d, want 1", got)
+	}
+	if countEvents(snapshot.Events, core.EventWorkerCreated, taskID) != 1 {
+		t.Fatalf("retry reran a worker; worker.created count = %d", countEvents(snapshot.Events, core.EventWorkerCreated, taskID))
+	}
+	if countTaskStatusErrors(snapshot.Events, taskID, core.TaskFailed, "depends on unknown worker") != 1 {
+		t.Fatalf("retry reran the invalid latest plan")
+	}
+}
+
 func TestServiceRetriesFinalCandidateSelectionFailureFromCompletedGraph(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -15017,6 +15120,26 @@ func countEvents(events []core.Event, eventType core.EventType, taskID string) i
 	count := 0
 	for _, event := range events {
 		if event.Type == eventType && event.TaskID == taskID {
+			count++
+		}
+	}
+	return count
+}
+
+func countTaskStatusErrors(events []core.Event, taskID string, status core.TaskStatus, errorNeedle string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type != core.EventTaskStatus || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+			Error  string          `json:"error"`
+		}
+		if json.Unmarshal(event.Payload, &payload) != nil {
+			continue
+		}
+		if payload.Status == status && strings.Contains(payload.Error, errorNeedle) {
 			count++
 		}
 	}
