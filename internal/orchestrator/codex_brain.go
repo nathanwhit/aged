@@ -890,13 +890,17 @@ func taskPromptPayload(task core.Task) map[string]any {
 	return payload
 }
 
+const builtinCompactSchedulerHeader = "You are the scheduler brain for a target-aware autonomous development orchestrator."
+const builtinReplanHeader = builtinCompactSchedulerHeader
+const builtinReviewHeader = builtinCompactSchedulerHeader
+
 func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
 	payload := replanPromptPayload(task, state)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return task.Prompt
 	}
-	return strings.TrimSpace(b.template) + `	
+	return builtinReplanHeader + `
 
 You are making a dynamic replanning decision after one or more worker turns.
 
@@ -961,7 +965,7 @@ func (b *CodexBrain) completionReviewPrompt(task core.Task, candidate WorkerTurn
 	if err != nil {
 		return task.Prompt
 	}
-	return strings.TrimSpace(b.template) + `
+	return builtinReviewHeader + `
 
 You are reviewing whether the selected final candidate actually satisfies the user's task objective.
 
@@ -995,7 +999,7 @@ func (b *CodexBrain) publicationReviewPrompt(task core.Task, candidate WorkerTur
 	if err != nil {
 		return task.Prompt
 	}
-	return strings.TrimSpace(b.template) + `
+	return builtinReviewHeader + `
 
 You are reviewing whether the orchestrator should publish the selected worker result as a pull request right now.
 
@@ -1029,7 +1033,7 @@ func (b *CodexBrain) codeReviewPrompt(task core.Task, candidate WorkerTurnResult
 	if err != nil {
 		return buildCodeReviewGatePrompt(task, candidate, policy, phase)
 	}
-	return strings.TrimSpace(b.template) + `
+	return builtinReviewHeader + `
 
 You are performing a blocking pre-publication code review for aged.
 
