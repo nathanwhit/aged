@@ -1394,14 +1394,7 @@ func (s *Service) cancelStaleLocalWorkers(ctx context.Context, snapshot core.Sna
 		if err != nil {
 			return err
 		}
-		if _, err := s.append(ctx, core.Event{
-			Type:   core.EventTaskStatus,
-			TaskID: worker.TaskID,
-			Payload: core.MustJSON(map[string]any{
-				"status": core.TaskCanceled,
-				"reason": taskCancelReasonStartupRecovery,
-			}),
-		}); err != nil {
+		if err := s.setTaskStatusWithReason(ctx, worker.TaskID, core.TaskCanceled, taskCancelReasonStartupRecovery); err != nil {
 			return err
 		}
 	}
@@ -2331,10 +2324,10 @@ func taskIDForWorker(snapshot core.Snapshot, workerID string) string {
 }
 
 func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
+	if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
 		return err
 	}
-	return s.setTaskStatus(ctx, taskID, core.TaskPlanning)
+	return s.setTaskStatusAllowingTerminalOverride(ctx, taskID, core.TaskPlanning, "retrying")
 }
 
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
@@ -2517,18 +2510,7 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 		_ = s.CancelWorker(ctx, workerID)
 	}
 
-	_, err = s.append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskCanceled,
-			"reason": taskCancelReasonUser,
-		}),
-	})
-	if err != nil {
-		return err
-	}
-	return nil
+	return s.setTaskStatusWithReason(ctx, taskID, core.TaskCanceled, taskCancelReasonUser)
 }
 
 func (s *Service) ClearTask(ctx context.Context, taskID string) error {
@@ -9735,18 +9717,77 @@ func (s *Service) cleanupWorkspace(ctx context.Context, taskID string, workerID 
 }
 
 func (s *Service) setTaskStatus(ctx context.Context, taskID string, status core.TaskStatus) error {
-	_, err := s.append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": status,
-		}),
+	return s.setTaskStatusChecked(ctx, taskID, status, "", "", false)
+}
+
+func (s *Service) setTaskStatusWithReason(ctx context.Context, taskID string, status core.TaskStatus, reason string) error {
+	return s.setTaskStatusChecked(ctx, taskID, status, reason, "", false)
+}
+
+func (s *Service) setTaskStatusAllowingTerminalOverride(ctx context.Context, taskID string, status core.TaskStatus, reason string) error {
+	return s.setTaskStatusChecked(ctx, taskID, status, reason, "", true)
+}
+
+func (s *Service) failTask(ctx context.Context, taskID string, err error) error {
+	if err == nil {
+		err = errors.New("task failed")
+	}
+	return s.setTaskStatusChecked(ctx, taskID, core.TaskFailed, "", err.Error(), false)
+}
+
+func (s *Service) setTaskStatusChecked(ctx context.Context, taskID string, status core.TaskStatus, reason string, statusError string, allowTerminalOverride bool) error {
+	if status == "" {
+		return errors.New("task status is required")
+	}
+	current, found, err := s.store.TaskStatus(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return eventstore.ErrNotFound
+	}
+	if isTerminalTaskStatus(current) && current != status && !allowTerminalOverride {
+		return nil
+	}
+	payload := map[string]any{"status": status}
+	if strings.TrimSpace(reason) != "" {
+		payload["reason"] = strings.TrimSpace(reason)
+	}
+	if strings.TrimSpace(statusError) != "" {
+		payload["error"] = strings.TrimSpace(statusError)
+	}
+	_, err = s.append(ctx, core.Event{
+		Type:    core.EventTaskStatus,
+		TaskID:  taskID,
+		Payload: core.MustJSON(payload),
 	})
 	return err
 }
 
 func (s *Service) updateTaskObjective(ctx context.Context, taskID string, status core.ObjectiveStatus, phase string, summary string) error {
-	_, err := s.append(ctx, core.Event{
+	return s.updateTaskObjectiveChecked(ctx, taskID, status, phase, summary, false)
+}
+
+func (s *Service) updateTaskObjectiveAllowingTerminalOverride(ctx context.Context, taskID string, status core.ObjectiveStatus, phase string, summary string) error {
+	return s.updateTaskObjectiveChecked(ctx, taskID, status, phase, summary, true)
+}
+
+func (s *Service) updateTaskObjectiveChecked(ctx context.Context, taskID string, status core.ObjectiveStatus, phase string, summary string, allowTerminalOverride bool) error {
+	current, found, err := s.store.TaskStatus(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return eventstore.ErrNotFound
+	}
+	if isTerminalTaskStatus(current) && !allowTerminalOverride {
+		switch status {
+		case core.ObjectiveSatisfied, core.ObjectiveAbandoned:
+		default:
+			return nil
+		}
+	}
+	_, err = s.append(ctx, core.Event{
 		Type:   core.EventTaskObjective,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -9935,18 +9976,6 @@ func (s *Service) setExecutionNodeStatus(ctx context.Context, taskID string, nod
 		}),
 	})
 	return err
-}
-
-func (s *Service) failTask(ctx context.Context, taskID string, err error) error {
-	_, appendErr := s.append(ctx, core.Event{
-		Type:   core.EventTaskStatus,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"status": core.TaskFailed,
-			"error":  err.Error(),
-		}),
-	})
-	return appendErr
 }
 
 func planMetadata(plan Plan) map[string]any {
