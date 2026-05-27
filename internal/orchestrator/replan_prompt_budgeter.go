@@ -167,13 +167,15 @@ func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult, b
 		}
 		recent = append(recent, b.compactWorkerResult(result))
 	}
-	for approxJSONTokens(recent) > b.RecentResultsTokens {
+	recentTokens := newJSONArrayTokenSizer(recent)
+	for recentTokens.tokens() > b.RecentResultsTokens {
 		dropped := false
 		for i, result := range recent {
 			if isHighPriorityPromptResult(result, blocked) {
 				continue
 			}
 			recent = append(recent[:i], recent[i+1:]...)
+			recentTokens.drop(i)
 			dropped = true
 			break
 		}
@@ -216,7 +218,8 @@ func (b ReplanPromptBudgeter) compactWorkerResult(result WorkerTurnResult) Worke
 
 func (b ReplanPromptBudgeter) compactContextLedger(entries []ContextLedgerEntry) []ContextLedgerEntry {
 	compact := compactContextLedgerForPrompt(entries)
-	for approxJSONTokens(compact) > b.ContextLedgerTokens && len(compact) > 0 {
+	compactTokens := newJSONArrayTokenSizer(compact)
+	for compactTokens.tokens() > b.ContextLedgerTokens && len(compact) > 0 {
 		dropIndex := -1
 		for i, entry := range compact {
 			if entry.Error == "" && !strings.Contains(entry.Kind, "candidate") {
@@ -228,6 +231,7 @@ func (b ReplanPromptBudgeter) compactContextLedger(entries []ContextLedgerEntry)
 			dropIndex = 0
 		}
 		compact = append(compact[:dropIndex], compact[dropIndex+1:]...)
+		compactTokens.drop(dropIndex)
 	}
 	return compact
 }
@@ -237,10 +241,13 @@ func (b ReplanPromptBudgeter) compactPullRequestFeedback(items []PullRequestFeed
 	for i := range compact {
 		compact[i].Prompt = truncateStringForPrompt(compact[i].Prompt, tokensToApproxChars(1000))
 	}
-	for approxJSONTokens(compact) > b.PullRequestFeedbackTokens && len(compact) > 0 {
+	compactTokens := newJSONArrayTokenSizer(compact)
+	for compactTokens.tokens() > b.PullRequestFeedbackTokens && len(compact) > 0 {
 		compact[0].Prompt = truncateStringForPrompt(compact[0].Prompt, tokensToApproxChars(250))
-		if approxJSONTokens(compact) > b.PullRequestFeedbackTokens {
+		compactTokens.update(0, compact[0])
+		if compactTokens.tokens() > b.PullRequestFeedbackTokens {
 			compact = compact[1:]
+			compactTokens.drop(0)
 		}
 	}
 	return compact
@@ -259,7 +266,8 @@ func (b ReplanPromptBudgeter) compactArtifacts(artifacts []core.TaskArtifact) []
 		}
 		compact = append(compact, item)
 	}
-	for approxJSONTokens(compact) > b.ArtifactsTokens && len(compact) > 0 {
+	compactTokens := newJSONArrayTokenSizer(compact)
+	for compactTokens.tokens() > b.ArtifactsTokens && len(compact) > 0 {
 		dropIndex := 0
 		for i, artifact := range compact {
 			if artifact.Kind != "worker_result_digest" {
@@ -268,12 +276,14 @@ func (b ReplanPromptBudgeter) compactArtifacts(artifacts []core.TaskArtifact) []
 			}
 		}
 		compact = append(compact[:dropIndex], compact[dropIndex+1:]...)
+		compactTokens.drop(dropIndex)
 	}
 	return compact
 }
 
 func (b ReplanPromptBudgeter) degradeToTotalBudget(payload map[string]any, state ReplanPromptState) ReplanPromptState {
-	for approxJSONTokens(payload) > b.TotalTokens {
+	currentTokens := approxJSONTokens(payload)
+	for currentTokens > b.TotalTokens {
 		switch {
 		case len(state.Artifacts) > 0:
 			state.Artifacts = state.Artifacts[1:]
@@ -288,16 +298,18 @@ func (b ReplanPromptBudgeter) degradeToTotalBudget(payload map[string]any, state
 				state.RecentResults[i].Changes.ChangedFiles = nil
 			}
 			state.RecoveryHint = truncateStringForPrompt(state.RecoveryHint, tokensToApproxChars(250))
+			payload["state"] = state
 			state.PromptBudget.ApproxTokens = approxJSONTokens(payload)
 			return state
 		}
-		state.PromptBudget.ApproxTokens = approxJSONTokens(state)
 		state.PromptBudget.RecentResultCount = len(state.RecentResults)
 		state.PromptBudget.ArtifactCount = len(state.Artifacts)
 		state.PromptBudget.ContextLedgerCount = len(state.ContextLedger)
 		payload["state"] = state
+		currentTokens = approxJSONTokens(payload)
+		state.PromptBudget.ApproxTokens = currentTokens
 	}
-	state.PromptBudget.ApproxTokens = approxJSONTokens(payload)
+	state.PromptBudget.ApproxTokens = currentTokens
 	return state
 }
 
@@ -317,8 +329,10 @@ func compactTaskSteeringForPrompt(items []string) []string {
 	for i := range compact {
 		compact[i] = truncateStringForPrompt(compact[i], tokensToApproxChars(1000))
 	}
-	for approxJSONTokens(compact) > 4000 && len(compact) > 1 {
+	compactTokens := newJSONArrayTokenSizer(compact)
+	for compactTokens.tokens() > 4000 && len(compact) > 1 {
 		compact = compact[1:]
+		compactTokens.drop(0)
 	}
 	return compact
 }
@@ -404,11 +418,76 @@ func approxJSONTokens(value any) int {
 	return approxTokensForString(string(data))
 }
 
+type jsonArrayTokenSizer[T any] struct {
+	nilSlice  bool
+	itemBytes []int
+}
+
+func newJSONArrayTokenSizer[T any](items []T) *jsonArrayTokenSizer[T] {
+	sizer := &jsonArrayTokenSizer[T]{
+		nilSlice:  items == nil,
+		itemBytes: make([]int, 0, len(items)),
+	}
+	for _, item := range items {
+		sizer.itemBytes = append(sizer.itemBytes, jsonEncodedBytes(item))
+	}
+	return sizer
+}
+
+func (s *jsonArrayTokenSizer[T]) tokens() int {
+	return approxTokensForBytes(s.bytes())
+}
+
+func (s *jsonArrayTokenSizer[T]) bytes() int {
+	if s == nil || s.nilSlice {
+		return len("null")
+	}
+	if len(s.itemBytes) == 0 {
+		return len("[]")
+	}
+	total := len("[]") + len(s.itemBytes) - 1
+	for _, bytes := range s.itemBytes {
+		total += bytes
+	}
+	return total
+}
+
+func (s *jsonArrayTokenSizer[T]) drop(index int) {
+	if s == nil || index < 0 || index >= len(s.itemBytes) {
+		return
+	}
+	s.nilSlice = false
+	s.itemBytes = append(s.itemBytes[:index], s.itemBytes[index+1:]...)
+}
+
+func (s *jsonArrayTokenSizer[T]) update(index int, item T) {
+	if s == nil || index < 0 || index >= len(s.itemBytes) {
+		return
+	}
+	s.nilSlice = false
+	s.itemBytes[index] = jsonEncodedBytes(item)
+}
+
+func jsonEncodedBytes(value any) int {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return 0
+	}
+	return len(data)
+}
+
+func approxTokensForBytes(bytes int) int {
+	if bytes <= 0 {
+		return 0
+	}
+	return (bytes + 3) / 4
+}
+
 func approxTokensForString(value string) int {
 	if value == "" {
 		return 0
 	}
-	return (len(value) + 3) / 4
+	return approxTokensForBytes(len(value))
 }
 
 func tokensToApproxChars(tokens int) int {

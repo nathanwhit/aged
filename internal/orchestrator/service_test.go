@@ -12038,6 +12038,46 @@ func TestServiceTaskSteeringQueuesReplanState(t *testing.T) {
 	}
 }
 
+func TestReplanLoopBuildsTurnStateWithSingleSnapshot(t *testing.T) {
+	ctx := context.Background()
+	baseStore := openTestStore(t)
+	defer baseStore.Close()
+
+	task := core.Task{ID: "task-1", Title: "Task", Prompt: "Prompt"}
+	if _, err := baseStore.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": task.Prompt,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &snapshotCountingStore{Store: baseStore}
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "pause after one replan turn",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+
+	store.resetSnapshotCalls()
+	service.replanLoop(ctx, task, Plan{WorkerKind: "mock", Prompt: "initial worker"}, []WorkerTurnResult{{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+		Kind:     "mock",
+		Summary:  "finished benchmark",
+	}})
+
+	if len(brain.states) != 1 {
+		t.Fatalf("replan states = %d, want 1", len(brain.states))
+	}
+	if calls := store.snapshotCalls(); calls != 1 {
+		t.Fatalf("Snapshot calls during one replan turn = %d, want 1", calls)
+	}
+}
+
 func TestServiceWorkerSteeringAnnotatesContinuePlan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -14781,6 +14821,31 @@ func (s *transientAppendErrorStore) failureCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.failures
+}
+
+type snapshotCountingStore struct {
+	eventstore.Store
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *snapshotCountingStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return s.Store.Snapshot(ctx)
+}
+
+func (s *snapshotCountingStore) snapshotCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *snapshotCountingStore) resetSnapshotCalls() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = 0
 }
 
 type startFailRemoteExecutor struct {
