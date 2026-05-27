@@ -2852,7 +2852,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 	var ok bool
 	followUpParentNodeID := ""
 	if len(plan.Workers) > 0 {
-		results, ok, err = s.runInitialWorkerGraph(ctx, task, plan)
+		results, ok, err = s.runInitialWorkerGraph(ctx, task, plan, nil)
 		if err != nil {
 			if s.waitForRecoverableError(ctx, task.ID, "", err) {
 				return
@@ -3533,7 +3533,7 @@ func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Pla
 	results := append([]WorkerTurnResult{}, priorResults...)
 	_ = parentNodeID
 	if len(plan.Workers) > 0 {
-		graphResults, ok, err := s.runInitialWorkerGraph(ctx, task, plan)
+		graphResults, ok, err := s.runInitialWorkerGraph(ctx, task, plan, priorResults)
 		results = append(results, graphResults...)
 		if err != nil || !ok {
 			return results, ok, err
@@ -7139,7 +7139,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			var nextResults []WorkerTurnResult
 			var ok bool
 			if len(next.Workers) > 0 {
-				nextResults, ok, err = s.runInitialWorkerGraph(ctx, task, next)
+				nextResults, ok, err = s.runInitialWorkerGraph(ctx, task, next, results)
 			} else {
 				var result WorkerTurnResult
 				result, err = s.runPlannedWorker(ctx, task, next)
@@ -7589,13 +7589,13 @@ type initialWorkerNode struct {
 	deps   []string
 }
 
-func (s *Service) runInitialWorkerGraph(ctx context.Context, task core.Task, plan Plan) ([]WorkerTurnResult, bool, error) {
-	pending, err := initialWorkerNodes(plan.Workers)
+func (s *Service) runInitialWorkerGraph(ctx context.Context, task core.Task, plan Plan, priorResults []WorkerTurnResult) ([]WorkerTurnResult, bool, error) {
+	completed := completedWorkerDependencies(priorResults)
+	pending, err := initialWorkerNodes(plan.Workers, completed)
 	if err != nil {
 		return nil, false, err
 	}
 	results := []WorkerTurnResult{}
-	completed := map[string]WorkerTurnResult{}
 	for len(pending) > 0 {
 		ready := readyInitialWorkers(pending, completed)
 		if len(ready) == 0 {
@@ -7620,7 +7620,7 @@ func (s *Service) runInitialWorkerGraph(ctx context.Context, task core.Task, pla
 	return results, true, nil
 }
 
-func initialWorkerNodes(workers []WorkerRequest) (map[string]initialWorkerNode, error) {
+func initialWorkerNodes(workers []WorkerRequest, completed map[string]WorkerTurnResult) (map[string]initialWorkerNode, error) {
 	nodes := map[string]initialWorkerNode{}
 	for index, worker := range workers {
 		id := workerRequestID(worker, index)
@@ -7639,7 +7639,9 @@ func initialWorkerNodes(workers []WorkerRequest) (map[string]initialWorkerNode, 
 	for _, node := range nodes {
 		for _, dep := range node.deps {
 			if _, ok := nodes[dep]; !ok {
-				return nil, fmt.Errorf("worker %q depends on unknown worker %q", node.id, dep)
+				if _, ok := completed[dep]; !ok {
+					return nil, fmt.Errorf("worker %q depends on unknown worker %q", node.id, dep)
+				}
 			}
 			if dep == node.id {
 				return nil, fmt.Errorf("worker %q depends on itself", node.id)
