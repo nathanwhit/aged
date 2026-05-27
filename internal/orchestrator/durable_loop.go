@@ -291,6 +291,27 @@ func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, c
 	return s.runPlannedWorker(ctx, task, plan)
 }
 
+func (s *Service) restoreDurableLoopFullPromptForDegradedResume(ctx context.Context, task core.Task, plan *Plan) {
+	if plan == nil || stringMetadata(plan.Metadata, "retryContextKind") != "durable_loop" {
+		return
+	}
+	iteration := intMetadata(plan.Metadata, "loopIteration")
+	if iteration <= 0 {
+		return
+	}
+	config := durableLoopConfigFromTask(task, s.runners)
+	if workerKind := stringMetadata(plan.Metadata, "loopWorkerKind"); workerKind != "" {
+		config.WorkerKind = workerKind
+	}
+	if role := stringMetadata(plan.Metadata, "loopRole"); role != "" {
+		config.Role = role
+	}
+	if reasoning := stringMetadata(plan.Metadata, "reasoningEffort"); reasoning != "" {
+		config.Reasoning = reasoning
+	}
+	plan.Prompt = durableLoopPrompt(task, config, iteration, s.taskContextLedger(ctx, task.ID))
+}
+
 func durableLoopPrompt(task core.Task, config durableLoopConfig, iteration int, ledger []ContextLedgerEntry) string {
 	var builder strings.Builder
 	builder.WriteString("# Durable Agent Loop\n\n")

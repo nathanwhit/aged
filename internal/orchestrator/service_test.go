@@ -12889,6 +12889,119 @@ func TestServiceRetryReusesRemoteWorkerTargetWorkspaceAndSession(t *testing.T) {
 	}
 }
 
+func TestServiceRestoresDurableLoopPromptWhenRemoteRetryWorkspaceUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-remote-loop-degraded-resume"
+	previousWorkerID := "worker-remote-loop-old"
+	task := core.Task{
+		ID:     taskID,
+		Title:  "Loop",
+		Prompt: "Keep looking for reliability improvements.",
+		Metadata: core.MustJSON(map[string]any{
+			"executionMode":       "loop",
+			"loopWorkerKind":      "codex",
+			"loopIntervalSeconds": 0,
+		}),
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(map[string]any{
+			"workerId":      previousWorkerID,
+			"workerKind":    "codex",
+			"nodeId":        "node-remote-loop-old",
+			"targetId":      "vm-loop",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-old",
+			"remoteRunDir":  "/runs/old",
+			"remoteWorkDir": "/repo-old",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerWorkspace,
+		TaskID:   taskID,
+		WorkerID: previousWorkerID,
+		Payload: core.MustJSON(PreparedWorkspace{
+			Root:          "/runs/old",
+			CWD:           "/repo-old",
+			SourceRoot:    "/repo-old",
+			WorkspaceName: "aged-old",
+			Mode:          "remote",
+			VCSType:       "ssh",
+			TaskID:        taskID,
+			WorkerID:      previousWorkerID,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:           "vm-loop",
+		Kind:         TargetKindSSH,
+		Host:         "loop-vm",
+		WorkDir:      "/repo-default",
+		WorkRoot:     "/runs",
+		CheckoutRoot: "/checkouts",
+		Capacity:     TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+	}})
+	runner := &recordingBuildRunner{kind: "codex"}
+	executor := &fakeRemoteExecutor{directoryErr: exitCodeError{code: 1}}
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+
+	_, err := service.runPlannedWorker(ctx, task, Plan{
+		WorkerKind: "codex",
+		Prompt:     "compact provider-resume prompt",
+		Metadata: map[string]any{
+			"executionMode":         "loop",
+			"loopIteration":         2,
+			"loopRole":              "worker_loop",
+			"loopWorkerKind":        "codex",
+			"retryContextKind":      "durable_loop",
+			"retryFromWorkerID":     previousWorkerID,
+			"retryResumeSessionID":  "thread-remote-loop",
+			"retryRemoteSession":    "aged-old",
+			"retryRemoteRunDir":     "/runs/old",
+			"retryRemoteWorkDir":    "/repo-old",
+			"retryTargetID":         "vm-loop",
+			"retryTargetKind":       "ssh",
+			"targetSelectionSource": "retry",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.spec.WorkDir == "/repo-old" {
+		t.Fatalf("remote retry reused unavailable work dir %q", runner.spec.WorkDir)
+	}
+	if runner.spec.ResumeSessionID != "" {
+		t.Fatalf("remote retry session = %q, want stripped degraded resume", runner.spec.ResumeSessionID)
+	}
+	if !strings.Contains(runner.spec.Prompt, "# Durable Agent Loop") || !strings.Contains(runner.spec.Prompt, "Keep looking for reliability improvements.") {
+		t.Fatalf("remote retry prompt did not restore durable loop prompt:\n%s", runner.spec.Prompt)
+	}
+	if strings.Contains(runner.spec.Prompt, "compact provider-resume prompt") {
+		t.Fatalf("remote retry prompt kept compact resume prompt after degradation:\n%s", runner.spec.Prompt)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerCreated, taskID, `"retryWorkspaceReused":false`) {
+		t.Fatalf("missing remote retry workspace reuse failure metadata")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventWorkerCreated, taskID, `"retryResumeSessionID":"thread-remote-loop"`) {
+		t.Fatalf("retry resume session metadata survived degraded remote resume")
+	}
+}
+
 func TestServiceIgnoresSchedulerTargetLabels(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
