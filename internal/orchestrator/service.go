@@ -101,6 +101,9 @@ type Service struct {
 	workerCaps  map[string]worker.Capabilities
 
 	steeringRestarts map[string]struct{}
+
+	retainedArtifactCleanup        RetainedWorkspaceArtifactCleanupOptions
+	retainedArtifactCleanupEnabled bool
 }
 
 const (
@@ -1429,6 +1432,20 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
 	})
 	_ = s.recordWorkerArtifacts(ctx, node.TaskID, node.WorkerID, node.WorkerKind, runState, changes)
+	s.cleanupTerminalWorkspaceArtifacts(ctx, node.TaskID, node.WorkerID, PreparedWorkspace{
+		Root:            run.RunDir,
+		CWD:             run.WorkDir,
+		WorkspaceName:   run.Session,
+		Mode:            "remote",
+		VCSType:         "ssh",
+		CleanupPolicy:   string(WorkspaceCleanupRetain),
+		WorkerID:        node.WorkerID,
+		TaskID:          node.TaskID,
+		TargetID:        run.Target.ID,
+		TargetKind:      string(run.Target.Kind),
+		SharedRoot:      run.SharedRoot,
+		SharedWorkerDir: run.SharedWorkerDir,
+	}, workspaceResultForWorkerStatus(workerStatus))
 	if workerStatus == core.WorkerCanceled {
 		if snapshot, err := s.store.Snapshot(ctx); err == nil && !taskHasActiveWorkers(snapshot, node.TaskID) {
 			_ = s.setTaskStatus(ctx, node.TaskID, core.TaskCanceled)
@@ -3872,6 +3889,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
+		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
 		return runState.turnResult(workerID, plan, status, err, changes), nil
 	}
 
@@ -3907,6 +3925,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		workspaceResult = WorkspaceResultFailed
 	}
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
+	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
 	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
 }
 
@@ -4338,6 +4357,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			return WorkerTurnResult{}, completionErr
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, WorkspaceResultFailed)
 		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {
@@ -4346,6 +4366,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 			return WorkerTurnResult{}, completionErr
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
+		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, WorkspaceResultFailed)
 		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	sshRunner := s.sshRunner
@@ -4373,6 +4394,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	if err := sshRunner.drainRemoteCallbacks(ctx, remoteRun, sink); err != nil {
 		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain terminal remote worker callbacks: " + err.Error()})
 	}
+	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResultForWorkerStatus(workerStatus))
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
 }
 

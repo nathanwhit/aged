@@ -596,6 +596,52 @@ func (r SSHRunner) cleanupRemoteArtifactDir(ctx context.Context, target TargetCo
 	return item
 }
 
+func (r SSHRunner) cleanupRemoteDirectory(ctx context.Context, target TargetConfig, dir string, name string, dryRun bool) ArtifactDirCleanup {
+	item := ArtifactDirCleanup{Name: name, DryRun: dryRun}
+	path, err := retainedRemoteDirectoryPath(dir)
+	if err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	item.Path = path
+	if r.Executor == nil {
+		r.Executor = execRemoteExecutor{}
+	}
+	out, err := r.runPollCommand(ctx, target, remoteCleanupDirectoryScript(path, dryRun))
+	if err != nil {
+		detail := strings.TrimSpace(out)
+		if detail != "" {
+			item.Error = fmt.Sprintf("%v: %s", err, detail)
+		} else {
+			item.Error = err.Error()
+		}
+		return item
+	}
+	values := parseProbeValues(out)
+	if remotePath := strings.TrimSpace(values["path"]); remotePath != "" {
+		item.Path = remotePath
+	}
+	item.Bytes = parseProbeInt(values["bytes"])
+	switch values["status"] {
+	case "missing":
+		item.Reason = "shared worker scratch directory does not exist"
+	case "symlink":
+		item.Reason = "shared worker scratch directory is a symlink"
+	case "not_directory":
+		item.Reason = "shared worker scratch path is not a directory"
+	case "dry_run":
+		item.WouldRemove = true
+		item.Reason = "dry run"
+	case "removed":
+		item.Removed = true
+	case "error":
+		item.Error = nonEmpty(values["error"], values["reason"])
+	default:
+		item.Error = "unexpected remote directory cleanup response"
+	}
+	return item
+}
+
 func retainedRemoteArtifactPath(root string, name string) (string, error) {
 	root = path.Clean(strings.TrimSpace(root))
 	name = strings.TrimSpace(name)
@@ -616,6 +662,20 @@ func retainedRemoteArtifactPath(root string, name string) (string, error) {
 		return "", fmt.Errorf("artifact path escapes workspace root: %s", name)
 	}
 	return cleanPath, nil
+}
+
+func retainedRemoteDirectoryPath(dir string) (string, error) {
+	dir = path.Clean(strings.TrimSpace(dir))
+	if dir == "" || dir == "." {
+		return "", errors.New("remote directory is required")
+	}
+	if !path.IsAbs(dir) {
+		return "", fmt.Errorf("remote directory must be absolute: %s", dir)
+	}
+	if dir == "/" {
+		return "", errors.New("remote directory must not be filesystem root")
+	}
+	return dir, nil
 }
 
 func remoteCleanupArtifactScript(root string, name string, dryRun bool) string {
@@ -649,6 +709,26 @@ printf 'bytes=%%s\n' "$bytes"
 if [ "$dry_run" = 1 ]; then printf 'status=dry_run\n'; exit 0; fi
 rm -rf -- "$artifact"
 printf 'status=removed\n'`, shellQuote(root), shellQuote(name), shellQuote(dryRunValue))
+}
+
+func remoteCleanupDirectoryScript(dir string, dryRun bool) string {
+	dryRunValue := "0"
+	if dryRun {
+		dryRunValue = "1"
+	}
+	return fmt.Sprintf(`set -eu
+dir=%[1]s
+dry_run=%[2]s
+printf 'path=%%s\n' "$dir"
+if [ ! -e "$dir" ]; then printf 'status=missing\n'; exit 0; fi
+if [ -L "$dir" ]; then printf 'status=symlink\n'; exit 0; fi
+if [ ! -d "$dir" ]; then printf 'status=not_directory\n'; exit 0; fi
+bytes="$(du -sk "$dir" 2>/dev/null | awk 'NR==1 { print $1 * 1024 }')"
+bytes="${bytes:-0}"
+printf 'bytes=%%s\n' "$bytes"
+if [ "$dry_run" = 1 ]; then printf 'status=dry_run\n'; exit 0; fi
+rm -rf -- "$dir"
+printf 'status=removed\n'`, shellQuote(dir), shellQuote(dryRunValue))
 }
 
 func (r SSHRunner) Probe(ctx context.Context, target TargetConfig) (core.TargetHealth, core.TargetResources) {

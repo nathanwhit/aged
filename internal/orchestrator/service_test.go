@@ -11794,7 +11794,13 @@ func TestServiceWorkerSteeringPreventsFallbackCompletionWhenReplannerUnavailable
 		t.Fatal(err)
 	}
 
-	snapshot := waitForEvent(t, store, core.EventApprovalNeeded, "task-1")
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return taskStatus(snapshot, "task-1") == core.TaskWaiting &&
+			hasEvent(snapshot.Events, core.EventApprovalNeeded, "task-1", "") &&
+			eventPayloadContains(snapshot.Events, core.EventTaskReplanned, "task-1", "queued worker steering must be handled")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task did not reach queued steering approval state; status = %q events = %+v", taskStatus(snapshot, "task-1"), snapshot.Events)
+	})
 	if taskStatus(snapshot, "task-1") != core.TaskWaiting {
 		t.Fatalf("task status = %q, want waiting", taskStatus(snapshot, "task-1"))
 	}
