@@ -126,12 +126,56 @@ func TestTerminalWorkspaceArtifactCleanupRemovesNewTargetWhenEnabled(t *testing.
 	if _, err := os.Stat(filepath.Join(repo, "target")); !os.IsNotExist(err) {
 		t.Fatalf("target stat err = %v, want not exist", err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace.SharedWorkerDir, "cargo-target", "release-lite", "artifact.bin")); err != nil {
-		t.Fatalf("shared worker scratch was removed by terminal cleanup: %v", err)
+	if _, err := os.Stat(filepath.Join(workspace.SharedWorkerDir, "cargo-target", "release-lite", "artifact.bin")); !os.IsNotExist(err) {
+		t.Fatalf("shared worker scratch stat err = %v, want not exist", err)
 	}
 	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-terminal-clean")
-	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 1 || !cleanup.ArtifactDirs[0].Removed {
-		t.Fatalf("cleanup event = %+v, want terminal artifact cleanup without shared scratch removal", cleanup)
+	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 2 || !cleanup.ArtifactDirs[0].Removed || !cleanup.ArtifactDirs[1].Removed {
+		t.Fatalf("cleanup event = %+v, want terminal artifact and shared scratch cleanup", cleanup)
+	}
+	if cleanup.ArtifactDirs[1].Name != "shared_worker_scratch" {
+		t.Fatalf("second cleanup item = %+v, want shared worker scratch", cleanup.ArtifactDirs[1])
+	}
+}
+
+func TestTerminalWorkspaceArtifactCleanupRemovesNewRemoteSharedWorkerScratchWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+	workspace := PreparedWorkspace{
+		Root:            "/runs/worker-remote-clean",
+		CWD:             "/runs/worker-remote-clean/repo",
+		SourceRoot:      "/repo",
+		WorkspaceName:   "aged-worker-remote-clean",
+		Mode:            "remote",
+		VCSType:         "ssh",
+		CleanupPolicy:   string(WorkspaceCleanupRetain),
+		TaskID:          "task-remote-clean",
+		WorkerID:        "worker-remote-clean",
+		TargetID:        "vm-clean",
+		TargetKind:      string(TargetKindSSH),
+		SharedRoot:      "/runs/shared/task-remote-clean",
+		SharedWorkerDir: "/runs/shared/task-remote-clean/workers/worker-remote-clean",
+	}
+	executor := &retainedArtifactRemoteExecutor{}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-clean",
+		Kind:     TargetKindSSH,
+		Host:     "vm-clean",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor})
+	service.SetRetainedWorkspaceArtifactCleanup(RetainedWorkspaceArtifactCleanupOptions{MinAge: 24 * time.Hour})
+
+	service.cleanupTerminalWorkspaceArtifacts(ctx, workspace.TaskID, workspace.WorkerID, workspace, WorkspaceResultSucceeded)
+
+	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-remote-clean")
+	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 2 || !cleanup.ArtifactDirs[0].Removed || !cleanup.ArtifactDirs[1].Removed {
+		t.Fatalf("cleanup event = %+v, want terminal remote target and shared scratch cleanup", cleanup)
+	}
+	if cleanup.ArtifactDirs[1].Path != "/runs/shared/task-remote-clean/workers/worker-remote-clean" {
+		t.Fatalf("remote shared worker path = %q", cleanup.ArtifactDirs[1].Path)
 	}
 }
 

@@ -119,7 +119,11 @@ func (r SSHRunner) PrepareSharedWorkspace(ctx context.Context, target TargetConf
 		WorkerDir:    path.Join(root, "workers", shortID(workerID)),
 	}
 	script := "mkdir -p " + shellQuote(shared.Root) + " " + shellQuote(shared.ArtifactsDir) + " " + shellQuote(shared.WorkersDir) + " " + shellQuote(shared.WorkerDir)
-	if _, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", script)); err != nil {
+	if output, err := r.Executor.Run(ctx, sshArgs(target, "sh", "-lc", script)); err != nil {
+		detail := strings.TrimSpace(output)
+		if detail != "" {
+			return SharedWorkspace{}, fmt.Errorf("%w: %s", err, detail)
+		}
 		return SharedWorkspace{}, err
 	}
 	return shared, nil

@@ -8562,9 +8562,9 @@ func TestServiceRetriesTransientFailedWorkerCompletedAppendFailure(t *testing.T)
 		events: []worker.Event{{
 			Kind:   worker.EventLog,
 			Stream: "stderr",
-			Text:   "cargo test failed: No space left on device",
+			Text:   "cargo test failed: assertion mismatch",
 		}},
-		err: errors.New("No space left on device (os error 28)"),
+		err: errors.New("assertion mismatch"),
 	}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -8583,7 +8583,7 @@ func TestServiceRetriesTransientFailedWorkerCompletedAppendFailure(t *testing.T)
 		t.Fatalf("worker.completed count = %d, want 1", countEvents(snapshot.Events, core.EventWorkerCompleted, task.ID))
 	}
 	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
-	if payload.Status != core.WorkerFailed || payload.LogCount != 1 || !strings.Contains(payload.Error, "No space left on device") {
+	if payload.Status != core.WorkerFailed || payload.LogCount != 1 || !strings.Contains(payload.Error, "assertion mismatch") {
 		t.Fatalf("payload = %+v", payload)
 	}
 }
