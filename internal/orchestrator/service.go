@@ -9081,6 +9081,12 @@ func latestOpenPullRequestFollowUpEvent(snapshot core.Snapshot, taskID string) (
 }
 
 func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, results []WorkerTurnResult) bool {
+	if len(results) == 0 {
+		return false
+	}
+	if latestTaskFailureMatches(snapshot, taskID, isGraphDependencyFailure) {
+		return true
+	}
 	if len(candidateResults(results)) == 0 {
 		return false
 	}
@@ -9090,14 +9096,17 @@ func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, resu
 			strings.Contains(errorText, "final candidate") ||
 			strings.Contains(errorText, "selected final candidate") ||
 			strings.Contains(errorText, "multiple competing final candidates") ||
-			strings.Contains(errorText, "depends on unknown spawn") ||
-			strings.Contains(errorText, "depends on unknown worker") ||
 			strings.Contains(errorText, "worker command failed")
 	}) {
 		return true
 	}
 	latest := latestWorkerResult(results)
 	return latest.Status == core.WorkerFailed || latest.Status == core.WorkerCanceled
+}
+
+func isGraphDependencyFailure(errorText string) bool {
+	return strings.Contains(errorText, "depends on unknown spawn") ||
+		strings.Contains(errorText, "depends on unknown worker")
 }
 
 func latestTaskFailureMatches(snapshot core.Snapshot, taskID string, match func(string) bool) bool {
