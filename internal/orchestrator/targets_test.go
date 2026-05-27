@@ -402,6 +402,21 @@ func TestSSHRunnerPreparesSharedWorkspaceAndExportsEnv(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPrepareSharedWorkspaceIncludesRemoteOutputOnError(t *testing.T) {
+	ctx := context.Background()
+	executor := &fakeRemoteExecutor{
+		sharedOutput: "mkdir: cannot create directory '/runs/shared/task-1234567/workers/worker-abcde': No space left on device\n",
+		sharedErr:    exitCodeError{code: 1},
+	}
+	runner := SSHRunner{Executor: executor}
+	target := TargetConfig{ID: "vm", Host: "vm", WorkRoot: "/runs"}
+
+	_, err := runner.PrepareSharedWorkspace(ctx, target, "task-1234567890", "worker-abcdef")
+	if err == nil || !strings.Contains(err.Error(), "No space left on device") {
+		t.Fatalf("err = %v, want remote setup output", err)
+	}
+}
+
 func TestSSHRunnerPollsLargeRemoteLogLine(t *testing.T) {
 	largeLine := strings.Repeat("r", 2*1024*1024)
 	executor := &scriptedPollExecutor{
@@ -1431,6 +1446,8 @@ type fakeRemoteExecutor struct {
 	directoryErr    error
 	callbackOutput  string
 	input           string
+	sharedOutput    string
+	sharedErr       error
 }
 
 type gatedRemoteStatusExecutor struct {
@@ -1442,6 +1459,8 @@ func (e *fakeRemoteExecutor) Run(_ context.Context, argv []string) (string, erro
 	e.commands = append(e.commands, append([]string(nil), argv...))
 	joined := strings.Join(argv, " ")
 	switch {
+	case e.sharedErr != nil && strings.Contains(joined, "/shared/") && strings.Contains(joined, "mkdir -p"):
+		return e.sharedOutput, e.sharedErr
 	case e.prepareErr != nil && strings.Contains(joined, "git clone"):
 		return e.prepareOutput, e.prepareErr
 	case e.callbackOutput != "" && strings.Contains(joined, "AGED-CALLBACK-FILE"):

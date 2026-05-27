@@ -270,14 +270,12 @@ func cleanupLocalRetainedWorkspaceArtifacts(ctx context.Context, worker core.Wor
 			cleanup.BytesRemoved += item.Bytes
 		}
 	}
-	if !options.IgnoreMinAge {
-		item := cleanupLocalSharedWorkerDir(workspace, options.DryRun)
-		if item.Path != "" {
-			cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
-			if item.Removed {
-				cleanup.Cleaned = true
-				cleanup.BytesRemoved += item.Bytes
-			}
+	item := cleanupLocalSharedWorkerDir(workspace, options.DryRun)
+	if item.Path != "" {
+		cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
+		if item.Removed {
+			cleanup.Cleaned = true
+			cleanup.BytesRemoved += item.Bytes
 		}
 	}
 	if !cleanup.Cleaned {
@@ -330,7 +328,7 @@ func (s *Service) cleanupRemoteRetainedWorkspaceArtifacts(ctx context.Context, w
 			cleanup.BytesRemoved += item.Bytes
 		}
 	}
-	if dir := strings.TrimSpace(workspace.SharedWorkerDir); dir != "" && !options.IgnoreMinAge {
+	if dir := strings.TrimSpace(workspace.SharedWorkerDir); dir != "" {
 		safeDir, err := retainedRemoteSharedWorkerDir(workspace)
 		if err != nil {
 			item := ArtifactDirCleanup{Name: "shared_worker_scratch", Path: dir, DryRun: options.DryRun, Error: err.Error()}

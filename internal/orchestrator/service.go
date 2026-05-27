@@ -6824,6 +6824,11 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 			any:     []string{"perf_event_paranoid", "kernel.perf_event", "perf_event_open", "failed to open perf", "debug symbols", "dwarf"},
 		},
 		{
+			reason:  "target_storage_full",
+			summary: "The execution target is out of disk space or quota.",
+			any:     []string{"no space left on device", "disk quota exceeded"},
+		},
+		{
 			reason:  "ssh_signing_agent_failed",
 			summary: "PR publication is blocked by the local SSH signing agent.",
 			any:     []string{"signing error", "sign_and_send_pubkey", "ssh sign failed", "1password: agent returned an error", "failed to fill whole buffer", "could not write object of type commit"},
