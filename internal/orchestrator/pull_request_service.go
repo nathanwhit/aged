@@ -2044,22 +2044,16 @@ func latestPullRequestFollowUpIsQueued(snapshot core.Snapshot, taskID string) bo
 }
 
 func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
-	latestPlanned := int64(0)
 	pullRequests := map[string]core.PullRequest{}
 	for _, pr := range snapshot.PullRequests {
 		if pr.TaskID == taskID {
 			pullRequests[pr.ID] = pr
 		}
 	}
-	for _, event := range snapshot.Events {
-		if event.TaskID == taskID && event.Type == core.EventTaskPlanned && event.ID > latestPlanned {
-			latestPlanned = event.ID
-		}
-	}
 	var items []PullRequestFeedbackItem
 	itemByPullRequest := map[string]int{}
 	for _, event := range snapshot.Events {
-		if event.TaskID != taskID || event.Type != core.EventPRFollowUp || event.ID <= latestPlanned {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
 			continue
 		}
 		var payload struct {
@@ -2112,6 +2106,9 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 			FeedbackSignature: payload.FeedbackSignature,
 			Prompt:            payload.Prompt,
 		}
+		if pullRequestFeedbackHandledAfterEvent(snapshot, event.ID, item) {
+			continue
+		}
 		if index, ok := itemByPullRequest[item.PullRequestID]; ok {
 			items[index] = item
 			continue
@@ -2132,21 +2129,30 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 	}
 	currentSignature := pullRequestFeedbackSignature(current.Metadata)
 	hasUntriggeredFeedback := currentSignature != "" && pullRequestHasUntriggeredFeedback(current)
-	latestPlanned := int64(0)
 	for _, event := range snapshot.Events {
-		if event.TaskID == taskID && event.Type == core.EventTaskPlanned && event.ID > latestPlanned {
-			latestPlanned = event.ID
-		}
-	}
-	for _, event := range snapshot.Events {
-		if event.TaskID != taskID || event.Type != core.EventPRFollowUp || event.ID <= latestPlanned {
+		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
 			continue
 		}
 		var payload struct {
 			ID                string `json:"id"`
+			Repo              string `json:"repo"`
+			Number            int    `json:"number"`
+			URL               string `json:"url"`
+			Branch            string `json:"branch"`
 			FeedbackSignature string `json:"feedbackSignature"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || payload.ID != prID {
+			continue
+		}
+		item := PullRequestFeedbackItem{
+			PullRequestID:     payload.ID,
+			Repo:              nonEmpty(payload.Repo, current.Repo),
+			Number:            firstNonZero(payload.Number, current.Number),
+			URL:               nonEmpty(payload.URL, current.URL),
+			Branch:            nonEmpty(payload.Branch, current.Branch),
+			FeedbackSignature: payload.FeedbackSignature,
+		}
+		if pullRequestFeedbackHandledAfterEvent(snapshot, event.ID, item) {
 			continue
 		}
 		signature := strings.TrimSpace(payload.FeedbackSignature)
@@ -2155,6 +2161,58 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 		}
 	}
 	return false
+}
+
+func pullRequestFeedbackHandledAfterEvent(snapshot core.Snapshot, followUpEventID int64, item PullRequestFeedbackItem) bool {
+	for _, event := range snapshot.Events {
+		if event.ID <= followUpEventID || event.Type != core.EventTaskAction {
+			continue
+		}
+		var payload struct {
+			Kind          string         `json:"kind"`
+			Status        string         `json:"status"`
+			PullRequestID string         `json:"pullRequestId"`
+			Inputs        map[string]any `json:"inputs"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			continue
+		}
+		if strings.EqualFold(payload.Status, "started") || strings.EqualFold(payload.Status, "waiting") || strings.EqualFold(payload.Status, "continued") {
+			continue
+		}
+		switch strings.TrimSpace(payload.Kind) {
+		case "watch_pull_requests":
+			if pullRequestFeedbackActionMatches(item, payload.PullRequestID, payload.Inputs) {
+				return true
+			}
+		case "update_pull_request":
+			if strings.TrimSpace(payload.Status) == "" && pullRequestFeedbackActionMatches(item, payload.PullRequestID, payload.Inputs) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pullRequestFeedbackActionMatches(item PullRequestFeedbackItem, pullRequestID string, inputs map[string]any) bool {
+	if strings.TrimSpace(pullRequestID) != "" && pullRequestID == item.PullRequestID {
+		return true
+	}
+	id := stringMetadata(inputs, "id")
+	if id != "" && id == item.PullRequestID {
+		return true
+	}
+	url := stringMetadata(inputs, "url")
+	if url != "" && strings.EqualFold(url, item.URL) {
+		return true
+	}
+	repo := stringMetadata(inputs, "repo")
+	number := intMetadata(inputs, "number")
+	if repo != "" && number > 0 && strings.EqualFold(repo, item.Repo) && number == item.Number {
+		return true
+	}
+	branch := stringMetadata(inputs, "branch")
+	return branch != "" && branch == item.Branch && (repo == "" || strings.EqualFold(repo, item.Repo))
 }
 
 func (s *Service) pendingPullRequestFeedback(ctx context.Context, taskID string) []PullRequestFeedbackItem {
@@ -2220,7 +2278,7 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 	if strings.TrimSpace(pr.Branch) != "" {
 		plan.Metadata["pullRequestBranch"] = pr.Branch
 		if stringMetadata(plan.Metadata, "workspaceBaseRef") == "" {
-			plan.Metadata["workspaceBaseRef"] = pr.Branch
+			plan.Metadata["workspaceBaseRef"] = pullRequestWorkspaceRef(pr)
 			plan.Metadata["workspaceBaseRefKind"] = "pull_request_head"
 		}
 		if strings.EqualFold(stringMetadata(plan.Metadata, "workspaceBaseRefKind"), "pull_request_head") &&
@@ -2235,6 +2293,13 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 		plan.Metadata["pullRequestURL"] = pr.URL
 	}
 	return plan
+}
+
+func pullRequestWorkspaceRef(pr core.PullRequest) string {
+	if pr.Number > 0 && strings.TrimSpace(pr.Repo) != "" {
+		return fmt.Sprintf("refs/pull/%d/head", pr.Number)
+	}
+	return pr.Branch
 }
 
 func appendPullRequestFollowUpWorkerInstruction(prompt string, pr core.PullRequest) string {

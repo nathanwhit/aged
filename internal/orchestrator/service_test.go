@@ -2746,8 +2746,8 @@ func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *te
 		State:  "OPEN",
 	})
 
-	if got := stringMetadata(plan.Metadata, "workspaceBaseRef"); got != "codex/slice" {
-		t.Fatalf("workspaceBaseRef = %q, want PR branch", got)
+	if got := stringMetadata(plan.Metadata, "workspaceBaseRef"); got != "refs/pull/7/head" {
+		t.Fatalf("workspaceBaseRef = %q, want fetchable PR head ref", got)
 	}
 	if got := stringMetadata(plan.Metadata, "workspaceBaseRefKind"); got != "pull_request_head" {
 		t.Fatalf("workspaceBaseRefKind = %q, want pull_request_head", got)
@@ -3681,7 +3681,9 @@ func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing
 	}
 	runTestGit(t, repo, "add", "fix.txt")
 	runTestGit(t, repo, "-c", "user.name=aged-test", "-c", "user.email=aged-test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "pr head")
+	prHead := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
 	runTestGit(t, repo, "push", "-u", "origin", "codex/aged-test")
+	runTestGit(t, remote, "update-ref", "refs/pull/7/head", prHead)
 	runTestGit(t, repo, "checkout", "main")
 
 	taskID := "task-pr-head-followup"
@@ -3763,10 +3765,10 @@ func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing
 	service.resumeWaitingTask(ctx, taskID, "GitHub pull request owner/repo#7 needs follow-up work.")
 
 	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
-	if workspace.baseRevision != "refs/remotes/origin/codex/aged-test" {
+	if workspace.baseRevision != "refs/remotes/origin/pull/7/head" {
 		t.Fatalf("workspace base revision = %q, want PR head", workspace.baseRevision)
 	}
-	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"workspaceBaseRef":"codex/aged-test"`) {
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"workspaceBaseRef":"refs/pull/7/head"`) {
 		t.Fatalf("missing PR head workspace metadata")
 	}
 	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, "Decide whether a GitHub PR comment is warranted") {
