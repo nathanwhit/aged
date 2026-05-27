@@ -6462,6 +6462,32 @@ func TestServiceRetriesGraphDependencyFailureWithoutCandidateChanges(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-1",
+			"repo":   "owner/repo",
+			"number": 7,
+			"url":    "https://github.com/owner/repo/pull/7",
+			"branch": "codex/aged-test",
+			"base":   "main",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(invalidLatestPlan)}); err != nil {
 		t.Fatal(err)
 	}

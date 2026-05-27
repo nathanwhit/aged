@@ -2069,6 +2069,22 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		})
 		return task, nil
 	}
+	if task.Status == core.TaskFailed && latestTaskFailureMatches(snapshot, taskID, isGraphDependencyFailure) {
+		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
+		if graphErr == nil && taskFailureRecoverableFromGraph(snapshot, taskID, results) {
+			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
+				return core.Task{}, err
+			}
+			task.Status = core.TaskPlanning
+			task.Error = ""
+			task.ObjectiveStatus = core.ObjectiveActive
+			task.ObjectivePhase = "retrying"
+			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+				s.retryGraphTask(taskCtx, task, initial, results)
+			})
+			return task, nil
+		}
+	}
 	if task.Status == core.TaskFailed {
 		plan, ok, err := retryPullRequestFollowUpPlan(snapshot, taskID)
 		if err != nil {
