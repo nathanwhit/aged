@@ -16,8 +16,8 @@ import (
 	"aged/internal/core"
 )
 
-const defaultRetainedArtifactCleanupMinAge = 24 * time.Hour
-const defaultRetainedArtifactCleanupInterval = time.Hour
+const defaultRetainedArtifactCleanupMinAge = time.Hour
+const defaultRetainedArtifactCleanupInterval = 10 * time.Minute
 
 var defaultRetainedArtifactDirNames = []string{"target"}
 
@@ -26,6 +26,7 @@ type RetainedWorkspaceArtifactCleanupOptions struct {
 	DryRun           bool
 	ArtifactDirNames []string
 	Now              time.Time
+	IgnoreMinAge     bool
 }
 
 type RetainedWorkspaceArtifactCleanupReport struct {
@@ -43,6 +44,7 @@ func (s *Service) StartRetainedWorkspaceArtifactCleanup(ctx context.Context, int
 	if s == nil {
 		return
 	}
+	s.SetRetainedWorkspaceArtifactCleanup(options)
 	if interval <= 0 {
 		interval = defaultRetainedArtifactCleanupInterval
 	}
@@ -59,6 +61,28 @@ func (s *Service) StartRetainedWorkspaceArtifactCleanup(ctx context.Context, int
 			}
 		}
 	}()
+}
+
+func (s *Service) SetRetainedWorkspaceArtifactCleanup(options RetainedWorkspaceArtifactCleanupOptions) {
+	if s == nil {
+		return
+	}
+	options = normalizeRetainedArtifactCleanupOptions(options)
+	s.mu.Lock()
+	s.retainedArtifactCleanup = options
+	s.retainedArtifactCleanupEnabled = true
+	s.mu.Unlock()
+}
+
+func (s *Service) retainedArtifactCleanupOptions() (RetainedWorkspaceArtifactCleanupOptions, bool) {
+	if s == nil {
+		return RetainedWorkspaceArtifactCleanupOptions{}, false
+	}
+	s.mu.Lock()
+	options := s.retainedArtifactCleanup
+	enabled := s.retainedArtifactCleanupEnabled
+	s.mu.Unlock()
+	return options, enabled
 }
 
 func (s *Service) cleanupRetainedWorkspaceArtifactsLogged(ctx context.Context, options RetainedWorkspaceArtifactCleanupOptions) {
@@ -213,7 +237,7 @@ func retainedWorkspaceArtifactCleanupBase(worker core.Worker, workspace Prepared
 		cleanup.Reason = "worker terminal time is unavailable"
 		return cleanup, false
 	}
-	if worker.UpdatedAt.After(options.Now.Add(-options.MinAge)) {
+	if !options.IgnoreMinAge && worker.UpdatedAt.After(options.Now.Add(-options.MinAge)) {
 		cleanup.Reason = "worker is newer than retained artifact cleanup age"
 		return cleanup, false
 	}
@@ -244,6 +268,16 @@ func cleanupLocalRetainedWorkspaceArtifacts(ctx context.Context, worker core.Wor
 		if item.Removed {
 			cleanup.Cleaned = true
 			cleanup.BytesRemoved += item.Bytes
+		}
+	}
+	if !options.IgnoreMinAge {
+		item := cleanupLocalSharedWorkerDir(workspace, options.DryRun)
+		if item.Path != "" {
+			cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
+			if item.Removed {
+				cleanup.Cleaned = true
+				cleanup.BytesRemoved += item.Bytes
+			}
 		}
 	}
 	if !cleanup.Cleaned {
@@ -296,10 +330,62 @@ func (s *Service) cleanupRemoteRetainedWorkspaceArtifacts(ctx context.Context, w
 			cleanup.BytesRemoved += item.Bytes
 		}
 	}
+	if dir := strings.TrimSpace(workspace.SharedWorkerDir); dir != "" && !options.IgnoreMinAge {
+		safeDir, err := retainedRemoteSharedWorkerDir(workspace)
+		if err != nil {
+			item := ArtifactDirCleanup{Name: "shared_worker_scratch", Path: dir, DryRun: options.DryRun, Error: err.Error()}
+			cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
+		} else {
+			item := s.sshRunner.cleanupRemoteDirectory(ctx, target, safeDir, "shared_worker_scratch", options.DryRun)
+			cleanup.ArtifactDirs = append(cleanup.ArtifactDirs, item)
+			if item.Removed {
+				cleanup.Cleaned = true
+				cleanup.BytesRemoved += item.Bytes
+			}
+		}
+	}
 	if !cleanup.Cleaned {
 		cleanup.Reason = "no retained artifact directories removed"
 	}
 	return cleanup
+}
+
+func (s *Service) cleanupTerminalWorkspaceArtifacts(ctx context.Context, taskID string, workerID string, workspace PreparedWorkspace, result WorkspaceResult) {
+	options, enabled := s.retainedArtifactCleanupOptions()
+	if !enabled {
+		return
+	}
+	options.Now = time.Now().UTC()
+	options.IgnoreMinAge = true
+	workerState := core.Worker{
+		ID:        workerID,
+		TaskID:    taskID,
+		Status:    workerStatusForWorkspaceResult(result),
+		UpdatedAt: options.Now,
+	}
+	cleanup := s.cleanupRetainedWorkspaceArtifacts(ctx, workerState, workspace, options, nil)
+	if !cleanup.Cleaned {
+		return
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerCleanup,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(cleanup),
+	}); err != nil {
+		slog.Warn("record terminal retained artifact cleanup", "taskID", taskID, "workerID", workerID, "error", err)
+	}
+}
+
+func workerStatusForWorkspaceResult(result WorkspaceResult) core.WorkerStatus {
+	switch result {
+	case WorkspaceResultSucceeded:
+		return core.WorkerSucceeded
+	case WorkspaceResultCanceled:
+		return core.WorkerCanceled
+	default:
+		return core.WorkerFailed
+	}
 }
 
 func workspaceResultForWorkerStatus(status core.WorkerStatus) WorkspaceResult {
@@ -393,6 +479,101 @@ func cleanupArtifactDir(ctx context.Context, workspace PreparedWorkspace, root s
 	}
 	item.Removed = true
 	return item
+}
+
+func cleanupLocalSharedWorkerDir(workspace PreparedWorkspace, dryRun bool) ArtifactDirCleanup {
+	item := ArtifactDirCleanup{Name: "shared_worker_scratch", DryRun: dryRun}
+	dir := strings.TrimSpace(workspace.SharedWorkerDir)
+	if dir == "" {
+		return item
+	}
+	item.Path = dir
+	if err := sharedWorkerDirIsSafe(workspace); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		item.Reason = "shared worker scratch directory does not exist"
+		return item
+	}
+	if err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		item.Reason = "shared worker scratch directory is a symlink"
+		return item
+	}
+	if !info.IsDir() {
+		item.Reason = "shared worker scratch path is not a directory"
+		return item
+	}
+	size, err := directorySize(dir)
+	if err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	item.Bytes = size
+	if dryRun {
+		item.WouldRemove = true
+		item.Reason = "dry run"
+		return item
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		item.Error = err.Error()
+		return item
+	}
+	item.Removed = true
+	return item
+}
+
+func sharedWorkerDirIsSafe(workspace PreparedWorkspace) error {
+	workerDir := strings.TrimSpace(workspace.SharedWorkerDir)
+	if workerDir == "" {
+		return errors.New("shared worker scratch directory is required")
+	}
+	absWorkerDir, err := filepath.Abs(workerDir)
+	if err != nil {
+		return err
+	}
+	sharedRoot := strings.TrimSpace(workspace.SharedRoot)
+	if sharedRoot == "" {
+		return errors.New("shared worker scratch root is required")
+	}
+	absSharedRoot, err := filepath.Abs(sharedRoot)
+	if err != nil {
+		return err
+	}
+	workersRoot := filepath.Join(absSharedRoot, "workers")
+	cleanWorkerDir := filepath.Clean(absWorkerDir)
+	cleanWorkersRoot := filepath.Clean(workersRoot)
+	if cleanWorkerDir == cleanWorkersRoot || !strings.HasPrefix(cleanWorkerDir, cleanWorkersRoot+string(os.PathSeparator)) {
+		return fmt.Errorf("shared worker scratch path escapes workers root: %s", workerDir)
+	}
+	return nil
+}
+
+func retainedRemoteSharedWorkerDir(workspace PreparedWorkspace) (string, error) {
+	workerDir := path.Clean(strings.TrimSpace(workspace.SharedWorkerDir))
+	if workerDir == "" || workerDir == "." {
+		return "", errors.New("shared worker scratch directory is required")
+	}
+	if !path.IsAbs(workerDir) {
+		return "", fmt.Errorf("shared worker scratch directory must be absolute: %s", workerDir)
+	}
+	sharedRoot := path.Clean(strings.TrimSpace(workspace.SharedRoot))
+	if sharedRoot == "" || sharedRoot == "." {
+		return "", errors.New("shared worker scratch root is required")
+	}
+	if !path.IsAbs(sharedRoot) {
+		return "", fmt.Errorf("shared worker scratch root must be absolute: %s", sharedRoot)
+	}
+	workersRoot := path.Join(sharedRoot, "workers")
+	if workerDir == workersRoot || !strings.HasPrefix(workerDir, workersRoot+"/") {
+		return "", fmt.Errorf("shared worker scratch path escapes workers root: %s", workspace.SharedWorkerDir)
+	}
+	return workerDir, nil
 }
 
 func retainedArtifactPath(root string, name string) (string, error) {

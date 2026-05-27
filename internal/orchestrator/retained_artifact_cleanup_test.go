@@ -48,20 +48,22 @@ func TestCleanupRetainedWorkspaceArtifactsRemovesRemoteTarget(t *testing.T) {
 	defer store.Close()
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	workspace := PreparedWorkspace{
-		Root:          "/runs/worker-remote-clean",
-		CWD:           "/runs/worker-remote-clean/repo",
-		SourceRoot:    "/repo",
-		WorkspaceName: "aged-worker-remote-clean",
-		Mode:          "remote",
-		VCSType:       "ssh",
-		CleanupPolicy: string(WorkspaceCleanupRetain),
-		TaskID:        "task-remote-clean",
-		WorkerID:      "worker-remote-clean",
-		TargetID:      "vm-clean",
-		TargetKind:    string(TargetKindSSH),
+		Root:            "/runs/worker-remote-clean",
+		CWD:             "/runs/worker-remote-clean/repo",
+		SourceRoot:      "/repo",
+		WorkspaceName:   "aged-worker-remote-clean",
+		Mode:            "remote",
+		VCSType:         "ssh",
+		CleanupPolicy:   string(WorkspaceCleanupRetain),
+		TaskID:          "task-remote-clean",
+		WorkerID:        "worker-remote-clean",
+		TargetID:        "vm-clean",
+		TargetKind:      string(TargetKindSSH),
+		SharedRoot:      "/runs/shared/task-remote-clean",
+		SharedWorkerDir: "/runs/shared/task-remote-clean/workers/worker-remote-clean",
 	}
 	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now.Add(-2*time.Hour), true)
-	executor := &retainedArtifactRemoteExecutor{output: "path=/runs/worker-remote-clean/repo/target\nbytes=4096\nstatus=removed\n"}
+	executor := &retainedArtifactRemoteExecutor{}
 	targets := NewTargetRegistry([]TargetConfig{{
 		ID:       "vm-clean",
 		Kind:     TargetKindSSH,
@@ -78,18 +80,58 @@ func TestCleanupRetainedWorkspaceArtifactsRemovesRemoteTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Cleaned != 1 || report.BytesRemoved != 4096 {
-		t.Fatalf("report = %+v, want remote target cleaned", report)
+	if report.Cleaned != 1 || report.BytesRemoved != 12288 {
+		t.Fatalf("report = %+v, want remote target and shared worker scratch cleaned", report)
 	}
 	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-remote-clean")
-	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 1 || !cleanup.ArtifactDirs[0].Removed {
-		t.Fatalf("cleanup event = %+v, want removed remote target", cleanup)
+	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 2 || !cleanup.ArtifactDirs[0].Removed || !cleanup.ArtifactDirs[1].Removed {
+		t.Fatalf("cleanup event = %+v, want removed remote target and shared worker scratch", cleanup)
 	}
 	if cleanup.ArtifactDirs[0].Path != "/runs/worker-remote-clean/repo/target" {
 		t.Fatalf("remote artifact path = %q", cleanup.ArtifactDirs[0].Path)
 	}
-	if len(executor.commands) != 1 || !strings.Contains(strings.Join(executor.commands[0], " "), "/runs/worker-remote-clean/repo") {
-		t.Fatalf("remote cleanup commands = %+v, want cleanup under remote workdir", executor.commands)
+	if cleanup.ArtifactDirs[1].Path != "/runs/shared/task-remote-clean/workers/worker-remote-clean" {
+		t.Fatalf("remote shared worker path = %q", cleanup.ArtifactDirs[1].Path)
+	}
+	if len(executor.commands) != 2 ||
+		!strings.Contains(strings.Join(executor.commands[0], " "), "/runs/worker-remote-clean/repo") ||
+		!strings.Contains(strings.Join(executor.commands[1], " "), "/runs/shared/task-remote-clean/workers/worker-remote-clean") {
+		t.Fatalf("remote cleanup commands = %+v, want repo target and shared worker cleanup", executor.commands)
+	}
+}
+
+func TestTerminalWorkspaceArtifactCleanupRemovesNewTargetWhenEnabled(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+	repo := initGitTestRepo(t)
+	ignoreGitTarget(t, repo)
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	workspace := retainedCleanupWorkspace("task-terminal-clean", "worker-terminal-clean", repo, "git")
+	workspace.SharedRoot = filepath.Join(t.TempDir(), "shared", workspace.TaskID)
+	workspace.SharedWorkerDir = filepath.Join(workspace.SharedRoot, "workers", workspace.WorkerID)
+	appendRetainedCleanupWorker(t, ctx, store, workspace, core.WorkerSucceeded, now, true)
+	writeRetainedTargetFile(t, repo, "artifact.bin", "build output\n")
+	if err := os.MkdirAll(filepath.Join(workspace.SharedWorkerDir, "cargo-target", "release-lite"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.SharedWorkerDir, "cargo-target", "release-lite", "artifact.bin"), []byte("shared build output\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	service.SetRetainedWorkspaceArtifactCleanup(RetainedWorkspaceArtifactCleanupOptions{MinAge: 24 * time.Hour})
+
+	service.cleanupTerminalWorkspaceArtifacts(ctx, workspace.TaskID, workspace.WorkerID, workspace, WorkspaceResultSucceeded)
+
+	if _, err := os.Stat(filepath.Join(repo, "target")); !os.IsNotExist(err) {
+		t.Fatalf("target stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.SharedWorkerDir, "cargo-target", "release-lite", "artifact.bin")); err != nil {
+		t.Fatalf("shared worker scratch was removed by terminal cleanup: %v", err)
+	}
+	cleanup := lastWorkspaceCleanupEvent(t, ctx, store, "worker-terminal-clean")
+	if !cleanup.Cleaned || len(cleanup.ArtifactDirs) != 1 || !cleanup.ArtifactDirs[0].Removed {
+		t.Fatalf("cleanup event = %+v, want terminal artifact cleanup without shared scratch removal", cleanup)
 	}
 }
 
@@ -306,6 +348,13 @@ func (e *retainedArtifactRemoteExecutor) Run(_ context.Context, argv []string) (
 	e.commands = append(e.commands, append([]string(nil), argv...))
 	if e.output != "" || e.err != nil {
 		return e.output, e.err
+	}
+	joined := strings.Join(argv, " ")
+	if strings.Contains(joined, "/runs/shared/task-remote-clean/workers/worker-remote-clean") {
+		return "path=/runs/shared/task-remote-clean/workers/worker-remote-clean\nbytes=8192\nstatus=removed\n", nil
+	}
+	if strings.Contains(joined, "/runs/worker-remote-clean/repo") {
+		return "path=/runs/worker-remote-clean/repo/target\nbytes=4096\nstatus=removed\n", nil
 	}
 	return "path=/repo/target\nbytes=1024\nstatus=removed\n", nil
 }

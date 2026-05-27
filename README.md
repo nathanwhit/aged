@@ -104,10 +104,10 @@ Retained workspace artifact cleanup runs on startup by default:
 
 - `-workspace-artifact-cleanup`
 - `-workspace-artifact-cleanup-dry-run`
-- `-workspace-artifact-cleanup-min-age 24h`
-- `-workspace-artifact-cleanup-interval 1h`
+- `-workspace-artifact-cleanup-min-age 1h`
+- `-workspace-artifact-cleanup-interval 10m`
 
-The current artifact allowlist removes stale terminal worker `target/` directories from retained local `jj` and Git workspaces when they are safe to clean. Cleanup runs once on startup and then periodically while the daemon is running.
+The current artifact cleanup removes terminal worker `target/` directories from retained local and SSH `jj`/Git workspaces when they are safe to clean, and periodically prunes old terminal worker scratch directories under `shared/*/workers/*`. Immediate terminal cleanup preserves shared scratch caches so later work can reuse expensive build outputs.
 
 SSH targets are configured with `-targets` / `AGED_TARGETS` or through `/api/targets`:
 
