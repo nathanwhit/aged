@@ -6929,6 +6929,14 @@ func taskCompletionModeFromTask(task core.Task) string {
 	}
 }
 
+func taskIsBroadObjective(task core.Task) bool {
+	var metadata map[string]any
+	if len(task.Metadata) > 0 {
+		_ = json.Unmarshal(task.Metadata, &metadata)
+	}
+	return strings.EqualFold(strings.TrimSpace(stringMetadataValue(metadata["objectiveMode"])), "broad")
+}
+
 type replanLoopOptions struct {
 	BlockedFinalCandidates          map[string]string
 	AllowBlockedBasePatchConflicts  bool
@@ -6954,6 +6962,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	}
 	recoveryHint := options.RecoveryHint
 	stalledTurns := 0
+	limitUnproductiveTurns := !taskIsBroadObjective(task)
 	currentWorkPlan := initial.WorkPlan
 	for turn := 1; ; turn++ {
 		if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
@@ -6962,7 +6971,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		} else if terminal && !options.FinalizationRecovery {
 			return false, "", "", results
 		}
-		if stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
+		if limitUnproductiveTurns && stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
 			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
