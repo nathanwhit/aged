@@ -853,7 +853,7 @@ func replanPromptPayload(task core.Task, state OrchestrationState) map[string]an
 func completionReviewPayload(task core.Task, candidate WorkerTurnResult, reason string) map[string]any {
 	return map[string]any{
 		"task":              taskPromptPayload(task),
-		"selectedCandidate": candidate,
+		"selectedCandidate": compactCandidateForReviewPrompt(candidate, false),
 		"completionReason":  reason,
 	}
 }
@@ -861,7 +861,7 @@ func completionReviewPayload(task core.Task, candidate WorkerTurnResult, reason 
 func publicationReviewPayload(task core.Task, candidate WorkerTurnResult, action PlanAction) map[string]any {
 	return map[string]any{
 		"task":              taskPromptPayload(task),
-		"candidate":         candidate,
+		"candidate":         compactCandidateForReviewPrompt(candidate, false),
 		"publicationAction": action,
 	}
 }
@@ -869,7 +869,7 @@ func publicationReviewPayload(task core.Task, candidate WorkerTurnResult, action
 func codeReviewPromptPayload(task core.Task, candidate WorkerTurnResult, policy core.ReviewPolicy, phase string) map[string]any {
 	return map[string]any{
 		"task":         taskPromptPayload(task),
-		"candidate":    candidate,
+		"candidate":    compactCandidateForReviewPrompt(candidate, true),
 		"reviewPolicy": policy,
 		"phase":        phase,
 	}
@@ -1055,12 +1055,24 @@ Code review input:
 }
 
 const (
-	maxPromptPlanTextBytes  = 12000
-	maxPromptRationaleBytes = 4000
-	maxPromptTaskTextBytes  = 20000
-	maxPromptChangedFiles   = 40
-	maxPromptArtifacts      = 8
+	maxPromptPlanTextBytes       = 12000
+	maxPromptRationaleBytes      = 4000
+	maxPromptTaskTextBytes       = 20000
+	maxPromptCandidateDiffBytes  = 60000
+	maxPromptChangedFiles        = 40
+	maxPromptArtifacts           = 8
+	codeReviewDiffTruncateMarker = "\n... truncated for code review prompt ...\n"
 )
+
+func compactCandidateForReviewPrompt(result WorkerTurnResult, includeDiff bool) WorkerTurnResult {
+	rawDiff := result.Changes.Diff
+	result = DefaultReplanPromptBudgeter().compactWorkerResult(result)
+	if includeDiff {
+		result.Changes.Diff = truncateStringForPromptWithMarker(rawDiff, maxPromptCandidateDiffBytes, codeReviewDiffTruncateMarker)
+	}
+	result.Changes.PublishDiff = ""
+	return result
+}
 
 func compactPlanForPrompt(plan Plan) Plan {
 	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
@@ -1136,10 +1148,13 @@ func compactWorkPlanItemsForPrompt(items []core.WorkPlanItem) []core.WorkPlanIte
 }
 
 func truncateStringForPrompt(value string, maxBytes int) string {
+	return truncateStringForPromptWithMarker(value, maxBytes, "\n... truncated for replanning prompt ...\n")
+}
+
+func truncateStringForPromptWithMarker(value string, maxBytes int, marker string) string {
 	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value
 	}
-	const marker = "\n... truncated for replanning prompt ...\n"
 	if maxBytes <= len(marker) {
 		return value[:maxBytes]
 	}
