@@ -662,6 +662,37 @@ func TestCodexBrainReplanPromptDoesNotBlockBroadObjectivesOnIntermediatePRs(t *t
 	}
 }
 
+func TestCodexBrainReplanPromptDoesNotInlineSchedulerTemplate(t *testing.T) {
+	schedulerMarker := "FULL_SCHEDULER_PROMPT_MARKER"
+	brain := &CodexBrain{template: schedulerMarker + strings.Repeat(" static scheduler text", 1000)}
+	prompt := brain.replanPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Continue task",
+		Prompt: "Continue after worker results.",
+	}, OrchestrationState{})
+
+	if strings.Contains(prompt, schedulerMarker) {
+		t.Fatalf("replan prompt inlined the full scheduler template")
+	}
+	if !strings.Contains(prompt, builtinReplanHeader) || !strings.Contains(prompt, "Dynamic replanning input") {
+		t.Fatalf("replan prompt missing compact replanning instructions:\n%s", prompt)
+	}
+}
+
+func TestDefaultReplanPromptDoesNotInlineDefaultSystemPrompt(t *testing.T) {
+	data, err := os.ReadFile("../../prompts/default/replan.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if strings.Contains(body, "{{system}}") {
+		t.Fatalf("default replan prompt should be self-contained instead of expanding the full scheduler system prompt")
+	}
+	if !strings.Contains(body, builtinReplanHeader) || !strings.Contains(body, "Dynamic replanning input") {
+		t.Fatalf("default replan prompt missing compact replanning instructions:\n%s", body)
+	}
+}
+
 func TestSchedulerPromptInstructsHumanStylePRBody(t *testing.T) {
 	for _, path := range []string{"../../prompts/scheduler.md", "../../prompts/default/system.md", "../../prompts/default/replan.md"} {
 		data, err := os.ReadFile(path)

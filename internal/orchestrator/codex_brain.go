@@ -890,13 +890,15 @@ func taskPromptPayload(task core.Task) map[string]any {
 	return payload
 }
 
+const builtinReplanHeader = "You are the scheduler brain for a target-aware autonomous development orchestrator."
+
 func (b *CodexBrain) replanPrompt(task core.Task, state OrchestrationState) string {
 	payload := replanPromptPayload(task, state)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return task.Prompt
 	}
-	return strings.TrimSpace(b.template) + `	
+	return builtinReplanHeader + `
 
 You are making a dynamic replanning decision after one or more worker turns.
 
