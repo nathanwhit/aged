@@ -11309,6 +11309,41 @@ func TestServiceRunsReplannedSpawnDependingOnWorker(t *testing.T) {
 	}
 }
 
+func TestServiceRunsReplannedWorkerDependingOnPriorWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, nil, map[string]worker.Runner{
+		"scout": eventRunner{kind: "scout", events: []worker.Event{{Kind: worker.EventResult, Text: "scouted"}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	results, ok, err := service.runInitialWorkerGraph(ctx, core.Task{ID: "task-cross-turn-worker-dep"}, Plan{
+		Workers: []WorkerRequest{{
+			ID:         "source_next_opportunity_scout",
+			Role:       "scout",
+			Reason:     "Scout the next opportunity after validation.",
+			WorkerKind: "scout",
+			Prompt:     "scout",
+			DependsOn:  []string{"validate_http_compressible_size_slice"},
+		}},
+	}, []WorkerTurnResult{{
+		WorkerID: "worker-validate",
+		SpawnID:  "validate_http_compressible_size_slice",
+		Status:   core.WorkerSucceeded,
+		Summary:  "validated",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("worker graph did not complete")
+	}
+	if len(results) != 1 || results[0].SpawnID != "source_next_opportunity_scout" {
+		t.Fatalf("results = %+v, want dependent scout result", results)
+	}
+}
+
 func TestServiceCompletesWithWorkerCreatedDuringDynamicReplan(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
