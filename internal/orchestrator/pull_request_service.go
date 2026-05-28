@@ -2075,9 +2075,11 @@ func latestPullRequestFollowUpIsQueued(snapshot core.Snapshot, taskID string) bo
 
 func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
 	pullRequests := map[string]core.PullRequest{}
+	trackedPullRequests := []core.PullRequest{}
 	for _, pr := range snapshot.PullRequests {
 		if pr.TaskID == taskID {
 			pullRequests[pr.ID] = pr
+			trackedPullRequests = append(trackedPullRequests, pr)
 		}
 	}
 	var items []PullRequestFeedbackItem
@@ -2105,19 +2107,25 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
 			continue
 		}
-		if pr, ok := pullRequests[payload.ID]; ok {
-			payload.Repo = nonEmpty(payload.Repo, pr.Repo)
-			payload.Number = firstNonZero(payload.Number, pr.Number)
-			payload.URL = nonEmpty(payload.URL, pr.URL)
-			payload.Branch = nonEmpty(payload.Branch, pr.Branch)
-			payload.Base = nonEmpty(payload.Base, pr.Base)
-			payload.State = nonEmpty(payload.State, pr.State)
-			payload.ChecksStatus = nonEmpty(payload.ChecksStatus, pr.ChecksStatus)
-			payload.MergeStatus = nonEmpty(payload.MergeStatus, pr.MergeStatus)
-			payload.ReviewStatus = nonEmpty(payload.ReviewStatus, pr.ReviewStatus)
-			if payload.Prompt == "" {
-				payload.Prompt = pullRequestFollowUpPrompt(pr)
-			}
+		pr, ok := pullRequests[payload.ID]
+		if !ok {
+			pr, ok = trackedPullRequestForFeedback(trackedPullRequests, payload.ID, payload.Repo, payload.Number, payload.URL, payload.Branch)
+		}
+		if !ok || isTerminalPullRequestState(pr.State) {
+			continue
+		}
+		payload.ID = pr.ID
+		payload.Repo = nonEmpty(payload.Repo, pr.Repo)
+		payload.Number = firstNonZero(payload.Number, pr.Number)
+		payload.URL = nonEmpty(payload.URL, pr.URL)
+		payload.Branch = nonEmpty(payload.Branch, pr.Branch)
+		payload.Base = nonEmpty(payload.Base, pr.Base)
+		payload.State = nonEmpty(payload.State, pr.State)
+		payload.ChecksStatus = nonEmpty(payload.ChecksStatus, pr.ChecksStatus)
+		payload.MergeStatus = nonEmpty(payload.MergeStatus, pr.MergeStatus)
+		payload.ReviewStatus = nonEmpty(payload.ReviewStatus, pr.ReviewStatus)
+		if payload.Prompt == "" {
+			payload.Prompt = pullRequestFollowUpPrompt(pr)
 		}
 		item := PullRequestFeedbackItem{
 			EventID:           event.ID,
@@ -2147,6 +2155,18 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 		items = append(items, item)
 	}
 	return items
+}
+
+func trackedPullRequestForFeedback(pullRequests []core.PullRequest, id string, repo string, number int, url string, branch string) (core.PullRequest, bool) {
+	repo = strings.ToLower(strings.TrimSpace(repo))
+	url = strings.TrimSpace(url)
+	branch = strings.TrimSpace(branch)
+	for _, pr := range pullRequests {
+		if pullRequestMatchesUpdateTarget(pr, id, repo, number, url, branch) {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
 }
 
 func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, prID string) bool {
