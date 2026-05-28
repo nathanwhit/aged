@@ -2757,6 +2757,190 @@ func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *te
 	}
 }
 
+func TestCanonicalPullRequestFollowUpPlanRewritesStaleTargets(t *testing.T) {
+	plan := canonicalizePullRequestFollowUpPlan(Plan{
+		WorkerKind: "codex",
+		Prompt:     "Repair PR 34321.",
+		Metadata: map[string]any{
+			"pullRequestID":        "github:owner/repo#34323",
+			"pullRequestRepo":      "owner/repo",
+			"pullRequestNumber":    34323,
+			"pullRequestBranch":    "stale-branch",
+			"workspaceBaseRef":     "refs/pull/34323/head",
+			"workspaceBaseRefKind": "pull_request_head",
+		},
+		Actions: []PlanAction{{
+			Kind:   "publish_pull_request",
+			When:   "after_success",
+			Reason: "publish repair",
+			Inputs: map[string]any{
+				"repo":   "owner/repo",
+				"number": 34321,
+				"branch": "wrong-branch",
+				"title":  "fix: repair PR",
+			},
+		}, {
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "watch repair",
+			Inputs: map[string]any{
+				"repo":   "owner/repo",
+				"number": 34321,
+				"branch": "wrong-branch",
+			},
+		}},
+	}, core.PullRequest{
+		ID:     "pr-live",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 34408,
+		URL:    "https://github.com/owner/repo/pull/34408",
+		Branch: "codex/aged-live",
+		Base:   "main",
+		State:  "OPEN",
+	})
+
+	if got := intMetadata(plan.Metadata, "pullRequestNumber"); got != 34408 {
+		t.Fatalf("metadata pullRequestNumber = %d, want 34408", got)
+	}
+	if got := stringMetadata(plan.Metadata, "workspaceBaseRef"); got != "refs/pull/34408/head" {
+		t.Fatalf("workspaceBaseRef = %q, want PR head", got)
+	}
+	if len(plan.Actions) != 2 {
+		t.Fatalf("actions = %d, want 2", len(plan.Actions))
+	}
+	if plan.Actions[0].Kind != "update_pull_request" {
+		t.Fatalf("first action kind = %q, want update_pull_request", plan.Actions[0].Kind)
+	}
+	for _, action := range plan.Actions {
+		if got := intMetadata(action.Inputs, "number"); got != 34408 {
+			t.Fatalf("%s action number = %d, want 34408", action.Kind, got)
+		}
+		if got := stringMetadata(action.Inputs, "branch"); got != "codex/aged-live" {
+			t.Fatalf("%s action branch = %q, want codex/aged-live", action.Kind, got)
+		}
+	}
+	if !strings.Contains(plan.Prompt, "Do not use aged-publish-pr for existing PR follow-up work") {
+		t.Fatalf("missing existing-PR publish guard in prompt: %s", plan.Prompt)
+	}
+}
+
+func TestPullRequestFollowUpForPlanRejectsUnqueuedExplicitTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-target-rejection"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Repair PR",
+			"prompt": "Fix queued PR feedback.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-live",
+			"repo":   "owner/repo",
+			"number": 34408,
+			"url":    "https://github.com/owner/repo/pull/34408",
+			"branch": "codex/aged-live",
+			"base":   "main",
+			"state":  "OPEN",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-live",
+			"repo":    "owner/repo",
+			"number":  34408,
+			"url":     "https://github.com/owner/repo/pull/34408",
+			"branch":  "codex/aged-live",
+			"attempt": 1,
+			"reason":  "pull_request_needs_work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, mismatch, ok := pullRequestFollowUpForPlan(snapshot, taskID, Plan{
+		Actions: []PlanAction{{
+			Kind: "update_pull_request",
+			When: "after_success",
+			Inputs: map[string]any{
+				"repo":   "owner/repo",
+				"number": 34321,
+			},
+		}},
+	})
+	if !ok {
+		t.Fatal("expected queued PR feedback")
+	}
+	if mismatch == "" {
+		t.Fatal("expected explicit non-queued PR target to be rejected")
+	}
+	if pr.Number != 34408 {
+		t.Fatalf("selected PR = %d, want queued PR 34408", pr.Number)
+	}
+}
+
+func TestPullRequestFollowUpForPlanAcceptsMatchingActionDespiteStaleMetadata(t *testing.T) {
+	snapshot := core.Snapshot{
+		PullRequests: []core.PullRequest{{
+			ID:     "pr-live",
+			TaskID: "task-1",
+			Repo:   "owner/repo",
+			Number: 34408,
+			URL:    "https://github.com/owner/repo/pull/34408",
+			Branch: "codex/aged-live",
+			State:  "OPEN",
+		}},
+		Events: []core.Event{{
+			ID:     1,
+			Type:   core.EventPRFollowUp,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"id":      "pr-live",
+				"repo":    "owner/repo",
+				"number":  34408,
+				"url":     "https://github.com/owner/repo/pull/34408",
+				"branch":  "codex/aged-live",
+				"attempt": 1,
+				"reason":  "pull_request_needs_work",
+			}),
+		}},
+	}
+	pr, mismatch, ok := pullRequestFollowUpForPlan(snapshot, "task-1", Plan{
+		Metadata: map[string]any{
+			"pullRequestRepo":   "owner/repo",
+			"pullRequestNumber": 34323,
+		},
+		Actions: []PlanAction{{
+			Kind: "update_pull_request",
+			When: "after_success",
+			Inputs: map[string]any{
+				"repo":   "owner/repo",
+				"number": 34408,
+			},
+		}},
+	})
+	if !ok || mismatch != "" || pr.Number != 34408 {
+		t.Fatalf("selection = pr %d mismatch %q ok %v, want queued PR without mismatch", pr.Number, mismatch, ok)
+	}
+}
+
 func TestServiceIntermediatePullRequestUpdateFailureContinuesObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
