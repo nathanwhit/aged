@@ -7336,7 +7336,7 @@ func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForEvent(t, store, core.EventWorkerCreated, taskID)
+	snapshot := waitForEvent(t, store, core.EventWorkerCompleted, taskID)
 	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "resumed") {
 		t.Fatalf("missing startup planning recovery action")
 	}
