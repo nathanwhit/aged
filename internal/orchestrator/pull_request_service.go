@@ -24,6 +24,7 @@ var (
 	githubPullRequestURLRE      = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
 	pullRequestClosingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
 	errTerminalPullRequest      = errors.New("pull request is already terminal")
+	errNoPullRequestsToWatch    = errors.New("no task-owned pull requests to watch")
 )
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
@@ -669,8 +670,10 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		if err != nil {
 			return nil, err
 		}
-	}
-	if len(prs) == 0 {
+		if len(prs) == 0 {
+			return nil, errNoPullRequestsToWatch
+		}
+	} else {
 		prs, err = lister.List(ctx, PullRequestListSpec{
 			TaskID:     taskID,
 			Repo:       repo,
@@ -685,9 +688,10 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		if err != nil {
 			return nil, err
 		}
+		prs = watchablePullRequests(prs, req.State)
 	}
 	if len(prs) == 0 {
-		return nil, errors.New("no pull requests matched watch request")
+		return nil, errNoPullRequestsToWatch
 	}
 	if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
 		"count": len(prs),
@@ -723,6 +727,21 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		prs[index] = pr
 	}
 	return prs, nil
+}
+
+func watchablePullRequests(prs []core.PullRequest, state string) []core.PullRequest {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state != "" && state != "open" {
+		return prs
+	}
+	out := prs[:0]
+	for _, pr := range prs {
+		if isTerminalPullRequestState(pr.State) {
+			continue
+		}
+		out = append(out, pr)
+	}
+	return out
 }
 
 func watchRequestHasExplicitTarget(req core.WatchPullRequestsRequest) bool {
