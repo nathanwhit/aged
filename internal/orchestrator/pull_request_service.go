@@ -1029,6 +1029,10 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		status = ""
 		phase = ""
 	}
+	if isTerminalPullRequestState(checked.State) && !pullRequestTerminalizesTask(snapshot, checked) && pullRequestTerminalStatusContinuesTask(snapshot, checked) {
+		status = ""
+		phase = ""
+	}
 	if phase != "" && !taskObjectiveMatches(snapshot, checked.TaskID, status, phase) {
 		if err := s.updateTaskObjective(ctx, checked.TaskID, status, phase, pullRequestObjectiveSummary(checked, phase)); err != nil {
 			return core.PullRequest{}, err
@@ -1089,19 +1093,26 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 }
 
 func (s *Service) continueTaskAfterIntermediatePullRequest(ctx context.Context, snapshot core.Snapshot, pr core.PullRequest, phase string, summary string) error {
-	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, phase, summary); err != nil {
-		return err
-	}
-	if _, ok := s.brain.(ReplanProvider); !ok {
-		return nil
-	}
 	task, ok := findTask(snapshot, pr.TaskID)
-	if !ok || taskHasActiveWorkers(snapshot, pr.TaskID) || intermediatePullRequestContinuationRecorded(snapshot, pr) {
+	if !ok {
 		return nil
 	}
 	switch task.Status {
 	case core.TaskWaiting, core.TaskRunning, core.TaskFailed:
 	default:
+		return nil
+	}
+	if isTerminalTaskStatus(task.Status) {
+		if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, pr.TaskID, core.ObjectiveActive, phase, summary); err != nil {
+			return err
+		}
+	} else if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, phase, summary); err != nil {
+		return err
+	}
+	if _, ok := s.brain.(ReplanProvider); !ok {
+		return nil
+	}
+	if taskHasActiveWorkers(snapshot, pr.TaskID) || intermediatePullRequestContinuationRecorded(snapshot, pr) {
 		return nil
 	}
 	initial, results, err := retryGraphStateForTask(snapshot, pr.TaskID)
@@ -1120,7 +1131,11 @@ func (s *Service) continueTaskAfterIntermediatePullRequest(ctx context.Context, 
 	}); err != nil {
 		return err
 	}
-	if err := s.setTaskStatus(ctx, pr.TaskID, core.TaskPlanning); err != nil {
+	if isTerminalTaskStatus(task.Status) {
+		if err := s.setTaskStatusAllowingTerminalOverride(ctx, pr.TaskID, core.TaskPlanning, phase); err != nil {
+			return err
+		}
+	} else if err := s.setTaskStatus(ctx, pr.TaskID, core.TaskPlanning); err != nil {
 		return err
 	}
 	task.Status = core.TaskPlanning
@@ -1861,10 +1876,10 @@ func (s *Service) retryFailedPublishPullRequestAction(ctx context.Context, task 
 	if !ok {
 		return false
 	}
-	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying failed pull request publication."); err != nil {
+	if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying failed pull request publication."); err != nil {
 		return true
 	}
-	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
+	if err := s.setTaskStatusAllowingTerminalOverride(ctx, task.ID, core.TaskPlanning, "retrying_failed_pull_request_publication"); err != nil {
 		return true
 	}
 	req := publishPullRequestRequestFromAction(action)
