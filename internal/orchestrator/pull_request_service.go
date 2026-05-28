@@ -1995,31 +1995,46 @@ func resumingPullRequestFollowUp(snapshot core.Snapshot, taskID string) bool {
 
 func latestPullRequestFollowUp(snapshot core.Snapshot, taskID string) (core.PullRequest, bool) {
 	latestFollowUp := int64(0)
-	latestPullRequestID := ""
+	var latestItem PullRequestFeedbackItem
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
 			continue
 		}
 		var payload struct {
-			ID string `json:"id"`
+			ID           string `json:"id"`
+			Repo         string `json:"repo"`
+			Number       int    `json:"number"`
+			URL          string `json:"url"`
+			Branch       string `json:"branch"`
+			Base         string `json:"base"`
+			State        string `json:"state"`
+			ChecksStatus string `json:"checksStatus"`
+			MergeStatus  string `json:"mergeStatus"`
+			ReviewStatus string `json:"reviewStatus"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil || strings.TrimSpace(payload.ID) == "" {
 			continue
 		}
 		if event.ID >= latestFollowUp {
 			latestFollowUp = event.ID
-			latestPullRequestID = strings.TrimSpace(payload.ID)
+			latestItem = PullRequestFeedbackItem{
+				PullRequestID: strings.TrimSpace(payload.ID),
+				Repo:          payload.Repo,
+				Number:        payload.Number,
+				URL:           payload.URL,
+				Branch:        payload.Branch,
+				Base:          payload.Base,
+				State:         payload.State,
+				ChecksStatus:  payload.ChecksStatus,
+				MergeStatus:   payload.MergeStatus,
+				ReviewStatus:  payload.ReviewStatus,
+			}
 		}
 	}
-	if latestPullRequestID == "" {
+	if latestItem.PullRequestID == "" {
 		return core.PullRequest{}, false
 	}
-	for _, pr := range snapshot.PullRequests {
-		if pr.ID == latestPullRequestID {
-			return pr, true
-		}
-	}
-	return core.PullRequest{}, false
+	return pullRequestFromFeedbackItem(snapshot, taskID, latestItem), true
 }
 
 func latestPullRequestFollowUpIsQueued(snapshot core.Snapshot, taskID string) bool {
@@ -2228,24 +2243,28 @@ func firstPendingPullRequestFeedback(snapshot core.Snapshot, taskID string) (cor
 	if len(items) == 0 {
 		return core.PullRequest{}, false
 	}
+	return pullRequestFromFeedbackItem(snapshot, taskID, items[0]), true
+}
+
+func pullRequestFromFeedbackItem(snapshot core.Snapshot, taskID string, item PullRequestFeedbackItem) core.PullRequest {
 	for _, pr := range snapshot.PullRequests {
-		if pr.ID == items[0].PullRequestID {
-			return pr, true
+		if pr.TaskID == taskID && pr.ID == item.PullRequestID {
+			return pr
 		}
 	}
 	return core.PullRequest{
-		ID:           items[0].PullRequestID,
+		ID:           item.PullRequestID,
 		TaskID:       taskID,
-		Repo:         items[0].Repo,
-		Number:       items[0].Number,
-		URL:          items[0].URL,
-		Branch:       items[0].Branch,
-		Base:         items[0].Base,
-		State:        items[0].State,
-		ChecksStatus: items[0].ChecksStatus,
-		MergeStatus:  items[0].MergeStatus,
-		ReviewStatus: items[0].ReviewStatus,
-	}, true
+		Repo:         item.Repo,
+		Number:       item.Number,
+		URL:          item.URL,
+		Branch:       item.Branch,
+		Base:         item.Base,
+		State:        item.State,
+		ChecksStatus: item.ChecksStatus,
+		MergeStatus:  item.MergeStatus,
+		ReviewStatus: item.ReviewStatus,
+	}
 }
 
 func (s *Service) firstPendingPullRequestFeedback(ctx context.Context, taskID string) (core.PullRequest, bool) {
@@ -2254,6 +2273,122 @@ func (s *Service) firstPendingPullRequestFeedback(ctx context.Context, taskID st
 		return core.PullRequest{}, false
 	}
 	return firstPendingPullRequestFeedback(snapshot, taskID)
+}
+
+func (s *Service) pullRequestFollowUpForPlan(ctx context.Context, taskID string, plan Plan) (core.PullRequest, string, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, "", false
+	}
+	return pullRequestFollowUpForPlan(snapshot, taskID, plan)
+}
+
+func pullRequestFollowUpForPlan(snapshot core.Snapshot, taskID string, plan Plan) (core.PullRequest, string, bool) {
+	items := pendingPullRequestFeedback(snapshot, taskID)
+	if len(items) == 0 {
+		return core.PullRequest{}, "", false
+	}
+	var firstTarget pullRequestPlanTarget
+	targets := pullRequestPlanTargets(plan)
+	for _, target := range targets {
+		if !target.hasValue() {
+			continue
+		}
+		if !firstTarget.hasValue() {
+			firstTarget = target
+		}
+		for _, item := range items {
+			if pullRequestFeedbackItemMatchesTarget(item, target) {
+				return pullRequestFromFeedbackItem(snapshot, taskID, item), "", true
+			}
+		}
+	}
+	if firstTarget.hasValue() {
+		return pullRequestFromFeedbackItem(snapshot, taskID, items[0]), fmt.Sprintf("pull request follow-up plan targets %s, but queued task feedback is for %s", firstTarget.describe(), describePullRequestFeedbackItem(items[0])), true
+	}
+	return pullRequestFromFeedbackItem(snapshot, taskID, items[0]), "", true
+}
+
+type pullRequestPlanTarget struct {
+	id     string
+	repo   string
+	number int
+	url    string
+	branch string
+}
+
+func (target pullRequestPlanTarget) hasValue() bool {
+	return strings.TrimSpace(target.id) != "" ||
+		strings.TrimSpace(target.url) != "" ||
+		(strings.TrimSpace(target.repo) != "" && target.number > 0) ||
+		strings.TrimSpace(target.branch) != ""
+}
+
+func (target pullRequestPlanTarget) describe() string {
+	if strings.TrimSpace(target.repo) != "" && target.number > 0 {
+		return fmt.Sprintf("%s#%d", target.repo, target.number)
+	}
+	if strings.TrimSpace(target.url) != "" {
+		return target.url
+	}
+	if strings.TrimSpace(target.id) != "" {
+		return target.id
+	}
+	if strings.TrimSpace(target.branch) != "" {
+		return "branch " + target.branch
+	}
+	return "unknown pull request"
+}
+
+func describePullRequestFeedbackItem(item PullRequestFeedbackItem) string {
+	return pullRequestPlanTarget{
+		id:     item.PullRequestID,
+		repo:   item.Repo,
+		number: item.Number,
+		url:    item.URL,
+		branch: item.Branch,
+	}.describe()
+}
+
+func pullRequestPlanTargets(plan Plan) []pullRequestPlanTarget {
+	var targets []pullRequestPlanTarget
+	if plan.Metadata != nil {
+		targets = append(targets, pullRequestPlanTarget{
+			id:     stringMetadata(plan.Metadata, "pullRequestID"),
+			repo:   stringMetadata(plan.Metadata, "pullRequestRepo"),
+			number: intMetadata(plan.Metadata, "pullRequestNumber"),
+			url:    stringMetadata(plan.Metadata, "pullRequestURL"),
+			branch: stringMetadata(plan.Metadata, "pullRequestBranch"),
+		})
+	}
+	for _, action := range plan.Actions {
+		switch strings.TrimSpace(action.Kind) {
+		case "update_pull_request", "watch_pull_requests":
+			targets = append(targets, pullRequestPlanTarget{
+				id:     stringMetadata(action.Inputs, "id"),
+				repo:   stringMetadata(action.Inputs, "repo"),
+				number: intMetadata(action.Inputs, "number"),
+				url:    stringMetadata(action.Inputs, "url"),
+				branch: nonEmpty(stringMetadata(action.Inputs, "branch"), stringMetadata(action.Inputs, "headBranch")),
+			})
+		}
+	}
+	return targets
+}
+
+func pullRequestFeedbackItemMatchesTarget(item PullRequestFeedbackItem, target pullRequestPlanTarget) bool {
+	if strings.TrimSpace(target.id) != "" && target.id == item.PullRequestID {
+		return true
+	}
+	if strings.TrimSpace(target.url) != "" && strings.EqualFold(target.url, item.URL) {
+		return true
+	}
+	if strings.TrimSpace(target.repo) != "" && target.number > 0 &&
+		strings.EqualFold(target.repo, item.Repo) && target.number == item.Number {
+		return true
+	}
+	return strings.TrimSpace(target.branch) != "" && target.branch == item.Branch &&
+		(strings.TrimSpace(target.repo) == "" || strings.EqualFold(target.repo, item.Repo))
 }
 
 func firstNonZero(values ...int) int {
@@ -2277,14 +2412,12 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 	}
 	if strings.TrimSpace(pr.Branch) != "" {
 		plan.Metadata["pullRequestBranch"] = pr.Branch
-		if stringMetadata(plan.Metadata, "workspaceBaseRef") == "" {
-			plan.Metadata["workspaceBaseRef"] = pullRequestWorkspaceRef(pr)
-			plan.Metadata["workspaceBaseRefKind"] = "pull_request_head"
-		}
-		if strings.EqualFold(stringMetadata(plan.Metadata, "workspaceBaseRefKind"), "pull_request_head") &&
-			candidateBaseWorkerID(plan.Metadata) == "" {
-			plan.Metadata["baseWorkerID"] = "source"
-		}
+		plan.Metadata["workspaceBaseRef"] = pullRequestWorkspaceRef(pr)
+		plan.Metadata["workspaceBaseRefKind"] = "pull_request_head"
+	}
+	if strings.EqualFold(stringMetadata(plan.Metadata, "workspaceBaseRefKind"), "pull_request_head") &&
+		candidateBaseWorkerID(plan.Metadata) == "" {
+		plan.Metadata["baseWorkerID"] = "source"
 	}
 	if strings.TrimSpace(pr.Base) != "" {
 		plan.Metadata["pullRequestBase"] = pr.Base
@@ -2293,6 +2426,51 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 		plan.Metadata["pullRequestURL"] = pr.URL
 	}
 	return plan
+}
+
+func canonicalizePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
+	plan = annotatePullRequestFollowUpPlan(plan, pr)
+	plan = canonicalizePullRequestFollowUpActions(plan, pr)
+	return normalizePullRequestFollowUpPlan(plan)
+}
+
+func canonicalizePullRequestFollowUpActions(plan Plan, pr core.PullRequest) Plan {
+	if len(plan.Actions) == 0 {
+		return plan
+	}
+	inputs := pullRequestUpdateInputsFromPlan(plan)
+	for index, action := range plan.Actions {
+		switch strings.TrimSpace(action.Kind) {
+		case "publish_pull_request":
+			if strings.TrimSpace(action.When) == "immediate" {
+				continue
+			}
+			action.Kind = "update_pull_request"
+			action.Reason = nonEmpty(action.Reason, "Update the existing pull request for queued PR feedback instead of opening another pull request.")
+			action.Inputs = mergePullRequestActionInputs(action.Inputs, inputs)
+		case "update_pull_request", "watch_pull_requests":
+			if strings.TrimSpace(action.When) == "immediate" {
+				continue
+			}
+			action.Inputs = mergePullRequestActionInputs(action.Inputs, inputs)
+		default:
+			continue
+		}
+		plan.Actions[index] = action
+	}
+	return plan
+}
+
+func mergePullRequestActionInputs(existing map[string]any, canonical map[string]any) map[string]any {
+	merged := map[string]any{}
+	for key, value := range existing {
+		merged[key] = value
+	}
+	for key, value := range canonical {
+		merged[key] = value
+	}
+	delete(merged, "headBranch")
+	return merged
 }
 
 func pullRequestWorkspaceRef(pr core.PullRequest) string {
@@ -2325,7 +2503,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. If you use aged-publish-pr, treat its output as queued until aged reports the published PR URL; do not comment that code changes were pushed or published based only on a queued callback. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
+	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
 	return b.String()
 }
 

@@ -3200,9 +3200,8 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 	}
 	if resumingPullRequestFollowUp(snapshot, taskID) {
 		if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
-			plan = annotatePullRequestFollowUpPlan(plan, pr)
+			plan = canonicalizePullRequestFollowUpPlan(plan, pr)
 		}
-		plan = normalizePullRequestFollowUpPlan(plan)
 	}
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
@@ -3258,9 +3257,8 @@ func (s *Service) resumeLegacyPullRequestFollowUpPlanning(ctx context.Context, t
 		return
 	}
 	if pr, ok := latestPullRequestFollowUp(snapshot, taskID); ok {
-		plan = annotatePullRequestFollowUpPlan(plan, pr)
+		plan = canonicalizePullRequestFollowUpPlan(plan, pr)
 	}
-	plan = normalizePullRequestFollowUpPlan(plan)
 	if _, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskPlanned,
 		TaskID:  taskID,
@@ -7174,9 +7172,20 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			beforeResults := results
 			next := *decision.Plan
-			if pr, ok := s.firstPendingPullRequestFeedback(ctx, task.ID); ok {
-				next = annotatePullRequestFollowUpPlan(next, pr)
-				next = normalizePullRequestFollowUpPlan(next)
+			if pr, mismatchReason, ok := s.pullRequestFollowUpForPlan(ctx, task.ID, next); ok {
+				if mismatchReason != "" {
+					if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+						"kind":   "pull_request_followup_plan_rejected",
+						"status": "rejected",
+						"reason": mismatchReason,
+					}); err != nil {
+						_ = s.failTask(ctx, task.ID, err)
+						return false, "", "", results
+					}
+					stalledTurns++
+					continue
+				}
+				next = canonicalizePullRequestFollowUpPlan(next, pr)
 			}
 			if steering, ok := s.firstPendingWorkerSteering(ctx, task.ID); ok {
 				next = annotateWorkerSteeringPlan(next, steering)
