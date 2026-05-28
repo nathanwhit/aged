@@ -2511,7 +2511,11 @@ func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	if len(plan.Spawns) == 0 {
 		return ensurePullRequestFollowUpUpdateAction(plan)
 	}
+	plan = bindImplicitPullRequestFollowUpUpdateWorkers(plan)
 	if !planReturnsToPullRequestWatch(plan) {
+		return plan
+	}
+	if planHasPullRequestMutation(plan) {
 		return plan
 	}
 	if plan.Metadata == nil {
@@ -2521,6 +2525,27 @@ func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	plan.Metadata["spawnsSuppressedReason"] = "pull_request_followup_returns_to_github_monitor"
 	plan.Spawns = nil
 	return ensurePullRequestFollowUpUpdateAction(plan)
+}
+
+func bindImplicitPullRequestFollowUpUpdateWorkers(plan Plan) Plan {
+	workerRef := implicitPullRequestFollowUpUpdateWorkerRef(plan.Spawns)
+	if workerRef == "" {
+		return plan
+	}
+	for index, action := range plan.Actions {
+		if strings.TrimSpace(action.Kind) != "update_pull_request" {
+			continue
+		}
+		if strings.TrimSpace(action.When) == "immediate" || strings.TrimSpace(action.WorkerID) != "" {
+			continue
+		}
+		if updatePullRequestActionMetadataOnly(action) {
+			continue
+		}
+		action.WorkerID = workerRef
+		plan.Actions[index] = action
+	}
+	return plan
 }
 
 func planReturnsToPullRequestWatch(plan Plan) bool {
@@ -2537,10 +2562,11 @@ func ensurePullRequestFollowUpUpdateAction(plan Plan) Plan {
 		return plan
 	}
 	action := PlanAction{
-		Kind:   "update_pull_request",
-		When:   "after_success",
-		Reason: "Apply successful follow-up worker changes to the existing pull request before returning it to GitHub monitoring.",
-		Inputs: pullRequestUpdateInputsFromPlan(plan),
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		Reason:   "Apply successful follow-up worker changes to the existing pull request before returning it to GitHub monitoring.",
+		WorkerID: implicitPullRequestFollowUpUpdateWorkerRef(plan.Spawns),
+		Inputs:   pullRequestUpdateInputsFromPlan(plan),
 	}
 	actions := make([]PlanAction, 0, len(plan.Actions)+1)
 	inserted := false
@@ -2556,6 +2582,13 @@ func ensurePullRequestFollowUpUpdateAction(plan Plan) Plan {
 	}
 	plan.Actions = actions
 	return plan
+}
+
+func implicitPullRequestFollowUpUpdateWorkerRef(spawns []SpawnRequest) string {
+	if len(spawns) != 1 {
+		return ""
+	}
+	return spawnID(spawns[0], 0)
 }
 
 func planHasPullRequestMutation(plan Plan) bool {
