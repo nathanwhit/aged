@@ -5803,6 +5803,17 @@ func planActionWorkerID(results []WorkerTurnResult, workerRef string) string {
 	return workerRef
 }
 
+func singleUpdateCandidateWorkerID(results []WorkerTurnResult) string {
+	if len(results) != 1 {
+		return ""
+	}
+	result := results[0]
+	if result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
+		return result.WorkerID
+	}
+	return ""
+}
+
 func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, plan Plan) (bool, error) {
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.When) != "immediate" {
@@ -6180,8 +6191,10 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 	case "update_pull_request":
 		metadataOnly := updatePullRequestActionMetadataOnly(action)
 		workerID := ""
-		if strings.TrimSpace(action.WorkerID) != "" || !metadataOnly {
+		if strings.TrimSpace(action.WorkerID) != "" {
 			workerID = planActionWorkerID(results, action.WorkerID)
+		} else if !metadataOnly {
+			workerID = singleUpdateCandidateWorkerID(results)
 		}
 		if workerID == "" && !metadataOnly {
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -6190,7 +6203,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				"reason": action.Reason,
 				"inputs": action.Inputs,
 				"status": "skipped",
-				"error":  "no successful changed candidate worker to update pull request",
+				"error":  "update_pull_request requires an explicit workerId when pushing worker changes for multi-result tasks",
 			}); err != nil {
 				return false, results, err
 			}

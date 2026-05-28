@@ -2732,6 +2732,95 @@ func TestServicePlanPullRequestUpdateWithMetadataFallsBackWhenWorkerHasNoChanges
 	}
 }
 
+func TestServicePullRequestUpdateDoesNotInferStaleTaskCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "other-pr.go", Status: "modified"}},
+			Diff:         "diff --git a/other-pr.go b/other-pr.go\n",
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-wide-objective", Title: "Optimize broadly"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Produce multiple independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-a",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 41,
+		URL:    "https://github.com/owner/repo/pull/41",
+		Branch: "codex/pr-a",
+		Base:   "main",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"continueAfterPublish": true,
+			"publicationPhase":     "intermediate",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "other-pr-worker",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "other-pr.go", Status: "modified"}},
+			Diff:         "diff --git a/other-pr.go b/other-pr.go\n",
+		},
+	}, {
+		WorkerID: "comment-only-follow-up",
+		Status:   core.WorkerSucceeded,
+		Summary:  "Posted requested benchmark numbers on PR 41.",
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:   "update_pull_request",
+		When:   "after_success",
+		Reason: "Return PR 41 to monitoring after handling feedback.",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 41,
+			"branch": "codex/pr-a",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("missing explicit update worker should not stop broad objective work")
+	}
+	if publisher.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0; stale worker %q would have overwritten PR", publisher.updateCalls, publisher.updated.WorkerID)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "update_pull_request", "skipped") {
+		t.Fatalf("missing skipped update action; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if !strings.Contains(taskActionPayloads(snapshot.Events, task.ID), "requires an explicit workerId") {
+		t.Fatalf("missing explicit workerId skip reason; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+}
+
 func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *testing.T) {
 	plan := annotatePullRequestFollowUpPlan(Plan{
 		WorkerKind: "codex",
@@ -2754,6 +2843,37 @@ func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *te
 	}
 	if shouldInheritLatestCandidate(plan.Metadata) {
 		t.Fatalf("PR follow-up plan should not inherit latest broad-objective candidate: %+v", plan.Metadata)
+	}
+}
+
+func TestNormalizePullRequestFollowUpPlanBindsImplicitUpdateToSingleSpawn(t *testing.T) {
+	plan := normalizePullRequestFollowUpPlan(Plan{
+		Spawns: []SpawnRequest{{
+			ID:         "repair-pr",
+			Role:       "PR repair",
+			Reason:     "Address queued PR feedback.",
+			WorkerKind: "codex",
+		}},
+		Actions: []PlanAction{{
+			Kind:   "update_pull_request",
+			When:   "after_success",
+			Reason: "apply repair",
+			Inputs: map[string]any{"repo": "owner/repo", "number": 7},
+		}, {
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "return to monitoring",
+		}},
+	})
+
+	if len(plan.Actions) != 2 {
+		t.Fatalf("actions = %+v, want update then watch", plan.Actions)
+	}
+	if plan.Actions[0].Kind != "update_pull_request" {
+		t.Fatalf("first action kind = %q, want update_pull_request", plan.Actions[0].Kind)
+	}
+	if plan.Actions[0].WorkerID != "repair-pr" {
+		t.Fatalf("update workerId = %q, want repair-pr", plan.Actions[0].WorkerID)
 	}
 }
 
