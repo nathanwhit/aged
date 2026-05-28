@@ -6244,6 +6244,19 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				}
 				return true, results, nil
 			}
+			if errors.Is(err, eventstore.ErrNotFound) {
+				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":   action.Kind,
+					"when":   nonEmpty(action.When, "after_success"),
+					"reason": action.Reason,
+					"inputs": action.Inputs,
+					"status": "skipped",
+					"error":  "pull request target is not tracked by this task",
+				}); err != nil {
+					return false, results, err
+				}
+				return true, results, nil
+			}
 			return false, results, err
 		}
 		req := updatePullRequestRequestFromAction(action)

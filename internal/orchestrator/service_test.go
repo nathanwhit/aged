@@ -3061,6 +3061,135 @@ func TestPullRequestFollowUpForPlanAcceptsMatchingActionDespiteStaleMetadata(t *
 	}
 }
 
+func TestPendingPullRequestFeedbackSkipsUntrackedAndTerminalPullRequests(t *testing.T) {
+	snapshot := core.Snapshot{
+		PullRequests: []core.PullRequest{{
+			ID:     "pr-open",
+			TaskID: "task-1",
+			Repo:   "owner/repo",
+			Number: 7,
+			URL:    "https://github.com/owner/repo/pull/7",
+			Branch: "codex/open",
+			State:  "OPEN",
+		}, {
+			ID:     "pr-closed",
+			TaskID: "task-1",
+			Repo:   "owner/repo",
+			Number: 8,
+			URL:    "https://github.com/owner/repo/pull/8",
+			Branch: "codex/closed",
+			State:  "CLOSED",
+		}},
+		Events: []core.Event{{
+			ID:     1,
+			Type:   core.EventPRFollowUp,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "github:owner/repo#9",
+				"repo":   "owner/repo",
+				"number": 9,
+				"url":    "https://github.com/owner/repo/pull/9",
+				"branch": "other-branch",
+				"reason": "pull_request_needs_work",
+			}),
+		}, {
+			ID:     2,
+			Type:   core.EventPRFollowUp,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-closed",
+				"repo":   "owner/repo",
+				"number": 8,
+				"url":    "https://github.com/owner/repo/pull/8",
+				"branch": "codex/closed",
+				"reason": "pull_request_needs_work",
+			}),
+		}, {
+			ID:     3,
+			Type:   core.EventPRFollowUp,
+			TaskID: "task-1",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "github:owner/repo#7",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/open",
+				"reason": "pull_request_needs_work",
+			}),
+		}},
+	}
+
+	pending := pendingPullRequestFeedback(snapshot, "task-1")
+	if len(pending) != 1 {
+		t.Fatalf("pending feedback = %+v, want only tracked open PR", pending)
+	}
+	if pending[0].PullRequestID != "pr-open" || pending[0].Number != 7 {
+		t.Fatalf("pending feedback = %+v, want canonical tracked PR", pending[0])
+	}
+}
+
+func TestServicePlanActionSkipsMissingPullRequestUpdateTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-missing-pr", Title: "Broad objective"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Keep producing independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "repair-worker",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "fix.go", Status: "modified"}},
+			Diff:         "diff --git a/fix.go b/fix.go\n",
+		},
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "repair-worker",
+		Reason:   "repair stale PR feedback",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 404,
+			"url":    "https://github.com/owner/repo/pull/404",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("missing PR update target should not stop the plan")
+	}
+	if publisher.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", publisher.updateCalls)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "update_pull_request", "skipped") {
+		t.Fatalf("missing skipped update action; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if !strings.Contains(taskActionPayloads(snapshot.Events, task.ID), "not tracked by this task") {
+		t.Fatalf("missing not tracked skip reason; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+}
+
 func TestServiceIntermediatePullRequestUpdateFailureContinuesObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
