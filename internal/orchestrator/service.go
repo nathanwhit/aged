@@ -6347,6 +6347,19 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		prs, err := s.WatchPullRequests(ctx, task.ID, req)
 		if err != nil {
+			if errors.Is(err, errNoPullRequestsToWatch) {
+				if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":   action.Kind,
+					"when":   nonEmpty(action.When, "after_success"),
+					"reason": action.Reason,
+					"inputs": action.Inputs,
+					"status": "skipped",
+					"error":  err.Error(),
+				}); err != nil {
+					return false, results, err
+				}
+				return true, results, nil
+			}
 			return false, results, err
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{

@@ -3877,6 +3877,117 @@ func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	}
 }
 
+func TestWatchPullRequestsWithoutExplicitTargetDoesNotAdoptRepoPullRequests(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Broad objective", Prompt: "Keep reducing dependencies."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.WatchPullRequests(ctx, task.ID, core.WatchPullRequestsRequest{Repo: "owner/repo"})
+	if !errors.Is(err, errNoPullRequestsToWatch) {
+		t.Fatalf("WatchPullRequests error = %v, want errNoPullRequestsToWatch", err)
+	}
+	if publisher.listCalls != 0 {
+		t.Fatalf("list calls = %d, want no broad repo listing", publisher.listCalls)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 0 {
+		t.Fatalf("pull requests = %+v, want none adopted", snapshot.PullRequests)
+	}
+}
+
+func TestWatchPullRequestsExplicitTerminalTargetDoesNotEnterWaiting(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{list: []core.PullRequest{{
+		ID:     "github:owner/repo#42",
+		Repo:   "owner/repo",
+		Number: 42,
+		URL:    "https://github.com/owner/repo/pull/42",
+		State:  "CLOSED",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Babysit PR", Prompt: "Watch owner/repo#42."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.WatchPullRequests(ctx, task.ID, core.WatchPullRequestsRequest{Repo: "owner/repo", Number: 42})
+	if !errors.Is(err, errNoPullRequestsToWatch) {
+		t.Fatalf("WatchPullRequests error = %v, want errNoPullRequestsToWatch", err)
+	}
+	if publisher.listCalls != 1 {
+		t.Fatalf("list calls = %d, want explicit target lookup", publisher.listCalls)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 0 {
+		t.Fatalf("pull requests = %+v, want terminal target ignored", snapshot.PullRequests)
+	}
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskWaiting || task.ObjectiveStatus == core.ObjectiveWaitingExternal {
+		t.Fatalf("task = %+v, want no waiting transition", task)
+	}
+}
+
+func TestServicePlanActionSkipsWatchWhenNoTaskOwnedPullRequestsRemain(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(&fakePullRequestPublisher{})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Broad objective", Prompt: "Keep going."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:   "watch_pull_requests",
+		When:   "after_success",
+		Reason: "return to monitoring after stale follow-up",
+		Inputs: map[string]any{"repo": "owner/repo"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("empty watch should continue replanning")
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "watch_pull_requests", "skipped") {
+		t.Fatalf("missing skipped watch action; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	task, ok := findTask(snapshot, task.ID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskWaiting || task.ObjectiveStatus == core.ObjectiveWaitingExternal {
+		t.Fatalf("task = %+v, want no waiting transition", task)
+	}
+}
+
 func TestServicePullRequestFollowUpSuppressesPlanSpawnsWhenReturningToWatch(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
