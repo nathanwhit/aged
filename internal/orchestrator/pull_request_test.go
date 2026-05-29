@@ -386,6 +386,55 @@ func TestPublishGitPatchBranchDoesNotUsePatchBaseAsBranchBase(t *testing.T) {
 	}
 }
 
+func TestUpdateGitPatchBranchAppliesPatchOnExistingPullRequestHead(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	runTestGit(t, repo, "branch", "-M", "main")
+	runTestGit(t, repo, "checkout", "-b", "feature")
+	if err := os.MkdirAll(filepath.Join(repo, "cli", "util"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "cli", "util", "browser.rs"), []byte("Command::new(\"open\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, repo, "add", "cli/util/browser.rs")
+	runTestGit(t, repo, "commit", "-m", "add browser opener")
+	prHead := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "cli", "util", "browser.rs"), []byte("Command::new(\"/usr/bin/open\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := runTestGit(t, repo, "diff", "--binary", "HEAD")
+	runTestGit(t, repo, "reset", "--hard", "HEAD")
+	runTestGit(t, repo, "checkout", "main")
+
+	stub := newPullRequestCommandStub(t, "owner/repo", 13, "Existing", "feature", "main")
+
+	if _, err := (LocalPullRequestPublisher{exec: stub.exec}).Update(ctx, core.PullRequest{
+		ID:     "pr-1",
+		Repo:   "owner/repo",
+		Number: 13,
+		URL:    "https://github.com/owner/repo/pull/13",
+		Branch: "feature",
+		Base:   "main",
+		Title:  "Existing",
+	}, PullRequestPublishSpec{
+		TaskID:        "task-1",
+		WorkDir:       repo,
+		Repo:          "owner/repo",
+		Base:          "main",
+		Branch:        "feature",
+		Patch:         patch,
+		PatchFromBase: true,
+		PatchBaseRef:  prHead,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if contents := runTestGit(t, repo, "show", "feature:cli/util/browser.rs"); contents != "Command::new(\"/usr/bin/open\")\n" {
+		t.Fatalf("updated branch cli/util/browser.rs = %q, want /usr/bin/open change", contents)
+	}
+}
+
 func TestPublishGitBranchFallsBackToRefspecPushWhenLocalBranchInUseByWorktree(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)

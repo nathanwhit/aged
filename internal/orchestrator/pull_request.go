@@ -36,6 +36,7 @@ type PullRequestPublishSpec struct {
 	ResetWorkDir   bool
 	ForceWithLease bool
 	MetadataOnly   bool
+	UpdateExisting bool
 	Metadata       map[string]any
 }
 
@@ -210,6 +211,7 @@ func (p LocalPullRequestPublisher) Update(ctx context.Context, pr core.PullReque
 	spec.Repo = repo
 	spec.Base = base
 	spec.Branch = branch
+	spec.UpdateExisting = true
 	if !spec.MetadataOnly {
 		if err := p.pushBranch(ctx, exec, spec, branch, base); err != nil {
 			return core.PullRequest{}, err
@@ -376,9 +378,9 @@ func (p LocalPullRequestPublisher) pushBranch(ctx context.Context, exec commandE
 
 func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec commandExecutor, dir string, branch string, base string, remote string, spec PullRequestPublishSpec) error {
 	refreshGitPublishBaseRefs(ctx, exec, dir)
-	baseRef := gitPublishBaseRef(ctx, exec, dir, base)
-	if baseRef == "" {
-		return fmt.Errorf("prepare git patch worktree: base %q is not available", nonEmpty(base, "main"))
+	applyBaseRef := gitPublishPatchApplyBaseRef(ctx, exec, dir, base, spec)
+	if applyBaseRef == "" {
+		return fmt.Errorf("prepare git patch worktree: base %q is not available", nonEmpty(spec.PatchBaseRef, base, "main"))
 	}
 	worktree, err := os.MkdirTemp("", "aged-pr-worktree-*")
 	if err != nil {
@@ -393,7 +395,7 @@ func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec 
 		_ = os.RemoveAll(worktree)
 	}
 	defer cleanup()
-	if _, err := exec(ctx, dir, "git", "worktree", "add", "--detach", worktree, baseRef); err != nil {
+	if _, err := exec(ctx, dir, "git", "worktree", "add", "--detach", worktree, applyBaseRef); err != nil {
 		return fmt.Errorf("create git patch worktree: %w", err)
 	}
 	if strings.TrimSpace(spec.Patch) != "" {
@@ -414,6 +416,18 @@ func (p LocalPullRequestPublisher) pushGitPatchBranch(ctx context.Context, exec 
 		return err
 	}
 	return nil
+}
+
+func gitPublishPatchApplyBaseRef(ctx context.Context, exec commandExecutor, dir string, base string, spec PullRequestPublishSpec) string {
+	if spec.UpdateExisting {
+		patchBaseRef := strings.TrimSpace(spec.PatchBaseRef)
+		if patchBaseRef != "" {
+			if _, err := exec(ctx, dir, "git", "rev-parse", "--verify", "--quiet", patchBaseRef+"^{commit}"); err == nil {
+				return patchBaseRef
+			}
+		}
+	}
+	return gitPublishBaseRef(ctx, exec, dir, base)
 }
 
 // pushGitPublishBranch updates the local branch ref to HEAD and pushes it to

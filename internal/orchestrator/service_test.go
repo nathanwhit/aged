@@ -12668,7 +12668,7 @@ func TestReplanLoopBuildsTurnStateWithSingleSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := &snapshotCountingStore{Store: baseStore}
+	store := &resettableSnapshotCountingStore{Store: baseStore}
 	brain := &replanningBrain{decisions: []ReplanDecision{{
 		Action:  "wait",
 		Message: "pause after one replan turn",
@@ -15568,26 +15568,26 @@ func (s *transientAppendErrorStore) failureCount() int {
 	return s.failures
 }
 
-type snapshotCountingStore struct {
+type resettableSnapshotCountingStore struct {
 	eventstore.Store
 	mu    sync.Mutex
 	calls int
 }
 
-func (s *snapshotCountingStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
+func (s *resettableSnapshotCountingStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()
 	return s.Store.Snapshot(ctx)
 }
 
-func (s *snapshotCountingStore) snapshotCalls() int {
+func (s *resettableSnapshotCountingStore) snapshotCalls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.calls
 }
 
-func (s *snapshotCountingStore) resetSnapshotCalls() {
+func (s *resettableSnapshotCountingStore) resetSnapshotCalls() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = 0
