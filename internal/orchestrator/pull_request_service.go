@@ -2319,6 +2319,10 @@ func latestPullRequestFollowUpIsQueued(snapshot core.Snapshot, taskID string) bo
 }
 
 func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
+	return pendingPullRequestFeedbackFromSnapshot(snapshot, taskID)
+}
+
+func pendingPullRequestFeedbackFromSnapshot(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
 	pullRequests := map[string]core.PullRequest{}
 	trackedPullRequests := []core.PullRequest{}
 	for _, pr := range snapshot.PullRequests {

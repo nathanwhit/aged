@@ -2570,12 +2570,16 @@ func (s *Service) taskIsTerminal(ctx context.Context, taskID string) (bool, erro
 	if err != nil {
 		return false, err
 	}
+	return taskIsTerminalFromSnapshot(snapshot, taskID), nil
+}
+
+func taskIsTerminalFromSnapshot(snapshot core.Snapshot, taskID string) bool {
 	for _, task := range snapshot.Tasks {
 		if task.ID == taskID {
-			return isTerminalTaskStatus(task.Status), nil
+			return isTerminalTaskStatus(task.Status)
 		}
 	}
-	return false, nil
+	return false
 }
 
 func (s *Service) taskArtifacts(ctx context.Context, taskID string) []core.TaskArtifact {
@@ -2583,6 +2587,10 @@ func (s *Service) taskArtifacts(ctx context.Context, taskID string) []core.TaskA
 	if err != nil {
 		return nil
 	}
+	return taskArtifactsFromSnapshot(snapshot, taskID)
+}
+
+func taskArtifactsFromSnapshot(snapshot core.Snapshot, taskID string) []core.TaskArtifact {
 	for _, task := range snapshot.Tasks {
 		if task.ID == taskID {
 			return append([]core.TaskArtifact{}, task.Artifacts...)
@@ -2596,6 +2604,10 @@ func (s *Service) taskPullRequestStates(ctx context.Context, taskID string) []Re
 	if err != nil {
 		return nil
 	}
+	return taskPullRequestStatesFromSnapshot(snapshot, taskID)
+}
+
+func taskPullRequestStatesFromSnapshot(snapshot core.Snapshot, taskID string) []ReplanPullRequestState {
 	states := []ReplanPullRequestState{}
 	for _, pr := range snapshot.PullRequests {
 		if pr.TaskID != taskID {
@@ -7064,10 +7076,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	limitUnproductiveTurns := !taskIsBroadObjective(task)
 	currentWorkPlan := initial.WorkPlan
 	for turn := 1; ; turn++ {
-		if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
+		stateSnapshot, err := s.store.Snapshot(ctx)
+		if err != nil {
 			_ = s.failTask(ctx, task.ID, err)
 			return false, "", "", results
-		} else if terminal && !options.FinalizationRecovery {
+		}
+		if taskIsTerminalFromSnapshot(stateSnapshot, task.ID) && !options.FinalizationRecovery {
 			return false, "", "", results
 		}
 		if limitUnproductiveTurns && stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
@@ -7082,11 +7096,11 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			WorkPlan:                   currentWorkPlan,
 			Results:                    results,
 			ContextLedger:              s.taskContextLedger(ctx, task.ID),
-			Artifacts:                  s.taskArtifacts(ctx, task.ID),
-			PullRequests:               s.taskPullRequestStates(ctx, task.ID),
-			TaskSteering:               s.taskSteering(ctx, task.ID),
-			PendingPullRequestFeedback: s.pendingPullRequestFeedback(ctx, task.ID),
-			PendingWorkerSteering:      s.pendingWorkerSteering(ctx, task.ID),
+			Artifacts:                  taskArtifactsFromSnapshot(stateSnapshot, task.ID),
+			PullRequests:               taskPullRequestStatesFromSnapshot(stateSnapshot, task.ID),
+			TaskSteering:               taskSteering(stateSnapshot, task.ID),
+			PendingPullRequestFeedback: pendingPullRequestFeedbackFromSnapshot(stateSnapshot, task.ID),
+			PendingWorkerSteering:      pendingWorkerSteering(stateSnapshot, task.ID),
 			Turn:                       turn,
 			BlockedFinalCandidateIDs:   blockedFinalCandidateIDs,
 			RecoveryHint:               recoveryHint,
