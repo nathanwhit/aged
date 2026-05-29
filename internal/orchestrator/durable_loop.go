@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +19,8 @@ const (
 	defaultLoopWorkerKind = "codex"
 	loopActionKind        = "durable_loop"
 )
+
+var errDurableLoopTaskTerminal = errors.New("durable loop task reached terminal state")
 
 type durableLoopConfig struct {
 	WorkerKind     string
@@ -227,33 +230,174 @@ func (s *Service) waitDurableLoopInterval(ctx context.Context, taskID string, in
 		return nil
 	}
 	started := time.Now()
+	latest := interval
+	subscriptionID, events := s.Subscribe()
+	defer s.Unsubscribe(subscriptionID)
+	if task, ok, err := s.readDurableLoopTask(ctx, taskID); err == nil && ok {
+		if isTerminalTaskStatus(task.Status) {
+			return errDurableLoopTaskTerminal
+		}
+		latest = durableLoopConfigFromTask(task, s.runners).Interval
+	}
+	if latest <= 0 || time.Since(started) >= latest {
+		return nil
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		latest := interval
-		snapshot, err := s.store.Snapshot(ctx)
-		if err == nil {
-			if task, ok := findTask(snapshot, taskID); ok {
-				latest = durableLoopConfigFromTask(task, s.runners).Interval
-			}
 		}
 		if latest <= 0 || time.Since(started) >= latest {
 			return nil
 		}
 		remaining := latest - time.Since(started)
-		wait := time.Second
-		if remaining < wait {
-			wait = remaining
-		}
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(remaining)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
+		case event, ok := <-events:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if !ok || event.TaskID != taskID || !durableLoopWaitEventCanChangeTaskState(event.Type) {
+				continue
+			}
+			task, found, err := s.readDurableLoopTask(ctx, taskID)
+			if err != nil || !found {
+				continue
+			}
+			if isTerminalTaskStatus(task.Status) {
+				return errDurableLoopTaskTerminal
+			}
+			latest = durableLoopConfigFromTask(task, s.runners).Interval
 		case <-timer.C:
+			return nil
 		}
 	}
+}
+
+func durableLoopWaitEventCanChangeTaskState(eventType core.EventType) bool {
+	switch eventType {
+	case core.EventTaskCreated, core.EventTaskUpdated, core.EventTaskStatus, core.EventTaskCleared:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) readDurableLoopTask(ctx context.Context, taskID string) (core.Task, bool, error) {
+	events, err := s.store.ListTaskEvents(ctx, taskID, 0)
+	if err != nil {
+		return core.Task{}, false, err
+	}
+	return durableLoopTaskFromEvents(events, taskID)
+}
+
+func durableLoopTaskFromEvents(events []core.Event, taskID string) (core.Task, bool, error) {
+	var task core.Task
+	found := false
+	cleared := false
+	for _, event := range events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskCreated:
+			var payload struct {
+				ProjectID string          `json:"projectId,omitempty"`
+				Title     string          `json:"title"`
+				Prompt    string          `json:"prompt"`
+				Metadata  json.RawMessage `json:"metadata,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Task{}, false, fmt.Errorf("decode task.created: %w", err)
+			}
+			task = core.Task{
+				ID:              event.TaskID,
+				ProjectID:       payload.ProjectID,
+				Title:           payload.Title,
+				Prompt:          payload.Prompt,
+				Status:          core.TaskQueued,
+				ObjectiveStatus: core.ObjectiveActive,
+				ObjectivePhase:  "queued",
+				CreatedAt:       event.At,
+				UpdatedAt:       event.At,
+				Metadata:        payload.Metadata,
+			}
+			if metadata, err := createTaskMetadataMap(payload.Metadata); err == nil {
+				if task.ProjectID == "" {
+					task.ProjectID = stringMetadataValue(metadata["projectId"])
+				}
+				task.WorkstreamID = stringMetadataValue(metadata["workstreamId"])
+			}
+			found = true
+			cleared = false
+		case core.EventTaskUpdated:
+			if !found {
+				continue
+			}
+			var payload struct {
+				Title         string          `json:"title,omitempty"`
+				Prompt        string          `json:"prompt,omitempty"`
+				MetadataPatch json.RawMessage `json:"metadataPatch,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Task{}, false, fmt.Errorf("decode task.updated: %w", err)
+			}
+			if payload.Title != "" {
+				task.Title = payload.Title
+			}
+			if payload.Prompt != "" {
+				task.Prompt = payload.Prompt
+			}
+			task.Metadata = mergeDurableLoopTaskMetadataPatch(task.Metadata, payload.MetadataPatch)
+			if metadata, err := createTaskMetadataMap(task.Metadata); err == nil {
+				task.WorkstreamID = stringMetadataValue(metadata["workstreamId"])
+			}
+			task.UpdatedAt = event.At
+		case core.EventTaskStatus:
+			if !found {
+				continue
+			}
+			var payload struct {
+				Status core.TaskStatus `json:"status"`
+				Error  string          `json:"error,omitempty"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				return core.Task{}, false, fmt.Errorf("decode task.status: %w", err)
+			}
+			task.Status = payload.Status
+			task.Error = payload.Error
+			task.UpdatedAt = event.At
+		case core.EventTaskCleared:
+			cleared = true
+		}
+	}
+	if !found || cleared {
+		return core.Task{}, false, nil
+	}
+	return task, true, nil
+}
+
+func mergeDurableLoopTaskMetadataPatch(base json.RawMessage, patch json.RawMessage) json.RawMessage {
+	if len(patch) == 0 {
+		return base
+	}
+	out := map[string]any{}
+	if len(base) > 0 {
+		_ = json.Unmarshal(base, &out)
+	}
+	var patchValues map[string]any
+	if err := json.Unmarshal(patch, &patchValues); err != nil {
+		return base
+	}
+	for key, value := range patchValues {
+		out[key] = value
+	}
+	return core.MustJSON(out)
 }
 
 func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, config durableLoopConfig, iteration int, previousWorkerID string) (WorkerTurnResult, error) {

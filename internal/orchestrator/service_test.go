@@ -6379,14 +6379,15 @@ func hasIterationCompletedAction(events []core.Event, taskID string, iteration i
 func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	store := openTestStore(t)
+	sqliteStore := openTestStore(t)
+	store := &snapshotCountingStore{Store: sqliteStore}
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
 		"loop": eventRunner{kind: "loop"},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	taskID := "loop-task"
-	if _, err := store.Append(ctx, core.Event{
+	if _, err := service.append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -6401,7 +6402,7 @@ func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Append(ctx, core.Event{
+	if _, err := service.append(ctx, core.Event{
 		Type:   core.EventTaskStatus,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
@@ -6416,7 +6417,15 @@ func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 		done <- service.waitDurableLoopInterval(ctx, taskID, 30*time.Second)
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if _, err := service.UpdateTaskLoopConfig(ctx, taskID, core.UpdateLoopConfigRequest{LoopIntervalSeconds: ptrInt(0)}); err != nil {
+	if _, err := service.append(ctx, core.Event{
+		Type:   core.EventTaskUpdated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"metadataPatch": map[string]any{
+				"loopIntervalSeconds": 0,
+			},
+		}),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -6429,6 +6438,66 @@ func TestDurableLoopIntervalWaitObservesConfigUpdate(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+	if got := store.snapshotCount(); got != 0 {
+		t.Fatalf("Snapshot calls = %d, want 0", got)
+	}
+}
+
+func TestDurableLoopIntervalWaitStopsOnTerminalTaskStatusWithoutSnapshot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sqliteStore := openTestStore(t)
+	store := &snapshotCountingStore{Store: sqliteStore}
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"loop": eventRunner{kind: "loop"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	taskID := "loop-task"
+	if _, err := service.append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Loop",
+			"prompt": "Keep making bounded progress.",
+			"metadata": map[string]any{
+				"executionMode":       "loop",
+				"loopWorkerKind":      "loop",
+				"loopIntervalSeconds": 30,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskWaiting,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- service.waitDurableLoopInterval(ctx, taskID, 30*time.Second)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := service.setTaskStatus(ctx, taskID, core.TaskCanceled); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, errDurableLoopTaskTerminal) {
+			t.Fatalf("error = %v, want terminal task error", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got := store.snapshotCount(); got != 0 {
+		t.Fatalf("Snapshot calls = %d, want 0", got)
 	}
 }
 
@@ -15419,6 +15488,25 @@ type transientAppendErrorStore struct {
 	failuresLeft int
 	failures     int
 	err          error
+}
+
+type snapshotCountingStore struct {
+	eventstore.Store
+	mu        sync.Mutex
+	snapshots int
+}
+
+func (s *snapshotCountingStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
+	s.mu.Lock()
+	s.snapshots++
+	s.mu.Unlock()
+	return s.Store.Snapshot(ctx)
+}
+
+func (s *snapshotCountingStore) snapshotCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.snapshots
 }
 
 func (s *transientAppendErrorStore) Append(ctx context.Context, event core.Event) (core.Event, error) {
