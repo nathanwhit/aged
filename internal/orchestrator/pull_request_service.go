@@ -1551,8 +1551,234 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 		s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
 			s.resumePullRequestFeedbackQueue(taskCtx, pr.TaskID)
 		})
+	} else if task.Status == core.TaskRunning || task.Status == core.TaskPlanning {
+		s.startPullRequestFollowUpWorker(pr.TaskID, pr.ID)
 	}
 	return nil
+}
+
+func (s *Service) startPullRequestFollowUpWorker(taskID string, prID string) {
+	go s.runPullRequestFollowUpWorker(context.Background(), taskID, prID)
+}
+
+func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID string, prID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || isTerminalTaskStatus(task.Status) {
+		return
+	}
+	pr, ok := pullRequestByID(snapshot, prID)
+	if !ok || pr.TaskID != taskID || isTerminalPullRequestState(pr.State) {
+		return
+	}
+	if activePullRequestFollowUpWorker(snapshot, taskID, prID) {
+		return
+	}
+	plan := canonicalizePullRequestFollowUpPlan(Plan{
+		WorkerKind: s.pullRequestFollowUpWorkerKind(),
+		Prompt:     pullRequestFollowUpPrompt(pr),
+		Rationale:  "Handle queued GitHub pull request feedback without blocking the broader objective worker.",
+		Actions: []PlanAction{{
+			Kind:   "update_pull_request",
+			When:   "after_success",
+			Reason: "Apply successful follow-up worker changes to the existing pull request.",
+			Inputs: pullRequestUpdateInputs(pr),
+		}, {
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "Return the pull request to GitHub monitoring after the bounded follow-up.",
+			Inputs: pullRequestWatchInputs(pr),
+		}},
+		Metadata: map[string]any{
+			"backgroundPullRequestFollowUp": true,
+			"scheduler":                     "pull_request_monitor",
+			"spawnID":                       pullRequestFollowUpSpawnID(pr),
+			"spawnRole":                     "github_pr_followup",
+			"spawnReason":                   "Handle queued GitHub pull request feedback in parallel with objective work.",
+		},
+	}, pr)
+	if strings.TrimSpace(plan.WorkerKind) == "" {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "skipped",
+			"reason":        "no worker runner is configured for pull request follow-up",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+		})
+		return
+	}
+	if err := plan.Validate(); err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "skipped",
+			"reason":        "generated pull request follow-up plan is invalid",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+			"error":         err.Error(),
+		})
+		return
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":          "pull_request_background_followup",
+		"status":        "started",
+		"reason":        "queued pull request feedback is being handled without waiting for the active objective worker",
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+	}); err != nil {
+		return
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  taskID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "failed",
+			"reason":        "could not record background pull request follow-up plan",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+			"error":         err.Error(),
+		})
+		return
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "continued",
+			"reason":        "background pull request follow-up worker could not start or finish; queued feedback remains for the next objective replan",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+			"error":         err.Error(),
+		})
+		return
+	}
+	results := []WorkerTurnResult{result}
+	if result.Status != core.WorkerSucceeded {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "continued",
+			"reason":        "background pull request follow-up worker did not complete successfully; queued feedback remains for the next objective replan",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+			"workerId":      result.WorkerID,
+			"error":         nonEmpty(result.Error, result.Summary),
+		})
+		return
+	}
+	for _, action := range plan.Actions {
+		if strings.TrimSpace(action.When) != "after_success" {
+			continue
+		}
+		if err := s.executeBackgroundPullRequestFollowUpAction(ctx, task, pr, action, results); err != nil {
+			_ = s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":          "pull_request_background_followup",
+				"status":        "continued",
+				"reason":        "background pull request follow-up action failed; queued feedback remains for the next objective replan",
+				"pullRequestId": pr.ID,
+				"url":           pr.URL,
+				"workerId":      result.WorkerID,
+				"error":         err.Error(),
+			})
+			return
+		}
+	}
+	_ = s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":          "pull_request_background_followup",
+		"status":        "completed",
+		"reason":        "background pull request follow-up completed while objective work continued",
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"workerId":      result.WorkerID,
+	})
+}
+
+func (s *Service) executeBackgroundPullRequestFollowUpAction(ctx context.Context, task core.Task, pr core.PullRequest, action PlanAction, results []WorkerTurnResult) error {
+	switch strings.TrimSpace(action.Kind) {
+	case "update_pull_request":
+		keepGoing, _, err := s.executePlanAction(ctx, task, action, results)
+		if err != nil {
+			return err
+		}
+		_ = keepGoing
+		return nil
+	case "watch_pull_requests":
+		return s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":             action.Kind,
+			"when":             nonEmpty(action.When, "after_success"),
+			"reason":           action.Reason,
+			"inputs":           action.Inputs,
+			"pullRequestCount": 1,
+			"pullRequestId":    pr.ID,
+			"url":              pr.URL,
+			"status":           "background",
+		})
+	default:
+		return nil
+	}
+}
+
+func (s *Service) pullRequestFollowUpWorkerKind() string {
+	for _, kind := range []string{"codex", "claude", "mock"} {
+		if s.runners[kind] != nil {
+			return kind
+		}
+	}
+	for kind, runner := range s.runners {
+		if runner != nil {
+			return kind
+		}
+	}
+	return ""
+}
+
+func activePullRequestFollowUpWorker(snapshot core.Snapshot, taskID string, prID string) bool {
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID != taskID || isTerminalWorkerStatus(node.Status) {
+			continue
+		}
+		metadata := map[string]any{}
+		if len(node.Metadata) > 0 {
+			_ = json.Unmarshal(node.Metadata, &metadata)
+		}
+		if stringMetadata(metadata, "pullRequestID") == prID && boolMetadata(metadata, "backgroundPullRequestFollowUp") {
+			return true
+		}
+	}
+	return false
+}
+
+func pullRequestFollowUpSpawnID(pr core.PullRequest) string {
+	if pr.Number > 0 {
+		return fmt.Sprintf("pr%d_followup", pr.Number)
+	}
+	return "pull_request_followup"
+}
+
+func pullRequestUpdateInputs(pr core.PullRequest) map[string]any {
+	return map[string]any{
+		"id":     pr.ID,
+		"repo":   pr.Repo,
+		"number": pr.Number,
+		"url":    pr.URL,
+		"branch": pr.Branch,
+		"base":   pr.Base,
+	}
+}
+
+func pullRequestWatchInputs(pr core.PullRequest) map[string]any {
+	return map[string]any{
+		"repo":   pr.Repo,
+		"number": pr.Number,
+		"url":    pr.URL,
+		"state":  "open",
+	}
 }
 
 func (s *Service) markPullRequestFeedbackTriggered(ctx context.Context, pr core.PullRequest) error {

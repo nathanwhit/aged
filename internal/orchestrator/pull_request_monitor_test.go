@@ -539,6 +539,60 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	}
 }
 
+func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRuns(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	metadata := core.MustJSON(map[string]any{
+		"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+		"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+	})
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "COMMENTED", metadata)}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+	appendActiveWorker(t, ctx, store, "task-1", "objective-worker")
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, "task-1", "pull_request_background_followup", "completed")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task did not complete background follow-up; events = %+v", snapshot.Events)
+	})
+	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 0 {
+		t.Fatalf("pending feedback = %+v, want background watch action to clear it", pending)
+	}
+	if !workerActive(snapshot, "objective-worker") {
+		t.Fatalf("objective worker was not left active; workers = %+v", snapshot.Workers)
+	}
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskRunning {
+		t.Fatalf("task status = %q, want broad objective to keep running", task.Status)
+	}
+	backgroundWorkers := 0
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID != "task-1" || node.WorkerID == "objective-worker" {
+			continue
+		}
+		metadata := map[string]any{}
+		if len(node.Metadata) > 0 {
+			_ = json.Unmarshal(node.Metadata, &metadata)
+		}
+		if boolMetadata(metadata, "backgroundPullRequestFollowUp") && stringMetadata(metadata, "pullRequestID") == "pr-1" {
+			backgroundWorkers++
+		}
+	}
+	if backgroundWorkers != 1 {
+		t.Fatalf("background follow-up workers = %d, want 1; nodes = %+v", backgroundWorkers, snapshot.ExecutionNodes)
+	}
+}
+
 func TestServiceDefaultPullRequestMonitorQueuesNewFeedbackWhenOldFollowUpPending(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -1020,6 +1074,56 @@ func appendTrackedPullRequestWithRepo(t *testing.T, ctx context.Context, store *
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func appendActiveWorker(t *testing.T, ctx context.Context, store *eventstore.SQLiteStore, taskID string, workerID string) {
+	t.Helper()
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-" + workerID,
+			"workerId":   workerID,
+			"workerKind": "mock",
+			"targetId":   "local",
+			"targetKind": "local",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "mock",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func workerActive(snapshot core.Snapshot, workerID string) bool {
+	for _, worker := range snapshot.Workers {
+		if worker.ID == workerID && !isTerminalWorkerStatus(worker.Status) {
+			return true
+		}
+	}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.WorkerID == workerID && !isTerminalWorkerStatus(node.Status) {
+			return true
+		}
+	}
+	return false
 }
 
 type testPullRequestFollowUpPayload struct {
