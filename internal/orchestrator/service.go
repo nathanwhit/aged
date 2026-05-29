@@ -7269,6 +7269,41 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				_ = s.failTask(ctx, task.ID, err)
 				return false, "", "", results
 			}
+			earlyActions, remainingActions := splitPreFollowUpActions(next.Actions, results)
+			if len(earlyActions) > 0 {
+				beforePRs, err := s.taskPullRequestCount(ctx, task.ID)
+				if err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", "", results
+				}
+				var keepGoing bool
+				keepGoing, results, err = s.runPlanActions(ctx, task, planWithActions(next, earlyActions), results)
+				if err != nil {
+					if ctx.Err() != nil {
+						return false, "", "", results
+					}
+					if s.waitForRecoverableError(ctx, task.ID, "", err) {
+						return false, "", "", results
+					}
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", "", results
+				}
+				if !keepGoing {
+					return false, "", "", results
+				}
+				if containsPublishPullRequestAction(earlyActions) {
+					afterPRs, err := s.taskPullRequestCount(ctx, task.ID)
+					if err != nil {
+						_ = s.failTask(ctx, task.ID, err)
+						return false, "", "", results
+					}
+					if afterPRs <= beforePRs {
+						stalledTurns++
+						continue
+					}
+				}
+				next.Actions = remainingActions
+			}
 			var nextResults []WorkerTurnResult
 			var ok bool
 			if len(next.Workers) > 0 {
