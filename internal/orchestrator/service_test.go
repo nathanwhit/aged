@@ -2153,6 +2153,93 @@ func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	}
 }
 
+func TestServiceReplanPublishesReadyCandidateBeforeNextWorkers(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &replanningBrain{
+		plan: Plan{
+			Rationale: "produce one candidate before replanning",
+			Workers: []WorkerRequest{{
+				ID:         "candidate",
+				Role:       "candidate",
+				Reason:     "Produce the first reviewable slice.",
+				WorkerKind: "change",
+				Prompt:     "implement first slice",
+			}},
+		},
+		decisions: []ReplanDecision{
+			{
+				Action:    "continue",
+				Rationale: "publish the first slice and continue",
+				Plan: &Plan{
+					Rationale: "the candidate is ready to publish before starting the next slice",
+					Actions: []PlanAction{{
+						Kind:     "publish_pull_request",
+						When:     "after_success",
+						Reason:   "publish the first slice before continuing",
+						WorkerID: "candidate",
+						Inputs: map[string]any{
+							"repo":                 "owner/repo",
+							"title":                "Ship first slice",
+							"body":                 "Ship the first slice.",
+							"continueAfterPublish": true,
+						},
+					}},
+					Workers: []WorkerRequest{{
+						ID:         "next_slice",
+						Role:       "implementer",
+						Reason:     "Continue with the next slice after publication.",
+						WorkerKind: "change",
+						Prompt:     "implement next slice",
+					}},
+				},
+			},
+			{
+				Action:  "wait",
+				Message: "pause after next slice",
+			},
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "changed code"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "Cargo.toml", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Broad objective",
+		Prompt: "Publish slices as they become ready.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEventCount(t, store, core.EventTaskReplanned, task.ID, 2)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want ready candidate published before next work", publisher.publishCalls)
+	}
+	publishEventID := firstEventIDWithPayloadValue(snapshot.Events, core.EventTaskAction, task.ID, "kind", "publish_pull_request")
+	if publishEventID == 0 {
+		t.Fatalf("missing publish action; actions:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	nextWorkerEventID := firstEventIDWithPayloadValue(snapshot.Events, core.EventExecutionPlanned, task.ID, "spawnID", "next_slice")
+	if nextWorkerEventID == 0 {
+		t.Fatalf("missing next_slice worker; events = %s", taskEventSummary(snapshot.Events, task.ID))
+	}
+	if publishEventID > nextWorkerEventID {
+		t.Fatalf("publish action event %d happened after next worker event %d", publishEventID, nextWorkerEventID)
+	}
+}
+
 func TestServiceIntermediatePullRequestKeepsObjectiveRunning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
