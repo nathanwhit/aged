@@ -3697,6 +3697,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	plannedResumeSession := strings.TrimSpace(resumeSessionID) != ""
 	workspace, reusedWorkspace, workspaceErr := s.retryWorkspace(ctx, task.ID, workerID, retryFromWorkerID)
 	if workspaceErr != nil {
 		plan.Metadata["retryWorkspaceReused"] = false
@@ -3836,20 +3837,26 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		steering = make(chan string, 16)
 	}
 	retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
-	workerPrompt := plan.Prompt
-	prompt := workerExecutionPrompt(workerPrompt, workspace)
 	if reusedWorkspace {
 		if !capabilities.ResumeSession {
 			resumeSessionID = ""
 			delete(plan.Metadata, "retryResumeSessionID")
+			if plannedResumeSession {
+				s.restoreDurableLoopFullPromptForDegradedResume(ctx, task, &plan)
+			}
 		}
-		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
 	} else {
 		resumeSessionID = ""
 		delete(plan.Metadata, "retryResumeSessionID")
-		if retryFromWorkerID != "" && len(retrySteering) > 0 {
-			prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, "", retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
+		if retryFromWorkerID != "" && plannedResumeSession {
+			s.restoreDurableLoopFullPromptForDegradedResume(ctx, task, &plan)
 		}
+	}
+	prompt := workerExecutionPrompt(plan.Prompt, workspace)
+	if reusedWorkspace {
+		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
+	} else if retryFromWorkerID != "" && len(retrySteering) > 0 {
+		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, "", retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
 	}
 	spec := worker.Spec{
 		ID:              workerID,
@@ -4167,6 +4174,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	remoteWorkDir := remoteSourceDir
 	retryFromWorkerID := stringMetadata(plan.Metadata, "retryFromWorkerID")
 	resumeSessionID := stringMetadata(plan.Metadata, "retryResumeSessionID")
+	plannedResumeSession := strings.TrimSpace(resumeSessionID) != ""
 	requireFreshWorkspace := strings.EqualFold(stringMetadata(plan.Metadata, "workspaceReusePolicy"), "fresh") || boolMetadata(plan.Metadata, "freshWorkspace")
 	reusedWorkspace := false
 	if retryFromWorkerID != "" && !requireFreshWorkspace {
@@ -4279,6 +4287,17 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	capabilities := worker.RunnerCapabilities(runner)
 	capabilities.LiveSteering = false
+	if reusedWorkspace {
+		if !capabilities.ResumeSession {
+			resumeSessionID = ""
+			delete(plan.Metadata, "retryResumeSessionID")
+			if plannedResumeSession {
+				s.restoreDurableLoopFullPromptForDegradedResume(ctx, task, &plan)
+			}
+		}
+	} else if retryFromWorkerID != "" && plannedResumeSession {
+		s.restoreDurableLoopFullPromptForDegradedResume(ctx, task, &plan)
+	}
 	spec := worker.Spec{
 		ID:              workerID,
 		TaskID:          task.ID,
@@ -4292,11 +4311,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		Env:             workspaceSharedEnv(workspace),
 	}
 	if reusedWorkspace {
-		if !capabilities.ResumeSession {
-			resumeSessionID = ""
-			delete(plan.Metadata, "retryResumeSessionID")
-			spec.ResumeSessionID = ""
-		}
+		spec.ResumeSessionID = resumeSessionID
 		spec.Prompt = retryWorkerExecutionPrompt(spec.Prompt, retryFromWorkerID, resumeSessionID, stringSliceMetadata(plan.Metadata, "retrySteering"), stringMetadata(plan.Metadata, "retryContextKind"))
 	} else if retryFromWorkerID != "" {
 		retrySteering := stringSliceMetadata(plan.Metadata, "retrySteering")
