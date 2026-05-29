@@ -332,6 +332,102 @@ func TestReplanPromptBudgeterSplitsBoundedStateAndOmitsLargeArtifactContents(t *
 	}
 }
 
+func TestReviewPromptPayloadsCompactLargeCandidates(t *testing.T) {
+	task := core.Task{ID: "task-1", Title: "Large candidate", Prompt: "Review a large candidate."}
+	candidate := largePromptCandidate()
+
+	completionData, err := json.Marshal(completionReviewPayload(task, candidate, "done"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicationData, err := json.Marshal(publicationReviewPayload(task, candidate, PlanAction{Kind: "publish_pull_request"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	brain := &CodexBrain{template: "schedule the work"}
+	completionPrompt := brain.completionReviewPrompt(task, candidate, "done")
+	publicationPrompt := brain.publicationReviewPrompt(task, candidate, PlanAction{Kind: "publish_pull_request"})
+
+	for name, data := range map[string][]byte{
+		"completion":  completionData,
+		"publication": publicationData,
+	} {
+		text := string(data)
+		if strings.Contains(text, "RAW_DIFF_MARKER") || strings.Contains(text, "RAW_PUBLISH_DIFF_MARKER") {
+			t.Fatalf("%s review payload retained raw diff content", name)
+		}
+		if strings.Contains(text, "artifact-content-artifact-content") {
+			t.Fatalf("%s review payload retained large artifact content", name)
+		}
+		if !strings.Contains(text, "additional changed files omitted") {
+			t.Fatalf("%s review payload did not cap changed files: %s", name, text)
+		}
+		if len(data) >= 40_000 {
+			t.Fatalf("%s review payload length = %d, want compact candidate payload", name, len(data))
+		}
+	}
+	for name, prompt := range map[string]string{
+		"completion":  completionPrompt,
+		"publication": publicationPrompt,
+	} {
+		if strings.Contains(prompt, "RAW_DIFF_MARKER") || strings.Contains(prompt, "RAW_PUBLISH_DIFF_MARKER") {
+			t.Fatalf("%s review prompt retained raw diff content", name)
+		}
+	}
+
+	rawPayload := map[string]any{
+		"task":              taskPromptPayload(task),
+		"selectedCandidate": candidate,
+		"completionReason":  "done",
+	}
+	rawData, err := json.Marshal(rawPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(completionData)*10 >= len(rawData) {
+		t.Fatalf("completion review payload length = %d, raw length = %d, want at least 10x smaller", len(completionData), len(rawData))
+	}
+	t.Logf("completion review payload bytes: compact=%d raw=%d reduction=%.1fx", len(completionData), len(rawData), float64(len(rawData))/float64(len(completionData)))
+}
+
+func TestCodeReviewPromptPayloadBoundsDiff(t *testing.T) {
+	task := core.Task{ID: "task-1", Title: "Large candidate", Prompt: "Review a large candidate."}
+	candidate := largePromptCandidate()
+
+	payload := codeReviewPromptPayload(task, candidate, core.ReviewPolicy{Enabled: true}, "completion")
+	bounded, ok := payload["candidate"].(WorkerTurnResult)
+	if !ok {
+		t.Fatalf("candidate payload type = %T", payload["candidate"])
+	}
+	if len(bounded.Changes.Diff) > maxPromptCandidateDiffBytes {
+		t.Fatalf("bounded diff length = %d, want <= %d", len(bounded.Changes.Diff), maxPromptCandidateDiffBytes)
+	}
+	if !strings.Contains(bounded.Changes.Diff, codeReviewDiffTruncateMarker) {
+		t.Fatalf("bounded diff missing truncation marker")
+	}
+	if !strings.Contains(bounded.Changes.Diff, "RAW_DIFF_MARKER") {
+		t.Fatalf("bounded diff dropped useful diff header")
+	}
+	if strings.Contains(bounded.Changes.Diff, "DIFF_MIDDLE_SHOULD_BE_OMITTED") {
+		t.Fatalf("bounded diff retained omitted middle content")
+	}
+	if bounded.Changes.PublishDiff != "" {
+		t.Fatalf("publish diff was not stripped")
+	}
+
+	prompt := (&CodexBrain{template: "schedule the work"}).codeReviewPrompt(task, candidate, core.ReviewPolicy{Enabled: true}, "completion")
+	if !strings.Contains(prompt, "truncated for code review prompt") {
+		t.Fatalf("code review prompt missing diff truncation marker")
+	}
+	if strings.Contains(prompt, "RAW_PUBLISH_DIFF_MARKER") {
+		t.Fatalf("code review prompt retained publish diff")
+	}
+	if len(prompt) >= 120_000 {
+		t.Fatalf("code review prompt length = %d, want bounded prompt", len(prompt))
+	}
+	t.Logf("code review prompt bytes: prompt=%d rawDiff=%d boundedDiff=%d", len(prompt), len(candidate.Changes.Diff), len(bounded.Changes.Diff))
+}
+
 func TestReplanPromptPayloadIncludesTaskSteering(t *testing.T) {
 	payload := replanPromptPayload(core.Task{
 		ID:     "task-1",
@@ -549,6 +645,42 @@ func TestDecodeReplanDecisionIgnoresTrailingJunk(t *testing.T) {
 	}
 	if decision.Action != "complete" {
 		t.Fatalf("action = %q", decision.Action)
+	}
+}
+
+func largePromptCandidate() WorkerTurnResult {
+	changedFiles := make([]WorkspaceChangedFile, maxPromptChangedFiles+12)
+	for index := range changedFiles {
+		changedFiles[index] = WorkspaceChangedFile{
+			Path:   "internal/orchestrator/file-" + strconv.Itoa(index) + ".go",
+			Status: "modified",
+		}
+	}
+	return WorkerTurnResult{
+		WorkerID: "worker-large",
+		Status:   core.WorkerSucceeded,
+		Kind:     "codex",
+		Summary:  "summary-head " + strings.Repeat("summary ", 3000) + " summary-tail",
+		Error:    "error-head " + strings.Repeat("error ", 1000) + " error-tail",
+		Changes: WorkspaceChanges{
+			Root:         "/tmp/workspace",
+			CWD:          "/tmp/workspace",
+			Status:       "status-head " + strings.Repeat("status ", 600) + " status-tail",
+			DiffStat:     "diffstat-head " + strings.Repeat("diffstat ", 800) + " diffstat-tail",
+			Diff:         "diff --git a/main.go b/main.go\nRAW_DIFF_MARKER\n" + strings.Repeat("a", 90_000) + "DIFF_MIDDLE_SHOULD_BE_OMITTED" + strings.Repeat("b", 90_000) + "diff-tail",
+			PublishDiff:  "diff --git a/publish.go b/publish.go\nRAW_PUBLISH_DIFF_MARKER\n" + strings.Repeat("p", 90_000),
+			ChangedFiles: changedFiles,
+			Dirty:        true,
+			Error:        "change-error-head " + strings.Repeat("change-error ", 1000) + " change-error-tail",
+			Artifacts: []WorkspaceArtifact{{
+				ID:      "artifact-1",
+				Kind:    "log",
+				Content: strings.Repeat("artifact-content-", 2000),
+				Metadata: map[string]any{
+					"content": strings.Repeat("metadata-content-", 2000),
+				},
+			}},
+		},
 	}
 }
 
