@@ -10101,6 +10101,7 @@ func planMetadata(plan Plan) map[string]any {
 		"usageSelectionReason",
 		"usageCurrentPressure",
 		"usageAlternatePressure",
+		"backgroundPullRequestFollowUp",
 	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
 			metadata[key] = value
