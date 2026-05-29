@@ -862,25 +862,35 @@ func extractText(payload map[string]any) string {
 func extractClaudeText(payload map[string]any) string {
 	switch stringField(payload, "type") {
 	case "assistant":
-		content := firstClaudeMessageContent(payload)
-		switch stringField(content, "type") {
-		case "text":
-			return stringField(content, "text")
-		case "tool_use":
-			name := stringField(content, "name")
-			input, _ := content["input"].(map[string]any)
-			description := stringField(input, "description")
-			command := stringField(input, "command")
-			switch {
-			case description != "":
-				return strings.TrimSpace(name + ": " + description)
-			case command != "":
-				return strings.TrimSpace(name + ": " + command)
-			case name != "":
-				return name + " tool use"
+		var textParts []string
+		for _, content := range claudeMessageContents(payload) {
+			if stringField(content, "type") == "text" {
+				if text := stringField(content, "text"); text != "" {
+					textParts = append(textParts, text)
+				}
 			}
-		case "thinking":
-			return "thinking"
+		}
+		if len(textParts) > 0 {
+			return strings.Join(textParts, "")
+		}
+		for _, content := range claudeMessageContents(payload) {
+			switch stringField(content, "type") {
+			case "tool_use":
+				name := stringField(content, "name")
+				input, _ := content["input"].(map[string]any)
+				description := stringField(input, "description")
+				command := stringField(input, "command")
+				switch {
+				case description != "":
+					return strings.TrimSpace(name + ": " + description)
+				case command != "":
+					return strings.TrimSpace(name + ": " + command)
+				case name != "":
+					return name + " tool use"
+				}
+			case "thinking":
+				return "thinking"
+			}
 		}
 	case "user":
 		content := firstClaudeMessageContent(payload)
@@ -947,13 +957,26 @@ func boolField(payload map[string]any, key string) bool {
 }
 
 func firstClaudeMessageContent(payload map[string]any) map[string]any {
+	contents := claudeMessageContents(payload)
+	if len(contents) == 0 {
+		return nil
+	}
+	return contents[0]
+}
+
+func claudeMessageContents(payload map[string]any) []map[string]any {
 	message, _ := payload["message"].(map[string]any)
 	content, _ := message["content"].([]any)
 	if len(content) == 0 {
 		return nil
 	}
-	first, _ := content[0].(map[string]any)
-	return first
+	contents := make([]map[string]any, 0, len(content))
+	for _, item := range content {
+		if typed, ok := item.(map[string]any); ok {
+			contents = append(contents, typed)
+		}
+	}
+	return contents
 }
 
 func claudeToolUseResult(payload map[string]any) map[string]any {
