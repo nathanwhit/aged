@@ -57,6 +57,7 @@ The initial local-first vertical slice is implemented.
 - Google OAuth can protect the dashboard/API for public exposure. `-auth google` requires Google client credentials, an allowed-email list, and uses signed HTTP-only session cookies.
 - Built-in Codex/Claude workers no longer hold stdin open for steering, avoiding `codex exec` waiting forever for appended stdin input.
 - Daemon startup recovery marks stale local nonterminal workers as canceled when their process handles are no longer recoverable.
+- Daemon-side stale-worker visibility is projected into task-detail responses: each nonterminal worker carries a `staleness` block (last activity, silence seconds, threshold seconds, stale flag) so operators can spot quiet workers in the dashboard/MCP without affecting scheduling. The threshold defaults to 15 minutes and is configurable via `AGED_STALE_WORKER_AFTER`; setting it to `0s` disables the projection. This is a **visibility-only** signal and does not cancel workers — distinct from `cmd/aged-loop-eval`'s `-stale-worker-after`, which converts the same silence measurement into a scorecard `no_stale_running_workers` failure for offline eval runs.
 - Built dashboard can be served directly by the Go daemon from `web/dist`.
 - Dev control server in `cmd/aged-dev` can rebuild the daemon, rebuild the UI, and restart the managed daemon through a local HTTP trigger.
 - Dev control can be launched with `-daemon-addr 0.0.0.0:8787` so the dashboard is reachable from other devices on the local network.
@@ -108,6 +109,7 @@ The initial local-first vertical slice is implemented.
 - Auth tests verify Google auth protects API/static routes, leaves health public, and creates a session through a fake OAuth callback for an allowed Google account.
 - MCP tests verify initialize, tool listing, task creation through `tools/call`, resource listing/reading, and auth protection.
 - Worker tests verify the default Codex runner does not advertise stdin steering; recovery tests verify stale local workers become canceled on daemon startup.
+- Stale-worker projection tests verify `EvaluateWorkerStaleness` ignores terminal/zero-time workers, honors recent worker events as activity, clamps negative silence, and that `BuildTaskDetailAt` populates `Staleness` only on nonterminal workers and respects a zero threshold to disable the projection.
 - Worker-question tests verify autonomous replanning answers and user feedback both resume waiting tasks.
 - User-action tests verify explicit `ask_user` actions and recoverable worker setup failures move tasks to waiting-user state with approval metadata.
 - Assistant tests verify Q&A records durable question/answer events.
