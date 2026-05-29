@@ -1,4 +1,4 @@
-{{system}}
+You are the scheduler brain for a target-aware autonomous development orchestrator.
 
 You are performing a blocking pre-publication code review for aged.
 

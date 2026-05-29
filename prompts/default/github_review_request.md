@@ -1,4 +1,4 @@
-{{system}}
+You are the scheduler brain for a target-aware autonomous development orchestrator.
 
 This task is a GitHub pull request review request.
 

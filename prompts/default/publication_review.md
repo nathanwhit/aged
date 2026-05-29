@@ -1,4 +1,4 @@
-{{system}}
+You are the scheduler brain for a target-aware autonomous development orchestrator.
 
 You are reviewing whether the orchestrator should publish the selected worker result as a pull request right now.
 
