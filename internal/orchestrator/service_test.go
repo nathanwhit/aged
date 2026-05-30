@@ -8607,6 +8607,64 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	}
 }
 
+func TestRemotePullRequestFollowUpIgnoresCreateTaskCallback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	callbackID := "create-task.20260511T000000Z.1.0"
+	callbackOutput := "AGED-CALLBACK-FILE:" + callbackID + ".json\n" +
+		`{"type":"create_task","promptBase64":"` + base64.StdEncoding.EncodeToString([]byte("check this PR again later")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("PR follow-up child")) + `"}` + "\n" +
+		"AGED-CALLBACK-END\n"
+	executor := &fakeRemoteExecutor{callbackOutput: callbackOutput}
+	targets := NewTargetRegistry([]TargetConfig{{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 100},
+	}})
+	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedBrain{plan: Plan{
+		WorkerKind: "mock",
+		Prompt:     "repair the existing PR",
+		Metadata: map[string]any{
+			"backgroundPullRequestFollowUp": true,
+			"scheduler":                     "pull_request_monitor",
+			"pullRequestID":                 "pr-1",
+		},
+	}}, map[string]worker.Runner{"mock": eventRunner{kind: "mock"}}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()}, targets, SSHRunner{Executor: executor, PollInterval: time.Millisecond})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"},
+		{ID: "deno", Name: "Deno", LocalPath: t.TempDir(), DefaultBase: "main"},
+	}, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "deno", Title: "Parent", Prompt: "Run remote parent."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range snapshot.Tasks {
+		if candidate.Title == "PR follow-up child" {
+			t.Fatalf("pull request follow-up create-task callback created child task: %+v", candidate)
+		}
+	}
+	if eventContains(snapshot.Events, core.EventWorkerCreated, "aged-create-task") {
+		t.Fatalf("pull request follow-up worker prompt advertised aged-create-task")
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "ignored remote create-task callback from pull request follow-up worker") {
+		t.Fatalf("missing ignored callback event")
+	}
+}
+
 func TestLocalWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8667,6 +8725,52 @@ func TestLocalWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T)
 	}
 	if !eventContains(snapshot.Events, core.EventWorkerOutput, "local worker queued follow-up task") {
 		t.Fatalf("missing parent worker callback event")
+	}
+}
+
+func TestLocalPullRequestFollowUpIgnoresCreateTaskCallback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	runner := &localCallbackRunner{kind: "callback"}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "callback",
+		Prompt:     "repair the existing PR",
+		Metadata: map[string]any{
+			"backgroundPullRequestFollowUp": true,
+			"scheduler":                     "pull_request_monitor",
+			"pullRequestID":                 "pr-1",
+		},
+	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	projects, err := NewProjectRegistry([]core.Project{
+		{ID: "default", Name: "Default", LocalPath: t.TempDir(), DefaultBase: "main"},
+		{ID: "deno", Name: "Deno", LocalPath: t.TempDir(), DefaultBase: "main"},
+	}, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetProjects(projects)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{ProjectID: "deno", Title: "Parent", Prompt: "Run local parent."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range snapshot.Tasks {
+		if candidate.Title == "Local follow-up" {
+			t.Fatalf("pull request follow-up create-task callback created child task: %+v", candidate)
+		}
+	}
+	if strings.Contains(runner.prompt, "aged-create-task") {
+		t.Fatalf("pull request follow-up prompt advertised task helper:\n%s", runner.prompt)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "ignored local create-task callback from pull request follow-up worker") {
+		t.Fatalf("missing ignored callback event")
 	}
 }
 
