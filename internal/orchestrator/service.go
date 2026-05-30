@@ -122,7 +122,7 @@ var workerCompletedAppendRetryDelays = []time.Duration{
 	8 * time.Second,
 }
 
-func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
+func workerExecutionPrompt(prompt string, workspace PreparedWorkspace, allowCreateTaskCallbacks bool) string {
 	cwd := strings.TrimSpace(workspace.CWD)
 	sourceRoot := strings.TrimSpace(workspace.SourceRoot)
 	if cwd == "" {
@@ -153,14 +153,16 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
 	} else {
 		b.WriteString("Use the current working directory as the repository root.\n\n")
 	}
-	if helper := strings.TrimSpace(workspaceCreateTaskHelperPath(workspace)); helper != "" {
-		b.WriteString("# Aged Task Creation\n\n")
-		b.WriteString("If this worker needs to delegate, fan out, or spawn follow-up aged tasks, use this helper:\n")
-		b.WriteString(helper)
-		b.WriteString("\n\n")
-		b.WriteString("It reads the new task prompt from stdin. Example: `printf '%s\\n' \"Concrete task prompt\" | ")
-		b.WriteString(helper)
-		b.WriteString(" --title \"Follow-up\"`. When the worker task explicitly asks you to spawn or create aged tasks, queue those tasks with this helper instead of doing the delegated implementation yourself.\n\n")
+	if allowCreateTaskCallbacks {
+		if helper := strings.TrimSpace(workspaceCreateTaskHelperPath(workspace)); helper != "" {
+			b.WriteString("# Aged Task Creation\n\n")
+			b.WriteString("If this worker needs to delegate, fan out, or spawn follow-up aged tasks, use this helper:\n")
+			b.WriteString(helper)
+			b.WriteString("\n\n")
+			b.WriteString("It reads the new task prompt from stdin. Example: `printf '%s\\n' \"Concrete task prompt\" | ")
+			b.WriteString(helper)
+			b.WriteString(" --title \"Follow-up\"`. When the worker task explicitly asks you to spawn or create aged tasks, queue those tasks with this helper instead of doing the delegated implementation yourself.\n\n")
+		}
 	}
 	if helper := strings.TrimSpace(workspacePublishPRHelperPath(workspace)); helper != "" {
 		b.WriteString("# Aged Pull Request Publication\n\n")
@@ -253,7 +255,7 @@ func applySharedWorkspace(workspace PreparedWorkspace, shared SharedWorkspace) P
 	return workspace
 }
 
-func installLocalCreateTaskHelper(workspace PreparedWorkspace) (string, string, error) {
+func installLocalCreateTaskHelper(workspace PreparedWorkspace, allowCreateTaskCallbacks bool) (string, string, error) {
 	helperPath := workspaceCreateTaskHelperPath(workspace)
 	callbackDir := workspaceCallbackDir(workspace)
 	if helperPath == "" || callbackDir == "" {
@@ -265,8 +267,12 @@ func installLocalCreateTaskHelper(workspace PreparedWorkspace) (string, string, 
 	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
 		return "", "", err
 	}
-	if err := os.WriteFile(helperPath, []byte(localCreateTaskHelperScript(callbackDir, workspace.TaskID, workspace.WorkerID)), 0o700); err != nil {
-		return "", "", err
+	if allowCreateTaskCallbacks {
+		if err := os.WriteFile(helperPath, []byte(localCreateTaskHelperScript(callbackDir, workspace.TaskID, workspace.WorkerID)), 0o700); err != nil {
+			return "", "", err
+		}
+	} else {
+		helperPath = ""
 	}
 	publishHelperPath := workspacePublishPRHelperPath(workspace)
 	if publishHelperPath != "" {
@@ -309,17 +315,23 @@ func localCreateTaskHelperScript(callbackDir string, taskID string, workerID str
 	return b.String()
 }
 
-func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace) string {
-	prompt = workerExecutionPrompt(prompt, workspace)
+func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace, allowCreateTaskCallbacks bool) string {
+	prompt = workerExecutionPrompt(prompt, workspace, allowCreateTaskCallbacks)
 	var b strings.Builder
 	b.WriteString("# Original Orchestrator\n\n")
 	b.WriteString("This worker is running on a remote execution target under an existing aged orchestrator. Do not start a new aged daemon or orchestrator from this worker.\n\n")
-	b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
-	b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
+	if allowCreateTaskCallbacks {
+		b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
+		b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
+	}
 	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
 	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, `AGED_WORKER_CALLBACK_DIR`, and the shared artifact workspace variables when available.\n\n")
 	b.WriteString(prompt)
 	return b.String()
+}
+
+func planAllowsCreateTaskCallbacks(plan Plan) bool {
+	return !boolMetadata(plan.Metadata, "backgroundPullRequestFollowUp") && !boolMetadata(plan.Metadata, "disableCreateTaskCallbacks")
 }
 
 func retryWorkerExecutionPrompt(prompt string, previousWorkerID string, resumeSessionID string, steering []string, contextKind string) string {
@@ -3834,7 +3846,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
-	helperPath, callbackDir, err := installLocalCreateTaskHelper(workspace)
+	allowCreateTaskCallbacks := planAllowsCreateTaskCallbacks(plan)
+	helperPath, callbackDir, err := installLocalCreateTaskHelper(workspace, allowCreateTaskCallbacks)
 	if err != nil {
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, fmt.Errorf("install local worker task helper: %w", err)
@@ -3864,7 +3877,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			s.restoreDurableLoopFullPromptForDegradedResume(ctx, task, &plan)
 		}
 	}
-	prompt := workerExecutionPrompt(plan.Prompt, workspace)
+	prompt := workerExecutionPrompt(plan.Prompt, workspace, allowCreateTaskCallbacks)
 	if reusedWorkspace {
 		prompt = retryWorkerExecutionPrompt(prompt, retryFromWorkerID, resumeSessionID, retrySteering, stringMetadata(plan.Metadata, "retryContextKind"))
 	} else if retryFromWorkerID != "" && len(retrySteering) > 0 {
@@ -4314,7 +4327,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		ID:              workerID,
 		TaskID:          task.ID,
 		Kind:            plan.WorkerKind,
-		Prompt:          remoteWorkerExecutionPrompt(plan.Prompt, workspace),
+		Prompt:          remoteWorkerExecutionPrompt(plan.Prompt, workspace, planAllowsCreateTaskCallbacks(plan)),
 		WorkDir:         remoteWorkDir,
 		ResumeSessionID: resumeSessionID,
 		ReasoningEffort: plan.ReasoningEffort,
@@ -4679,6 +4692,9 @@ func remoteWorkerStartFailureChanges(workspace PreparedWorkspace) WorkspaceChang
 }
 
 func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remoteRun, callback RemoteWorkerCallback) error {
+	if !s.workerAllowsCreateTaskCallbacks(ctx, run.TaskID, run.WorkerID) {
+		return s.recordIgnoredCreateTaskCallback(ctx, run.TaskID, run.WorkerID, callback.ID, "remote")
+	}
 	prompt := strings.TrimSpace(callback.Prompt)
 	if prompt == "" {
 		return fmt.Errorf("remote worker callback %s has empty prompt", callback.ID)
@@ -4806,6 +4822,9 @@ func (s *Service) handleLocalWorkerCallbacks(ctx context.Context, taskID string,
 }
 
 func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback) error {
+	if !s.workerAllowsCreateTaskCallbacks(ctx, taskID, workerID) {
+		return s.recordIgnoredCreateTaskCallback(ctx, taskID, workerID, callback.ID, "local")
+	}
 	prompt := strings.TrimSpace(callback.Prompt)
 	if prompt == "" {
 		return fmt.Errorf("local worker callback %s has empty prompt", callback.ID)
@@ -4849,6 +4868,54 @@ func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID stri
 		return err
 	}
 	return nil
+}
+
+func (s *Service) workerAllowsCreateTaskCallbacks(ctx context.Context, taskID string, workerID string) bool {
+	metadata := s.recordedWorkerMetadata(ctx, taskID, workerID)
+	if boolMetadata(metadata, "backgroundPullRequestFollowUp") || boolMetadata(metadata, "disableCreateTaskCallbacks") {
+		return false
+	}
+	return true
+}
+
+func (s *Service) recordedWorkerMetadata(ctx context.Context, taskID string, workerID string) map[string]any {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.WorkerID != workerID {
+			continue
+		}
+		if event.Type != core.EventWorkerCreated && event.Type != core.EventExecutionPlanned {
+			continue
+		}
+		var payload struct {
+			Metadata map[string]any `json:"metadata"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil || len(payload.Metadata) == 0 {
+			continue
+		}
+		return payload.Metadata
+	}
+	return nil
+}
+
+func (s *Service) recordIgnoredCreateTaskCallback(ctx context.Context, taskID string, workerID string, callbackID string, source string) error {
+	reason := "ignored " + source + " create-task callback from pull request follow-up worker; PR follow-up must stay on the parent task"
+	_, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":       "log",
+			"stream":     "stderr",
+			"text":       reason,
+			"callbackId": callbackID,
+		}),
+	})
+	return err
 }
 
 func (s *Service) workerCallbackProjectID(ctx context.Context, parentTaskID string, explicitProjectID string) (string, error) {
