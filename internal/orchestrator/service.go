@@ -2063,8 +2063,7 @@ func (s *Service) waitForTaskWorkersStopped(ctx context.Context, taskID string, 
 		snapshot, err := s.store.Snapshot(ctx)
 		if err == nil {
 			latest = snapshot
-			status := taskStatus(snapshot, taskID)
-			if !taskHasActiveWorkers(snapshot, taskID) && status != core.TaskQueued && status != core.TaskPlanning && status != core.TaskRunning {
+			if !taskHasActiveWorkers(snapshot, taskID) && !s.taskHasActiveWorkerRoutine(taskID) {
 				return snapshot, nil
 			}
 		}
@@ -2076,6 +2075,17 @@ func (s *Service) waitForTaskWorkersStopped(ctx context.Context, taskID string, 
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Service) taskHasActiveWorkerRoutine(taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, workerTaskID := range s.tasks {
+		if workerTaskID == taskID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, error) {

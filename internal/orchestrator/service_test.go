@@ -4812,6 +4812,7 @@ func TestServiceRefreshPullRequestCanSatisfyTaskObjective(t *testing.T) {
 	}
 	snapshot := waitForPullRequests(t, store, task.ID, 1)
 	pr := snapshot.PullRequests[0]
+	waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
 	publisher.status.TaskID = task.ID
 	_, err = service.RefreshPullRequest(ctx, pr.ID)
 	if err != nil {
@@ -12476,6 +12477,59 @@ func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	}
 	if !hasTaskAction(snapshot.Events, task.ID, "steering_restart", "resumed") {
 		t.Fatalf("missing resumed steering restart action")
+	}
+}
+
+func TestWaitForTaskWorkersStoppedAllowsRunningTaskAfterWorkerCanceled(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-1"
+	workerID := "worker-1"
+	for _, event := range []core.Event{{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Steering restart",
+			"prompt": "Cancel and resume the active worker.",
+		}),
+	}, {
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}, {
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "codex",
+		}),
+	}, {
+		Type:     core.EventWorkerCompleted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerCanceled,
+		}),
+	}} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	snapshot, err := service.waitForTaskWorkersStopped(ctx, taskID, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForTaskWorkersStopped returned error: %v", err)
+	}
+	if status := taskStatus(snapshot, taskID); status != core.TaskRunning {
+		t.Fatalf("task status = %q, want running", status)
+	}
+	if taskHasActiveWorkers(snapshot, taskID) {
+		t.Fatalf("task still has active workers")
 	}
 }
 
