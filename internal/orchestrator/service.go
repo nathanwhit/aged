@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,8 @@ type WorkerChangesReview struct {
 var (
 	standaloneNoPRPattern     = regexp.MustCompile(`\bno\s+pr\b`)
 	deferredNextWorkPattern   = regexp.MustCompile(`\b(?:i am|i'm|i will|i'll|will|going to|about to)\s+(?:run|running|rerun|execute|start|try|check|validate|test|rebuild|build)\b.*\bnext\b`)
+	pullRequestRepoNumberRE   = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b`)
+	pullRequestBareNumberRE   = regexp.MustCompile(`(?i)\b(?:PR|pull\s+request)\s*#?\s*([0-9]+)\b`)
 	errWorkerCallbackDeferred = errors.New("worker callback deferred")
 )
 
@@ -4702,6 +4705,9 @@ func remoteWorkerStartFailureChanges(workspace PreparedWorkspace) WorkspaceChang
 }
 
 func (s *Service) handleRemoteCreateTaskCallback(ctx context.Context, run remoteRun, callback RemoteWorkerCallback) error {
+	if pr, ok := s.createTaskCallbackTargetsParentPullRequest(ctx, run.TaskID, callback); ok {
+		return s.recordIgnoredPullRequestCreateTaskCallback(ctx, run.TaskID, run.WorkerID, callback.ID, "remote", pr)
+	}
 	if !s.workerAllowsCreateTaskCallbacks(ctx, run.TaskID, run.WorkerID) {
 		return s.recordIgnoredCreateTaskCallback(ctx, run.TaskID, run.WorkerID, callback.ID, "remote")
 	}
@@ -4832,6 +4838,9 @@ func (s *Service) handleLocalWorkerCallbacks(ctx context.Context, taskID string,
 }
 
 func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback) error {
+	if pr, ok := s.createTaskCallbackTargetsParentPullRequest(ctx, taskID, callback); ok {
+		return s.recordIgnoredPullRequestCreateTaskCallback(ctx, taskID, workerID, callback.ID, "local", pr)
+	}
 	if !s.workerAllowsCreateTaskCallbacks(ctx, taskID, workerID) {
 		return s.recordIgnoredCreateTaskCallback(ctx, taskID, workerID, callback.ID, "local")
 	}
@@ -4880,6 +4889,58 @@ func (s *Service) handleLocalCreateTaskCallback(ctx context.Context, taskID stri
 	return nil
 }
 
+func (s *Service) createTaskCallbackTargetsParentPullRequest(ctx context.Context, taskID string, callback RemoteWorkerCallback) (core.PullRequest, bool) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, false
+	}
+	text := strings.TrimSpace(callback.Title + "\n" + callback.Prompt)
+	if text == "" {
+		return core.PullRequest{}, false
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		if pullRequestReferenceMatchesText(pr, text) {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
+}
+
+func pullRequestReferenceMatchesText(pr core.PullRequest, text string) bool {
+	if pr.ID != "" && strings.Contains(text, pr.ID) {
+		return true
+	}
+	if pr.URL != "" && strings.Contains(text, pr.URL) {
+		return true
+	}
+	for _, value := range githubPullRequestURLRE.FindAllString(text, -1) {
+		repo, number := parsePullRequestURL(value)
+		if pullRequestRefMatches(pr, repo, number) {
+			return true
+		}
+	}
+	for _, match := range pullRequestRepoNumberRE.FindAllStringSubmatch(text, -1) {
+		number, err := strconv.Atoi(match[2])
+		if err == nil && pullRequestRefMatches(pr, match[1], number) {
+			return true
+		}
+	}
+	for _, match := range pullRequestBareNumberRE.FindAllStringSubmatch(text, -1) {
+		number, err := strconv.Atoi(match[1])
+		if err == nil && pr.Number > 0 && pr.Number == number {
+			return true
+		}
+	}
+	return false
+}
+
+func pullRequestRefMatches(pr core.PullRequest, repo string, number int) bool {
+	return number > 0 && pr.Number == number && (repo == "" || strings.EqualFold(pr.Repo, repo))
+}
+
 func (s *Service) workerAllowsCreateTaskCallbacks(ctx context.Context, taskID string, workerID string) bool {
 	metadata := s.recordedWorkerMetadata(ctx, taskID, workerID)
 	if boolMetadata(metadata, "backgroundPullRequestFollowUp") || boolMetadata(metadata, "disableCreateTaskCallbacks") {
@@ -4923,6 +4984,28 @@ func (s *Service) recordIgnoredCreateTaskCallback(ctx context.Context, taskID st
 			"stream":     "stderr",
 			"text":       reason,
 			"callbackId": callbackID,
+		}),
+	})
+	return err
+}
+
+func (s *Service) recordIgnoredPullRequestCreateTaskCallback(ctx context.Context, taskID string, workerID string, callbackID string, source string, pr core.PullRequest) error {
+	target := pr.ID
+	if pr.Repo != "" && pr.Number > 0 {
+		target = fmt.Sprintf("%s#%d", pr.Repo, pr.Number)
+	}
+	reason := "ignored " + source + " create-task callback for tracked pull request " + target + "; PR follow-up must stay on the parent task"
+	_, err := s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":          "log",
+			"stream":        "stderr",
+			"text":          reason,
+			"callbackId":    callbackID,
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
 		}),
 	})
 	return err

@@ -8608,6 +8608,66 @@ func TestRemoteWorkerCallbackCreatesTaskThroughOriginalOrchestrator(t *testing.T
 	}
 }
 
+func TestRemoteCreateTaskCallbackForTrackedPullRequestIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	taskID := "task-parent"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Broad objective",
+			"prompt": "Keep producing independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-34636",
+		TaskID: taskID,
+		Repo:   "denoland/deno",
+		Number: 34636,
+		URL:    "https://github.com/denoland/deno/pull/34636",
+		Branch: "codex/aged-9fb21b99-31c",
+		Base:   "main",
+		Title:  "perf(http): reduce overhead",
+		State:  "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := service.handleRemoteCreateTaskCallback(ctx, remoteRun{
+		TaskID:   taskID,
+		WorkerID: "worker-parent",
+		Target:   TargetConfig{ID: "bigboi"},
+		Session:  "aged-session",
+	}, RemoteWorkerCallback{
+		ID:     "create-task.pr-followup.json",
+		Type:   "create_task",
+		Title:  "Recheck Deno PR CI",
+		Prompt: "Follow up on existing PR denoland/deno#34636. Do not open a new PR; update the existing PR branch if needed.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range snapshot.Tasks {
+		if task.Title == "Recheck Deno PR CI" {
+			t.Fatalf("tracked PR create-task callback created child task: %+v", task)
+		}
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "ignored remote create-task callback for tracked pull request denoland/deno#34636") {
+		t.Fatalf("missing ignored tracked PR callback event")
+	}
+}
+
 func TestRemotePullRequestFollowUpIgnoresCreateTaskCallback(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -8772,6 +8832,61 @@ func TestLocalPullRequestFollowUpIgnoresCreateTaskCallback(t *testing.T) {
 	}
 	if !eventContains(snapshot.Events, core.EventWorkerOutput, "ignored local create-task callback from pull request follow-up worker") {
 		t.Fatalf("missing ignored callback event")
+	}
+}
+
+func TestLocalCreateTaskCallbackForTrackedPullRequestIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	taskID := "task-parent"
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Broad objective",
+			"prompt": "Keep producing independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-34636",
+		TaskID: taskID,
+		Repo:   "denoland/deno",
+		Number: 34636,
+		URL:    "https://github.com/denoland/deno/pull/34636",
+		Branch: "codex/aged-9fb21b99-31c",
+		Base:   "main",
+		Title:  "perf(http): reduce overhead",
+		State:  "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := service.handleLocalCreateTaskCallback(ctx, taskID, "worker-parent", RemoteWorkerCallback{
+		ID:     "create-task.pr-followup.json",
+		Type:   "create_task",
+		Title:  "Update PR Benchmark Results",
+		Prompt: "Continue follow-up on PR 34636 and post the requested benchmark numbers.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range snapshot.Tasks {
+		if task.Title == "Update PR Benchmark Results" {
+			t.Fatalf("tracked PR create-task callback created child task: %+v", task)
+		}
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "ignored local create-task callback for tracked pull request denoland/deno#34636") {
+		t.Fatalf("missing ignored tracked PR callback event")
 	}
 }
 
