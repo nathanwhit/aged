@@ -2334,6 +2334,21 @@ func activeTaskWorkerIDs(snapshot core.Snapshot, taskID string) []string {
 	return workerIDs
 }
 
+type activeTaskWorkerIDStore interface {
+	ActiveTaskWorkerIDs(ctx context.Context, taskID string) ([]string, error)
+}
+
+func (s *Service) activeTaskWorkerIDs(ctx context.Context, taskID string) ([]string, error) {
+	if store, ok := s.store.(activeTaskWorkerIDStore); ok {
+		return store.ActiveTaskWorkerIDs(ctx, taskID)
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return activeTaskWorkerIDs(snapshot, taskID), nil
+}
+
 func taskIDForWorker(snapshot core.Snapshot, workerID string) string {
 	for _, activeWorker := range snapshot.Workers {
 		if activeWorker.ID == workerID && activeWorker.TaskID != "" {
@@ -2504,11 +2519,11 @@ func (s *Service) persistedRemoteRun(snapshot core.Snapshot, workerID string) (c
 }
 
 func (s *Service) CancelTask(ctx context.Context, taskID string) error {
-	snapshot, err := s.store.Snapshot(ctx)
+	_, ok, err := s.store.TaskStatus(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	if _, ok := findTask(snapshot, taskID); !ok {
+	if !ok {
 		return eventstore.ErrNotFound
 	}
 
@@ -2528,7 +2543,11 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 	for _, workerID := range workerIDs {
 		_ = s.CancelWorker(ctx, workerID)
 	}
-	for _, workerID := range activeTaskWorkerIDs(snapshot, taskID) {
+	activeWorkerIDs, err := s.activeTaskWorkerIDs(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	for _, workerID := range activeWorkerIDs {
 		if canceledWorkers[workerID] {
 			continue
 		}

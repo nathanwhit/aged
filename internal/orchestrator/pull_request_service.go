@@ -72,12 +72,20 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 	if s == nil {
 		return nil
 	}
-	snapshot, err := s.Snapshot(ctx)
+	snapshot, err := s.pullRequestMonitorSnapshot(ctx)
 	if err != nil {
 		return err
 	}
 	var errs []string
+	tasksByID := make(map[string]core.Task, len(snapshot.Tasks))
+	for _, task := range snapshot.Tasks {
+		tasksByID[task.ID] = task
+	}
 	for _, pr := range snapshot.PullRequests {
+		task, ok := tasksByID[pr.TaskID]
+		if !ok || isTerminalTaskStatus(task.Status) {
+			continue
+		}
 		if options.IncludeRepo != nil && !options.IncludeRepo(pr.Repo) {
 			continue
 		}
@@ -120,6 +128,21 @@ func (s *Service) monitorPullRequests(ctx context.Context, options pullRequestMo
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+type pullRequestMonitorSnapshotStore interface {
+	PullRequestMonitorSnapshot(ctx context.Context) (core.Snapshot, error)
+}
+
+func (s *Service) pullRequestMonitorSnapshot(ctx context.Context) (core.Snapshot, error) {
+	if store, ok := s.store.(pullRequestMonitorSnapshotStore); ok {
+		snapshot, err := store.PullRequestMonitorSnapshot(ctx)
+		if err != nil {
+			return core.Snapshot{}, err
+		}
+		return s.decorateSnapshot(snapshot), nil
+	}
+	return s.SnapshotSummary(ctx)
 }
 
 func (s *Service) pullRequestMonitoringDisabled(snapshot core.Snapshot, pr core.PullRequest) bool {

@@ -35,6 +35,31 @@ func TestServiceDefaultPullRequestMonitorRefreshesTrackedPullRequests(t *testing
 	}
 }
 
+func TestServiceDefaultPullRequestMonitorSkipsTerminalTaskPullRequests(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatus("success", "CLEAN", "APPROVED")}
+	service := newTestPullRequestMonitorService(t, store, publisher)
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskCanceled)
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publisher.inspectCalls != 0 {
+		t.Fatalf("inspect calls = %d, want 0", publisher.inspectCalls)
+	}
+	if hasEvent(snapshot.Events, core.EventPRStatusChecked, "task-1", "") || hasEvent(snapshot.Events, core.EventPRFollowUp, "task-1", "") {
+		t.Fatalf("monitor events = %+v", snapshot.Events)
+	}
+}
+
 func TestServiceDefaultPullRequestMonitorContinuesTasksForPRsNeedingAttention(t *testing.T) {
 	cases := []struct {
 		name   string
