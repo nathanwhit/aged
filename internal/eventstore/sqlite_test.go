@@ -485,6 +485,67 @@ func TestTaskStatusUsesIndexedTaskEvents(t *testing.T) {
 	}
 }
 
+func TestActiveTaskWorkerIDsUsesReadModel(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-active-workers",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Task active workers",
+				"prompt": "Find active workers without rebuilding a snapshot.",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-active-workers",
+			WorkerID: "worker-active",
+			Payload:  core.MustJSON(map[string]any{"kind": "mock"}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-active-workers",
+			WorkerID: "worker-done",
+			Payload:  core.MustJSON(map[string]any{"kind": "mock"}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   "task-active-workers",
+			WorkerID: "worker-done",
+			Payload:  core.MustJSON(map[string]any{"status": core.WorkerSucceeded}),
+		},
+		core.Event{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   "task-active-workers",
+			WorkerID: "worker-node",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-active",
+				"workerId":   "worker-node",
+				"workerKind": "mock",
+			}),
+		},
+	)
+
+	workerIDs, err := store.ActiveTaskWorkerIDs(ctx, "task-active-workers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"worker-active", "worker-node"}
+	if fmt.Sprint(workerIDs) != fmt.Sprint(want) {
+		t.Fatalf("active worker ids = %v, want %v", workerIDs, want)
+	}
+
+	workerIDs, err = store.ActiveTaskWorkerIDs(ctx, "missing-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workerIDs) != 0 {
+		t.Fatalf("missing task active worker ids = %v, want none", workerIDs)
+	}
+}
+
 func TestReadModelRebuildUsesOnlyLatestWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)

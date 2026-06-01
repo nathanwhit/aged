@@ -1031,6 +1031,46 @@ FROM worker_read_models`)
 	return rows.Err()
 }
 
+func loadActiveProjectionWorkers(ctx context.Context, q projectionQuerier, out map[string]core.Worker) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, kind, status, created_at, updated_at
+FROM worker_read_models
+WHERE status NOT IN (?, ?, ?)`, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCanceled)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var worker core.Worker
+		var status string
+		var createdAtRaw string
+		var updatedAtRaw string
+		if err := rows.Scan(
+			&worker.ID,
+			&worker.TaskID,
+			&worker.Kind,
+			&status,
+			&createdAtRaw,
+			&updatedAtRaw,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		worker.Status = core.WorkerStatus(status)
+		worker.CreatedAt = createdAt
+		worker.UpdatedAt = updatedAt
+		out[worker.ID] = worker
+	}
+	return rows.Err()
+}
+
 func loadProjectionExecutionNodes(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
@@ -1090,6 +1130,58 @@ FROM execution_node_read_models`)
 		if metadata != "" {
 			node.Metadata = json.RawMessage(metadata)
 		}
+		out[node.ID] = node
+	}
+	return rows.Err()
+}
+
+func loadActiveProjectionExecutionNodes(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
+	reason, target_id, target_kind, remote_session, remote_run_dir, remote_work_dir, created_at, updated_at
+FROM execution_node_read_models
+WHERE status NOT IN (?, ?, ?)`, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCanceled)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var node core.ExecutionNode
+		var status string
+		var createdAtRaw string
+		var updatedAtRaw string
+		if err := rows.Scan(
+			&node.ID,
+			&node.TaskID,
+			&node.WorkerID,
+			&node.WorkerKind,
+			&status,
+			&node.PlanID,
+			&node.ParentNodeID,
+			&node.SpawnID,
+			&node.Role,
+			&node.Reason,
+			&node.TargetID,
+			&node.TargetKind,
+			&node.RemoteSession,
+			&node.RemoteRunDir,
+			&node.RemoteWorkDir,
+			&createdAtRaw,
+			&updatedAtRaw,
+		); err != nil {
+			return err
+		}
+		createdAt, err := parseReadModelTime(createdAtRaw)
+		if err != nil {
+			return err
+		}
+		updatedAt, err := parseReadModelTime(updatedAtRaw)
+		if err != nil {
+			return err
+		}
+		node.Status = core.WorkerStatus(status)
+		node.CreatedAt = createdAt
+		node.UpdatedAt = updatedAt
 		out[node.ID] = node
 	}
 	return rows.Err()

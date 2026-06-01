@@ -1085,6 +1085,94 @@ func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, err
 	return s.taskCardsFromReadModel(ctx)
 }
 
+func (s *SQLiteStore) PullRequestMonitorSnapshot(ctx context.Context) (core.Snapshot, error) {
+	lastEventID, err := s.latestEventID(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	state := newReadModelState()
+	if err := loadProjectionTasks(ctx, s.db, state.Tasks); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadActiveProjectionWorkers(ctx, s.db, state.Workers); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadActiveProjectionExecutionNodes(ctx, s.db, state.Nodes); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionPullRequests(ctx, s.db, state.PullRequests); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadClearedTasks(ctx, s.db, `cleared_tasks`, state.ClearedTasks); err != nil {
+		return core.Snapshot{}, err
+	}
+	monitorTaskIDs := map[string]bool{}
+	for _, pr := range state.PullRequests {
+		if strings.TrimSpace(pr.TaskID) != "" && !state.ClearedTasks[pr.TaskID] {
+			monitorTaskIDs[pr.TaskID] = true
+		}
+	}
+	events, err := s.pullRequestMonitorEvents(ctx, monitorTaskIDs)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	tasks := filterClearedTasks(state.Tasks, state.ClearedTasks)
+	taskIDs := map[string]bool{}
+	for id := range tasks {
+		taskIDs[id] = true
+	}
+	return core.Snapshot{
+		Tasks:          orderedTasks(tasks),
+		Workers:        orderedWorkers(filterTasks(state.Workers, state.ClearedTasks, taskIDs, func(worker core.Worker) string { return worker.TaskID })),
+		ExecutionNodes: orderedExecutionNodes(filterTasks(state.Nodes, state.ClearedTasks, taskIDs, func(node core.ExecutionNode) string { return node.TaskID })),
+		PullRequests:   orderedPullRequests(filterClearedPullRequests(state.PullRequests, state.ClearedTasks)),
+		LastEventID:    lastEventID,
+		Events:         events,
+	}, nil
+}
+
+func (s *SQLiteStore) pullRequestMonitorEvents(ctx context.Context, taskIDs map[string]bool) ([]core.Event, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(taskIDs))
+	for id := range taskIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	eventTypes := []core.EventType{
+		core.EventTaskPlanned,
+		core.EventTaskReplanned,
+		core.EventWorkerCreated,
+		core.EventWorkerCompleted,
+		core.EventTaskAction,
+		core.EventPRStatusChecked,
+		core.EventPRFollowUp,
+	}
+	args := make([]any, 0, len(ids)+len(eventTypes))
+	taskPlaceholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		taskPlaceholders = append(taskPlaceholders, "?")
+	}
+	typePlaceholders := make([]string, 0, len(eventTypes))
+	for _, eventType := range eventTypes {
+		args = append(args, eventType)
+		typePlaceholders = append(typePlaceholders, "?")
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE task_id IN (`+strings.Join(taskPlaceholders, ",")+`)
+	AND type IN (`+strings.Join(typePlaceholders, ",")+`)
+ORDER BY id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 func (s *SQLiteStore) TaskStatus(ctx context.Context, taskID string) (core.TaskStatus, bool, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
@@ -1134,6 +1222,38 @@ ORDER BY id ASC`, taskID)
 		return "", false, nil
 	}
 	return status, true, nil
+}
+
+func (s *SQLiteStore) ActiveTaskWorkerIDs(ctx context.Context, taskID string) ([]string, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id
+FROM worker_read_models
+WHERE task_id = ? AND status NOT IN (?, ?, ?)
+UNION
+SELECT worker_id
+FROM execution_node_read_models
+WHERE task_id = ? AND worker_id != '' AND status NOT IN (?, ?, ?)
+ORDER BY 1`, taskID, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCanceled, taskID, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCanceled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	workerIDs := []string{}
+	for rows.Next() {
+		var workerID string
+		if err := rows.Scan(&workerID); err != nil {
+			return nil, err
+		}
+		workerIDs = append(workerIDs, workerID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return workerIDs, nil
 }
 
 func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {
