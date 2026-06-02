@@ -16,6 +16,7 @@ import (
 )
 
 const codexYoloFlag = "--dangerously-bypass-approvals-and-sandbox"
+const defaultCodexModel = "gpt-5.5"
 const claudeSkipPermissionsFlag = "--dangerously-skip-permissions"
 const outputLineReadBufferBytes = 64 * 1024
 const maxStructuredOutputLineBytes = 16 * 1024 * 1024
@@ -528,14 +529,14 @@ func DefaultRunners() map[string]Runner {
 				effortArgs = []string{"-c", "model_reasoning_effort=\"" + effort + "\""}
 			}
 			if resumeSessionID != "" {
-				args := []string{"codex", "exec"}
+				args := []string{"codex", "exec", "-m", defaultCodexModel}
 				if strings.TrimSpace(spec.WorkDir) != "" {
 					args = append(args, "--cd", spec.WorkDir)
 				}
 				args = append(args, "resume", codexYoloFlag, "--json")
 				return append(append(args, effortArgs...), resumeSessionID, "-")
 			}
-			args := []string{"codex", "exec", codexYoloFlag, "--json", "--cd", spec.WorkDir}
+			args := []string{"codex", "exec", "-m", defaultCodexModel, codexYoloFlag, "--json", "--cd", spec.WorkDir}
 			return append(append(args, effortArgs...), "-")
 		}),
 		NewPromptStdinCommandRunnerWithCapabilities("claude", Capabilities{ResumeSession: true}, func(spec Spec) []string {
