@@ -7621,6 +7621,10 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 		s.waitForReplanContextOverflow(ctx, task, turn, replanErr, results)
 		return false, "", "", results
 	}
+	if taskIsBroadObjective(task) && taskCompletionModeFromTask(task) == "github" && !options.FinalizationRecovery {
+		s.waitForReplanFallback(ctx, task, turn, replanErr, config, "broad GitHub objectives require explicit replanning or publish_pull_request actions before publication")
+		return false, "", "", results
+	}
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
 	if candidateErr == nil && candidateWorkerID != "" {
 		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
