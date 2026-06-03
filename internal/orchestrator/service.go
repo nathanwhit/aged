@@ -1234,7 +1234,7 @@ func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
 		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
-			if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+			if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
 				s.retryFinalCandidateTask(taskCtx, task, results)
 				return
 			}
@@ -2173,7 +2173,7 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		task.ObjectivePhase = "retrying"
 		return task, nil
 	}
-	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
 		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
 			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
 				return core.Task{}, err
@@ -2244,6 +2244,34 @@ func (s *Service) retryFinalCandidateTask(ctx context.Context, task core.Task, r
 	}
 }
 
+func shouldRetryGraphInsteadOfFinalCandidate(snapshot core.Snapshot, task core.Task) bool {
+	if !taskIsBroadObjective(task) || taskCompletionModeFromTask(task) != "github" {
+		return false
+	}
+	return taskSteeredAfterLatestFinalCandidate(snapshot, task.ID)
+}
+
+func taskSteeredAfterLatestFinalCandidate(snapshot core.Snapshot, taskID string) bool {
+	latestCandidateEventID := int64(0)
+	latestSteeringEventID := int64(0)
+	for _, event := range snapshot.Events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case core.EventTaskCandidate:
+			if event.ID > latestCandidateEventID {
+				latestCandidateEventID = event.ID
+			}
+		case core.EventTaskSteered:
+			if event.ID > latestSteeringEventID {
+				latestSteeringEventID = event.ID
+			}
+		}
+	}
+	return latestCandidateEventID > 0 && latestSteeringEventID > latestCandidateEventID
+}
+
 func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -2289,7 +2317,7 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "recovering"
-	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" {
+	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
 		s.retryFinalCandidateTask(ctx, task, results)
 		return
 	}
@@ -7619,6 +7647,10 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 	}
 	if isReplanContextWindowError(replanErr) {
 		s.waitForReplanContextOverflow(ctx, task, turn, replanErr, results)
+		return false, "", "", results
+	}
+	if taskIsBroadObjective(task) && taskCompletionModeFromTask(task) == "github" && !options.FinalizationRecovery {
+		s.waitForReplanFallback(ctx, task, turn, replanErr, config, "broad GitHub objectives require explicit replanning or publish_pull_request actions before publication")
 		return false, "", "", results
 	}
 	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")

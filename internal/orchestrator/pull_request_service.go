@@ -177,6 +177,9 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	if !ok {
 		return core.PullRequest{}, eventstore.ErrNotFound
 	}
+	if err := validatePullRequestPublicationRequest(task, req); err != nil {
+		return core.PullRequest{}, err
+	}
 	project, err := s.projectForTask(task)
 	if err != nil {
 		return core.PullRequest{}, err
@@ -1331,6 +1334,19 @@ func pullRequestContinuesTask(pr core.PullRequest) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(stringMetadataValue(metadata["publicationPhase"])), "intermediate")
+}
+
+func validatePullRequestPublicationRequest(task core.Task, req core.PublishPullRequestRequest) error {
+	if !taskIsBroadObjective(task) || req.ContinueAfterPublish {
+		return nil
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return errors.New("broad objective completion pull request requires an explicit title")
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		return errors.New("broad objective completion pull request requires an explicit body")
+	}
+	return nil
 }
 
 func pullRequestTerminalStatusContinuesTask(snapshot core.Snapshot, pr core.PullRequest) bool {
