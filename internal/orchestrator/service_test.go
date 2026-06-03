@@ -13989,8 +13989,8 @@ func TestServiceRemotePluginWorkerUploadsRunnerSpecStdin(t *testing.T) {
 		t.Fatalf("plugin stdin workDir = %v, want %q", payload["workDir"], node.RemoteWorkDir)
 	}
 	joinedCommands := strings.Join(flattenCommands(executor.commands), "\n")
-	if !strings.Contains(joinedCommands, "aged-review-plugin") || !strings.Contains(joinedCommands, "run") {
-		t.Fatalf("remote command did not start plugin runner: %+v", executor.commands)
+	if !strings.Contains(joinedCommands, "launcher.sh") || !strings.Contains(executor.launcherInput, "aged-review-plugin") || !strings.Contains(executor.launcherInput, "run") {
+		t.Fatalf("remote launcher did not start plugin runner: commands=%+v launcher=%s", executor.commands, executor.launcherInput)
 	}
 }
 

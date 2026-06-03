@@ -506,6 +506,25 @@ func TestSSHRunnerInfersTerminalStatusWhenRemoteSessionDisappears(t *testing.T) 
 	}
 }
 
+func TestSSHRunnerReportsLauncherLogWhenRemoteSessionDisappearsBeforeWorkerLogs(t *testing.T) {
+	executor := &scriptedPollExecutor{
+		status:         []string{`{"status":"running"}`},
+		launcher:       "bash: launcher.sh: line 12: syntax error near unexpected token `fi'\n",
+		sessionMissing: true,
+	}
+	runner := SSHRunner{Executor: executor, PollInterval: time.Nanosecond}
+	run := testSSHRun()
+	sink := &recordingWorkerSink{}
+
+	status, err := runner.Poll(context.Background(), run, worker.ParserForKind("codex"), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "failed" || !strings.Contains(status.Error, "launcher exited") || !strings.Contains(status.Error, "syntax error") {
+		t.Fatalf("status = %+v, want launcher failure detail", status)
+	}
+}
+
 func TestSSHRunnerRefreshesTerminalStatusWhenRemoteSessionDisappearsAfterRunningRead(t *testing.T) {
 	result := `{"type":"result","subtype":"success","result":"done"}`
 	executor := &scriptedPollExecutor{
@@ -1005,26 +1024,28 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 		t.Fatalf("input = %q", executor.input)
 	}
 	var sawPromptUpload bool
-	var sawPromptRedirect bool
-	var sawPathBootstrap bool
-	var sawCallbackHelper bool
+	var sawLauncherUpload bool
 	for _, argv := range executor.commands {
 		joined := strings.Join(argv, " ")
 		if strings.Contains(joined, "cat >") && strings.Contains(joined, "prompt.txt") {
 			sawPromptUpload = true
 		}
-		if strings.Contains(joined, "<") && strings.Contains(joined, "prompt.txt") {
-			sawPromptRedirect = true
-		}
-		if strings.Contains(joined, ".local/share/mise/shims") {
-			sawPathBootstrap = true
-		}
-		if strings.Contains(joined, "aged-create-task") || strings.Contains(joined, "callback.env") {
-			sawCallbackHelper = true
+		if strings.Contains(joined, "cat >") && strings.Contains(joined, "launcher.sh") {
+			sawLauncherUpload = true
 		}
 	}
-	if !sawPromptUpload || !sawPromptRedirect || !sawPathBootstrap || !sawCallbackHelper {
-		t.Fatalf("commands did not upload prompt, install callback helper, redirect stdin, and bootstrap PATH: %+v", executor.commands)
+	for _, want := range []string{
+		"< '/tmp/aged-workers/worker-stdin/prompt.txt'",
+		".local/share/mise/shims",
+		"AGED_REMOTE_CALLBACK_ENV='/tmp/aged-workers/worker-stdin/callback.env'",
+		"AGED_REMOTE_HELPER_BIN='/tmp/aged-workers/worker-stdin/bin'",
+	} {
+		if !strings.Contains(executor.launcherInput, want) {
+			t.Fatalf("launcher script missing %q:\n%s", want, executor.launcherInput)
+		}
+	}
+	if !sawPromptUpload || !sawLauncherUpload {
+		t.Fatalf("commands did not upload prompt and launcher: %+v", executor.commands)
 	}
 }
 
@@ -1469,6 +1490,7 @@ type fakeRemoteExecutor struct {
 	directoryErr    error
 	callbackOutput  string
 	input           string
+	launcherInput   string
 	sharedOutput    string
 	sharedErr       error
 }
@@ -1563,6 +1585,7 @@ type scriptedPollExecutor struct {
 	commands       [][]string
 	stdout         []string
 	stderr         []string
+	launcher       string
 	status         []string
 	poll           int
 	sessionMissing bool
@@ -1589,6 +1612,8 @@ func (e *scriptedPollExecutor) Run(_ context.Context, argv []string) (string, er
 		return e.remoteLogChunk("stdout", valueAt(e.stdout, index), joined), nil
 	case strings.Contains(joined, "stderr.log"):
 		return e.remoteLogChunk("stderr", valueAt(e.stderr, index), joined), nil
+	case strings.Contains(joined, "launcher.log"):
+		return e.launcher, nil
 	case strings.Contains(joined, "status.json"):
 		out := valueAt(e.status, index)
 		if e.poll < len(e.status)-1 {
@@ -1757,6 +1782,9 @@ func (e *fakeRemoteExecutor) RunInput(_ context.Context, argv []string, input st
 	joined := strings.Join(argv, " ")
 	if strings.Contains(joined, "prompt.txt") || strings.Contains(joined, "base.patch") {
 		e.input = input
+	}
+	if strings.Contains(joined, "launcher.sh") {
+		e.launcherInput = input
 	}
 	return "", nil
 }
