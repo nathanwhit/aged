@@ -6496,6 +6496,13 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		req := updatePullRequestRequestFromAction(action)
 		req.MetadataOnly = metadataOnly
 		req.WorkerID = workerID
+		if !metadataOnly {
+			if ready, err := s.reviewPlanPullRequestUpdateReadiness(ctx, task, action, results, workerID, pr); err != nil {
+				return false, results, err
+			} else if !ready {
+				return true, results, nil
+			}
+		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":          action.Kind,
 			"when":          nonEmpty(action.When, "after_success"),
@@ -6839,6 +6846,64 @@ func (s *Service) reviewCompletionPublicationReadiness(ctx context.Context, task
 func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
 	ready, _, err := s.reviewTaskPublicationReadiness(ctx, task, action, results, workerID)
 	return ready, err
+}
+
+func (s *Service) reviewPlanPullRequestUpdateReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string, pr core.PullRequest) (bool, error) {
+	reviewer, ok := s.brain.(PublicationReviewProvider)
+	if !ok {
+		return true, nil
+	}
+	candidate, ok := workerResultByID(results, workerID)
+	if !ok {
+		return false, fmt.Errorf("update_pull_request action selected unknown worker %s", workerID)
+	}
+	reviewAction := action
+	reviewAction.Inputs = maps.Clone(action.Inputs)
+	if reviewAction.Inputs == nil {
+		reviewAction.Inputs = map[string]any{}
+	}
+	reviewAction.Inputs["existingPullRequest"] = map[string]any{
+		"id":     pr.ID,
+		"repo":   pr.Repo,
+		"number": pr.Number,
+		"url":    pr.URL,
+		"title":  pr.Title,
+		"base":   pr.Base,
+		"branch": pr.Branch,
+		"state":  pr.State,
+	}
+	review, err := reviewer.ReviewPublication(ctx, task, candidate, reviewAction)
+	if err != nil {
+		if recordErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          "update_pull_request_readiness_review",
+			"when":          nonEmpty(action.When, "after_success"),
+			"reason":        "Pull request update readiness review failed; continuing with the planned update.",
+			"workerId":      workerID,
+			"pullRequestId": pr.ID,
+			"status":        "ignored",
+			"error":         err.Error(),
+		}); recordErr != nil {
+			return false, recordErr
+		}
+		return true, nil
+	}
+	if review.Ready {
+		return true, nil
+	}
+	reason := strings.TrimSpace(review.Reason)
+	if reason == "" {
+		reason = "candidate is not a coherent update for the existing pull request"
+	}
+	return false, s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":            "update_pull_request_readiness_rejected",
+		"when":            nonEmpty(action.When, "after_success"),
+		"reason":          reason,
+		"actionReason":    action.Reason,
+		"workerId":        workerID,
+		"pullRequestId":   pr.ID,
+		"status":          "rejected",
+		"candidateStatus": candidate.Status,
+	})
 }
 
 func (s *Service) reviewTaskPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, string, error) {

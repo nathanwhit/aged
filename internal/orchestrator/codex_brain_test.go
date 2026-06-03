@@ -844,6 +844,12 @@ func TestCodexBrainReviewPromptsDoNotInlineSchedulerTemplate(t *testing.T) {
 	prompts := map[string]string{
 		"completion":  brain.completionReviewPrompt(task, candidate, "final candidate selected"),
 		"publication": brain.publicationReviewPrompt(task, candidate, PlanAction{Kind: "publish_pull_request"}),
+		"pr_update": brain.publicationReviewPrompt(task, candidate, PlanAction{
+			Kind: "update_pull_request",
+			Inputs: map[string]any{
+				"existingPullRequest": map[string]any{"repo": "owner/repo", "number": 7},
+			},
+		}),
 		"code_review": brain.codeReviewPrompt(task, candidate, core.ReviewPolicy{BlockingSeverities: []string{"P0", "P1"}}, "completion"),
 	}
 	for name, prompt := range prompts {
@@ -855,6 +861,37 @@ func TestCodexBrainReviewPromptsDoNotInlineSchedulerTemplate(t *testing.T) {
 				t.Fatalf("%s prompt missing compact review header:\n%s", name, prompt)
 			}
 		})
+	}
+}
+
+func TestCodexBrainPublicationReviewPromptCoversSemanticPRUpdates(t *testing.T) {
+	brain := &CodexBrain{}
+	prompt := brain.publicationReviewPrompt(core.Task{
+		ID:     "task-1",
+		Title:  "Broad objective",
+		Prompt: "Split broad work into focused PRs and babysit each PR.",
+	}, WorkerTurnResult{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+		Summary:  "Addressed PR feedback with a focused helper.",
+		Changes: WorkspaceChanges{
+			ChangedFiles: []WorkspaceChangedFile{{Path: "tests/helper_test.go", Status: "added"}},
+		},
+	}, PlanAction{
+		Kind: "update_pull_request",
+		Inputs: map[string]any{
+			"existingPullRequest": map[string]any{"repo": "owner/repo", "number": 7},
+		},
+	})
+	for _, want := range []string{
+		`For "update_pull_request" actions`,
+		"even if that requires adding a new test or helper file",
+		"Do not reject only because the patch touches a new path",
+		"semantically belongs in that existing PR",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("publication review prompt missing %q:\n%s", want, prompt)
+		}
 	}
 }
 
