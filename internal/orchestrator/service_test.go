@@ -2933,6 +2933,98 @@ func TestServicePullRequestUpdateDoesNotInferStaleTaskCandidate(t *testing.T) {
 	}
 }
 
+func TestServiceUpdatePullRequestReadinessRejectsIncoherentPatch(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	brain := &publicationReviewBrain{
+		reviews: []PublicationReview{{
+			Ready:  false,
+			Reason: "worker patch adds an unrelated dependency slice that belongs in a separate PR",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, brain, nil, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	task := core.Task{ID: "task-pr-update-readiness", Title: "Trim dependencies broadly"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Produce several focused dependency cleanup PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-geometry",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 41,
+		URL:    "https://github.com/owner/repo/pull/41",
+		Title:  "refactor: replace geometry dependency",
+		Branch: "codex/geometry",
+		Base:   "main",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"continueAfterPublish": true,
+			"publicationPhase":     "intermediate",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "repair-worker",
+		Status:   core.WorkerSucceeded,
+		Summary:  "Also changed the CLI keyring dependency.",
+		Changes: WorkspaceChanges{
+			Dirty: true,
+			ChangedFiles: []WorkspaceChangedFile{
+				{Path: "cli/Cargo.toml", Status: "modified"},
+				{Path: "Cargo.lock", Status: "modified"},
+			},
+			Diff: "diff --git a/cli/Cargo.toml b/cli/Cargo.toml\n",
+		},
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "update_pull_request",
+		When:     "after_success",
+		WorkerID: "repair-worker",
+		Reason:   "Address feedback on PR 41.",
+		Inputs: map[string]any{
+			"repo":   "owner/repo",
+			"number": 41,
+			"branch": "codex/geometry",
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("rejected intermediate PR update should let objective continue")
+	}
+	if publisher.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want semantic readiness rejection to prevent push", publisher.updateCalls)
+	}
+	if brain.reviewCalls != 1 {
+		t.Fatalf("review calls = %d, want 1", brain.reviewCalls)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "update_pull_request_readiness_rejected", "rejected") {
+		t.Fatalf("missing rejected update readiness action; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if !strings.Contains(taskActionPayloads(snapshot.Events, task.ID), "separate PR") {
+		t.Fatalf("missing readiness rejection reason; payloads:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+}
+
 func TestAnnotatePullRequestFollowUpPlanDisablesLatestCandidateInheritance(t *testing.T) {
 	plan := annotatePullRequestFollowUpPlan(Plan{
 		WorkerKind: "codex",
@@ -4625,43 +4717,6 @@ func TestServicePullRequestFollowUpNoChangeReturnsToWatch(t *testing.T) {
 		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"status":"skipped"`) ||
 		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, "no candidate changes") {
 		t.Fatalf("missing skipped no-change update action")
-	}
-}
-
-func TestValidatePullRequestUpdateChangesAllowsNarrowNewFiles(t *testing.T) {
-	err := validatePullRequestUpdateChanges(core.PullRequest{Repo: "owner/repo", Number: 7}, WorkspaceChanges{
-		Dirty: true,
-		ChangedFiles: []WorkspaceChangedFile{
-			{Path: "ext/web/geometry.rs", Status: "modified"},
-			{Path: "ext/web/geometry_test.rs", Status: "added"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("narrow PR follow-up was rejected: %v", err)
-	}
-}
-
-func TestValidatePullRequestUpdateChangesRejectsBroadMergeContamination(t *testing.T) {
-	changes := WorkspaceChanges{Dirty: true}
-	for _, path := range []string{
-		".github/workflows/ci.generated.yml",
-		"Cargo.lock",
-		"Cargo.toml",
-		"cli/Cargo.toml",
-		"ext/web/geometry.rs",
-		"ext/node/Cargo.toml",
-		"libs/npm/Cargo.toml",
-		"runtime/Cargo.toml",
-		"tools/lint.js",
-	} {
-		changes.ChangedFiles = append(changes.ChangedFiles, WorkspaceChangedFile{Path: path, Status: "modified"})
-	}
-	err := validatePullRequestUpdateChanges(core.PullRequest{Repo: "owner/repo", Number: 7}, changes)
-	if err == nil {
-		t.Fatal("broad PR follow-up update succeeded; want contamination rejection")
-	}
-	if !strings.Contains(err.Error(), "split broad objective work into a new PR") {
-		t.Fatalf("error = %v", err)
 	}
 }
 

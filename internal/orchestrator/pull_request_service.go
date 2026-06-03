@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -331,9 +330,6 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	changes := WorkspaceChanges{}
 	if !req.MetadataOnly {
 		changes = s.pullRequestWorkspaceChanges(ctx, workerID)
-		if err := validatePullRequestUpdateChanges(pr, changes); err != nil {
-			return core.PullRequest{}, err
-		}
 	}
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
 	metadata := map[string]any{}
@@ -517,65 +513,6 @@ func pullRequestPublishPatch(workspace PreparedWorkspace, changes WorkspaceChang
 		return changes.PublishDiff, true, strings.TrimSpace(changes.PublishBase)
 	}
 	return changes.Diff, true, ""
-}
-
-func validatePullRequestUpdateChanges(pr core.PullRequest, changes WorkspaceChanges) error {
-	if strings.TrimSpace(changes.PublishDiff) == "" && strings.TrimSpace(changes.Diff) == "" && len(changes.ChangedFiles) == 0 {
-		return nil
-	}
-	paths := workspaceChangedFilePaths(changes.ChangedFiles)
-	if len(paths) == 0 {
-		return nil
-	}
-	if len(paths) > maxPullRequestFollowUpChangedFiles {
-		return fmt.Errorf("refusing to update pull request %s#%d with %d changed files; likely base-merge or objective-work contamination", pr.Repo, pr.Number, len(paths))
-	}
-	if roots := broadPullRequestUpdateRoots(paths); len(roots) > maxPullRequestFollowUpRoots {
-		return fmt.Errorf("refusing to update pull request %s#%d across %d top-level areas (%s); split broad objective work into a new PR instead of mutating an existing intermediate PR", pr.Repo, pr.Number, len(roots), strings.Join(roots, ", "))
-	}
-	return nil
-}
-
-const (
-	maxPullRequestFollowUpChangedFiles = 25
-	maxPullRequestFollowUpRoots        = 4
-)
-
-func broadPullRequestUpdateRoots(paths []string) []string {
-	seen := map[string]bool{}
-	roots := []string{}
-	for _, path := range paths {
-		root := pullRequestUpdateRoot(path)
-		if root == "" || seen[root] {
-			continue
-		}
-		seen[root] = true
-		roots = append(roots, root)
-	}
-	return roots
-}
-
-func pullRequestUpdateRoot(path string) string {
-	path = strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
-	if path == "" {
-		return ""
-	}
-	parts := strings.Split(path, "/")
-	if len(parts) == 1 {
-		return parts[0]
-	}
-	switch parts[0] {
-	case ".github":
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
-		return parts[0]
-	case "cli", "ext", "libs", "runtime", "tests", "tools":
-		if len(parts) >= 2 {
-			return parts[0] + "/" + parts[1]
-		}
-	}
-	return parts[0]
 }
 
 func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {
