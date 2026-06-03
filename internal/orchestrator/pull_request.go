@@ -538,10 +538,17 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 	if strings.TrimSpace(branch) != "" {
 		fallback = "Publish " + strings.TrimSpace(branch)
 	}
+	pullTitle := spec.Title
+	metadata := spec.Metadata
+	if spec.UpdateExisting {
+		fallback = "Address PR feedback"
+		pullTitle = ""
+		metadata = nil
+	}
 	message := changeCommitMessage(changeCommitMessageContext{
 		Fallback:     fallback,
-		PullTitle:    spec.Title,
-		Metadata:     spec.Metadata,
+		PullTitle:    pullTitle,
+		Metadata:     metadata,
 		ChangedFiles: changedFiles,
 	})
 	if _, err := exec(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {

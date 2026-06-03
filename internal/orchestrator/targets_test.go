@@ -956,17 +956,40 @@ func TestRemoteChangeScriptPreservesCleanGitWorkspaceCapture(t *testing.T) {
 	runRemoteTestScript(t, ctx, repo, remoteChangeScript(run))
 
 	changes := readTestRunFile(t, run.RunDir, "changes.txt")
-	if !strings.Contains(changes, "?? worker-added.txt") {
-		t.Fatalf("clean workspace capture should keep porcelain untracked status, got:\n%s", changes)
-	}
-	if _, err := os.Stat(filepath.Join(run.RunDir, "name-status.z")); err == nil {
-		t.Fatal("clean workspace capture should not use filtered name-status artifact")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
+	files := parseGitNameStatus(readTestRunFile(t, run.RunDir, "name-status.z"))
+	assertChangedFiles(t, files, []WorkspaceChangedFile{{Path: "worker-added.txt", Status: "added"}})
+	if !strings.Contains(changes, "A\tworker-added.txt") {
+		t.Fatalf("clean workspace capture should report baseline-tree change, got:\n%s", changes)
 	}
 	diff := readTestRunFile(t, run.RunDir, "diff.patch")
 	if !strings.Contains(diff, "diff --git a/worker-added.txt b/worker-added.txt") {
 		t.Fatalf("clean workspace capture missed worker-added file:\n%s", diff)
+	}
+}
+
+func TestRemoteChangeScriptCapturesCommittedGitWorkerChanges(t *testing.T) {
+	ctx := context.Background()
+	repo := initGitTestRepo(t)
+	run := NewRemoteRun(TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, worker.Spec{ID: "worker", WorkDir: repo})
+	run.RunDir = t.TempDir()
+
+	baseHead := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
+
+	runRemoteTestScript(t, ctx, repo, remoteBaselineScript(run))
+	writeTestFile(t, repo, "file.txt", "base\ncommitted worker change\n")
+	runTestGit(t, repo, "add", "file.txt")
+	runTestGit(t, repo, "commit", "-m", "worker change")
+	runRemoteTestScript(t, ctx, repo, remoteChangeScript(run))
+
+	files := parseGitNameStatus(readTestRunFile(t, run.RunDir, "name-status.z"))
+	assertChangedFiles(t, files, []WorkspaceChangedFile{{Path: "file.txt", Status: "modified"}})
+	publishBase := strings.TrimSpace(readTestRunFile(t, run.RunDir, "publish-base.txt"))
+	if publishBase != baseHead {
+		t.Fatalf("publish base = %q, want baseline head %q", publishBase, baseHead)
+	}
+	publishDiff := readTestRunFile(t, run.RunDir, "publish-diff.patch")
+	if !strings.Contains(publishDiff, "+committed worker change") {
+		t.Fatalf("publish diff missed committed worker change:\n%s", publishDiff)
 	}
 }
 

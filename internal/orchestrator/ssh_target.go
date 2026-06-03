@@ -1279,6 +1279,7 @@ func remoteBaselineScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
 	return fmt.Sprintf(`if git rev-parse --show-toplevel >/dev/null 2>&1; then
   git status --porcelain > %[1]s/git-baseline-status.txt 2>&1 || true
+  git rev-parse --verify HEAD > %[1]s/git-baseline-head.txt 2>/dev/null || true
   %[2]s
   if tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$tree" ]; then printf '%%s\n' "$tree" > %[1]s/git-baseline.tree; fi
 fi`, runDir, remoteGitSnapshotTreeFunction())
@@ -1294,22 +1295,22 @@ func remoteShellCommand(script string) string {
 func remoteChangeScript(run remoteRun) string {
 	runDir := shellQuote(run.RunDir)
 	return fmt.Sprintf(`if jj root >/dev/null 2>&1; then printf jj > %[1]s/vcs.txt; jj root > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; jj diff --summary > %[1]s/changes.txt 2>&1 || true; cp %[1]s/changes.txt %[1]s/diffstat.txt 2>/dev/null || true; jj diff --git > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; cp %[1]s/diff.patch %[1]s/publish-diff.patch 2>/dev/null || true; elif git rev-parse --show-toplevel >/dev/null 2>&1; then printf git > %[1]s/vcs.txt; git rev-parse --show-toplevel > %[1]s/root.txt 2>/dev/null || pwd > %[1]s/root.txt; %[2]s
-  git rev-parse --verify HEAD > %[1]s/publish-base.txt 2>/dev/null || true
-  git diff --binary HEAD > %[1]s/publish-diff.patch 2>/dev/null || true
-  printf '\n' >> %[1]s/publish-diff.patch
-  git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/publish-diff.patch 2>/dev/null || true; done
-  if [ -s %[1]s/git-baseline-status.txt ]; then
+  if [ -s %[1]s/git-baseline-head.txt ]; then cat %[1]s/git-baseline-head.txt > %[1]s/publish-base.txt 2>/dev/null || true; else git rev-parse --verify HEAD > %[1]s/publish-base.txt 2>/dev/null || true; fi
+  if [ -s %[1]s/git-baseline.tree ]; then
     baseline_tree=$(cat %[1]s/git-baseline.tree 2>/dev/null || true)
+    baseline_head=$(cat %[1]s/git-baseline-head.txt 2>/dev/null || true)
     if current_tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$baseline_tree" ] && [ -n "$current_tree" ]; then
       git diff --name-status "$baseline_tree" "$current_tree" > %[1]s/changes.txt 2>&1 || true
       git diff --name-status -z "$baseline_tree" "$current_tree" > %[1]s/name-status.z 2>/dev/null || true
       git diff --stat "$baseline_tree" "$current_tree" > %[1]s/diffstat.txt 2>&1 || true
       git diff --binary "$baseline_tree" "$current_tree" > %[1]s/diff.patch 2>&1 || true
       printf '\n' >> %[1]s/diff.patch
+      if [ -n "$baseline_head" ]; then git diff --binary "$baseline_head" "$current_tree" > %[1]s/publish-diff.patch 2>&1 || true; else cp %[1]s/diff.patch %[1]s/publish-diff.patch 2>/dev/null || true; fi
+      printf '\n' >> %[1]s/publish-diff.patch
     else
-      : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch
+      : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; : > %[1]s/publish-diff.patch
     fi
-  else git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/diff.patch 2>/dev/null || true; done; fi; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; fi`, runDir, remoteGitSnapshotTreeFunction())
+  else git status --porcelain > %[1]s/changes.txt 2>&1 || true; git diff --stat > %[1]s/diffstat.txt 2>&1 || true; git diff --binary > %[1]s/diff.patch 2>&1 || true; printf '\n' >> %[1]s/diff.patch; cp %[1]s/diff.patch %[1]s/publish-diff.patch 2>/dev/null || true; git ls-files --others --exclude-standard | while IFS= read -r path; do git diff --no-index --binary -- /dev/null "$path" >> %[1]s/diff.patch 2>/dev/null || true; done; cp %[1]s/diff.patch %[1]s/publish-diff.patch 2>/dev/null || true; fi; else printf unknown > %[1]s/vcs.txt; pwd > %[1]s/root.txt; : > %[1]s/changes.txt; : > %[1]s/diffstat.txt; : > %[1]s/diff.patch; : > %[1]s/publish-diff.patch; fi`, runDir, remoteGitSnapshotTreeFunction())
 }
 
 func remotePrepareCheckoutScript(spec RemoteCheckoutSpec) string {

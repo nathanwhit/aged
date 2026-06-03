@@ -746,6 +746,43 @@ func TestMaterializeGitPullRequestChangesIgnoresDirtySubmoduleOnlyStatus(t *test
 	assertCommandContains(t, calls, []string{"git", "add", "-A"})
 }
 
+func TestMaterializeGitPullRequestUpdateCommitUsesFeedbackFallback(t *testing.T) {
+	ctx := context.Background()
+	var commitMessage string
+	exec := func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		switch {
+		case name == "git" && containsSubsequence(args, []string{"status", "--porcelain=v1"}):
+			return " M ext/web/geometry.rs\n", nil
+		case name == "git" && containsSubsequence(args, []string{"add", "-A"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}):
+			return "ext/web/geometry.rs\x00", nil
+		case name == "git" && containsSubsequence(args, []string{"commit"}):
+			for i, arg := range args {
+				if arg == "-m" && i+1 < len(args) {
+					commitMessage = args[i+1]
+				}
+			}
+			return "", nil
+		default:
+			t.Fatalf("unexpected command %s %v", name, args)
+		}
+		return "", nil
+	}
+
+	err := materializeGitPullRequestChanges(ctx, exec, "/repo", "codex/aged-worker", PullRequestPublishSpec{
+		UpdateExisting: true,
+		Title:          "Trim Heavy Deno Dependencies",
+		Metadata:       map[string]any{"taskTitle": "Trim Heavy Deno Dependencies"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitMessage != "Update ext web" {
+		t.Fatalf("commit message = %q, want file-scoped update", commitMessage)
+	}
+}
+
 func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)

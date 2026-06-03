@@ -4427,8 +4427,8 @@ func TestServicePullRequestFollowUpStartsWorkspaceFromPullRequestHead(t *testing
 	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, `"workspaceBaseRef":"refs/pull/7/head"`) {
 		t.Fatalf("missing PR head workspace metadata")
 	}
-	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, "Decide whether a GitHub PR comment is warranted") {
-		t.Fatalf("missing PR comment instruction")
+	if !eventPayloadContains(snapshot.Events, core.EventTaskPlanned, taskID, "Do not post PR status comments") {
+		t.Fatalf("missing PR status comment guard")
 	}
 }
 
@@ -4625,6 +4625,43 @@ func TestServicePullRequestFollowUpNoChangeReturnsToWatch(t *testing.T) {
 		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"status":"skipped"`) ||
 		!eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, "no candidate changes") {
 		t.Fatalf("missing skipped no-change update action")
+	}
+}
+
+func TestValidatePullRequestUpdateChangesAllowsNarrowNewFiles(t *testing.T) {
+	err := validatePullRequestUpdateChanges(core.PullRequest{Repo: "owner/repo", Number: 7}, WorkspaceChanges{
+		Dirty: true,
+		ChangedFiles: []WorkspaceChangedFile{
+			{Path: "ext/web/geometry.rs", Status: "modified"},
+			{Path: "ext/web/geometry_test.rs", Status: "added"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("narrow PR follow-up was rejected: %v", err)
+	}
+}
+
+func TestValidatePullRequestUpdateChangesRejectsBroadMergeContamination(t *testing.T) {
+	changes := WorkspaceChanges{Dirty: true}
+	for _, path := range []string{
+		".github/workflows/ci.generated.yml",
+		"Cargo.lock",
+		"Cargo.toml",
+		"cli/Cargo.toml",
+		"ext/web/geometry.rs",
+		"ext/node/Cargo.toml",
+		"libs/npm/Cargo.toml",
+		"runtime/Cargo.toml",
+		"tools/lint.js",
+	} {
+		changes.ChangedFiles = append(changes.ChangedFiles, WorkspaceChangedFile{Path: path, Status: "modified"})
+	}
+	err := validatePullRequestUpdateChanges(core.PullRequest{Repo: "owner/repo", Number: 7}, changes)
+	if err == nil {
+		t.Fatal("broad PR follow-up update succeeded; want contamination rejection")
+	}
+	if !strings.Contains(err.Error(), "split broad objective work into a new PR") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
