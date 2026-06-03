@@ -12323,6 +12323,111 @@ func TestServiceBroadGitHubObjectiveWaitsOnReplanErrorInsteadOfFallbackCompletio
 	}
 }
 
+func TestServiceRetryBroadGitHubTaskWithNewSteeringBypassesStaleFinalCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-broad-stale-final"
+	workerID := "worker-stale-final"
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":     "Trim Heavy Deno Dependencies",
+				"prompt":    "Find several dependency-reduction PRs.",
+				"metadata":  core.MustJSON(map[string]any{"completionMode": "github", "objectiveMode": "broad"}),
+				"projectId": "default",
+			}),
+		},
+		{
+			Type:   core.EventTaskPlanned,
+			TaskID: taskID,
+			Payload: core.MustJSON(Plan{
+				WorkerKind: "change",
+				Prompt:     "produce a dependency-reduction slice",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload:  core.MustJSON(map[string]any{"kind": "change"}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: workerID,
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "validated one dependency-reduction slice",
+				"workspaceChanges": WorkspaceChanges{
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "Cargo.toml", Status: "modified"}},
+				},
+			}),
+		},
+		{
+			Type:   core.EventTaskCandidate,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"workerId": workerID,
+				"reason":   "stale completion fallback",
+			}),
+		},
+		{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskCanceled,
+			}),
+		},
+		{
+			Type:   core.EventTaskSteered,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"message": "Discard the closed completion PR and continue with focused intermediate PRs.",
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	brain := &replanningBrain{
+		decisions: []ReplanDecision{{
+			Action:  "wait",
+			Message: "continue broad objective via explicit intermediate PR planning",
+		}},
+	}
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "Cargo.toml", Status: "modified"}},
+		},
+	})
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForTaskStatus(t, store, taskID, core.TaskWaiting)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want stale final candidate bypassed", publisher.publishCalls)
+	}
+	if len(brain.states) != 1 {
+		t.Fatalf("replan calls = %d, want graph retry through replanner", len(brain.states))
+	}
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingUser {
+		t.Fatalf("objective status = %q, want waiting_user", snapshot.Tasks[0].ObjectiveStatus)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventApprovalNeeded, taskID, "continue broad objective") {
+		t.Fatalf("missing replan wait approval event")
+	}
+}
+
 func TestServiceDoesNotApplyDynamicReplanLimitToBroadObjective(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
