@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -330,6 +331,9 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	changes := WorkspaceChanges{}
 	if !req.MetadataOnly {
 		changes = s.pullRequestWorkspaceChanges(ctx, workerID)
+		if err := validatePullRequestUpdateChanges(pr, changes); err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
 	metadata := map[string]any{}
@@ -513,6 +517,65 @@ func pullRequestPublishPatch(workspace PreparedWorkspace, changes WorkspaceChang
 		return changes.PublishDiff, true, strings.TrimSpace(changes.PublishBase)
 	}
 	return changes.Diff, true, ""
+}
+
+func validatePullRequestUpdateChanges(pr core.PullRequest, changes WorkspaceChanges) error {
+	if strings.TrimSpace(changes.PublishDiff) == "" && strings.TrimSpace(changes.Diff) == "" && len(changes.ChangedFiles) == 0 {
+		return nil
+	}
+	paths := workspaceChangedFilePaths(changes.ChangedFiles)
+	if len(paths) == 0 {
+		return nil
+	}
+	if len(paths) > maxPullRequestFollowUpChangedFiles {
+		return fmt.Errorf("refusing to update pull request %s#%d with %d changed files; likely base-merge or objective-work contamination", pr.Repo, pr.Number, len(paths))
+	}
+	if roots := broadPullRequestUpdateRoots(paths); len(roots) > maxPullRequestFollowUpRoots {
+		return fmt.Errorf("refusing to update pull request %s#%d across %d top-level areas (%s); split broad objective work into a new PR instead of mutating an existing intermediate PR", pr.Repo, pr.Number, len(roots), strings.Join(roots, ", "))
+	}
+	return nil
+}
+
+const (
+	maxPullRequestFollowUpChangedFiles = 25
+	maxPullRequestFollowUpRoots        = 4
+)
+
+func broadPullRequestUpdateRoots(paths []string) []string {
+	seen := map[string]bool{}
+	roots := []string{}
+	for _, path := range paths {
+		root := pullRequestUpdateRoot(path)
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+func pullRequestUpdateRoot(path string) string {
+	path = strings.Trim(strings.TrimSpace(filepath.ToSlash(path)), "/")
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	switch parts[0] {
+	case ".github":
+		if len(parts) >= 2 {
+			return parts[0] + "/" + parts[1]
+		}
+		return parts[0]
+	case "cli", "ext", "libs", "runtime", "tests", "tools":
+		if len(parts) >= 2 {
+			return parts[0] + "/" + parts[1]
+		}
+	}
+	return parts[0]
 }
 
 func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {
@@ -2826,7 +2889,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. Decide whether a GitHub PR comment is warranted after inspecting the feedback and outcome. If a direct response would help reviewers or explain the result, leave a concise comment on the pull request using the available GitHub tooling. Do not post a noisy comment when the code/check results already speak for themselves. In the final report, state whether you posted a PR comment and summarize its content.")
+	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. Do not post PR status comments about local preparation, local validation, mergeability, or pending branch updates; aged can only make those claims after the branch update succeeds and GitHub has been re-read. If reviewer feedback is purely a question and no code change is needed, report the suggested concise reply in the final report instead of posting it directly.")
 	return b.String()
 }
 
