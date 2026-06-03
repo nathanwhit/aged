@@ -148,7 +148,15 @@ func (r SSHRunner) Start(ctx context.Context, run remoteRun, argv []string, stdi
 			return err
 		}
 	}
-	script := remoteStartScript(run, argv, stdin != "")
+	inputExecutor, ok := r.Executor.(RemoteInputExecutor)
+	if !ok {
+		return errors.New("remote executor does not support launcher upload")
+	}
+	launcher := remoteLauncherScript(run, argv, stdin != "")
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remoteLauncherPath(run))+" && chmod 700 "+shellQuote(remoteLauncherPath(run))), launcher); err != nil {
+		return err
+	}
+	script := remoteStartScript(run)
 	_, err := r.Executor.Run(ctx, sshArgs(run.Target, "sh", "-lc", script))
 	return err
 }
@@ -311,7 +319,22 @@ func (r SSHRunner) refreshAfterRemoteSessionExit(ctx context.Context, run remote
 	if terminal, ok := pollState.stdout.TerminalStatus(); ok {
 		return terminal, true
 	}
+	if launcherLog := r.readRemoteLauncherLog(ctx, run); strings.TrimSpace(launcherLog) != "" {
+		return remoteStatus{
+			Status:             "failed",
+			Error:              "remote worker launcher exited before writing terminal status: " + truncateStatusErrorDetail(launcherLog),
+			InferredFromOutput: true,
+		}, true
+	}
 	return remoteStatus{}, false
+}
+
+func (r SSHRunner) readRemoteLauncherLog(ctx context.Context, run remoteRun) string {
+	out, err := r.runPollCommand(ctx, run.Target, "cat "+shellQuote(remoteLauncherLogPath(run))+" 2>/dev/null || true")
+	if err != nil {
+		return strings.TrimSpace(out)
+	}
+	return strings.TrimSpace(out)
 }
 
 func (r SSHRunner) remoteSessionActive(ctx context.Context, run remoteRun) (bool, error) {
@@ -835,6 +858,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 	publishBase := read("publish-base.txt")
 	stdout := readRaw("stdout.log")
 	stderr := readRaw("stderr.log")
+	launcher := readRaw("launcher.log")
 	changes := WorkspaceChanges{
 		Root:          root,
 		CWD:           run.WorkDir,
@@ -847,7 +871,7 @@ func (r SSHRunner) DescribeChanges(ctx context.Context, run remoteRun) Workspace
 		PublishDiff:   publishDiff,
 		PublishBase:   publishBase,
 		Dirty:         strings.TrimSpace(status) != "",
-		Artifacts:     remoteLogArtifacts(run, stdout, stderr),
+		Artifacts:     remoteLogArtifacts(run, stdout, stderr, launcher),
 	}
 	switch vcs {
 	case "jj":
@@ -874,7 +898,7 @@ func (r SSHRunner) ensureRemoteChangeFiles(ctx context.Context, run remoteRun) e
 	return err
 }
 
-func remoteLogArtifacts(run remoteRun, stdout string, stderr string) []WorkspaceArtifact {
+func remoteLogArtifacts(run remoteRun, stdout string, stderr string, launcher string) []WorkspaceArtifact {
 	artifacts := []WorkspaceArtifact{}
 	if strings.TrimSpace(stdout) != "" {
 		artifacts = append(artifacts, WorkspaceArtifact{
@@ -902,6 +926,19 @@ func remoteLogArtifacts(run remoteRun, stdout string, stderr string) []Workspace
 			},
 		})
 	}
+	if strings.TrimSpace(launcher) != "" {
+		artifacts = append(artifacts, WorkspaceArtifact{
+			ID:      run.Session + "-launcher",
+			Kind:    "worker_log",
+			Name:    "Remote launcher",
+			Path:    path.Join(run.RunDir, "launcher.log"),
+			Content: truncateArtifactContent(launcher),
+			Metadata: map[string]any{
+				"stream": "launcher",
+				"bytes":  len(launcher),
+			},
+		})
+	}
 	return artifacts
 }
 
@@ -913,17 +950,44 @@ func truncateArtifactContent(content string) string {
 	return content[:limit] + "\n[truncated]"
 }
 
-func remoteStartScript(run remoteRun, argv []string, hasStdin bool) string {
+func truncateStatusErrorDetail(content string) string {
+	const limit = 2048
+	content = strings.TrimSpace(content)
+	if len(content) <= limit {
+		return content
+	}
+	return "[truncated]\n" + content[len(content)-limit:]
+}
+
+func remoteStartScript(run remoteRun) string {
+	launcher := shellQuote(remoteLauncherPath(run))
+	launcherLog := shellQuote(remoteLauncherLogPath(run))
+	tmuxCommand := fmt.Sprintf("if command -v bash >/dev/null 2>&1; then exec bash -l %s; else exec sh %s; fi >> %s 2>&1", launcher, launcher, launcherLog)
+	return fmt.Sprintf(
+		`tmux new-session -d -s %[1]s %s`,
+		shellQuote(run.Session),
+		shellQuote(tmuxCommand),
+	)
+}
+
+func remoteLauncherScript(run remoteRun, argv []string, hasStdin bool) string {
 	command := shellJoin(argv)
 	stdinRedirect := ""
 	if hasStdin {
 		stdinRedirect = " < " + shellQuote(remotePromptPath(run))
 	}
-	inner := fmt.Sprintf(`AGED_REMOTE_CALLBACK_ENV=%s
+	return fmt.Sprintf(`#!/bin/sh
+AGED_REMOTE_CALLBACK_ENV=%s
 AGED_REMOTE_HELPER_BIN=%s
 export AGED_REMOTE_CALLBACK_ENV AGED_REMOTE_HELPER_BIN
 %s
-cd %s && (%s)%s > %s/stdout.log 2> %s/stderr.log
+cd %s
+code=$?
+if [ "$code" -ne 0 ]; then
+  printf '{"status":"failed","exit":%%s,"error":"failed to enter remote worker directory"}' "$code" > %s/status.json
+  exit "$code"
+fi
+(%s)%s > %s/stdout.log 2> %s/stderr.log
 code=$?
 %s
 if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.json; else printf '{"status":"failed","exit":%%s}' "$code" > %s/status.json; fi`,
@@ -931,6 +995,7 @@ if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.
 		shellQuote(path.Join(run.RunDir, "bin")),
 		remoteWorkerEnvScript(),
 		shellQuote(run.WorkDir),
+		shellQuote(run.RunDir),
 		remoteBaselineScript(run)+"\n"+command,
 		stdinRedirect,
 		shellQuote(run.RunDir),
@@ -939,16 +1004,18 @@ if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.
 		shellQuote(run.RunDir),
 		shellQuote(run.RunDir),
 	)
-	tmuxCommand := remoteShellCommand(inner)
-	return fmt.Sprintf(
-		`tmux new-session -d -s %[1]s %s`,
-		shellQuote(run.Session),
-		shellQuote(tmuxCommand),
-	)
 }
 
 func remotePromptPath(run remoteRun) string {
 	return path.Join(run.RunDir, "prompt.txt")
+}
+
+func remoteLauncherPath(run remoteRun) string {
+	return path.Join(run.RunDir, "launcher.sh")
+}
+
+func remoteLauncherLogPath(run remoteRun) string {
+	return path.Join(run.RunDir, "launcher.log")
 }
 
 func remoteCallbackEnvPath(run remoteRun) string {
@@ -1283,13 +1350,6 @@ func remoteBaselineScript(run remoteRun) string {
   %[2]s
   if tree=$(aged_git_snapshot_tree 2>/dev/null) && [ -n "$tree" ]; then printf '%%s\n' "$tree" > %[1]s/git-baseline.tree; fi
 fi`, runDir, remoteGitSnapshotTreeFunction())
-}
-
-func remoteShellCommand(script string) string {
-	if strings.TrimSpace(script) == "" {
-		return ""
-	}
-	return "if command -v bash >/dev/null 2>&1; then exec bash -l -c " + shellQuote(script) + "; else " + script + "; fi"
 }
 
 func remoteChangeScript(run remoteRun) string {
