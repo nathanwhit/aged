@@ -5976,6 +5976,36 @@ func annotateFinalCandidateFailure(results []WorkerTurnResult, candidateWorkerID
 	return out
 }
 
+func (s *Service) sanitizePublishPullRequestTarget(ctx context.Context, taskID string, action PlanAction) (PlanAction, bool, error) {
+	if strings.TrimSpace(action.Kind) != "publish_pull_request" || len(action.Inputs) == 0 {
+		return action, false, nil
+	}
+	id := strings.TrimSpace(nonEmpty(stringMetadata(action.Inputs, "id"), stringMetadata(action.Inputs, "pullRequestId")))
+	repo := strings.ToLower(strings.TrimSpace(stringMetadata(action.Inputs, "repo")))
+	number := intMetadata(action.Inputs, "number")
+	url := strings.TrimSpace(stringMetadata(action.Inputs, "url"))
+	branch := strings.TrimSpace(nonEmpty(stringMetadata(action.Inputs, "branch"), stringMetadata(action.Inputs, "headBranch")))
+	if id == "" && url == "" && number == 0 && branch == "" {
+		return action, false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return action, false, err
+	}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || !pullRequestMatchesUpdateTarget(pr, id, repo, number, url, branch) {
+			continue
+		}
+		sanitized := action
+		sanitized.Inputs = maps.Clone(action.Inputs)
+		for _, key := range []string{"id", "pullRequestId", "number", "url", "branch", "headBranch", "existingPullRequest"} {
+			delete(sanitized.Inputs, key)
+		}
+		return sanitized, true, nil
+	}
+	return action, false, nil
+}
+
 func isRecoverablePublishConflict(err error) bool {
 	if err == nil {
 		return false
@@ -5984,7 +6014,10 @@ func isRecoverablePublishConflict(err error) bool {
 	return strings.Contains(lower, "remote patch has conflicts") ||
 		strings.Contains(lower, "patch does not apply") ||
 		strings.Contains(lower, "3-way apply failed") ||
-		(strings.Contains(lower, "applied patch") && strings.Contains(lower, "conflicts"))
+		(strings.Contains(lower, "applied patch") && strings.Contains(lower, "conflicts")) ||
+		strings.Contains(lower, "non-fast-forward") ||
+		strings.Contains(lower, "failed to push some refs") ||
+		(strings.Contains(lower, "[rejected]") && strings.Contains(lower, "push"))
 }
 
 func isRecoverableApplyConflict(err error) bool {
@@ -6315,6 +6348,24 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		workerID := planActionWorkerID(results, action.WorkerID)
 		if workerID == "" {
 			return false, results, s.waitForMissingPublishCandidate(ctx, task, action, results)
+		}
+		var sanitized bool
+		var err error
+		action, sanitized, err = s.sanitizePublishPullRequestTarget(ctx, task.ID, action)
+		if err != nil {
+			return false, results, err
+		}
+		if sanitized {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":     "publish_pull_request_target_sanitized",
+				"when":     nonEmpty(action.When, "after_success"),
+				"reason":   "publish_pull_request referenced an existing task pull request; removed stale PR identity so a fresh intermediate PR gets its own branch.",
+				"inputs":   action.Inputs,
+				"workerId": workerID,
+				"status":   "applied",
+			}); err != nil {
+				return false, results, err
+			}
 		}
 		req := publishPullRequestRequestFromAction(action)
 		req.WorkerID = workerID
