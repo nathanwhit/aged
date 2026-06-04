@@ -2173,8 +2173,27 @@ func TestValidatePullRequestPublicationRequestRejectsImplicitBroadCompletionPR(t
 	}); err != nil {
 		t.Fatalf("explicit broad completion publish rejected: %v", err)
 	}
-	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{ContinueAfterPublish: true}); err != nil {
-		t.Fatalf("intermediate broad publish rejected: %v", err)
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{ContinueAfterPublish: true}); err == nil || !strings.Contains(err.Error(), "explicit title") {
+		t.Fatalf("implicit intermediate broad publish error = %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		ContinueAfterPublish: true,
+		Title:                "refactor(fetch): remove tower-http decompression",
+		Body:                 "## Summary\n- Remove tower-http decompression from deno_fetch.\n\n## Validation\n- cargo test -p deno_fetch",
+	}); err != nil {
+		t.Fatalf("explicit broad intermediate publish rejected: %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		Title: "refactor(fetch): remove tower-http decompression",
+		Body:  "## Summary\n- Remove tower-http decompression.\n\n## Validation\n- cargo test -p deno_fetch\n\n## Recommended Next Turns\n- Run broader CI.",
+	}); err == nil || !strings.Contains(err.Error(), "worker-report section") {
+		t.Fatalf("worker report body error = %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		Title: "refactor(fetch): remove tower-http decompression",
+		Body:  "## Summary\n- Remove tower-http decompression.\n\n## Validation\n- Binary size not measured.",
+	}); err == nil || !strings.Contains(err.Error(), "missing validation") {
+		t.Fatalf("missing validation body error = %v", err)
 	}
 }
 
@@ -4262,6 +4281,248 @@ func TestServiceImmediatePlanActionWatchesExistingPullRequests(t *testing.T) {
 	}
 	if !hasMilestone(task.Milestones, "pull_requests_watched") || len(task.Artifacts) != 1 {
 		t.Fatalf("milestones=%+v artifacts=%+v", task.Milestones, task.Artifacts)
+	}
+}
+
+func TestServicePlanActionWatchesIntermediatePullRequestsWithoutBlockingBroadObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	taskID := "task-broad-watch"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Reduce Deno dependencies",
+			"prompt": "Keep producing focused dependency-reduction PRs.",
+			"metadata": map[string]any{
+				"objectiveMode":  "broad",
+				"completionMode": "github",
+			},
+		}),
+	}, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-intermediate",
+			"repo":   "owner/repo",
+			"number": 42,
+			"url":    "https://github.com/owner/repo/pull/42",
+			"branch": "codex/intermediate",
+			"base":   "main",
+			"title":  "refactor(fetch): remove tower-http decompression",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"continueAfterPublish": true,
+				"publicationPhase":     "intermediate",
+			},
+		}),
+	})
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:   "watch_pull_requests",
+		When:   "after_success",
+		Reason: "return intermediate PR to monitoring",
+		Inputs: map[string]any{"repo": "owner/repo"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("watching intermediate PR stopped broad objective")
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok = findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveActive || task.ObjectivePhase != "watching_intermediate_pull_requests" {
+		t.Fatalf("task status=%q objective=%s/%s, want active non-waiting", task.Status, task.ObjectiveStatus, task.ObjectivePhase)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "watch_pull_requests", "") {
+		t.Fatalf("missing completed watch action; payloads:\n%s", taskActionPayloads(snapshot.Events, taskID))
+	}
+}
+
+func TestServiceExplicitWatchPreservesIntermediatePRMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		list: []core.PullRequest{{
+			Repo:   "owner/repo",
+			Number: 42,
+			URL:    "https://github.com/owner/repo/pull/42",
+			Branch: "codex/intermediate",
+			Base:   "main",
+			Title:  "refactor(fetch): remove tower-http decompression",
+			State:  "OPEN",
+		}},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	taskID := "task-explicit-watch"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Reduce Deno dependencies",
+			"prompt": "Keep producing focused dependency-reduction PRs.",
+			"metadata": map[string]any{
+				"objectiveMode": "broad",
+			},
+		}),
+	}, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-intermediate",
+			"repo":   "owner/repo",
+			"number": 42,
+			"url":    "https://github.com/owner/repo/pull/42",
+			"branch": "codex/intermediate",
+			"base":   "main",
+			"title":  "refactor(fetch): remove tower-http decompression",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"continueAfterPublish": true,
+				"publicationPhase":     "intermediate",
+			},
+		}),
+	})
+
+	prs, err := service.WatchPullRequests(ctx, taskID, core.WatchPullRequestsRequest{Repo: "owner/repo", Number: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 || !pullRequestContinuesTask(prs[0]) {
+		t.Fatalf("watched PRs = %+v, want preserved continueAfterPublish metadata", prs)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveActive {
+		t.Fatalf("task = %+v, want explicit intermediate watch to stay active", task)
+	}
+}
+
+func TestRefreshIntermediatePullRequestDoesNotBlockBroadObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{
+		status: core.PullRequest{
+			ID:               "pr-intermediate",
+			Repo:             "owner/repo",
+			Number:           42,
+			URL:              "https://github.com/owner/repo/pull/42",
+			Branch:           "codex/intermediate",
+			Base:             "main",
+			Title:            "refactor(fetch): remove tower-http decompression",
+			State:            "OPEN",
+			ChecksStatus:     "passing",
+			ChecksConclusion: "SUCCESS",
+			MergeStatus:      "MERGEABLE",
+			Mergeable:        "MERGEABLE",
+		},
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	service.SetPullRequestPublisher(publisher)
+	taskID := "task-refresh-intermediate"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Reduce Deno dependencies",
+			"prompt": "Keep producing focused dependency-reduction PRs.",
+			"metadata": map[string]any{
+				"objectiveMode": "broad",
+			},
+		}),
+	}, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}, core.Event{
+		Type:   core.EventTaskObjective,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status":  core.ObjectiveActive,
+			"phase":   "working",
+			"summary": "Objective work is active.",
+		}),
+	}, core.Event{
+		Type:   core.EventPRPublished,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":     "pr-intermediate",
+			"repo":   "owner/repo",
+			"number": 42,
+			"url":    "https://github.com/owner/repo/pull/42",
+			"branch": "codex/intermediate",
+			"base":   "main",
+			"title":  "refactor(fetch): remove tower-http decompression",
+			"state":  "OPEN",
+			"metadata": map[string]any{
+				"continueAfterPublish": true,
+				"publicationPhase":     "intermediate",
+			},
+		}),
+	})
+
+	pr, err := service.RefreshPullRequest(ctx, "pr-intermediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pullRequestContinuesTask(pr) {
+		t.Fatalf("refreshed PR lost intermediate metadata: %+v", pr)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveActive || task.ObjectivePhase != "intermediate_pr_open" {
+		t.Fatalf("task status=%q objective=%s/%s, want active intermediate PR state", task.Status, task.ObjectiveStatus, task.ObjectivePhase)
 	}
 }
 
@@ -9310,6 +9571,58 @@ func TestRemoteWorkerPublishPullRequestCallbackWithoutCandidateIsSkipped(t *test
 	}
 	if eventPayloadContains(snapshot.Events, core.EventWorkerOutput, taskID, "failed to drain terminal remote worker callbacks") {
 		t.Fatalf("callback was reported as a terminal drain failure")
+	}
+}
+
+func TestLocalWorkerCallbackSkipsBroadWorkerReportPullRequestBody(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	runner := &localPublishPRCallbackRunner{
+		kind:  "callback",
+		title: "Remove tower-http decompression from deno_fetch",
+		body:  "## Summary\n- Remove tower-http decompression from deno_fetch.\n\n## Validation\n- cargo test -p deno_fetch\n\n## Recommended Next Turns\n- Run broader CI.\n",
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "callback",
+		Prompt:     "publish an intermediate pull request",
+	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "ext/fetch/lib.rs", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Trim Deno dependency graph",
+		Prompt: "Run broad objective work.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode":  "broad",
+			"completionMode": "local",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventContains(snapshot.Events, core.EventWorkerOutput, "local worker skipped pull request publication")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not skip local worker PR publication; events = %+v", task.ID, snapshot.Events)
+	})
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want none for invalid broad worker-report body", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "skipped") {
+		t.Fatalf("missing skipped publish_pull_request callback action")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerOutput, task.ID, "worker-report section") {
+		t.Fatalf("missing worker-report rejection reason")
 	}
 }
 
@@ -15400,6 +15713,16 @@ func (a *recordingAssistant) Ask(_ context.Context, req core.AssistantRequest) (
 	}, nil
 }
 
+func appendTestEvents(t *testing.T, store eventstore.Store, events ...core.Event) {
+	t.Helper()
+	ctx := context.Background()
+	for _, event := range events {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 type fakePullRequestPublisher struct {
 	published        PullRequestPublishSpec
 	publishedSpecs   []PullRequestPublishSpec
@@ -16296,6 +16619,8 @@ func (r *localCallbackRunner) Run(_ context.Context, spec worker.Spec, _ worker.
 
 type localPublishPRCallbackRunner struct {
 	kind           string
+	title          string
+	body           string
 	prompt         string
 	parentWorkerID string
 }
@@ -16318,8 +16643,10 @@ func (r *localPublishPRCallbackRunner) Run(_ context.Context, spec worker.Spec, 
 	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
 		return err
 	}
-	body := `{"type":"publish_pull_request","bodyBase64":"` + base64.StdEncoding.EncodeToString([]byte("Callback PR body")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Local callback PR")) + `","repoBase64":"` + base64.StdEncoding.EncodeToString([]byte("owner/repo")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `","continueAfterPublish":true}`
-	return os.WriteFile(filepath.Join(callbackDir, "publish-pr.local.json"), []byte(body), 0o644)
+	title := nonEmpty(r.title, "Local callback PR")
+	body := nonEmpty(r.body, "Callback PR body")
+	payload := `{"type":"publish_pull_request","bodyBase64":"` + base64.StdEncoding.EncodeToString([]byte(body)) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte(title)) + `","repoBase64":"` + base64.StdEncoding.EncodeToString([]byte("owner/repo")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `","continueAfterPublish":true}`
+	return os.WriteFile(filepath.Join(callbackDir, "publish-pr.local.json"), []byte(payload), 0o644)
 }
 
 func (r *recordingRunner) Kind() string {

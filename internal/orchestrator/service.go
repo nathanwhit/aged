@@ -5084,7 +5084,7 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 	} else if !ready {
 		return nil
 	}
-	pr, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
+	req := core.PublishPullRequestRequest{
 		WorkerID:             publishWorkerID,
 		Repo:                 strings.TrimSpace(callback.Repo),
 		Base:                 strings.TrimSpace(callback.Base),
@@ -5093,7 +5093,13 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 		Body:                 body,
 		Draft:                callback.Draft,
 		ContinueAfterPublish: callback.ContinueAfterPublish,
-	})
+	}
+	if ready, err := s.workerPublishCallbackRequestReady(ctx, taskID, publishWorkerID, callback, source, req); err != nil {
+		return err
+	} else if !ready {
+		return nil
+	}
+	pr, err := s.PublishTaskPullRequest(ctx, taskID, req)
 	if err != nil {
 		return fmt.Errorf("publish pull request from %s callback %s: %w", source, callback.ID, err)
 	}
@@ -5124,6 +5130,26 @@ func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, ta
 	return nil
 }
 
+func (s *Service) workerPublishCallbackRequestReady(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string, req core.PublishPullRequestRequest) (bool, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return false, eventstore.ErrNotFound
+	}
+	if err := validatePullRequestPublicationRequest(task, req); err == nil {
+		return true, nil
+	} else {
+		reason := err.Error()
+		if recordErr := s.recordSkippedWorkerPublishPullRequestCallback(ctx, taskID, workerID, callback, source, reason); recordErr != nil {
+			return false, recordErr
+		}
+		return false, nil
+	}
+}
+
 func (s *Service) workerPublishCallbackCandidateReady(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) (bool, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
@@ -5141,6 +5167,13 @@ func (s *Service) workerPublishCallbackCandidateReady(ctx context.Context, taskI
 		return false, err
 	}
 	reason := "worker callback requested pull request publication, but the selected worker is not a successful changed candidate"
+	if err := s.recordSkippedWorkerPublishPullRequestCallback(ctx, taskID, workerID, callback, source, reason); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (s *Service) recordSkippedWorkerPublishPullRequestCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string, reason string) error {
 	if err := s.recordTaskAction(ctx, taskID, map[string]any{
 		"kind":       "publish_pull_request",
 		"when":       "worker_callback",
@@ -5158,7 +5191,7 @@ func (s *Service) workerPublishCallbackCandidateReady(ctx context.Context, taskI
 			"continueAfterPublish": callback.ContinueAfterPublish,
 		},
 	}); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerOutput,
@@ -5167,14 +5200,14 @@ func (s *Service) workerPublishCallbackCandidateReady(ctx context.Context, taskI
 		Payload: core.MustJSON(map[string]any{
 			"kind":       "log",
 			"stream":     "stdout",
-			"text":       source + " worker skipped pull request publication: no successful worker with candidate changes",
+			"text":       source + " worker skipped pull request publication: " + reason,
 			"callbackId": callback.ID,
 			"reason":     reason,
 		}),
 	}); err != nil {
-		return false, err
+		return err
 	}
-	return false, nil
+	return nil
 }
 
 func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, result WorkerTurnResult) bool {
@@ -6666,7 +6699,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}); err != nil {
 			return false, results, err
 		}
-		return false, results, nil
+		return !pullRequestWatchBlocksTask(task, prs), results, nil
 	case "create_tasks":
 		created, err := s.createChildTasksFromAction(ctx, task, action)
 		if err != nil {
