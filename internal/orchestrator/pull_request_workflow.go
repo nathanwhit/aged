@@ -180,6 +180,8 @@ func pullRequestObjectiveSummary(pr core.PullRequest, phase string) string {
 		return "Pull request needs follow-up work from checks or review."
 	case "ready_to_merge":
 		return "Pull request is ready for merge."
+	case "intermediate_pr_open":
+		return "Intermediate pull request is open; objective continues."
 	default:
 		return "Pull request is open; waiting on external GitHub state."
 	}

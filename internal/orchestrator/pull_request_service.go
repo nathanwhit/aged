@@ -722,21 +722,11 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 	if len(prs) == 0 {
 		return nil, errNoPullRequestsToWatch
 	}
-	if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
-		"count": len(prs),
-		"repo":  repo,
-	}); err != nil {
-		return nil, err
-	}
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "watching_pull_requests", fmt.Sprintf("Watching %d pull request(s) for GitHub state changes.", len(prs))); err != nil {
-		return nil, err
-	}
-	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
-		return nil, err
-	}
 	for index, pr := range prs {
-		pr.ID = existingPullRequestID(snapshot, taskID, pr)
-		if pr.ID == "" {
+		existing, hasExisting := existingPullRequestForIdentity(snapshot, taskID, pr)
+		if hasExisting {
+			pr.ID = existing.ID
+		} else {
 			pr.ID = watchedPullRequestID(pr)
 		}
 		pr.TaskID = taskID
@@ -745,6 +735,9 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		}
 		if len(pr.Metadata) == 0 {
 			pr.Metadata = core.MustJSON(metadata)
+		}
+		if hasExisting {
+			pr.Metadata = mergePullRequestMetadata(existing.Metadata, pr.Metadata)
 		}
 		pr = normalizePullRequestStatusFields(pr)
 		if err := s.recordPullRequestPublished(ctx, pr); err != nil {
@@ -755,7 +748,47 @@ func (s *Service) WatchPullRequests(ctx context.Context, taskID string, req core
 		}
 		prs[index] = pr
 	}
+	if pullRequestWatchBlocksTask(task, prs) {
+		if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "waiting_external", fmt.Sprintf("Watching %d existing pull request(s).", len(prs)), map[string]any{
+			"count": len(prs),
+			"repo":  repo,
+		}); err != nil {
+			return nil, err
+		}
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "watching_pull_requests", fmt.Sprintf("Watching %d pull request(s) for GitHub state changes.", len(prs))); err != nil {
+			return nil, err
+		}
+		if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.recordTaskMilestone(ctx, taskID, "pull_requests_watched", "pr_monitoring", fmt.Sprintf("Watching %d intermediate pull request(s) while objective continues.", len(prs)), map[string]any{
+			"count": len(prs),
+			"repo":  repo,
+		}); err != nil {
+			return nil, err
+		}
+		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "watching_intermediate_pull_requests", fmt.Sprintf("Watching %d intermediate pull request(s); objective continues.", len(prs))); err != nil {
+			return nil, err
+		}
+	}
 	return prs, nil
+}
+
+func pullRequestWatchBlocksTask(task core.Task, prs []core.PullRequest) bool {
+	if !taskIsBroadObjective(task) || len(prs) == 0 {
+		return true
+	}
+	for _, pr := range prs {
+		if pullRequestBlocksTask(task, pr) {
+			return true
+		}
+	}
+	return false
+}
+
+func pullRequestBlocksTask(task core.Task, pr core.PullRequest) bool {
+	return !taskIsBroadObjective(task) || !pullRequestContinuesTask(pr)
 }
 
 func watchablePullRequests(prs []core.PullRequest, state string) []core.PullRequest {
@@ -857,15 +890,23 @@ func (s *Service) watchRequestTargetsTerminalPullRequest(ctx context.Context, ta
 }
 
 func existingPullRequestID(snapshot core.Snapshot, taskID string, pr core.PullRequest) string {
+	existing, ok := existingPullRequestForIdentity(snapshot, taskID, pr)
+	if !ok {
+		return ""
+	}
+	return existing.ID
+}
+
+func existingPullRequestForIdentity(snapshot core.Snapshot, taskID string, pr core.PullRequest) (core.PullRequest, bool) {
 	for _, existing := range snapshot.PullRequests {
 		if existing.TaskID != taskID {
 			continue
 		}
 		if samePullRequestIdentity(existing, pr) {
-			return existing.ID
+			return existing, true
 		}
 	}
-	return ""
+	return core.PullRequest{}, false
 }
 
 func samePullRequestIdentity(a core.PullRequest, b core.PullRequest) bool {
@@ -1073,6 +1114,12 @@ func (s *Service) recordPullRequestStatus(ctx context.Context, snapshot core.Sna
 		return core.PullRequest{}, err
 	}
 	status, phase := objectiveForPullRequest(checked)
+	if status == core.ObjectiveWaitingExternal {
+		if task, ok := findTask(snapshot, checked.TaskID); ok && !pullRequestBlocksTask(task, checked) {
+			status = core.ObjectiveActive
+			phase = "intermediate_pr_open"
+		}
+	}
 	if pullRequestSupersededByNewerContinuingPullRequest(snapshot, checked) {
 		status = ""
 		phase = ""
@@ -1511,7 +1558,7 @@ func (s *Service) StartPullRequestBabysitter(ctx context.Context, prID string) (
 			return core.Task{}, err
 		}
 	}
-	if !isTerminalTaskStatus(task.Status) {
+	if !isTerminalTaskStatus(task.Status) && pullRequestBlocksTask(task, pr) {
 		if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, "pr_open", "Pull request is open; waiting on external GitHub state."); err != nil {
 			return core.Task{}, err
 		}
