@@ -23,6 +23,9 @@ import (
 var (
 	githubPullRequestURLRE      = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
 	pullRequestClosingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
+	pullRequestSummaryHeadingRE = regexp.MustCompile(`(?im)^\s*#{1,6}\s*summary\b`)
+	pullRequestTestHeadingRE    = regexp.MustCompile(`(?im)^\s*#{1,6}\s*(?:validation|test plan|tests)\b`)
+	workerReportSectionRE       = regexp.MustCompile(`(?im)^\s*#{0,6}\s*(?:findings|changed files|blockers|recommended next turns|next turns)\s*$`)
 	errTerminalPullRequest      = errors.New("pull request is already terminal")
 	errNoPullRequestsToWatch    = errors.New("no task-owned pull requests to watch")
 )
@@ -1337,14 +1340,46 @@ func pullRequestContinuesTask(pr core.PullRequest) bool {
 }
 
 func validatePullRequestPublicationRequest(task core.Task, req core.PublishPullRequestRequest) error {
-	if !taskIsBroadObjective(task) || req.ContinueAfterPublish {
+	if !taskIsBroadObjective(task) {
 		return nil
 	}
 	if strings.TrimSpace(req.Title) == "" {
-		return errors.New("broad objective completion pull request requires an explicit title")
+		return errors.New("broad objective pull request requires an explicit title")
 	}
 	if strings.TrimSpace(req.Body) == "" {
-		return errors.New("broad objective completion pull request requires an explicit body")
+		return errors.New("broad objective pull request requires an explicit body")
+	}
+	if err := validatePullRequestPublicationBody(req.Body); err != nil {
+		return fmt.Errorf("broad objective pull request body is not publish-ready: %w", err)
+	}
+	return nil
+}
+
+func validatePullRequestPublicationBody(body string) error {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return errors.New("body is empty")
+	}
+	if !pullRequestSummaryHeadingRE.MatchString(body) {
+		return errors.New("body must include a Markdown Summary section")
+	}
+	if !pullRequestTestHeadingRE.MatchString(body) {
+		return errors.New("body must include a Markdown Validation or Test Plan section")
+	}
+	if match := workerReportSectionRE.FindString(body); match != "" {
+		return fmt.Errorf("body includes worker-report section %q", strings.TrimSpace(match))
+	}
+	lower := strings.ToLower(body)
+	for _, phrase := range []string{
+		"not measured",
+		"not run",
+		"not practical",
+		"run broader",
+		"if desired",
+	} {
+		if strings.Contains(lower, phrase) {
+			return fmt.Errorf("body describes missing validation with phrase %q", phrase)
+		}
 	}
 	return nil
 }
