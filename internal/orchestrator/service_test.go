@@ -2398,6 +2398,190 @@ func TestServiceIntermediatePublishConflictContinuesToReplan(t *testing.T) {
 	}
 }
 
+func TestServicePublishPullRequestActionSanitizesTrackedPullRequestTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service, _ := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain:     fixedBrain{},
+		publisher: publisher,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "ext/ffi/dlfcn.rs", Status: "modified"}},
+			Diff:         "diff --git a/ext/ffi/dlfcn.rs b/ext/ffi/dlfcn.rs\n",
+		},
+	})
+	projectDir := t.TempDir()
+	if _, err := service.CreateProject(ctx, core.Project{
+		ID:          "repo",
+		Name:        "Repo",
+		LocalPath:   projectDir,
+		Repo:        "owner/repo",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	task := core.Task{ID: "task-multi-pr", ProjectID: "repo", Title: "Reduce dependency footprint"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"projectId": task.ProjectID,
+			"title":     task.Title,
+			"prompt":    "Produce multiple independent PRs.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-existing",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 41,
+		URL:    "https://github.com/owner/repo/pull/41",
+		Branch: "codex/existing-slice",
+		Base:   "main",
+		Title:  "refactor(cli): remove zip crate",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"continueAfterPublish": true,
+			"publicationPhase":     "intermediate",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []core.Event{
+		{
+			Type:   core.EventTaskPlanned,
+			TaskID: task.ID,
+			Payload: core.MustJSON(Plan{
+				WorkerKind: "change",
+				Prompt:     "remove serde-value from FFI",
+			}),
+		},
+		{
+			Type:     core.EventExecutionPlanned,
+			TaskID:   task.ID,
+			WorkerID: "worker-serde-value",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-serde-value",
+				"workerId":   "worker-serde-value",
+				"workerKind": "change",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCreated,
+			TaskID:   task.ID,
+			WorkerID: "worker-serde-value",
+			Payload: core.MustJSON(map[string]any{
+				"kind":    "change",
+				"command": []string{"change"},
+			}),
+		},
+		{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   task.ID,
+			WorkerID: "worker-serde-value",
+			Payload: core.MustJSON(PreparedWorkspace{
+				Root:       "/remote/work/root",
+				CWD:        "/remote/work/root/repo",
+				SourceRoot: projectDir,
+				VCSType:    "ssh",
+				TaskID:     task.ID,
+				WorkerID:   "worker-serde-value",
+			}),
+		},
+		{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   task.ID,
+			WorkerID: "worker-serde-value",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "removed serde-value from FFI",
+				"workspaceChanges": WorkspaceChanges{
+					Root:         "/remote/work/root",
+					CWD:          "/remote/work/root/repo",
+					Dirty:        true,
+					ChangedFiles: []WorkspaceChangedFile{{Path: "ext/ffi/dlfcn.rs", Status: "modified"}},
+					Diff:         "diff --git a/ext/ffi/dlfcn.rs b/ext/ffi/dlfcn.rs\n",
+				},
+			}),
+		},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results := []WorkerTurnResult{{
+		WorkerID: "worker-serde-value",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "ext/ffi/dlfcn.rs", Status: "modified"}},
+			Diff:         "diff --git a/ext/ffi/dlfcn.rs b/ext/ffi/dlfcn.rs\n",
+		},
+	}}
+	keepGoing, _, err := service.executePlanAction(ctx, task, PlanAction{
+		Kind:     "publish_pull_request",
+		When:     "after_success",
+		WorkerID: "worker-serde-value",
+		Reason:   "publish the next independent dependency cleanup",
+		Inputs: map[string]any{
+			"id":                   "pr-existing",
+			"pullRequestId":        "pr-existing",
+			"repo":                 "owner/repo",
+			"number":               41,
+			"url":                  "https://github.com/owner/repo/pull/41",
+			"branch":               "codex/existing-slice",
+			"base":                 "main",
+			"title":                "refactor(ffi): remove serde-value dependency",
+			"body":                 "## Summary\n- Remove serde-value from FFI parsing.\n\n## Validation\n- cargo test -p deno_ffi",
+			"continueAfterPublish": true,
+		},
+	}, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keepGoing {
+		t.Fatal("intermediate publish should keep objective planning active")
+	}
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want 1", publisher.publishCalls)
+	}
+	if publisher.published.Branch != "" {
+		t.Fatalf("publish reused existing PR branch %q", publisher.published.Branch)
+	}
+	if publisher.published.Title != "refactor(ffi): remove serde-value dependency" {
+		t.Fatalf("publish title = %q", publisher.published.Title)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request_target_sanitized", "applied") {
+		t.Fatalf("missing publish target sanitization action")
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "started") {
+		t.Fatalf("missing publish started action")
+	}
+	if eventPayloadContains(snapshot.Events, core.EventTaskAction, task.ID, `"branch":"codex/existing-slice"`) {
+		t.Fatalf("sanitized publish action still recorded existing branch target")
+	}
+}
+
+func TestRecoverablePublishConflictIncludesNonFastForwardPush(t *testing.T) {
+	err := errors.New(`push git branch: exit status 1: To https://github.com/nathanwhitbot/deno.git
+ ! [rejected]              codex/aged-f48cc51b-f43 -> codex/aged-f48cc51b-f43 (non-fast-forward)
+error: failed to push some refs to 'https://github.com/nathanwhitbot/deno.git'`)
+	if !isRecoverablePublishConflict(err) {
+		t.Fatalf("non-fast-forward push rejection should be recoverable")
+	}
+}
+
 func TestServicePlanActionDoesNotPublishAfterBlockingReviewFinding(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
