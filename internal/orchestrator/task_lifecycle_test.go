@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"aged/internal/core"
@@ -123,6 +124,44 @@ func TestTaskLifecycleRetryCanReviveTerminalTask(t *testing.T) {
 	}
 	if task.ObjectiveStatus != core.ObjectiveActive || task.ObjectivePhase != "retrying" {
 		t.Fatalf("objective = %s/%s, want active/retrying", task.ObjectiveStatus, task.ObjectivePhase)
+	}
+}
+
+func TestTaskLifecycleRetryStatusTransitionPrecedesObjectiveUpdate(t *testing.T) {
+	ctx := context.Background()
+	base := openTestStore(t)
+	defer base.Close()
+	store := &transientAppendErrorStore{
+		Store:        base,
+		eventType:    core.EventTaskObjective,
+		failuresLeft: 1,
+		err:          errors.New("objective append failed"),
+	}
+	taskID := "task-lifecycle-retry-partial"
+	appendLifecycleTask(t, ctx, store, taskID)
+	service := NewService(store, StaticBrain{WorkerKind: "mock"}, nil, t.TempDir())
+	if err := service.failTask(ctx, taskID, errors.New("initial failure")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := service.markTaskRetryPlanning(ctx, taskID)
+	if err == nil || !strings.Contains(err.Error(), "objective append failed") {
+		t.Fatalf("markTaskRetryPlanning err = %v, want objective append failure", err)
+	}
+
+	snapshot, err := base.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("task missing")
+	}
+	if task.Status != core.TaskPlanning {
+		t.Fatalf("task status = %q, want planning after partial retry marker", task.Status)
+	}
+	if task.ObjectiveStatus == core.ObjectiveActive && task.ObjectivePhase == "retrying" {
+		t.Fatalf("objective unexpectedly updated despite injected append failure")
 	}
 }
 

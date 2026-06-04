@@ -2392,10 +2392,13 @@ func taskIDForWorker(snapshot core.Snapshot, workerID string) string {
 }
 
 func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) error {
+	if err := s.setTaskStatusAllowingTerminalOverride(ctx, taskID, core.TaskPlanning, "retrying"); err != nil {
+		return err
+	}
 	if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, taskID, core.ObjectiveActive, "retrying", "Retrying task."); err != nil {
 		return err
 	}
-	return s.setTaskStatusAllowingTerminalOverride(ctx, taskID, core.TaskPlanning, "retrying")
+	return nil
 }
 
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
