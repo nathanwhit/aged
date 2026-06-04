@@ -2173,8 +2173,27 @@ func TestValidatePullRequestPublicationRequestRejectsImplicitBroadCompletionPR(t
 	}); err != nil {
 		t.Fatalf("explicit broad completion publish rejected: %v", err)
 	}
-	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{ContinueAfterPublish: true}); err != nil {
-		t.Fatalf("intermediate broad publish rejected: %v", err)
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{ContinueAfterPublish: true}); err == nil || !strings.Contains(err.Error(), "explicit title") {
+		t.Fatalf("implicit intermediate broad publish error = %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		ContinueAfterPublish: true,
+		Title:                "refactor(fetch): remove tower-http decompression",
+		Body:                 "## Summary\n- Remove tower-http decompression from deno_fetch.\n\n## Validation\n- cargo test -p deno_fetch",
+	}); err != nil {
+		t.Fatalf("explicit broad intermediate publish rejected: %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		Title: "refactor(fetch): remove tower-http decompression",
+		Body:  "## Summary\n- Remove tower-http decompression.\n\n## Validation\n- cargo test -p deno_fetch\n\n## Recommended Next Turns\n- Run broader CI.",
+	}); err == nil || !strings.Contains(err.Error(), "worker-report section") {
+		t.Fatalf("worker report body error = %v", err)
+	}
+	if err := validatePullRequestPublicationRequest(task, core.PublishPullRequestRequest{
+		Title: "refactor(fetch): remove tower-http decompression",
+		Body:  "## Summary\n- Remove tower-http decompression.\n\n## Validation\n- Binary size not measured.",
+	}); err == nil || !strings.Contains(err.Error(), "missing validation") {
+		t.Fatalf("missing validation body error = %v", err)
 	}
 }
 
@@ -9313,6 +9332,58 @@ func TestRemoteWorkerPublishPullRequestCallbackWithoutCandidateIsSkipped(t *test
 	}
 }
 
+func TestLocalWorkerCallbackSkipsBroadWorkerReportPullRequestBody(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	runner := &localPublishPRCallbackRunner{
+		kind:  "callback",
+		title: "Remove tower-http decompression from deno_fetch",
+		body:  "## Summary\n- Remove tower-http decompression from deno_fetch.\n\n## Validation\n- cargo test -p deno_fetch\n\n## Recommended Next Turns\n- Run broader CI.\n",
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "callback",
+		Prompt:     "publish an intermediate pull request",
+	}}, map[string]worker.Runner{"callback": runner}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "ext/fetch/lib.rs", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Trim Deno dependency graph",
+		Prompt: "Run broad objective work.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode":  "broad",
+			"completionMode": "local",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventContains(snapshot.Events, core.EventWorkerOutput, "local worker skipped pull request publication")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("task %s did not skip local worker PR publication; events = %+v", task.ID, snapshot.Events)
+	})
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want none for invalid broad worker-report body", publisher.publishCalls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "publish_pull_request", "skipped") {
+		t.Fatalf("missing skipped publish_pull_request callback action")
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventWorkerOutput, task.ID, "worker-report section") {
+		t.Fatalf("missing worker-report rejection reason")
+	}
+}
+
 func TestServiceRunsRemoteWorkerInPerWorkerGitWorktree(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -16296,6 +16367,8 @@ func (r *localCallbackRunner) Run(_ context.Context, spec worker.Spec, _ worker.
 
 type localPublishPRCallbackRunner struct {
 	kind           string
+	title          string
+	body           string
 	prompt         string
 	parentWorkerID string
 }
@@ -16318,8 +16391,10 @@ func (r *localPublishPRCallbackRunner) Run(_ context.Context, spec worker.Spec, 
 	if err := os.MkdirAll(callbackDir, 0o755); err != nil {
 		return err
 	}
-	body := `{"type":"publish_pull_request","bodyBase64":"` + base64.StdEncoding.EncodeToString([]byte("Callback PR body")) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte("Local callback PR")) + `","repoBase64":"` + base64.StdEncoding.EncodeToString([]byte("owner/repo")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `","continueAfterPublish":true}`
-	return os.WriteFile(filepath.Join(callbackDir, "publish-pr.local.json"), []byte(body), 0o644)
+	title := nonEmpty(r.title, "Local callback PR")
+	body := nonEmpty(r.body, "Callback PR body")
+	payload := `{"type":"publish_pull_request","bodyBase64":"` + base64.StdEncoding.EncodeToString([]byte(body)) + `","titleBase64":"` + base64.StdEncoding.EncodeToString([]byte(title)) + `","repoBase64":"` + base64.StdEncoding.EncodeToString([]byte("owner/repo")) + `","parentTaskIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.TaskID)) + `","parentWorkerIdBase64":"` + base64.StdEncoding.EncodeToString([]byte(spec.ID)) + `","continueAfterPublish":true}`
+	return os.WriteFile(filepath.Join(callbackDir, "publish-pr.local.json"), []byte(payload), 0o644)
 }
 
 func (r *recordingRunner) Kind() string {
