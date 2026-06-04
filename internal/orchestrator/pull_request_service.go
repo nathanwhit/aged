@@ -2160,10 +2160,10 @@ func (s *Service) retryFailedPublishPullRequestAction(ctx context.Context, task 
 	if !ok {
 		return false
 	}
-	if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying failed pull request publication."); err != nil {
+	if err := s.setTaskStatusAllowingTerminalOverride(ctx, task.ID, core.TaskPlanning, "retrying_failed_pull_request_publication"); err != nil {
 		return true
 	}
-	if err := s.setTaskStatusAllowingTerminalOverride(ctx, task.ID, core.TaskPlanning, "retrying_failed_pull_request_publication"); err != nil {
+	if err := s.updateTaskObjectiveAllowingTerminalOverride(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying failed pull request publication."); err != nil {
 		return true
 	}
 	req := publishPullRequestRequestFromAction(action)
