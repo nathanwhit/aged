@@ -10756,10 +10756,8 @@ func (s *workerRunState) completionPayload(status core.WorkerStatus, runErr erro
 	if s.summary != "" {
 		payload["summary"] = s.summary
 	}
-	if s.lastError != "" {
-		payload["error"] = s.lastError
-	} else if runErr != nil {
-		payload["error"] = runErr.Error()
+	if resultErr := s.finalErrorLocked(status, runErr); resultErr != "" {
+		payload["error"] = resultErr
 	}
 	if len(s.rawResult) > 0 {
 		payload["rawResult"] = core.MustJSON(jsonRawMessage(s.rawResult))
@@ -10792,12 +10790,20 @@ func (s *workerRunState) turnResult(workerID string, plan Plan, status core.Work
 			result.BaseWorkerID = baseWorkerID
 		}
 	}
-	if s.lastError != "" {
-		result.Error = s.lastError
-	} else if runErr != nil {
-		result.Error = runErr.Error()
+	if resultErr := s.finalErrorLocked(status, runErr); resultErr != "" {
+		result.Error = resultErr
 	}
 	return result
+}
+
+func (s *workerRunState) finalErrorLocked(status core.WorkerStatus, runErr error) string {
+	if runErr != nil {
+		return runErr.Error()
+	}
+	if status != core.WorkerSucceeded {
+		return s.lastError
+	}
+	return ""
 }
 
 type jsonRawMessage []byte

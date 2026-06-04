@@ -11501,7 +11501,7 @@ func TestServiceReplansInitialWorkerGraphAfterErroredDeferredSuccess(t *testing.
 		t.Fatalf("replan states = %+v", brain.states)
 	}
 	result := brain.states[0].Results[0]
-	if result.Status != core.WorkerFailed || !strings.Contains(result.Summary, "Waiting for the cargo build") || !strings.Contains(result.Error, "tool use failed") {
+	if result.Status != core.WorkerFailed || !strings.Contains(result.Summary, "Waiting for the cargo build") || !strings.Contains(result.Error, "deferring completion") {
 		t.Fatalf("dependency result = %+v, want failed deferred-success result", result)
 	}
 }
@@ -13187,6 +13187,28 @@ func TestWorkerRunStateFailsSuccessWithPriorErrorAndProgressOnlySummary(t *testi
 	})
 	if status != core.WorkerFailed || err == nil || !strings.Contains(err.Error(), "deferring completion") {
 		t.Fatalf("status = %q err = %v, want failed progress-only success", status, err)
+	}
+}
+
+func TestWorkerRunStateOmitsRecoveredToolErrorFromSuccessfulResult(t *testing.T) {
+	state := &workerRunState{}
+	state.observe(worker.Event{Kind: worker.EventError, Text: "format check failed: exit status 1"})
+	state.observe(worker.Event{Kind: worker.EventResult, Text: "Fixed the formatting issue. Validation passed."})
+	changes := WorkspaceChanges{
+		Dirty:        true,
+		ChangedFiles: []WorkspaceChangedFile{{Path: "Cargo.toml", Status: "modified"}},
+	}
+	status, err := state.normalizeCompletionStatus(Plan{}, core.WorkerSucceeded, nil, changes)
+	if status != core.WorkerSucceeded || err != nil {
+		t.Fatalf("status = %q err = %v, want successful recovered worker", status, err)
+	}
+	payload := state.completionPayload(status, err, changes)
+	if payload["error"] != nil {
+		t.Fatalf("successful completion payload retained recovered error: %+v", payload)
+	}
+	result := state.turnResult("worker-format-fix", Plan{WorkerKind: "codex"}, status, err, changes)
+	if result.Error != "" {
+		t.Fatalf("successful worker result retained recovered error: %+v", result)
 	}
 }
 
