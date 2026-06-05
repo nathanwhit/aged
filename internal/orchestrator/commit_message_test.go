@@ -14,6 +14,17 @@ func TestChangeCommitMessageUsesMeaningfulContext(t *testing.T) {
 	}
 }
 
+func TestChangeCommitMessageUsesExplicitCommitMessageBeforeFiles(t *testing.T) {
+	got := changeCommitMessage(changeCommitMessageContext{
+		Fallback:      "Address PR feedback",
+		CommitMessage: "Add focused HTTP regression tests",
+		ChangedFiles:  []string{"ext/node/polyfills/http.ts", "tests/unit_node/http_test.ts"},
+	})
+	if got != "Add focused HTTP regression tests" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
 func TestChangeCommitMessageSkipsWorkerReportHeadings(t *testing.T) {
 	tests := []struct {
 		name          string

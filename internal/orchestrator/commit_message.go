@@ -9,6 +9,7 @@ import (
 
 type changeCommitMessageContext struct {
 	Fallback      string
+	CommitMessage string
 	TaskTitle     string
 	WorkerSummary string
 	PullTitle     string
@@ -18,9 +19,13 @@ type changeCommitMessageContext struct {
 
 func changeCommitMessage(ctx changeCommitMessageContext) string {
 	for _, candidate := range []string{
+		ctx.CommitMessage,
 		ctx.WorkerSummary,
 		ctx.PullTitle,
 		ctx.TaskTitle,
+		stringMetadataValue(ctx.Metadata["commitMessage"]),
+		stringMetadataValue(ctx.Metadata["commitTitle"]),
+		stringMetadataValue(ctx.Metadata["feedbackBody"]),
 		stringMetadataValue(ctx.Metadata["summary"]),
 		stringMetadataValue(ctx.Metadata["title"]),
 		stringMetadataValue(ctx.Metadata["taskTitle"]),
@@ -125,7 +130,7 @@ func isGenericCommitMessageTitle(value string) bool {
 	normalized := strings.ToLower(strings.Join(strings.Fields(value), " "))
 	normalized = strings.Trim(normalized, " .:-_")
 	switch normalized {
-	case "", "ci", "fix", "published", "publish", "changes", "change", "updates", "update", "work", "base worker candidate", "publish aged worker changes":
+	case "", "ci", "fix", "published", "publish", "changes", "change", "updates", "update", "work", "base worker candidate", "publish aged worker changes", "address pr feedback", "apply successful follow-up worker changes to the existing pull request", "return the pull request to github monitoring after the bounded follow-up":
 		return true
 	default:
 		return false

@@ -429,6 +429,7 @@ type PublishPullRequestRequest struct {
 	Branch               string `json:"branch,omitempty"`
 	Title                string `json:"title,omitempty"`
 	Body                 string `json:"body,omitempty"`
+	CommitMessage        string `json:"commitMessage,omitempty"`
 	Draft                bool   `json:"draft,omitempty"`
 	ContinueAfterPublish bool   `json:"continueAfterPublish,omitempty"`
 	MetadataOnly         bool   `json:"metadataOnly,omitempty"`

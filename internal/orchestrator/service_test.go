@@ -2933,7 +2933,8 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 			TaskID:   task.ID,
 			WorkerID: "repair-worker",
 			Payload: core.MustJSON(map[string]any{
-				"status": core.WorkerSucceeded,
+				"status":  core.WorkerSucceeded,
+				"summary": "Add targeted repair for behavior",
 				"workspaceChanges": WorkspaceChanges{
 					Root:         "/repo",
 					CWD:          "/repo",
@@ -2981,6 +2982,9 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 	}
 	if publisher.updated.WorkerID != "repair-worker" {
 		t.Fatalf("worker id = %q, want repair-worker", publisher.updated.WorkerID)
+	}
+	if publisher.updated.CommitMessage != "Add targeted repair for behavior" {
+		t.Fatalf("commit message = %q, want worker summary", publisher.updated.CommitMessage)
 	}
 }
 
