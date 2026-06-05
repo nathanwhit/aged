@@ -1154,7 +1154,8 @@ Input:
   rejects empty bodies.
 
 Options:
-  --title TITLE          Optional pull request title.
+  --title TITLE          Optional pull request title. Use a short code-change
+                         title suitable as a commit subject, not status narration.
   --repo OWNER/REPO      Optional target repository.
   --base BRANCH          Optional base branch.
   --branch BRANCH        Optional head branch name.
@@ -1229,7 +1230,7 @@ Input:
   the title. At least one of --title or body is required.
 
 Options:
-  --title TITLE      Optional replacement pull request title.
+  --title TITLE      Optional replacement pull request title, not a progress message.
   --comment COMMENT  Optional exact PR comment aged should post after a successful update.
   --repo OWNER/REPO  Optional target repository.
   --number NUMBER    Optional target pull request number.
