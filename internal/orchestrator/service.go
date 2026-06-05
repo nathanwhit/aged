@@ -1176,15 +1176,16 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 
 func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot core.Snapshot) error {
 	for _, task := range snapshot.Tasks {
-		if task.Status != core.TaskRunning || taskHasActiveWorkers(snapshot, task.ID) {
+		if task.Status != core.TaskRunning || taskHasActiveObjectiveWorkers(snapshot, task.ID) {
 			continue
 		}
 		if !taskLatestStatusIs(snapshot, task.ID, core.TaskRunning) {
 			continue
 		}
-		if plan, ok, planErr := retryPullRequestFollowUpPlan(snapshot, task.ID); planErr != nil {
+		hasActiveWorkers := taskHasActiveWorkers(snapshot, task.ID)
+		if plan, ok, planErr := retryPullRequestFollowUpPlan(snapshot, task.ID); !hasActiveWorkers && planErr != nil {
 			return planErr
-		} else if ok {
+		} else if !hasActiveWorkers && ok {
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 				"kind":   "startup_running_recovery",
 				"status": "resumed",
@@ -2278,17 +2279,18 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 		return
 	}
 	task, ok := findTask(snapshot, taskID)
-	if !ok || isTerminalTaskStatus(task.Status) || taskHasActiveWorkers(snapshot, taskID) {
+	if !ok || isTerminalTaskStatus(task.Status) || taskHasActiveObjectiveWorkers(snapshot, taskID) {
 		return
 	}
 	if taskExecutionMode(task) == executionModeLoop {
 		s.runDurableLoopTask(ctx, task)
 		return
 	}
-	if plan, ok, err := retryPullRequestFollowUpPlan(snapshot, taskID); err != nil {
+	hasActiveWorkers := taskHasActiveWorkers(snapshot, taskID)
+	if plan, ok, err := retryPullRequestFollowUpPlan(snapshot, taskID); !hasActiveWorkers && err != nil {
 		_ = s.failTask(ctx, taskID, err)
 		return
-	} else if ok {
+	} else if !hasActiveWorkers && ok {
 		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "recovering", "Resuming interrupted pull request follow-up work."); err != nil {
 			return
 		}
@@ -2336,6 +2338,48 @@ func taskHasActiveWorkers(snapshot core.Snapshot, taskID string) bool {
 		}
 	}
 	return false
+}
+
+func taskHasActiveObjectiveWorkers(snapshot core.Snapshot, taskID string) bool {
+	backgroundFollowUpWorkers := map[string]bool{}
+	for _, node := range snapshot.ExecutionNodes {
+		if node.TaskID != taskID || isTerminalWorkerStatus(node.Status) {
+			continue
+		}
+		if executionNodeIsBackgroundPullRequestFollowUp(node) {
+			backgroundFollowUpWorkers[node.WorkerID] = true
+			continue
+		}
+		return true
+	}
+	for _, activeWorker := range snapshot.Workers {
+		if activeWorker.TaskID != taskID || isTerminalWorkerStatus(activeWorker.Status) {
+			continue
+		}
+		if backgroundFollowUpWorkers[activeWorker.ID] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func executionNodeIsBackgroundPullRequestFollowUp(node core.ExecutionNode) bool {
+	if boolMetadataFromJSON(node.Metadata, "backgroundPullRequestFollowUp") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(node.Role), "github_pr_followup")
+}
+
+func boolMetadataFromJSON(raw json.RawMessage, key string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	metadata := map[string]any{}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return false
+	}
+	return boolMetadata(metadata, key)
 }
 
 func activeTaskWorkerIDs(snapshot core.Snapshot, taskID string) []string {

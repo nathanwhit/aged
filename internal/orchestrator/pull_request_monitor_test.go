@@ -679,6 +679,19 @@ func TestPendingPullRequestFeedbackSurvivesFailedFollowUpPlan(t *testing.T) {
 
 	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
 	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id": "pr-1",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature":          "sig-1",
+				"latestPullRequestFeedbackTriggeredSignature": "sig-0",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRFollowUp,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -734,6 +747,19 @@ func TestPendingPullRequestFeedbackSurvivesWatchActionForSignedFeedback(t *testi
 
 	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
 	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id": "pr-1",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature":          "sig-1",
+				"latestPullRequestFeedbackTriggeredSignature": "sig-0",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventPRFollowUp,
 		TaskID: "task-1",
 		Payload: core.MustJSON(map[string]any{
@@ -782,6 +808,66 @@ func TestPendingPullRequestFeedbackSurvivesWatchActionForSignedFeedback(t *testi
 	pending := pendingPullRequestFeedback(snapshot, "task-1")
 	if len(pending) != 1 || pending[0].PullRequestID != "pr-1" || pending[0].FeedbackSignature != "sig-1" {
 		t.Fatalf("pending feedback = %+v, want signed feedback to survive watch-only action", pending)
+	}
+}
+
+func TestPendingPullRequestFeedbackClearsAlreadyTriggeredSignedFeedbackAfterWatchAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	signature := "2026-05-11T22:01:05Z:conversation:IC_1"
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id": "pr-1",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature":          signature,
+				"latestPullRequestFeedbackTriggeredSignature": signature,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":                "pr-1",
+			"attempt":           1,
+			"status":            "queued",
+			"reason":            "pull_request_needs_work",
+			"repo":              "owner/repo",
+			"number":            7,
+			"url":               "https://github.com/owner/repo/pull/7",
+			"branch":            "codex/aged-test",
+			"feedbackSignature": signature,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskAction,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind": "watch_pull_requests",
+			"inputs": map[string]any{
+				"repo":   "owner/repo",
+				"number": 7,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 0 {
+		t.Fatalf("pending feedback = %+v, want already-triggered signed feedback cleared by watch", pending)
 	}
 }
 
