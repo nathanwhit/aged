@@ -34,6 +34,7 @@ type RemoteWorkerCallback struct {
 	ParentTaskID         string
 	ParentWorkerID       string
 	Body                 string
+	Comment              string
 	Repo                 string
 	Number               int
 	URL                  string
@@ -1220,8 +1221,8 @@ case "${1:-}" in
 aged-update-pr asks the original aged orchestrator to update an existing tracked pull request.
 
 Usage:
-  aged-update-pr [--title TITLE] [--repo OWNER/REPO] [--number NUMBER] [--url URL] [--base BRANCH] [--branch BRANCH] < body.md
-  printf '%s\n' "Updated pull request description" | aged-update-pr --number 123
+  aged-update-pr [--title TITLE] [--comment COMMENT] [--repo OWNER/REPO] [--number NUMBER] [--url URL] [--base BRANCH] [--branch BRANCH] < body.md
+  printf '%s\n' "Updated pull request description" | aged-update-pr --number 123 --comment "Pushed the requested PR description update."
 
 Input:
   Reads the replacement pull request body from stdin. Provide --title to update
@@ -1229,6 +1230,7 @@ Input:
 
 Options:
   --title TITLE      Optional replacement pull request title.
+  --comment COMMENT  Optional exact PR comment aged should post after a successful update.
   --repo OWNER/REPO  Optional target repository.
   --number NUMBER    Optional target pull request number.
   --url URL          Optional target pull request URL.
@@ -1244,6 +1246,7 @@ if [ -z "${AGED_WORKER_CALLBACK_DIR:-}" ]; then
   exit 2
 fi
 title=""
+comment=""
 repo=""
 number=""
 url=""
@@ -1252,6 +1255,7 @@ branch=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --title) title="$2"; shift 2 ;;
+    --comment) comment="$2"; shift 2 ;;
     --repo) repo="$2"; shift 2 ;;
     --number) number="$2"; shift 2 ;;
     --url) url="$2"; shift 2 ;;
@@ -1273,6 +1277,7 @@ tmp="$AGED_WORKER_CALLBACK_DIR/update-pr.$stamp.$$.${RANDOM:-0}.tmp"
 out="${tmp%.tmp}.json"
 body_b64=$(cat | b64)
 title_b64=$(printf '%s' "$title" | b64)
+comment_b64=$(printf '%s' "$comment" | b64)
 repo_b64=$(printf '%s' "$repo" | b64)
 number_b64=$(printf '%s' "$number" | b64)
 url_b64=$(printf '%s' "$url" | b64)
@@ -1280,7 +1285,7 @@ base_b64=$(printf '%s' "$base" | b64)
 branch_b64=$(printf '%s' "$branch" | b64)
 parent_task_b64=$(printf '%s' "${AGED_PARENT_TASK_ID:-}" | b64)
 parent_worker_b64=$(printf '%s' "${AGED_PARENT_WORKER_ID:-}" | b64)
-printf '{"type":"update_pull_request","bodyBase64":"%s","titleBase64":"%s","repoBase64":"%s","numberBase64":"%s","urlBase64":"%s","baseBase64":"%s","branchBase64":"%s","parentTaskIdBase64":"%s","parentWorkerIdBase64":"%s"}\n' "$body_b64" "$title_b64" "$repo_b64" "$number_b64" "$url_b64" "$base_b64" "$branch_b64" "$parent_task_b64" "$parent_worker_b64" > "$tmp"
+printf '{"type":"update_pull_request","bodyBase64":"%s","titleBase64":"%s","commentBase64":"%s","repoBase64":"%s","numberBase64":"%s","urlBase64":"%s","baseBase64":"%s","branchBase64":"%s","parentTaskIdBase64":"%s","parentWorkerIdBase64":"%s"}\n' "$body_b64" "$title_b64" "$comment_b64" "$repo_b64" "$number_b64" "$url_b64" "$base_b64" "$branch_b64" "$parent_task_b64" "$parent_worker_b64" > "$tmp"
 mv "$tmp" "$out"
 printf 'queued %s\n' "$out"
 `
@@ -1303,6 +1308,7 @@ type remoteCallbackPayload struct {
 	PromptBase64         string `json:"promptBase64"`
 	BodyBase64           string `json:"bodyBase64,omitempty"`
 	TitleBase64          string `json:"titleBase64,omitempty"`
+	CommentBase64        string `json:"commentBase64,omitempty"`
 	ProjectIDBase64      string `json:"projectIdBase64,omitempty"`
 	RepoBase64           string `json:"repoBase64,omitempty"`
 	NumberBase64         string `json:"numberBase64,omitempty"`
@@ -1360,7 +1366,7 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		}
 		return string(bytes), nil
 	}
-	var prompt, title, prBody, projectID, repo, numberRaw, callbackURL, base, branch, parentTaskID, parentWorkerID string
+	var prompt, title, prBody, comment, projectID, repo, numberRaw, callbackURL, base, branch, parentTaskID, parentWorkerID string
 	for _, field := range []struct {
 		name  string
 		value string
@@ -1370,6 +1376,7 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		{"title", payload.TitleBase64, &title},
 		{"body", payload.BodyBase64, &prBody},
 		{"project", payload.ProjectIDBase64, &projectID},
+		{"comment", payload.CommentBase64, &comment},
 		{"repo", payload.RepoBase64, &repo},
 		{"number", payload.NumberBase64, &numberRaw},
 		{"url", payload.URLBase64, &callbackURL},
@@ -1401,6 +1408,7 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		ParentTaskID:         parentTaskID,
 		ParentWorkerID:       parentWorkerID,
 		Body:                 prBody,
+		Comment:              comment,
 		Repo:                 repo,
 		Number:               number,
 		URL:                  callbackURL,

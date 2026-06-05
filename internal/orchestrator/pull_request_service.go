@@ -2001,7 +2001,21 @@ func (s *Service) commentPullRequestFeedbackAddressed(ctx context.Context, task 
 	if signature == "" {
 		return nil
 	}
-	metadata := pullRequestMetadataMap(original.Metadata)
+	s.prCommentMu.Lock()
+	defer s.prCommentMu.Unlock()
+
+	current := original
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if pr, ok := pullRequestForFeedbackComment(snapshot, original, updated); ok {
+		current = pr
+		if refreshedSignature := pullRequestLatestFeedbackSignature(current.Metadata); refreshedSignature != "" {
+			signature = refreshedSignature
+		}
+	}
+	metadata := pullRequestMetadataMap(current.Metadata)
 	if strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackCommentedSignature"])) == signature {
 		return nil
 	}
@@ -2009,7 +2023,7 @@ func (s *Service) commentPullRequestFeedbackAddressed(ctx context.Context, task 
 	if err != nil {
 		return err
 	}
-	body := pullRequestFeedbackAddressedCommentBody(original, req, workerID)
+	body := strings.TrimSpace(req.FeedbackComment)
 	if body == "" {
 		return nil
 	}
@@ -2025,13 +2039,31 @@ func (s *Service) commentPullRequestFeedbackAddressed(ctx context.Context, task 
 	metadata["latestPullRequestFeedbackCommentedSignature"] = signature
 	_, err = s.append(ctx, core.Event{
 		Type:   core.EventPRStatusChecked,
-		TaskID: original.TaskID,
+		TaskID: nonEmpty(current.TaskID, original.TaskID, updated.TaskID),
 		Payload: core.MustJSON(map[string]any{
-			"id":       original.ID,
+			"id":       nonEmpty(current.ID, original.ID, updated.ID),
 			"metadata": metadata,
 		}),
 	})
 	return err
+}
+
+func pullRequestForFeedbackComment(snapshot core.Snapshot, original core.PullRequest, updated core.PullRequest) (core.PullRequest, bool) {
+	taskID := nonEmpty(original.TaskID, updated.TaskID)
+	for _, pr := range snapshot.PullRequests {
+		if pr.ID != "" && (pr.ID == original.ID || pr.ID == updated.ID) {
+			return pr, true
+		}
+	}
+	for _, pr := range snapshot.PullRequests {
+		if taskID != "" && pr.TaskID != taskID {
+			continue
+		}
+		if samePullRequestIdentity(pr, original) || samePullRequestIdentity(pr, updated) {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
 }
 
 func pullRequestLatestFeedbackSignature(metadataRaw json.RawMessage) string {
@@ -2051,42 +2083,6 @@ func pullRequestMetadataMap(metadataRaw json.RawMessage) map[string]any {
 		metadata = map[string]any{}
 	}
 	return metadata
-}
-
-func pullRequestFeedbackAddressedCommentBody(pr core.PullRequest, req core.PublishPullRequestRequest, workerID string) string {
-	feedback := pullRequestLatestFeedbackBody(pr.Metadata)
-	var b strings.Builder
-	if req.MetadataOnly {
-		b.WriteString("aged updated the pull request metadata in response to feedback.")
-	} else {
-		b.WriteString("aged pushed a follow-up update in response to feedback.")
-	}
-	if feedback != "" {
-		b.WriteString("\n\nAddressed feedback:\n> ")
-		b.WriteString(truncateSingleLine(feedback, 240))
-	}
-	if summary := strings.TrimSpace(req.CommitMessage); summary != "" {
-		b.WriteString("\n\nUpdate summary: ")
-		b.WriteString(truncateSingleLine(summary, 240))
-	}
-	if workerID != "" {
-		b.WriteString("\n\nWorker: `")
-		b.WriteString(shortID(workerID))
-		b.WriteString("`")
-	}
-	b.WriteString("\n\naged will keep watching CI, review, and mergeability for this PR.")
-	return b.String()
-}
-
-func truncateSingleLine(value string, limit int) string {
-	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	if limit <= 3 {
-		return value[:limit]
-	}
-	return strings.TrimSpace(value[:limit-3]) + "..."
 }
 
 func activePullRequestBabysitter(snapshot core.Snapshot, pr core.PullRequest) core.Task {
@@ -3123,7 +3119,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. If reviewer feedback asks to improve or update the PR title, description, or body and no code change is required, use aged-update-pr instead of gh pr edit so aged records a metadata-only update. Do not post PR status comments about local preparation, local validation, mergeability, or pending branch updates yourself; aged posts a concise follow-up comment after the branch or metadata update succeeds and GitHub has been re-read. If reviewer feedback is purely a question and no code change is needed, report the suggested concise reply in the final report instead of posting it directly.")
+	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. If reviewer feedback asks to improve or update the PR title, description, or body and no code change is required, use aged-update-pr instead of gh pr edit so aged records a metadata-only update. Do not post PR status comments about local preparation, local validation, mergeability, or pending branch updates yourself; when an update should include a public follow-up comment, provide the exact comment text through aged-update-pr --comment or the update_pull_request action comment field so aged posts it only after the branch or metadata update succeeds. If reviewer feedback is purely a question and no code change is needed, report the suggested concise reply in the final report instead of posting it directly.")
 	return b.String()
 }
 
@@ -3406,6 +3402,7 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 	return core.PublishPullRequestRequest{
 		Title:                stringMetadata(inputs, "title"),
 		Body:                 stringMetadata(inputs, "body"),
+		FeedbackComment:      pullRequestFeedbackCommentFromInputs(inputs),
 		Repo:                 stringMetadata(inputs, "repo"),
 		Base:                 stringMetadata(inputs, "base"),
 		Branch:               stringMetadata(inputs, "branch"),
@@ -3413,6 +3410,15 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 		Draft:                boolMetadata(inputs, "draft"),
 		ContinueAfterPublish: boolMetadata(inputs, "continueAfterPublish"),
 	}
+}
+
+func pullRequestFeedbackCommentFromInputs(inputs map[string]any) string {
+	for _, key := range []string{"comment", "commentBody", "feedbackComment", "followUpComment", "statusComment"} {
+		if value := stringMetadata(inputs, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func updatePullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {

@@ -2848,6 +2848,7 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 			"number":       7,
 			"title":        "refactor: remove os_pipe dependency",
 			"body":         "## Summary\n- Replace os_pipe.\n\n## Validation\n- Not run.",
+			"comment":      "Updated the PR title and description to describe the os_pipe removal.",
 			"metadataOnly": true,
 		},
 	}, results)
@@ -2869,7 +2870,7 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 	if publisher.commentCalls != 1 {
 		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
 	}
-	if !strings.Contains(publisher.commentSpec.Body, "updated the pull request metadata") || !strings.Contains(publisher.commentSpec.Body, "improve the description") {
+	if publisher.commentSpec.Body != "Updated the PR title and description to describe the os_pipe removal." {
 		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
 	}
 }
@@ -2979,10 +2980,11 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 		WorkerID: "repair-worker",
 		Reason:   "fix PR code and title",
 		Inputs: map[string]any{
-			"repo":   "owner/repo",
-			"number": 7,
-			"title":  "fix: repair behavior",
-			"body":   "## Summary\n- Repair behavior.\n\n## Validation\n- go test.",
+			"repo":    "owner/repo",
+			"number":  7,
+			"title":   "fix: repair behavior",
+			"body":    "## Summary\n- Repair behavior.\n\n## Validation\n- go test.",
+			"comment": "Pushed a targeted repair for the regression and kept the PR description current.",
 		},
 	}, results)
 	if err != nil {
@@ -3003,7 +3005,7 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 	if publisher.commentCalls != 1 {
 		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
 	}
-	if !strings.Contains(publisher.commentSpec.Body, "pushed a follow-up update") || !strings.Contains(publisher.commentSpec.Body, "please fix the regression") {
+	if publisher.commentSpec.Body != "Pushed a targeted repair for the regression and kept the PR description current." {
 		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
 	}
 }
@@ -9611,12 +9613,13 @@ func TestWorkerCallbackUpdatesPullRequestMetadataThroughOriginalOrchestrator(t *
 	}
 
 	err := service.handleWorkerUpdatePullRequestCallback(ctx, taskID, workerID, RemoteWorkerCallback{
-		ID:     "update-pr.local",
-		Type:   "update_pull_request",
-		Title:  "docs: clarify cache behavior",
-		Body:   "## Summary\n- Clarify the cache behavior change.\n\n## Validation\n- Not run; metadata-only update.",
-		Repo:   "owner/repo",
-		Number: 7,
+		ID:      "update-pr.local",
+		Type:    "update_pull_request",
+		Title:   "docs: clarify cache behavior",
+		Body:    "## Summary\n- Clarify the cache behavior change.\n\n## Validation\n- Not run; metadata-only update.",
+		Comment: "Updated the PR description to clarify the cache behavior change.",
+		Repo:    "owner/repo",
+		Number:  7,
 	}, "local")
 	if err != nil {
 		t.Fatal(err)
@@ -9634,7 +9637,7 @@ func TestWorkerCallbackUpdatesPullRequestMetadataThroughOriginalOrchestrator(t *
 	if publisher.commentCalls != 1 {
 		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
 	}
-	if !strings.Contains(publisher.commentSpec.Body, "updated the pull request metadata") || !strings.Contains(publisher.commentSpec.Body, "improve the description") {
+	if publisher.commentSpec.Body != "Updated the PR description to clarify the cache behavior change." {
 		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
 	}
 	snapshot, err := store.Snapshot(ctx)
@@ -9646,6 +9649,93 @@ func TestWorkerCallbackUpdatesPullRequestMetadataThroughOriginalOrchestrator(t *
 	}
 	if len(snapshot.PullRequests) != 1 || pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
 		t.Fatalf("pull request feedback still untriggered: %+v", snapshot.PullRequests)
+	}
+}
+
+func TestServicePullRequestFeedbackCommentDedupesStaleOriginalMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{})
+	task := core.Task{ID: "task-pr-comment-dedupe", Title: "Follow up PR"}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  task.Title,
+			"prompt": "Handle PR feedback.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pr := core.PullRequest{
+		ID:     "pr-1",
+		TaskID: task.ID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/aged-test",
+		Base:   "main",
+		Title:  "refactor(cron): remove saffron dependency",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackSignature":          "sig-weekday-comment",
+			"latestPullRequestFeedbackTriggeredSignature": "sig-old",
+			"latestPullRequestFeedbackBody":               "The numeric weekday mapping is offset relative to the named one.",
+		}),
+	}
+	if err := service.recordPullRequestPublished(ctx, pr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCompleted,
+		TaskID:   task.ID,
+		WorkerID: "repair-worker",
+		Payload: core.MustJSON(map[string]any{
+			"status": core.WorkerSucceeded,
+			"workspaceChanges": WorkspaceChanges{
+				Dirty:        true,
+				ChangedFiles: []WorkspaceChangedFile{{Path: "ext/cron/cron.rs", Status: "modified"}},
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.commentPullRequestFeedbackAddressed(ctx, task, pr, pr, core.PublishPullRequestRequest{WorkerID: "repair-worker"}, "repair-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.commentCalls != 0 {
+		t.Fatalf("comment calls without worker-authored comment = %d, want 0", publisher.commentCalls)
+	}
+
+	req := core.PublishPullRequestRequest{
+		WorkerID:        "repair-worker",
+		FeedbackComment: "Pushed a comment documenting the saffron-compatible numeric weekday quirk.",
+	}
+	if err := service.commentPullRequestFeedbackAddressed(ctx, task, pr, pr, req, "repair-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.commentPullRequestFeedbackAddressed(ctx, task, pr, pr, req, "repair-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
+	}
+	if publisher.commentSpec.Body != "Pushed a comment documenting the saffron-compatible numeric weekday quirk." {
+		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
+	}
+	metadata := pullRequestMetadataMap(snapshot.PullRequests[0].Metadata)
+	if got := stringMetadataValue(metadata["latestPullRequestFeedbackCommentedSignature"]); got != "sig-weekday-comment" {
+		t.Fatalf("commented signature = %q, want sig-weekday-comment", got)
 	}
 }
 
