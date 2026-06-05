@@ -811,6 +811,94 @@ func TestPendingPullRequestFeedbackSurvivesWatchActionForSignedFeedback(t *testi
 	}
 }
 
+func TestPendingPullRequestDescriptionFeedbackRequiresMetadataUpdate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id": "pr-1",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature":          "sig-description",
+				"latestPullRequestFeedbackTriggeredSignature": "sig-old",
+				"latestPullRequestFeedbackBody":               "improve the description",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":                "pr-1",
+			"attempt":           1,
+			"status":            "queued",
+			"reason":            "pull_request_needs_work",
+			"repo":              "owner/repo",
+			"number":            7,
+			"url":               "https://github.com/owner/repo/pull/7",
+			"branch":            "codex/aged-test",
+			"feedbackSignature": "sig-description",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskAction,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind":          "update_pull_request",
+			"pullRequestId": "pr-1",
+			"inputs": map[string]any{
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingPullRequestFeedback(snapshot, "task-1")
+	if len(pending) != 1 || pending[0].FeedbackSignature != "sig-description" {
+		t.Fatalf("pending feedback = %+v, want description feedback to survive generic update", pending)
+	}
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskAction,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind":          "update_pull_request",
+			"pullRequestId": "pr-1",
+			"inputs": map[string]any{
+				"repo":         "owner/repo",
+				"number":       7,
+				"url":          "https://github.com/owner/repo/pull/7",
+				"body":         "## Summary\n- Explain the PR clearly.\n\n## Validation\n- Not run.",
+				"metadataOnly": true,
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 0 {
+		t.Fatalf("pending feedback = %+v, want metadata update to clear description feedback", pending)
+	}
+}
+
 func TestPendingPullRequestFeedbackClearsAlreadyTriggeredSignedFeedbackAfterWatchAction(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

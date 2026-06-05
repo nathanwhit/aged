@@ -26,6 +26,7 @@ var (
 	pullRequestSummaryHeadingRE = regexp.MustCompile(`(?im)^\s*#{1,6}\s*summary\b`)
 	pullRequestTestHeadingRE    = regexp.MustCompile(`(?im)^\s*#{1,6}\s*(?:validation|test plan|tests)\b`)
 	workerReportSectionRE       = regexp.MustCompile(`(?im)^\s*#{0,6}\s*(?:findings|changed files|blockers|recommended next turns|next turns)\s*$`)
+	prMetadataFeedbackRE        = regexp.MustCompile(`(?i)\b(?:title|description)\b|\b(?:pr|pull\s+request)\s+body\b`)
 	errTerminalPullRequest      = errors.New("pull request is already terminal")
 	errNoPullRequestsToWatch    = errors.New("no task-owned pull requests to watch")
 )
@@ -2568,6 +2569,10 @@ func pendingPullRequestFeedbackFromSnapshot(snapshot core.Snapshot, taskID strin
 		payload.MergeStatus = nonEmpty(payload.MergeStatus, pr.MergeStatus)
 		payload.ReviewStatus = nonEmpty(payload.ReviewStatus, pr.ReviewStatus)
 		payload.FeedbackSignature = pullRequestUnhandledFollowUpSignature(pr, payload.FeedbackSignature)
+		feedbackBody := ""
+		if payload.FeedbackSignature != "" {
+			feedbackBody = pullRequestLatestFeedbackBody(pr.Metadata)
+		}
 		if payload.Prompt == "" {
 			payload.Prompt = pullRequestFollowUpPrompt(pr)
 		}
@@ -2586,6 +2591,7 @@ func pendingPullRequestFeedbackFromSnapshot(snapshot core.Snapshot, taskID strin
 			MergeStatus:       payload.MergeStatus,
 			ReviewStatus:      payload.ReviewStatus,
 			FeedbackSignature: payload.FeedbackSignature,
+			FeedbackBody:      feedbackBody,
 			Prompt:            payload.Prompt,
 		}
 		if pullRequestFeedbackHandledAfterEvent(snapshot, event.ID, item) {
@@ -2646,6 +2652,9 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 			Branch:            nonEmpty(payload.Branch, current.Branch),
 			FeedbackSignature: pullRequestUnhandledFollowUpSignature(current, payload.FeedbackSignature),
 		}
+		if item.FeedbackSignature != "" {
+			item.FeedbackBody = pullRequestLatestFeedbackBody(current.Metadata)
+		}
 		if pullRequestFeedbackHandledAfterEvent(snapshot, event.ID, item) {
 			continue
 		}
@@ -2698,11 +2707,29 @@ func pullRequestFeedbackHandledAfterEvent(snapshot core.Snapshot, followUpEventI
 			}
 		case "update_pull_request":
 			if strings.TrimSpace(payload.Status) == "" && pullRequestFeedbackActionMatches(item, payload.PullRequestID, payload.Inputs) {
+				if pullRequestFeedbackRequiresMetadataUpdate(item) && !updatePullRequestActionHasMetadata(PlanAction{Inputs: payload.Inputs}) {
+					continue
+				}
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func pullRequestFeedbackRequiresMetadataUpdate(item PullRequestFeedbackItem) bool {
+	if strings.TrimSpace(item.FeedbackSignature) == "" {
+		return false
+	}
+	return pullRequestFeedbackBodyRequiresMetadataUpdate(item.FeedbackBody)
+}
+
+func pullRequestFeedbackBodyRequiresMetadataUpdate(body string) bool {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return false
+	}
+	return prMetadataFeedbackRE.MatchString(body)
 }
 
 func pullRequestFeedbackActionMatches(item PullRequestFeedbackItem, pullRequestID string, inputs map[string]any) bool {
@@ -2999,7 +3026,7 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 		b.WriteString(strings.TrimSpace(pr.URL))
 		b.WriteString(")")
 	}
-	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. Do not post PR status comments about local preparation, local validation, mergeability, or pending branch updates; aged can only make those claims after the branch update succeeds and GitHub has been re-read. If reviewer feedback is purely a question and no code change is needed, report the suggested concise reply in the final report instead of posting it directly.")
+	b.WriteString(". Leave any code changes in this existing PR checkout; aged will apply successful worker changes with update_pull_request. Do not use aged-publish-pr for existing PR follow-up work. If reviewer feedback asks to improve or update the PR title, description, or body and no code change is required, use aged-update-pr instead of gh pr edit so aged records a metadata-only update. Do not post PR status comments about local preparation, local validation, mergeability, or pending branch updates; aged can only make those claims after the branch update succeeds and GitHub has been re-read. If reviewer feedback is purely a question and no code change is needed, report the suggested concise reply in the final report instead of posting it directly.")
 	return b.String()
 }
 

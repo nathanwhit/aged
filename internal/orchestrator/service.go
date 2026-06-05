@@ -176,6 +176,15 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace, allowCrea
 		b.WriteString(helper)
 		b.WriteString(" --title \"Short PR title\"`. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
 	}
+	if helper := strings.TrimSpace(workspaceUpdatePRHelperPath(workspace)); helper != "" {
+		b.WriteString("# Aged Pull Request Metadata Updates\n\n")
+		b.WriteString("If this worker needs to update the title or description of an existing tracked pull request, use this helper instead of `gh pr edit`:\n")
+		b.WriteString(helper)
+		b.WriteString("\n\n")
+		b.WriteString("It reads the replacement pull request body from stdin and asks the original aged orchestrator to perform a metadata-only update. Example: `printf '%s\\n' \"Updated PR description\" | ")
+		b.WriteString(helper)
+		b.WriteString(" --number 123 --title \"Short PR title\"`. Use this for review comments that ask to improve the PR title or description when no code change is required.\n\n")
+	}
 	if sharedRoot := strings.TrimSpace(workspace.SharedRoot); sharedRoot != "" {
 		b.WriteString("# Shared Artifact Workspace\n\n")
 		b.WriteString("This task has a shared artifact workspace for non-repo assets such as baseline binaries, benchmark harnesses, profiling captures, generated data, and logs that should survive across worker turns without becoming pull request changes.\n\n")
@@ -224,6 +233,14 @@ func workspacePublishPRHelperPath(workspace PreparedWorkspace) string {
 		return ""
 	}
 	return filepath.Join(base, "bin", "aged-publish-pr")
+}
+
+func workspaceUpdatePRHelperPath(workspace PreparedWorkspace) string {
+	base := workspaceAgedWorkerDir(workspace)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "bin", "aged-update-pr")
 }
 
 func workspaceCallbackDir(workspace PreparedWorkspace) string {
@@ -283,6 +300,12 @@ func installLocalCreateTaskHelper(workspace PreparedWorkspace, allowCreateTaskCa
 			return "", "", err
 		}
 	}
+	updateHelperPath := workspaceUpdatePRHelperPath(workspace)
+	if updateHelperPath != "" {
+		if err := os.WriteFile(updateHelperPath, []byte(localUpdatePRHelperScript(callbackDir, workspace.TaskID, workspace.WorkerID)), 0o700); err != nil {
+			return "", "", err
+		}
+	}
 	return helperPath, callbackDir, nil
 }
 
@@ -299,6 +322,22 @@ func localPublishPRHelperScript(callbackDir string, taskID string, workerID stri
 	b.WriteString(shellQuote(workerID))
 	b.WriteString("; fi\nexport AGED_PARENT_WORKER_ID\n")
 	b.WriteString(remotePublishPRHelperScript())
+	return b.String()
+}
+
+func localUpdatePRHelperScript(callbackDir string, taskID string, workerID string) string {
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString("if [ -z \"${AGED_WORKER_CALLBACK_DIR:-}\" ]; then AGED_WORKER_CALLBACK_DIR=")
+	b.WriteString(shellQuote(callbackDir))
+	b.WriteString("; fi\nexport AGED_WORKER_CALLBACK_DIR\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_TASK_ID:-}\" ]; then AGED_PARENT_TASK_ID=")
+	b.WriteString(shellQuote(taskID))
+	b.WriteString("; fi\nexport AGED_PARENT_TASK_ID\n")
+	b.WriteString("if [ -z \"${AGED_PARENT_WORKER_ID:-}\" ]; then AGED_PARENT_WORKER_ID=")
+	b.WriteString(shellQuote(workerID))
+	b.WriteString("; fi\nexport AGED_PARENT_WORKER_ID\n")
+	b.WriteString(remoteUpdatePRHelperScript())
 	return b.String()
 }
 
@@ -328,6 +367,7 @@ func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace, all
 		b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
 	}
 	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
+	b.WriteString("To update the title or description of an existing tracked pull request, use the `aged-update-pr` helper on PATH instead of `gh pr edit`; it reads the replacement PR body from stdin and the orchestrator records a metadata-only PR update. ")
 	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, `AGED_WORKER_CALLBACK_DIR`, and the shared artifact workspace variables when available.\n\n")
 	b.WriteString(prompt)
 	return b.String()
@@ -4609,6 +4649,10 @@ func (s *Service) handleRemoteWorkerCallbacks(ctx context.Context, run remoteRun
 			if err := s.handleWorkerPublishPullRequestCallback(ctx, run.TaskID, run.WorkerID, callback, "remote"); err != nil {
 				return err
 			}
+		case "update_pull_request":
+			if err := s.handleWorkerUpdatePullRequestCallback(ctx, run.TaskID, run.WorkerID, callback, "remote"); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported remote worker callback %q from %s", callback.Type, callback.ID)
 		}
@@ -4924,6 +4968,10 @@ func (s *Service) handleLocalWorkerCallbacks(ctx context.Context, taskID string,
 			if err := s.handleWorkerPublishPullRequestCallback(ctx, taskID, workerID, callback, "local"); err != nil {
 				return err
 			}
+		case "update_pull_request":
+			if err := s.handleWorkerUpdatePullRequestCallback(ctx, taskID, workerID, callback, "local"); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported local worker callback %q from %s", callback.Type, callback.ID)
 		}
@@ -5115,6 +5163,106 @@ func (s *Service) workerCallbackProjectID(ctx context.Context, parentTaskID stri
 		return "", err
 	}
 	return project.ID, nil
+}
+
+func (s *Service) handleWorkerUpdatePullRequestCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) error {
+	title := strings.TrimSpace(callback.Title)
+	body := strings.TrimSpace(callback.Body)
+	if title == "" && body == "" {
+		return fmt.Errorf("%s worker callback %s has empty pull request title and body", source, callback.ID)
+	}
+	pr, err := s.pullRequestForWorkerUpdateCallback(ctx, taskID, callback)
+	if err != nil {
+		return fmt.Errorf("resolve pull request for %s update callback %s: %w", source, callback.ID, err)
+	}
+	req := core.PublishPullRequestRequest{
+		WorkerID:     workerID,
+		Repo:         strings.TrimSpace(callback.Repo),
+		Base:         strings.TrimSpace(callback.Base),
+		Branch:       strings.TrimSpace(callback.Branch),
+		Title:        title,
+		Body:         body,
+		MetadataOnly: true,
+	}
+	inputs := map[string]any{
+		"id":           pr.ID,
+		"repo":         nonEmpty(req.Repo, pr.Repo),
+		"number":       firstNonZero(callback.Number, pr.Number),
+		"url":          nonEmpty(callback.URL, pr.URL),
+		"branch":       nonEmpty(req.Branch, pr.Branch),
+		"base":         nonEmpty(req.Base, pr.Base),
+		"title":        title,
+		"body":         body,
+		"metadataOnly": true,
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":          "update_pull_request",
+		"when":          "worker_callback",
+		"source":        source,
+		"callbackId":    callback.ID,
+		"workerId":      workerID,
+		"pullRequestId": pr.ID,
+		"inputs":        inputs,
+		"status":        "started",
+	}); err != nil {
+		return err
+	}
+	updated, err := s.UpdateTaskPullRequest(ctx, taskID, pr, req)
+	if err != nil {
+		return fmt.Errorf("update pull request from %s callback %s: %w", source, callback.ID, err)
+	}
+	if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
+		return err
+	}
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":          "update_pull_request",
+		"when":          "worker_callback",
+		"source":        source,
+		"callbackId":    callback.ID,
+		"workerId":      workerID,
+		"pullRequestId": updated.ID,
+		"url":           updated.URL,
+		"inputs":        inputs,
+	}); err != nil {
+		return err
+	}
+	_, err = s.append(ctx, core.Event{
+		Type:     core.EventWorkerOutput,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind":          "log",
+			"stream":        "stdout",
+			"text":          source + " worker updated pull request metadata: " + updated.URL,
+			"callbackId":    callback.ID,
+			"pullRequestId": updated.ID,
+			"url":           updated.URL,
+		}),
+	})
+	return err
+}
+
+func (s *Service) pullRequestForWorkerUpdateCallback(ctx context.Context, taskID string, callback RemoteWorkerCallback) (core.PullRequest, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	var fallback core.PullRequest
+	fallbackCount := 0
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || isTerminalPullRequestState(pr.State) {
+			continue
+		}
+		if pullRequestMatchesUpdateTarget(pr, "", strings.TrimSpace(callback.Repo), callback.Number, strings.TrimSpace(callback.URL), strings.TrimSpace(callback.Branch)) {
+			return pr, nil
+		}
+		fallback = pr
+		fallbackCount++
+	}
+	if fallbackCount == 1 && strings.TrimSpace(callback.Repo) == "" && callback.Number == 0 && strings.TrimSpace(callback.URL) == "" && strings.TrimSpace(callback.Branch) == "" {
+		return fallback, nil
+	}
+	return core.PullRequest{}, eventstore.ErrNotFound
 }
 
 func (s *Service) handleWorkerPublishPullRequestCallback(ctx context.Context, taskID string, workerID string, callback RemoteWorkerCallback, source string) error {
@@ -6161,6 +6309,16 @@ func singleUpdateCandidateWorkerID(results []WorkerTurnResult) string {
 	return ""
 }
 
+func pullRequestUpdateActionHandlesCurrentFeedback(pr core.PullRequest, action PlanAction) bool {
+	if !pullRequestHasUntriggeredFeedback(pr) {
+		return false
+	}
+	if pullRequestFeedbackBodyRequiresMetadataUpdate(pullRequestLatestFeedbackBody(pr.Metadata)) {
+		return updatePullRequestActionHasMetadata(action)
+	}
+	return true
+}
+
 func (s *Service) runImmediatePlanActions(ctx context.Context, task core.Task, plan Plan) (bool, error) {
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.When) != "immediate" {
@@ -6681,8 +6839,10 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			}
 			return false, results, err
 		}
-		if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
-			return false, results, err
+		if pullRequestUpdateActionHandlesCurrentFeedback(updated, action) {
+			if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
+				return false, results, err
+			}
 		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":          action.Kind,

@@ -224,7 +224,7 @@ Review status: %s
 %s
 %s
 
-Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should leave code changes in the existing PR checkout so aged can update this PR; do not use aged-publish-pr for existing PR follow-up work. The worker must not post PR status comments about local preparation, local validation, mergeability, or pending branch updates. If reviewer feedback is purely a question and no code change is needed, it should report the suggested concise reply instead of posting it directly. Keep this as the same long-running task objective; do not start a separate babysitter task.
+Inspect the current PR state, CI failures, review comments, and mergeability. Schedule the next bounded worker turn needed to fix the PR or report that it is ready. The worker should leave code changes in the existing PR checkout so aged can update this PR; do not use aged-publish-pr for existing PR follow-up work. If reviewer feedback asks to improve or update the PR title, description, or body and no code change is required, the worker should use aged-update-pr instead of gh pr edit so aged records a metadata-only update. The worker must not post PR status comments about local preparation, local validation, mergeability, or pending branch updates. If reviewer feedback is purely a question and no code change is needed, it should report the suggested concise reply instead of posting it directly. Keep this as the same long-running task objective; do not start a separate babysitter task.
 `, pr.Repo, pr.Number, pr.URL, pr.Branch, pr.Base, pr.State, pr.ChecksStatus, pr.MergeStatus, pr.ReviewStatus, comment, checkFailure, autoMergeError)
 }
 
