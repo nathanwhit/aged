@@ -1241,7 +1241,7 @@ func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
 			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
-				s.retryTask(taskCtx, task, plan)
+				s.retryPullRequestFollowUpTask(taskCtx, task, plan)
 			})
 			continue
 		}
@@ -2202,7 +2202,7 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
 			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
-				s.retryTask(taskCtx, task, plan)
+				s.retryPullRequestFollowUpTask(taskCtx, task, plan)
 			})
 			return task, nil
 		}
@@ -2341,7 +2341,7 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 		task.Error = ""
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "recovering"
-		s.retryTask(ctx, task, plan)
+		s.retryPullRequestFollowUpTask(ctx, task, plan)
 		return
 	}
 	initial, results, err := retryGraphStateForTask(snapshot, taskID)
@@ -3738,6 +3738,135 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 		return
 	}
 	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
+func (s *Service) retryPullRequestFollowUpTask(ctx context.Context, task core.Task, plan Plan) {
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	results, ok, err := s.runPullRequestFollowUpPlanWorkers(ctx, task, plan)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   "pull_request_background_followup",
+			"status": "continued",
+			"reason": "interrupted pull request follow-up could not be retried; queued feedback remains for the next objective replan",
+			"error":  err.Error(),
+		})
+		s.resumeTaskAfterBackgroundPullRequestFollowUp(ctx, task)
+		return
+	}
+	if !ok {
+		return
+	}
+	if result := firstNonSucceededWorkerResult(results); result.WorkerID != "" {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":     "pull_request_background_followup",
+			"status":   "continued",
+			"reason":   "interrupted pull request follow-up worker did not complete successfully; queued feedback remains for the next objective replan",
+			"workerId": result.WorkerID,
+			"error":    nonEmpty(result.Error, result.Summary),
+		})
+		s.resumeTaskAfterBackgroundPullRequestFollowUp(ctx, task)
+		return
+	}
+	result := latestWorkerResult(results)
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "pull_request_background_followup",
+		"status":   "completed",
+		"reason":   "interrupted pull request follow-up worker completed; returning to pull request monitoring",
+		"workerId": result.WorkerID,
+	})
+	s.completeRetriedPullRequestFollowUp(ctx, task, plan, results)
+}
+
+func (s *Service) runPullRequestFollowUpPlanWorkers(ctx context.Context, task core.Task, plan Plan) ([]WorkerTurnResult, bool, error) {
+	if len(plan.Workers) > 0 {
+		return s.runInitialWorkerGraph(ctx, task, plan, nil)
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		return nil, false, err
+	}
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(ctx, task, plan, []WorkerTurnResult{result}, result)
+		return []WorkerTurnResult{result}, false, nil
+	}
+	return []WorkerTurnResult{result}, true, nil
+}
+
+func firstNonSucceededWorkerResult(results []WorkerTurnResult) WorkerTurnResult {
+	for _, result := range results {
+		if result.Status != core.WorkerSucceeded {
+			return result
+		}
+	}
+	return WorkerTurnResult{}
+}
+
+func (s *Service) resumeTaskAfterBackgroundPullRequestFollowUp(ctx context.Context, task core.Task) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, task.ID)
+	if err != nil {
+		if err := s.setTaskStatus(ctx, task.ID, core.TaskRunning); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+		}
+		return
+	}
+	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	if !replanOK {
+		return
+	}
+	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+}
+
+func (s *Service) completeRetriedPullRequestFollowUp(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	prID := stringMetadata(plan.Metadata, "pullRequestID")
+	pr, ok := pullRequestByID(snapshot, prID)
+	if !ok {
+		if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+		}
+		return
+	}
+	result := latestWorkerResult(results)
+	ok, _, err = s.runDeferredPlanWork(ctx, task, plan, results, result.NodeID)
+	if err != nil {
+		_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":          "pull_request_background_followup",
+			"status":        "continued",
+			"reason":        "retried pull request follow-up action failed; queued feedback remains for the next objective replan",
+			"pullRequestId": pr.ID,
+			"url":           pr.URL,
+			"workerId":      result.WorkerID,
+			"error":         err.Error(),
+		})
+		s.resumeTaskAfterBackgroundPullRequestFollowUp(ctx, task)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+		return
+	}
+	if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
+		_ = s.failTask(ctx, task.ID, err)
+	}
 }
 
 func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Plan, priorResults []WorkerTurnResult, parentNodeID string) ([]WorkerTurnResult, bool, error) {
