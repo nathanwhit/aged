@@ -12170,6 +12170,45 @@ func TestServiceHonorsInitialWorkerDependencies(t *testing.T) {
 	}
 }
 
+func TestReadyInitialWorkersTreatsCurrentDependencyAsPendingEvenWithPriorResult(t *testing.T) {
+	completed := map[string]WorkerTurnResult{
+		"inspect": {
+			WorkerID: "old-inspect",
+			SpawnID:  "inspect",
+			Status:   core.WorkerSucceeded,
+			Summary:  "old inspection",
+		},
+	}
+	pending := map[string]initialWorkerNode{
+		"inspect": {
+			id:    "inspect",
+			index: 0,
+		},
+		"repair": {
+			id:    "repair",
+			index: 1,
+			deps:  []string{"inspect"},
+		},
+	}
+
+	ready := readyInitialWorkers(pending, completed)
+	if len(ready) != 1 || ready[0].id != "inspect" {
+		t.Fatalf("ready workers = %+v, want only current inspect dependency", ready)
+	}
+
+	delete(pending, "inspect")
+	completed["inspect"] = WorkerTurnResult{
+		WorkerID: "new-inspect",
+		SpawnID:  "inspect",
+		Status:   core.WorkerSucceeded,
+		Summary:  "new inspection",
+	}
+	ready = readyInitialWorkers(pending, completed)
+	if len(ready) != 1 || ready[0].id != "repair" {
+		t.Fatalf("ready workers after current dependency completed = %+v, want repair", ready)
+	}
+}
+
 func TestServiceReplansInitialWorkerGraphAfterErroredDeferredSuccess(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -12457,6 +12496,45 @@ func TestServiceReplansFollowUpGraphAfterFailedDependency(t *testing.T) {
 	failed := brain.states[0].Results[1]
 	if failed.Status != core.WorkerFailed || !strings.Contains(failed.Error, "review command failed") {
 		t.Fatalf("follow-up dependency result = %+v", failed)
+	}
+}
+
+func TestReadyFollowUpsTreatsCurrentDependencyAsPendingEvenWithPriorResult(t *testing.T) {
+	completed := map[string]WorkerTurnResult{
+		"review": {
+			WorkerID: "old-review",
+			SpawnID:  "review",
+			Status:   core.WorkerSucceeded,
+			Summary:  "old review",
+		},
+	}
+	pending := map[string]followUpNode{
+		"review": {
+			id:    "review",
+			index: 0,
+		},
+		"repair": {
+			id:    "repair",
+			index: 1,
+			deps:  []string{"review"},
+		},
+	}
+
+	ready := readyFollowUps(pending, completed)
+	if len(ready) != 1 || ready[0].id != "review" {
+		t.Fatalf("ready follow-ups = %+v, want only current review dependency", ready)
+	}
+
+	delete(pending, "review")
+	completed["review"] = WorkerTurnResult{
+		WorkerID: "new-review",
+		SpawnID:  "review",
+		Status:   core.WorkerSucceeded,
+		Summary:  "new review",
+	}
+	ready = readyFollowUps(pending, completed)
+	if len(ready) != 1 || ready[0].id != "repair" {
+		t.Fatalf("ready follow-ups after current dependency completed = %+v, want repair", ready)
 	}
 }
 

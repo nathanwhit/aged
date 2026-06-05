@@ -8559,6 +8559,10 @@ func readyInitialWorkers(pending map[string]initialWorkerNode, completed map[str
 	for _, node := range pending {
 		blocked := false
 		for _, dep := range node.deps {
+			if _, ok := pending[dep]; ok {
+				blocked = true
+				break
+			}
 			result, ok := completed[dep]
 			if !ok || !workerDependencySatisfied(result) {
 				blocked = true
@@ -8865,6 +8869,10 @@ func readyFollowUps(pending map[string]followUpNode, completed map[string]Worker
 	for _, node := range pending {
 		blocked := false
 		for _, dep := range node.deps {
+			if _, ok := pending[dep]; ok {
+				blocked = true
+				break
+			}
 			result, ok := completed[dep]
 			if !ok || !workerDependencySatisfied(result) {
 				blocked = true
