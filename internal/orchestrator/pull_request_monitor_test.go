@@ -545,8 +545,8 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-1", "") {
 		t.Fatalf("automatic pull request feedback steered task")
 	}
-	if pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
-		t.Fatalf("queued feedback was not marked handled")
+	if !pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
+		t.Fatalf("queued feedback was marked handled before pull request update")
 	}
 	followUp := latestPullRequestFollowUpPayload(t, snapshot, "task-1")
 	if followUp.Status != "queued" || followUp.ID != "pr-1" {
@@ -587,8 +587,9 @@ func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRu
 	}, func(snapshot core.Snapshot) string {
 		return fmt.Sprintf("task did not complete background follow-up; events = %+v", snapshot.Events)
 	})
-	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 0 {
-		t.Fatalf("pending feedback = %+v, want background watch action to clear it", pending)
+	pending := pendingPullRequestFeedback(snapshot, "task-1")
+	if len(pending) != 1 || pending[0].PullRequestID != "pr-1" || pending[0].FeedbackSignature != "2026-05-11T22:01:05Z:conversation:IC_1" {
+		t.Fatalf("pending feedback = %+v, want signed feedback to survive watch-only background follow-up", pending)
 	}
 	if !workerActive(snapshot, "objective-worker") {
 		t.Fatalf("objective worker was not left active; workers = %+v", snapshot.Workers)
@@ -726,7 +727,7 @@ func TestPendingPullRequestFeedbackSurvivesFailedFollowUpPlan(t *testing.T) {
 	}
 }
 
-func TestPendingPullRequestFeedbackClearsAfterWatchAction(t *testing.T) {
+func TestPendingPullRequestFeedbackSurvivesWatchActionForSignedFeedback(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -778,8 +779,55 @@ func TestPendingPullRequestFeedbackClearsAfterWatchAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pending := pendingPullRequestFeedback(snapshot, "task-1")
+	if len(pending) != 1 || pending[0].PullRequestID != "pr-1" || pending[0].FeedbackSignature != "sig-1" {
+		t.Fatalf("pending feedback = %+v, want signed feedback to survive watch-only action", pending)
+	}
+}
+
+func TestPendingPullRequestFeedbackClearsStatusFollowUpAfterWatchAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskWaiting)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":      "pr-1",
+			"attempt": 1,
+			"status":  "queued",
+			"reason":  "pull_request_needs_work",
+			"repo":    "owner/repo",
+			"number":  7,
+			"url":     "https://github.com/owner/repo/pull/7",
+			"branch":  "codex/aged-test",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskAction,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"kind": "watch_pull_requests",
+			"inputs": map[string]any{
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 0 {
-		t.Fatalf("pending feedback = %+v, want handled feedback cleared", pending)
+		t.Fatalf("pending feedback = %+v, want status follow-up cleared by watch", pending)
 	}
 }
 
