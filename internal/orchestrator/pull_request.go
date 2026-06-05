@@ -29,6 +29,7 @@ type PullRequestPublishSpec struct {
 	BranchPrefix   string
 	Title          string
 	Body           string
+	CommitMessage  string
 	Draft          bool
 	Patch          string
 	PatchFromBase  bool
@@ -546,10 +547,11 @@ func materializeGitPullRequestChanges(ctx context.Context, exec commandExecutor,
 		metadata = nil
 	}
 	message := changeCommitMessage(changeCommitMessageContext{
-		Fallback:     fallback,
-		PullTitle:    pullTitle,
-		Metadata:     metadata,
-		ChangedFiles: changedFiles,
+		Fallback:      fallback,
+		CommitMessage: spec.CommitMessage,
+		PullTitle:     pullTitle,
+		Metadata:      metadata,
+		ChangedFiles:  changedFiles,
 	})
 	if _, err := exec(ctx, dir, "git", "-c", "commit.gpgsign=false", "commit", "-m", message); err != nil {
 		return fmt.Errorf("commit git changes before publish: %w", err)

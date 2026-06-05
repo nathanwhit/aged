@@ -237,6 +237,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 			BranchPrefix:  project.PullRequestPolicy.BranchPrefix,
 			Title:         title,
 			Body:          body,
+			CommitMessage: req.CommitMessage,
 			Draft:         draft,
 			Patch:         publishPatch,
 			PatchFromBase: patchFromBase,
@@ -335,6 +336,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		changes = s.pullRequestWorkspaceChanges(ctx, workerID)
 	}
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
+	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
 	metadata := map[string]any{}
 	if len(pr.Metadata) > 0 {
 		_ = json.Unmarshal(pr.Metadata, &metadata)
@@ -349,10 +351,14 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	metadata["updatedExistingPullRequest"] = true
 	metadata["pullRequestId"] = pr.ID
 	metadata["metadataOnly"] = req.MetadataOnly
+	if summary != "" {
+		metadata["summary"] = summary
+	}
 	repo := nonEmpty(req.Repo, pr.Repo, pullRequestTargetRepo(req, project, task))
 	base := nonEmpty(req.Base, pr.Base, project.DefaultBase)
 	branch := nonEmpty(req.Branch, pr.Branch)
 	body := pullRequestBodyWithIssueClosingReference(strings.TrimSpace(req.Body), task, repo)
+	commitMessage := pullRequestUpdateCommitMessage(req, pr, summary)
 	updated, err := s.prPublisher.Update(ctx, pr, PullRequestPublishSpec{
 		TaskID:         taskID,
 		WorkerID:       workerID,
@@ -365,6 +371,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		BranchPrefix:   project.PullRequestPolicy.BranchPrefix,
 		Title:          strings.TrimSpace(req.Title),
 		Body:           body,
+		CommitMessage:  commitMessage,
 		Draft:          req.Draft,
 		Patch:          publishPatch,
 		PatchFromBase:  patchFromBase,
@@ -399,6 +406,61 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 		return core.PullRequest{}, err
 	}
 	return updated, nil
+}
+
+func pullRequestUpdateCommitMessage(req core.PublishPullRequestRequest, pr core.PullRequest, workerSummary string) string {
+	feedbackBody := pullRequestLatestFeedbackBody(pr.Metadata)
+	if feedbackBody != "" {
+		feedbackBody = commitMessageFromPullRequestFeedback(feedbackBody)
+	}
+	return changeCommitMessage(changeCommitMessageContext{
+		CommitMessage: req.CommitMessage,
+		WorkerSummary: workerSummary,
+		Metadata: map[string]any{
+			"commitMessage": req.CommitMessage,
+			"feedbackBody":  feedbackBody,
+		},
+	})
+}
+
+func pullRequestLatestFeedbackBody(metadataRaw json.RawMessage) string {
+	if len(metadataRaw) == 0 {
+		return ""
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataRaw, &metadata); err != nil {
+		return ""
+	}
+	body := strings.TrimSpace(stringMetadataValue(metadata["latestPullRequestFeedbackBody"]))
+	if body == "" {
+		body = strings.TrimSpace(stringMetadataValue(metadata["latestConversationCommentBody"]))
+	}
+	return body
+}
+
+func commitMessageFromPullRequestFeedback(body string) string {
+	body = normalizeCommitMessageTitle(body)
+	normalized := strings.ToLower(body)
+	for _, prefix := range []string{
+		"please ",
+		"pls ",
+		"can you ",
+		"could you ",
+		"would you ",
+		"can we ",
+		"could we ",
+		"would we ",
+		"let's ",
+	} {
+		if strings.HasPrefix(normalized, prefix) && len(body) > len(prefix) {
+			body = strings.TrimSpace(body[len(prefix):])
+			break
+		}
+	}
+	if body != "" && body[0] >= 'a' && body[0] <= 'z' {
+		body = strings.ToUpper(body[:1]) + body[1:]
+	}
+	return normalizeCommitMessageTitle(body)
 }
 
 type githubIssueClosingReference struct {
@@ -3201,6 +3263,7 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 		Repo:                 stringMetadata(inputs, "repo"),
 		Base:                 stringMetadata(inputs, "base"),
 		Branch:               stringMetadata(inputs, "branch"),
+		CommitMessage:        stringMetadata(inputs, "commitMessage"),
 		Draft:                boolMetadata(inputs, "draft"),
 		ContinueAfterPublish: boolMetadata(inputs, "continueAfterPublish"),
 	}
@@ -3209,7 +3272,18 @@ func publishPullRequestRequestFromAction(action PlanAction) core.PublishPullRequ
 func updatePullRequestRequestFromAction(action PlanAction) core.PublishPullRequestRequest {
 	req := publishPullRequestRequestFromAction(action)
 	req.MetadataOnly = updatePullRequestActionMetadataOnly(action)
+	req.CommitMessage = updatePullRequestCommitMessageFromAction(action)
 	return req
+}
+
+func updatePullRequestCommitMessageFromAction(action PlanAction) string {
+	inputs := action.Inputs
+	for _, key := range []string{"commitMessage", "commitTitle", "changeTitle", "summary"} {
+		if value := stringMetadata(inputs, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func updatePullRequestActionMetadataOnly(action PlanAction) bool {

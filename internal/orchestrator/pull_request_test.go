@@ -783,6 +783,57 @@ func TestMaterializeGitPullRequestUpdateCommitUsesFeedbackFallback(t *testing.T)
 	}
 }
 
+func TestMaterializeGitPullRequestUpdateCommitUsesCommitMessageHint(t *testing.T) {
+	ctx := context.Background()
+	var commitMessage string
+	exec := func(_ context.Context, _ string, name string, args ...string) (string, error) {
+		switch {
+		case name == "git" && containsSubsequence(args, []string{"status", "--porcelain=v1"}):
+			return " M ext/web/geometry.rs\n M tests/unit/geometry_test.ts\n", nil
+		case name == "git" && containsSubsequence(args, []string{"add", "-A"}):
+			return "", nil
+		case name == "git" && containsSubsequence(args, []string{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}):
+			return "ext/web/geometry.rs\x00tests/unit/geometry_test.ts\x00", nil
+		case name == "git" && containsSubsequence(args, []string{"commit"}):
+			for i, arg := range args {
+				if arg == "-m" && i+1 < len(args) {
+					commitMessage = args[i+1]
+				}
+			}
+			return "", nil
+		default:
+			t.Fatalf("unexpected command %s %v", name, args)
+		}
+		return "", nil
+	}
+
+	err := materializeGitPullRequestChanges(ctx, exec, "/repo", "codex/aged-worker", PullRequestPublishSpec{
+		UpdateExisting: true,
+		CommitMessage:  "Add geometry regression coverage",
+		Title:          "Trim Heavy Deno Dependencies",
+		Metadata:       map[string]any{"taskTitle": "Trim Heavy Deno Dependencies"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitMessage != "Add geometry regression coverage" {
+		t.Fatalf("commit message = %q, want explicit follow-up subject", commitMessage)
+	}
+}
+
+func TestPullRequestUpdateCommitMessageUsesFeedbackBody(t *testing.T) {
+	got := pullRequestUpdateCommitMessage(core.PublishPullRequestRequest{
+		CommitMessage: "Apply successful follow-up worker changes to the existing pull request.",
+	}, core.PullRequest{
+		Metadata: core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackBody": "Please add focused regression tests.",
+		}),
+	}, "")
+	if got != "Add focused regression tests" {
+		t.Fatalf("commit message = %q, want feedback-derived subject", got)
+	}
+}
+
 func TestPublishGitPullRequestRejectsEmptyBranch(t *testing.T) {
 	ctx := context.Background()
 	repo := initGitTestRepo(t)
