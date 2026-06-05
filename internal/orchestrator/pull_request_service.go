@@ -1716,7 +1716,7 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 			"checksStatus":      pr.ChecksStatus,
 			"mergeStatus":       pr.MergeStatus,
 			"reviewStatus":      pr.ReviewStatus,
-			"feedbackSignature": pullRequestFeedbackSignature(pr.Metadata),
+			"feedbackSignature": pullRequestFollowUpFeedbackSignature(pr),
 			"prompt":            prompt,
 		}),
 	}); err != nil {
@@ -1923,6 +1923,13 @@ func (s *Service) pullRequestFollowUpWorkerKind() string {
 		}
 	}
 	return ""
+}
+
+func pullRequestFollowUpFeedbackSignature(pr core.PullRequest) string {
+	if !pullRequestHasUntriggeredFeedback(pr) {
+		return ""
+	}
+	return pullRequestFeedbackSignature(pr.Metadata)
 }
 
 func activePullRequestFollowUpWorker(snapshot core.Snapshot, taskID string, prID string) bool {
@@ -2560,6 +2567,7 @@ func pendingPullRequestFeedbackFromSnapshot(snapshot core.Snapshot, taskID strin
 		payload.ChecksStatus = nonEmpty(payload.ChecksStatus, pr.ChecksStatus)
 		payload.MergeStatus = nonEmpty(payload.MergeStatus, pr.MergeStatus)
 		payload.ReviewStatus = nonEmpty(payload.ReviewStatus, pr.ReviewStatus)
+		payload.FeedbackSignature = pullRequestUnhandledFollowUpSignature(pr, payload.FeedbackSignature)
 		if payload.Prompt == "" {
 			payload.Prompt = pullRequestFollowUpPrompt(pr)
 		}
@@ -2636,7 +2644,7 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 			Number:            firstNonZero(payload.Number, current.Number),
 			URL:               nonEmpty(payload.URL, current.URL),
 			Branch:            nonEmpty(payload.Branch, current.Branch),
-			FeedbackSignature: payload.FeedbackSignature,
+			FeedbackSignature: pullRequestUnhandledFollowUpSignature(current, payload.FeedbackSignature),
 		}
 		if pullRequestFeedbackHandledAfterEvent(snapshot, event.ID, item) {
 			continue
@@ -2647,6 +2655,20 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 		}
 	}
 	return false
+}
+
+func pullRequestUnhandledFollowUpSignature(pr core.PullRequest, signature string) string {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return ""
+	}
+	if !pullRequestHasUntriggeredFeedback(pr) {
+		return ""
+	}
+	if signature != pullRequestFeedbackSignature(pr.Metadata) {
+		return ""
+	}
+	return signature
 }
 
 func pullRequestFeedbackHandledAfterEvent(snapshot core.Snapshot, followUpEventID int64, item PullRequestFeedbackItem) bool {

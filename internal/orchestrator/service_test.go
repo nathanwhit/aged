@@ -2988,6 +2988,46 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 	}
 }
 
+func TestTaskHasActiveObjectiveWorkersIgnoresBackgroundPullRequestFollowUp(t *testing.T) {
+	snapshot := core.Snapshot{
+		Workers: []core.Worker{{
+			ID:     "pr-worker",
+			TaskID: "task-1",
+			Status: core.WorkerRunning,
+		}},
+		ExecutionNodes: []core.ExecutionNode{{
+			TaskID:   "task-1",
+			WorkerID: "pr-worker",
+			Status:   core.WorkerRunning,
+			Role:     "github_pr_followup",
+			Metadata: core.MustJSON(map[string]any{
+				"backgroundPullRequestFollowUp": true,
+			}),
+		}},
+	}
+	if !taskHasActiveWorkers(snapshot, "task-1") {
+		t.Fatal("background follow-up should still count as an active worker for cancellation/status")
+	}
+	if taskHasActiveObjectiveWorkers(snapshot, "task-1") {
+		t.Fatal("background pull request follow-up should not block objective recovery")
+	}
+
+	snapshot.Workers = append(snapshot.Workers, core.Worker{
+		ID:     "objective-worker",
+		TaskID: "task-1",
+		Status: core.WorkerRunning,
+	})
+	snapshot.ExecutionNodes = append(snapshot.ExecutionNodes, core.ExecutionNode{
+		TaskID:   "task-1",
+		WorkerID: "objective-worker",
+		Status:   core.WorkerRunning,
+		Role:     "implementer",
+	})
+	if !taskHasActiveObjectiveWorkers(snapshot, "task-1") {
+		t.Fatal("regular running worker should block objective recovery")
+	}
+}
+
 func TestServicePlanPullRequestUpdateWithMetadataFallsBackWhenWorkerHasNoChanges(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
