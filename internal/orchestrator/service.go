@@ -175,7 +175,7 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace, allowCrea
 		b.WriteString("\n\n")
 		b.WriteString("It reads the pull request body from stdin and asks the original aged orchestrator to publish the current worker result. Example: `printf '%s\\n' \"Summary and validation\" | ")
 		b.WriteString(helper)
-		b.WriteString(" --title \"Short PR title\"`. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
+		b.WriteString(" --title \"refactor(cron): remove saffron dependency\"`. The `--title` value must be a short reviewable code-change title suitable for a PR title and commit subject; never use status narration like tests passed, pushing changes, final status, or opening a PR. Durable loops should use this helper so aged records and babysits the PR while the loop continues.\n\n")
 	}
 	if helper := strings.TrimSpace(workspaceUpdatePRHelperPath(workspace)); helper != "" {
 		b.WriteString("# Aged Pull Request Metadata Updates\n\n")
@@ -184,7 +184,7 @@ func workerExecutionPrompt(prompt string, workspace PreparedWorkspace, allowCrea
 		b.WriteString("\n\n")
 		b.WriteString("It reads the replacement pull request body from stdin and asks the original aged orchestrator to perform a metadata-only update. Example: `printf '%s\\n' \"Updated PR description\" | ")
 		b.WriteString(helper)
-		b.WriteString(" --number 123 --title \"Short PR title\" --comment \"Updated the PR title and description.\"`. Pass `--comment` only when aged should post that exact public comment after the update succeeds.\n\n")
+		b.WriteString(" --number 123 --title \"refactor(cron): remove saffron dependency\" --comment \"Updated the PR title and description.\"`. If you pass `--title`, make it the desired stable PR title, not a progress/status message. Pass `--comment` only when aged should post that exact public comment after the update succeeds.\n\n")
 	}
 	if sharedRoot := strings.TrimSpace(workspace.SharedRoot); sharedRoot != "" {
 		b.WriteString("# Shared Artifact Workspace\n\n")
@@ -367,8 +367,8 @@ func remoteWorkerExecutionPrompt(prompt string, workspace PreparedWorkspace, all
 		b.WriteString("To create follow-up work, use the `aged-create-task` helper on PATH. It reads the new task prompt from stdin and queues it for the original orchestrator over the existing SSH control channel. ")
 		b.WriteString("When creating follow-up work, do not ask the follow-up task to open a draft pull request unless the user explicitly requested a draft PR; project configuration controls draft-by-default behavior. ")
 	}
-	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. ")
-	b.WriteString("To update the title or description of an existing tracked pull request, use the `aged-update-pr` helper on PATH instead of `gh pr edit`; it reads the replacement PR body from stdin and the orchestrator records a metadata-only PR update. Pass `--comment` only when you want aged to post that exact public comment after the update succeeds. ")
+	b.WriteString("To publish this worker result as an intermediate pull request, use the `aged-publish-pr` helper on PATH instead of `gh pr create`; it reads the pull request body from stdin and the orchestrator records the PR. The `aged-publish-pr --title` value must be a short reviewable code-change title suitable for a PR title and commit subject, for example `refactor(cron): remove saffron dependency`; never use status narration like tests passed, pushing changes, final status, or opening a PR. ")
+	b.WriteString("To update the title or description of an existing tracked pull request, use the `aged-update-pr` helper on PATH instead of `gh pr edit`; it reads the replacement PR body from stdin and the orchestrator records a metadata-only PR update. If you provide `--title`, make it the desired stable PR title, not a progress/status message. Pass `--comment` only when you want aged to post that exact public comment after the update succeeds. ")
 	b.WriteString("The remote environment also exports `AGED_PARENT_TASK_ID`, `AGED_PARENT_WORKER_ID`, `AGED_WORKER_CALLBACK_DIR`, and the shared artifact workspace variables when available.\n\n")
 	b.WriteString(prompt)
 	return b.String()

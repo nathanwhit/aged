@@ -3416,6 +3416,9 @@ func TestCanonicalPullRequestFollowUpPlanRewritesStaleTargets(t *testing.T) {
 	if !strings.Contains(plan.Prompt, "Do not use aged-publish-pr for existing PR follow-up work") {
 		t.Fatalf("missing existing-PR publish guard in prompt: %s", plan.Prompt)
 	}
+	if !strings.Contains(plan.Prompt, "provide inputs.commitMessage as a short subject") {
+		t.Fatalf("missing PR update commit message guidance in prompt: %s", plan.Prompt)
+	}
 }
 
 func TestPullRequestFollowUpForPlanRejectsUnqueuedExplicitTarget(t *testing.T) {
@@ -9566,6 +9569,9 @@ func TestLocalWorkerCallbackPublishesPullRequestThroughOriginalOrchestrator(t *t
 	}
 	if !strings.Contains(runner.prompt, "aged-publish-pr") {
 		t.Fatalf("runner prompt missing publish helper instructions:\n%s", runner.prompt)
+	}
+	if !strings.Contains(runner.prompt, "suitable for a PR title and commit subject") || !strings.Contains(runner.prompt, "never use status narration") {
+		t.Fatalf("runner prompt missing publish title quality instructions:\n%s", runner.prompt)
 	}
 	if !eventContains(snapshot.Events, core.EventWorkerOutput, "local worker published pull request") {
 		t.Fatalf("missing parent worker publish event")

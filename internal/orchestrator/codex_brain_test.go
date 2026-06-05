@@ -766,6 +766,15 @@ func TestCodexBrainReplanPromptInstructsHumanStylePRBody(t *testing.T) {
 	if !strings.Contains(prompt, "## Test plan") && !strings.Contains(prompt, "## Validation") {
 		t.Fatalf("replan prompt does not require a Test plan / Validation section:\n%s", prompt)
 	}
+	for _, required := range []string{
+		"provide inputs.commitMessage",
+		"short imperative or conventional-commit subject",
+		"never use worker status narration",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("replan prompt missing commit-message instruction %q:\n%s", required, prompt)
+		}
+	}
 }
 
 func TestCodexBrainReplanPromptDoesNotBlockBroadObjectivesOnIntermediatePRs(t *testing.T) {
