@@ -56,6 +56,18 @@ type PullRequestPublisher interface {
 	Inspect(ctx context.Context, pr core.PullRequest) (core.PullRequest, error)
 }
 
+type PullRequestCommentSpec struct {
+	WorkDir string
+	Repo    string
+	Number  int
+	URL     string
+	Body    string
+}
+
+type PullRequestCommenter interface {
+	Comment(ctx context.Context, pr core.PullRequest, spec PullRequestCommentSpec) error
+}
+
 type PullRequestMerger interface {
 	Merge(ctx context.Context, pr core.PullRequest, spec PullRequestMergeSpec) (core.PullRequest, error)
 }
@@ -282,6 +294,40 @@ func updatePullRequestMetadata(ctx context.Context, exec commandExecutor, dir st
 		return fmt.Errorf("close pull request edit payload: %w", err)
 	}
 	_, err = exec(ctx, dir, "gh", "api", "--method", "PATCH", "repos/"+repo+"/pulls/"+strconv.Itoa(number), "--input", path)
+	return err
+}
+
+func (p LocalPullRequestPublisher) Comment(ctx context.Context, pr core.PullRequest, spec PullRequestCommentSpec) error {
+	body := strings.TrimSpace(spec.Body)
+	if body == "" {
+		return errors.New("comment requires body")
+	}
+	workDir := strings.TrimSpace(spec.WorkDir)
+	if workDir == "" {
+		return errors.New("comment requires workdir")
+	}
+	exec := p.exec
+	if exec == nil {
+		exec = runCommand
+	}
+	repo := nonEmpty(spec.Repo, pr.Repo)
+	number := firstNonZero(spec.Number, pr.Number)
+	if number <= 0 {
+		parsedRepo, parsedNumber := parsePullRequestURL(nonEmpty(spec.URL, pr.URL))
+		number = parsedNumber
+		if repo == "" {
+			repo = parsedRepo
+		}
+	}
+	if repo == "" || number <= 0 {
+		return errors.New("comment requires pull request repo and number")
+	}
+	bodyFile, err := writePullRequestBodyFile(body)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(bodyFile)
+	_, err = exec(ctx, workDir, "gh", "pr", "comment", strconv.Itoa(number), "--repo", repo, "--body-file", bodyFile)
 	return err
 }
 
