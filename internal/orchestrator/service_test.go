@@ -2819,8 +2819,11 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 		Title:  "Generic title",
 		State:  "OPEN",
 		Metadata: core.MustJSON(map[string]any{
-			"continueAfterPublish": true,
-			"publicationPhase":     "intermediate",
+			"continueAfterPublish":                        true,
+			"publicationPhase":                            "intermediate",
+			"latestPullRequestFeedbackSignature":          "sig-description",
+			"latestPullRequestFeedbackTriggeredSignature": "sig-old",
+			"latestPullRequestFeedbackBody":               "improve the description",
 		}),
 	}); err != nil {
 		t.Fatal(err)
@@ -2863,6 +2866,12 @@ func TestServicePlanMetadataOnlyPullRequestUpdateSkipsWorkerChanges(t *testing.T
 	if publisher.updated.Patch != "" || publisher.updated.PatchFromBase {
 		t.Fatalf("metadata-only update included worker patch: %+v", publisher.updated)
 	}
+	if publisher.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
+	}
+	if !strings.Contains(publisher.commentSpec.Body, "updated the pull request metadata") || !strings.Contains(publisher.commentSpec.Body, "improve the description") {
+		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
+	}
 }
 
 func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t *testing.T) {
@@ -2903,6 +2912,11 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 		Base:   "main",
 		Title:  "Generic title",
 		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackSignature":          "sig-review",
+			"latestPullRequestFeedbackTriggeredSignature": "sig-old",
+			"latestPullRequestFeedbackBody":               "please fix the regression in the PR",
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -2985,6 +2999,12 @@ func TestServicePlanPullRequestUpdateWithMetadataPushesWorkerChangesByDefault(t 
 	}
 	if publisher.updated.CommitMessage != "Add targeted repair for behavior" {
 		t.Fatalf("commit message = %q, want worker summary", publisher.updated.CommitMessage)
+	}
+	if publisher.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
+	}
+	if !strings.Contains(publisher.commentSpec.Body, "pushed a follow-up update") || !strings.Contains(publisher.commentSpec.Body, "please fix the regression") {
+		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
 	}
 }
 
@@ -9611,6 +9631,12 @@ func TestWorkerCallbackUpdatesPullRequestMetadataThroughOriginalOrchestrator(t *
 	if publisher.updated.Title != "docs: clarify cache behavior" || !strings.Contains(publisher.updated.Body, "Clarify the cache behavior change") {
 		t.Fatalf("updated metadata = title %q body %q", publisher.updated.Title, publisher.updated.Body)
 	}
+	if publisher.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", publisher.commentCalls)
+	}
+	if !strings.Contains(publisher.commentSpec.Body, "updated the pull request metadata") || !strings.Contains(publisher.commentSpec.Body, "improve the description") {
+		t.Fatalf("comment body = %q", publisher.commentSpec.Body)
+	}
 	snapshot, err := store.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -15852,6 +15878,9 @@ type fakePullRequestPublisher struct {
 	errCount         int
 	status           core.PullRequest
 	inspectCalls     int
+	commentCalls     int
+	commentPR        core.PullRequest
+	commentSpec      PullRequestCommentSpec
 	list             []core.PullRequest
 	listSpec         PullRequestListSpec
 	listCalls        int
@@ -15999,6 +16028,13 @@ func (p *fakePullRequestPublisher) Inspect(_ context.Context, pr core.PullReques
 		p.status.Title = pr.Title
 	}
 	return p.status, nil
+}
+
+func (p *fakePullRequestPublisher) Comment(_ context.Context, pr core.PullRequest, spec PullRequestCommentSpec) error {
+	p.commentCalls++
+	p.commentPR = pr
+	p.commentSpec = spec
+	return nil
 }
 
 func (p *fakePullRequestPublisher) List(_ context.Context, spec PullRequestListSpec) ([]core.PullRequest, error) {

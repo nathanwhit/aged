@@ -5211,6 +5211,27 @@ func (s *Service) handleWorkerUpdatePullRequestCallback(ctx context.Context, tas
 	if err != nil {
 		return fmt.Errorf("update pull request from %s callback %s: %w", source, callback.ID, err)
 	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if err := s.commentPullRequestFeedbackAddressed(ctx, task, pr, updated, req, workerID); err != nil {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":          "pull_request_feedback_comment",
+			"when":          "worker_callback",
+			"source":        source,
+			"callbackId":    callback.ID,
+			"workerId":      workerID,
+			"pullRequestId": updated.ID,
+			"url":           updated.URL,
+			"status":        "failed",
+			"error":         err.Error(),
+		})
+	}
 	if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
 		return err
 	}
@@ -6840,6 +6861,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			return false, results, err
 		}
 		if pullRequestUpdateActionHandlesCurrentFeedback(updated, action) {
+			if err := s.commentPullRequestFeedbackAddressed(ctx, task, pr, updated, req, workerID); err != nil {
+				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":          "pull_request_feedback_comment",
+					"when":          nonEmpty(action.When, "after_success"),
+					"reason":        "Pull request was updated, but aged could not post the follow-up status comment.",
+					"workerId":      workerID,
+					"pullRequestId": updated.ID,
+					"url":           updated.URL,
+					"status":        "failed",
+					"error":         err.Error(),
+				})
+			}
 			if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
 				return false, results, err
 			}
