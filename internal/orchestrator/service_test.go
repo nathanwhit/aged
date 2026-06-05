@@ -9550,6 +9550,79 @@ func TestLocalWorkerCallbackPublishesPullRequestThroughOriginalOrchestrator(t *t
 	}
 }
 
+func TestWorkerCallbackUpdatesPullRequestMetadataThroughOriginalOrchestrator(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-metadata-callback"
+	workerID := "worker-pr-metadata-callback"
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.SetPullRequestPublisher(publisher)
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Follow up PR",
+			"prompt": "Improve the PR description.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordPullRequestPublished(ctx, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: taskID,
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/aged-test",
+		Base:   "main",
+		Title:  "Generic PR",
+		State:  "OPEN",
+		Metadata: core.MustJSON(map[string]any{
+			"latestPullRequestFeedbackSignature":          "sig-description",
+			"latestPullRequestFeedbackTriggeredSignature": "sig-old",
+			"latestPullRequestFeedbackBody":               "improve the description",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := service.handleWorkerUpdatePullRequestCallback(ctx, taskID, workerID, RemoteWorkerCallback{
+		ID:     "update-pr.local",
+		Type:   "update_pull_request",
+		Title:  "docs: clarify cache behavior",
+		Body:   "## Summary\n- Clarify the cache behavior change.\n\n## Validation\n- Not run; metadata-only update.",
+		Repo:   "owner/repo",
+		Number: 7,
+	}, "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if publisher.updateCalls != 1 {
+		t.Fatalf("update calls = %d, want 1", publisher.updateCalls)
+	}
+	if !publisher.updated.MetadataOnly {
+		t.Fatalf("callback update sent MetadataOnly=false: %+v", publisher.updated)
+	}
+	if publisher.updated.Title != "docs: clarify cache behavior" || !strings.Contains(publisher.updated.Body, "Clarify the cache behavior change") {
+		t.Fatalf("updated metadata = title %q body %q", publisher.updated.Title, publisher.updated.Body)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eventContains(snapshot.Events, core.EventWorkerOutput, "local worker updated pull request metadata") {
+		t.Fatalf("missing worker output for metadata update")
+	}
+	if len(snapshot.PullRequests) != 1 || pullRequestHasUntriggeredFeedback(snapshot.PullRequests[0]) {
+		t.Fatalf("pull request feedback still untriggered: %+v", snapshot.PullRequests)
+	}
+}
+
 func TestRemoteWorkerPublishPullRequestCallbackWithoutCandidateIsSkipped(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

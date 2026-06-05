@@ -35,6 +35,8 @@ type RemoteWorkerCallback struct {
 	ParentWorkerID       string
 	Body                 string
 	Repo                 string
+	Number               int
+	URL                  string
 	Base                 string
 	Branch               string
 	Draft                bool
@@ -178,6 +180,9 @@ func (r SSHRunner) installCallbackEnvironment(ctx context.Context, run remoteRun
 		return err
 	}
 	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remotePublishPRHelperPath(run))+" && chmod 700 "+shellQuote(remotePublishPRHelperPath(run))), remotePublishPRHelperScript()); err != nil {
+		return err
+	}
+	if _, err := inputExecutor.RunInput(ctx, sshArgs(run.Target, "sh", "-lc", "cat > "+shellQuote(remoteUpdatePRHelperPath(run))+" && chmod 700 "+shellQuote(remoteUpdatePRHelperPath(run))), remoteUpdatePRHelperScript()); err != nil {
 		return err
 	}
 	return nil
@@ -1034,6 +1039,10 @@ func remotePublishPRHelperPath(run remoteRun) string {
 	return path.Join(run.RunDir, "bin", "aged-publish-pr")
 }
 
+func remoteUpdatePRHelperPath(run remoteRun) string {
+	return path.Join(run.RunDir, "bin", "aged-update-pr")
+}
+
 func remoteCallbackEnv(run remoteRun) string {
 	lines := []string{
 		"export AGED_PARENT_TASK_ID=" + shellQuote(run.TaskID),
@@ -1202,6 +1211,81 @@ printf 'queued %s\n' "$out"
 `
 }
 
+func remoteUpdatePRHelperScript() string {
+	return `#!/bin/sh
+set -eu
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+aged-update-pr asks the original aged orchestrator to update an existing tracked pull request.
+
+Usage:
+  aged-update-pr [--title TITLE] [--repo OWNER/REPO] [--number NUMBER] [--url URL] [--base BRANCH] [--branch BRANCH] < body.md
+  printf '%s\n' "Updated pull request description" | aged-update-pr --number 123
+
+Input:
+  Reads the replacement pull request body from stdin. Provide --title to update
+  the title. At least one of --title or body is required.
+
+Options:
+  --title TITLE      Optional replacement pull request title.
+  --repo OWNER/REPO  Optional target repository.
+  --number NUMBER    Optional target pull request number.
+  --url URL          Optional target pull request URL.
+  --base BRANCH      Optional base branch.
+  --branch BRANCH    Optional head branch.
+  -h, --help         Show this help and exit.
+EOF
+    exit 0
+    ;;
+esac
+if [ -z "${AGED_WORKER_CALLBACK_DIR:-}" ]; then
+  echo "AGED_WORKER_CALLBACK_DIR is required" >&2
+  exit 2
+fi
+title=""
+repo=""
+number=""
+url=""
+base=""
+branch=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --title) title="$2"; shift 2 ;;
+    --repo) repo="$2"; shift 2 ;;
+    --number) number="$2"; shift 2 ;;
+    --url) url="$2"; shift 2 ;;
+    --base) base="$2"; shift 2 ;;
+    --branch) branch="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+b64() {
+  if command -v base64 >/dev/null 2>&1; then base64 | tr -d '\n'
+  elif command -v openssl >/dev/null 2>&1; then openssl base64 -A
+  elif command -v python3 >/dev/null 2>&1; then python3 -c 'import base64,sys; print(base64.b64encode(sys.stdin.buffer.read()).decode())'
+  else echo "base64, openssl, or python3 is required" >&2; exit 2
+  fi
+}
+mkdir -p "$AGED_WORKER_CALLBACK_DIR"
+stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+tmp="$AGED_WORKER_CALLBACK_DIR/update-pr.$stamp.$$.${RANDOM:-0}.tmp"
+out="${tmp%.tmp}.json"
+body_b64=$(cat | b64)
+title_b64=$(printf '%s' "$title" | b64)
+repo_b64=$(printf '%s' "$repo" | b64)
+number_b64=$(printf '%s' "$number" | b64)
+url_b64=$(printf '%s' "$url" | b64)
+base_b64=$(printf '%s' "$base" | b64)
+branch_b64=$(printf '%s' "$branch" | b64)
+parent_task_b64=$(printf '%s' "${AGED_PARENT_TASK_ID:-}" | b64)
+parent_worker_b64=$(printf '%s' "${AGED_PARENT_WORKER_ID:-}" | b64)
+printf '{"type":"update_pull_request","bodyBase64":"%s","titleBase64":"%s","repoBase64":"%s","numberBase64":"%s","urlBase64":"%s","baseBase64":"%s","branchBase64":"%s","parentTaskIdBase64":"%s","parentWorkerIdBase64":"%s"}\n' "$body_b64" "$title_b64" "$repo_b64" "$number_b64" "$url_b64" "$base_b64" "$branch_b64" "$parent_task_b64" "$parent_worker_b64" > "$tmp"
+mv "$tmp" "$out"
+printf 'queued %s\n' "$out"
+`
+}
+
 func remoteCallbackReadScript(run remoteRun) string {
 	return fmt.Sprintf(`dir=%s
 [ -d "$dir" ] || exit 0
@@ -1221,6 +1305,8 @@ type remoteCallbackPayload struct {
 	TitleBase64          string `json:"titleBase64,omitempty"`
 	ProjectIDBase64      string `json:"projectIdBase64,omitempty"`
 	RepoBase64           string `json:"repoBase64,omitempty"`
+	NumberBase64         string `json:"numberBase64,omitempty"`
+	URLBase64            string `json:"urlBase64,omitempty"`
 	BaseBase64           string `json:"baseBase64,omitempty"`
 	BranchBase64         string `json:"branchBase64,omitempty"`
 	ParentTaskIDBase64   string `json:"parentTaskIdBase64,omitempty"`
@@ -1274,7 +1360,7 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		}
 		return string(bytes), nil
 	}
-	var prompt, title, prBody, projectID, repo, base, branch, parentTaskID, parentWorkerID string
+	var prompt, title, prBody, projectID, repo, numberRaw, callbackURL, base, branch, parentTaskID, parentWorkerID string
 	for _, field := range []struct {
 		name  string
 		value string
@@ -1285,6 +1371,8 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		{"body", payload.BodyBase64, &prBody},
 		{"project", payload.ProjectIDBase64, &projectID},
 		{"repo", payload.RepoBase64, &repo},
+		{"number", payload.NumberBase64, &numberRaw},
+		{"url", payload.URLBase64, &callbackURL},
 		{"base", payload.BaseBase64, &base},
 		{"branch", payload.BranchBase64, &branch},
 		{"parent task", payload.ParentTaskIDBase64, &parentTaskID},
@@ -1296,6 +1384,14 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		}
 		*field.out = decoded
 	}
+	number := 0
+	if strings.TrimSpace(numberRaw) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(numberRaw))
+		if err != nil {
+			return RemoteWorkerCallback{}, fmt.Errorf("decode remote callback %s number: %w", fileName, err)
+		}
+		number = parsed
+	}
 	return RemoteWorkerCallback{
 		ID:                   strings.TrimSuffix(path.Base(fileName), ".json"),
 		Type:                 nonEmpty(payload.Type, "create_task"),
@@ -1306,6 +1402,8 @@ func decodeRemoteCallback(fileName string, body string) (RemoteWorkerCallback, e
 		ParentWorkerID:       parentWorkerID,
 		Body:                 prBody,
 		Repo:                 repo,
+		Number:               number,
+		URL:                  callbackURL,
 		Base:                 base,
 		Branch:               branch,
 		Draft:                payload.Draft,

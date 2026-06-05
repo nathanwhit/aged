@@ -134,6 +134,7 @@ type PullRequestFeedbackItem struct {
 	MergeStatus       string `json:"mergeStatus,omitempty"`
 	ReviewStatus      string `json:"reviewStatus,omitempty"`
 	FeedbackSignature string `json:"feedbackSignature,omitempty"`
+	FeedbackBody      string `json:"feedbackBody,omitempty"`
 	Prompt            string `json:"prompt,omitempty"`
 }
 
