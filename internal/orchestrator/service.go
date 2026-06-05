@@ -6699,7 +6699,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}); err != nil {
 			return false, results, err
 		}
-		return false, results, nil
+		return !pullRequestWatchBlocksTask(task, prs), results, nil
 	case "create_tasks":
 		created, err := s.createChildTasksFromAction(ctx, task, action)
 		if err != nil {
