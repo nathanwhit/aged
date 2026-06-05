@@ -14838,6 +14838,162 @@ func TestServiceRetryReusesRemoteWorkerTargetWorkspaceAndSession(t *testing.T) {
 	}
 }
 
+func TestServiceRetryBackgroundPullRequestFollowUpFailureDoesNotFailObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-pr-followup-retry"
+	initialPlan := Plan{WorkerKind: "mock", Prompt: "continue objective"}
+	followUpPlan := Plan{
+		WorkerKind: "mock",
+		Prompt:     "address pull request feedback",
+		Metadata: map[string]any{
+			"backgroundPullRequestFollowUp": true,
+			"pullRequestID":                 "pr-1",
+			"pullRequestNumber":             7,
+			"pullRequestURL":                "https://github.com/owner/repo/pull/7",
+		},
+	}
+	appendTestEvents(t, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"title":          "Broad objective",
+				"prompt":         "Keep improving this project.",
+				"objectiveMode":  "broad",
+				"completionMode": "github",
+			}),
+		},
+		core.Event{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(initialPlan),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: "objective-worker",
+			Payload: core.MustJSON(map[string]any{
+				"kind": "mock",
+				"metadata": map[string]any{
+					"workerKind": "mock",
+				},
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "objective-worker",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerSucceeded,
+				"summary": "objective made useful progress",
+				"workspaceChanges": WorkspaceChanges{
+					ChangedFiles: []WorkspaceChangedFile{{Path: "src/lib.rs", Status: "modified"}},
+					Dirty:        true,
+				},
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/aged-test",
+				"base":   "main",
+				"title":  "Task",
+				"state":  "OPEN",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"status": "queued",
+			}),
+		},
+		core.Event{
+			Type:    core.EventTaskPlanned,
+			TaskID:  taskID,
+			Payload: core.MustJSON(followUpPlan),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   taskID,
+			WorkerID: "old-followup-worker",
+			Payload: core.MustJSON(map[string]any{
+				"kind":     "mock",
+				"metadata": followUpPlan.Metadata,
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCompleted,
+			TaskID:   taskID,
+			WorkerID: "old-followup-worker",
+			Payload: core.MustJSON(map[string]any{
+				"status":  core.WorkerFailed,
+				"summary": "The bounded wait is still running; I will collect the final poll output.",
+				"error":   "worker reported success after an unresolved tool or runtime error while deferring completion",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskStatus,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"status": core.TaskFailed,
+				"error":  "worker command failed",
+			}),
+		},
+	)
+
+	brain := &replanningBrain{decisions: []ReplanDecision{{
+		Action:  "wait",
+		Message: "continue after operator steering",
+	}}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
+		"mock": failingRunner{kind: "mock", err: errors.New("worker reported success after an unresolved tool or runtime error while deferring completion")},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	if _, err := service.RetryTask(ctx, taskID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return hasTaskAction(snapshot.Events, taskID, "pull_request_background_followup", "continued")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("missing continued background follow-up action; events = %+v", snapshot.Events)
+	})
+	failedStatuses := 0
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventTaskStatus || event.TaskID != taskID {
+			continue
+		}
+		var payload struct {
+			Status core.TaskStatus `json:"status"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil && payload.Status == core.TaskFailed {
+			failedStatuses++
+		}
+	}
+	if failedStatuses != 1 {
+		t.Fatalf("retry recorded %d failed task statuses, want only the seeded failure; task actions:\n%s", failedStatuses, taskActionPayloads(snapshot.Events, taskID))
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status == core.TaskFailed {
+		t.Fatalf("task status = %q, want non-terminal after background follow-up failure", task.Status)
+	}
+	if len(brain.states) == 0 {
+		t.Fatalf("objective replan was not resumed after background follow-up failure")
+	}
+}
+
 func TestServiceRestoresDurableLoopPromptWhenRemoteRetryWorkspaceUnavailable(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
