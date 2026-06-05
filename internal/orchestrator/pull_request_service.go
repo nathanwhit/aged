@@ -1623,6 +1623,13 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 		return nil
 	}
 	if pullRequestFeedbackAlreadyPending(snapshot, pr.TaskID, pr.ID) {
+		if task.Status == core.TaskWaiting {
+			s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
+				s.resumePullRequestFeedbackQueue(taskCtx, pr.TaskID)
+			})
+		} else if task.Status == core.TaskRunning || task.Status == core.TaskPlanning {
+			s.startPullRequestFollowUpWorker(pr.TaskID, pr.ID)
+		}
 		return nil
 	}
 	if pullRequestFollowUpStartedAfterLatestStatus(snapshot, pr.ID) {
@@ -1663,9 +1670,6 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 		return err
 	}
 	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, "pr_needs_work", "Pull request needs follow-up work from checks or review."); err != nil {
-		return err
-	}
-	if err := s.markPullRequestFeedbackTriggered(ctx, pr); err != nil {
 		return err
 	}
 	if task.Status == core.TaskWaiting {
@@ -2602,6 +2606,9 @@ func pullRequestFeedbackHandledAfterEvent(snapshot core.Snapshot, followUpEventI
 		}
 		switch strings.TrimSpace(payload.Kind) {
 		case "watch_pull_requests":
+			if strings.TrimSpace(item.FeedbackSignature) != "" {
+				continue
+			}
 			if pullRequestFeedbackActionMatches(item, payload.PullRequestID, payload.Inputs) {
 				return true
 			}

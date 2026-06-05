@@ -6637,6 +6637,9 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			}
 			return false, results, err
 		}
+		if err := s.markPullRequestFeedbackTriggered(ctx, updated); err != nil {
+			return false, results, err
+		}
 		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 			"kind":          action.Kind,
 			"when":          nonEmpty(action.When, "after_success"),
