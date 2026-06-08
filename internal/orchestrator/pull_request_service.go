@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,14 +23,15 @@ import (
 )
 
 var (
-	githubPullRequestURLRE      = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
-	pullRequestClosingKeywordRE = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
-	pullRequestSummaryHeadingRE = regexp.MustCompile(`(?im)^\s*#{1,6}\s*summary\b`)
-	pullRequestTestHeadingRE    = regexp.MustCompile(`(?im)^\s*#{1,6}\s*(?:validation|test plan|tests)\b`)
-	workerReportSectionRE       = regexp.MustCompile(`(?im)^\s*#{0,6}\s*(?:findings|changed files|blockers|recommended next turns|next turns)\s*$`)
-	prMetadataFeedbackRE        = regexp.MustCompile(`(?i)\b(?:title|description)\b|\b(?:pr|pull\s+request)\s+body\b`)
-	errTerminalPullRequest      = errors.New("pull request is already terminal")
-	errNoPullRequestsToWatch    = errors.New("no task-owned pull requests to watch")
+	githubPullRequestURLRE       = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+`)
+	pullRequestClosingKeywordRE  = regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b`)
+	pullRequestSummaryHeadingRE  = regexp.MustCompile(`(?im)^\s*#{1,6}\s*summary\b`)
+	pullRequestTestHeadingRE     = regexp.MustCompile(`(?im)^\s*#{1,6}\s*(?:validation|test plan|tests)\b`)
+	workerReportSectionRE        = regexp.MustCompile(`(?im)^\s*#{0,6}\s*(?:findings|changed files|blockers|recommended next turns|next turns)\s*$`)
+	prMetadataFeedbackRE         = regexp.MustCompile(`(?i)\b(?:title|description)\b|\b(?:pr|pull\s+request)\s+body\b`)
+	errTerminalPullRequest       = errors.New("pull request is already terminal")
+	errPullRequestTargetMismatch = errors.New("pull request update target does not match tracked pull request")
+	errNoPullRequestsToWatch     = errors.New("no task-owned pull requests to watch")
 )
 
 func (s *Service) SetPullRequestPublisher(publisher PullRequestPublisher) {
@@ -218,6 +221,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	changes := s.pullRequestWorkspaceChanges(ctx, workerID)
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
+	annotatePullRequestOwnerMetadata(metadata, workerID, publishWorkspace, sourceRoot)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
 	title := defaultPullRequestTitleForPublication(req.Title, task, summary, changes, req.ContinueAfterPublish)
 	body := pullRequestBodyWithIssueClosingReference(strings.TrimSpace(req.Body), task, repo)
@@ -255,6 +259,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	}
 	pr.TaskID = taskID
 	pr = normalizePullRequestStatusFields(pr)
+	pr.Metadata = mergePullRequestMetadataMap(pr.Metadata, metadata)
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_opened", "pr_opened", "Pull request opened.", map[string]any{
 		"pullRequestId": pr.ID,
 		"url":           pr.URL,
@@ -313,8 +318,22 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	if pr.ID == "" {
 		return core.PullRequest{}, errors.New("update pull request requires tracked pull request")
 	}
+	if isTerminalPullRequestState(pr.State) {
+		return core.PullRequest{}, errTerminalPullRequest
+	}
+	checked, err := s.refreshPullRequest(ctx, snapshot, pr)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if isTerminalPullRequestState(checked.State) {
+		return core.PullRequest{}, errTerminalPullRequest
+	}
+	pr = checked
 	project, err := s.projectForTask(task)
 	if err != nil {
+		return core.PullRequest{}, err
+	}
+	if err := validatePullRequestUpdateTarget(pr, req, project); err != nil {
 		return core.PullRequest{}, err
 	}
 	sourceRoot := project.LocalPath
@@ -352,6 +371,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	metadata["updatedExistingPullRequest"] = true
 	metadata["pullRequestId"] = pr.ID
 	metadata["metadataOnly"] = req.MetadataOnly
+	annotatePullRequestUpdateMetadata(metadata, workerID, publishWorkspace, sourceRoot)
 	if summary != "" {
 		metadata["summary"] = summary
 	}
@@ -390,6 +410,7 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	}
 	updated.TaskID = taskID
 	updated = normalizePullRequestStatusFields(updated)
+	updated.Metadata = mergePullRequestMetadataMap(updated.Metadata, metadata)
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_updated", "pr_updated", "Pull request branch updated.", map[string]any{
 		"pullRequestId": updated.ID,
 		"url":           updated.URL,
@@ -579,6 +600,82 @@ func pullRequestPublishPatch(workspace PreparedWorkspace, changes WorkspaceChang
 		return changes.PublishDiff, true, strings.TrimSpace(changes.PublishBase)
 	}
 	return changes.Diff, true, ""
+}
+
+func validatePullRequestUpdateTarget(pr core.PullRequest, req core.PublishPullRequestRequest, project core.Project) error {
+	if requestedRepo := strings.TrimSpace(req.Repo); requestedRepo != "" && strings.TrimSpace(pr.Repo) != "" && !strings.EqualFold(requestedRepo, strings.TrimSpace(pr.Repo)) {
+		return fmt.Errorf("%w: requested repo %q does not match tracked repo %q", errPullRequestTargetMismatch, requestedRepo, pr.Repo)
+	}
+	if requestedBranch := strings.TrimSpace(req.Branch); requestedBranch != "" && strings.TrimSpace(pr.Branch) != "" && requestedBranch != strings.TrimSpace(pr.Branch) {
+		return fmt.Errorf("%w: requested branch %q does not match tracked branch %q", errPullRequestTargetMismatch, requestedBranch, pr.Branch)
+	}
+	expectedBase := strings.TrimSpace(nonEmpty(pr.Base, project.DefaultBase))
+	if requestedBase := strings.TrimSpace(req.Base); requestedBase != "" && expectedBase != "" && requestedBase != expectedBase {
+		return fmt.Errorf("%w: requested base %q does not match tracked base %q", errPullRequestTargetMismatch, requestedBase, expectedBase)
+	}
+	return nil
+}
+
+func annotatePullRequestOwnerMetadata(metadata map[string]any, workerID string, workspace PreparedWorkspace, sourceRoot string) {
+	if metadata == nil {
+		return
+	}
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return
+	}
+	metadata["ownerWorkerId"] = workerID
+	metadata["ownerWorkDir"] = strings.TrimSpace(sourceRoot)
+	annotatePullRequestWorkspaceMetadata(metadata, "owner", workspace)
+}
+
+func annotatePullRequestUpdateMetadata(metadata map[string]any, workerID string, workspace PreparedWorkspace, sourceRoot string) {
+	if metadata == nil {
+		return
+	}
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return
+	}
+	metadata["lastUpdateWorkerId"] = workerID
+	metadata["lastUpdateWorkDir"] = strings.TrimSpace(sourceRoot)
+	annotatePullRequestWorkspaceMetadata(metadata, "lastUpdate", workspace)
+}
+
+func annotatePullRequestWorkspaceMetadata(metadata map[string]any, prefix string, workspace PreparedWorkspace) {
+	if metadata == nil || strings.TrimSpace(prefix) == "" {
+		return
+	}
+	set := func(key string, value string) {
+		if value = strings.TrimSpace(value); value != "" {
+			metadata[prefix+key] = value
+		}
+	}
+	set("WorkspaceRoot", workspace.Root)
+	set("WorkspaceCwd", workspace.CWD)
+	set("SourceRoot", workspace.SourceRoot)
+	set("WorkspaceName", workspace.WorkspaceName)
+	set("WorkspaceMode", workspace.Mode)
+	set("VcsType", workspace.VCSType)
+	set("TargetId", workspace.TargetID)
+	set("TargetKind", workspace.TargetKind)
+	set("SharedRoot", workspace.SharedRoot)
+	set("SharedArtifactsDir", workspace.SharedArtifactsDir)
+	set("SharedWorkerDir", workspace.SharedWorkerDir)
+}
+
+func mergePullRequestMetadataMap(raw json.RawMessage, values map[string]any) json.RawMessage {
+	if len(values) == 0 {
+		return raw
+	}
+	out := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
+	}
+	for key, value := range values {
+		out[key] = value
+	}
+	return core.MustJSON(out)
 }
 
 func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {
@@ -1685,6 +1782,18 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	if isTerminalTaskStatus(task.Status) {
 		return nil
 	}
+	if item, ok := pullRequestFollowUpWorkItem(snapshot, pr.TaskID, pr.ID, pullRequestFollowUpFeedbackSignature(pr)); ok {
+		if item.Status == core.WorkItemQueued {
+			if task.Status == core.TaskWaiting {
+				s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
+					s.resumePullRequestFeedbackQueue(taskCtx, pr.TaskID)
+				})
+			} else if task.Status == core.TaskRunning || task.Status == core.TaskPlanning {
+				s.startPullRequestFollowUpWorker(pr.TaskID, pr.ID)
+			}
+		}
+		return nil
+	}
 	if pullRequestFeedbackAlreadyPending(snapshot, pr.TaskID, pr.ID) {
 		if task.Status == core.TaskWaiting {
 			s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
@@ -1700,6 +1809,10 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	}
 	attempt := pullRequestFollowUpAttempt(snapshot, pr.ID) + 1
 	prompt := pullRequestFollowUpPrompt(pr)
+	feedbackSignature := pullRequestFollowUpFeedbackSignature(pr)
+	if err := s.recordPullRequestFollowUpWorkItem(ctx, pr, prompt, feedbackSignature); err != nil {
+		return err
+	}
 	if _, err := s.append(ctx, core.Event{
 		Type:   core.EventPRFollowUp,
 		TaskID: pr.TaskID,
@@ -1717,7 +1830,7 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 			"checksStatus":      pr.ChecksStatus,
 			"mergeStatus":       pr.MergeStatus,
 			"reviewStatus":      pr.ReviewStatus,
-			"feedbackSignature": pullRequestFollowUpFeedbackSignature(pr),
+			"feedbackSignature": feedbackSignature,
 			"prompt":            prompt,
 		}),
 	}); err != nil {
@@ -1765,6 +1878,16 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 	if activePullRequestFollowUpWorker(snapshot, taskID, prID) {
 		return
 	}
+	feedbackSignature := pullRequestFollowUpFeedbackSignature(pr)
+	workItemID := pullRequestFollowUpWorkItemID(pr, feedbackSignature)
+	if item, ok := pullRequestFollowUpWorkItem(snapshot, taskID, prID, feedbackSignature); ok {
+		workItemID = item.ID
+	} else {
+		_ = s.recordPullRequestFollowUpWorkItem(ctx, pr, pullRequestFollowUpPrompt(pr), feedbackSignature)
+	}
+	if err := s.recordWorkItemStarted(ctx, taskID, workItemID, ""); err != nil {
+		return
+	}
 	plan := canonicalizePullRequestFollowUpPlan(Plan{
 		WorkerKind: s.pullRequestFollowUpWorkerKind(),
 		Prompt:     pullRequestFollowUpPrompt(pr),
@@ -1789,6 +1912,7 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		},
 	}, pr)
 	if strings.TrimSpace(plan.WorkerKind) == "" {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", "no worker runner is configured for pull request follow-up")
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "skipped",
@@ -1798,7 +1922,9 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		})
 		return
 	}
+	normalizePlanShape(&plan)
 	if err := plan.Validate(); err != nil {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "skipped",
@@ -1825,6 +1951,7 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		TaskID:  taskID,
 		Payload: core.MustJSON(plan),
 	}); err != nil {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "failed",
@@ -1835,8 +1962,9 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		})
 		return
 	}
-	result, err := s.runPlannedWorker(ctx, task, plan)
+	results, ok, err := s.runPullRequestFollowUpPlanWorkers(ctx, task, plan)
 	if err != nil {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "continued",
@@ -1847,8 +1975,11 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		})
 		return
 	}
-	results := []WorkerTurnResult{result}
-	if result.Status != core.WorkerSucceeded {
+	if !ok {
+		return
+	}
+	if result := firstNonSucceededWorkerResult(results); result.WorkerID != "" {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, result.WorkerID, nonEmpty(result.Error, result.Summary))
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "continued",
@@ -1860,11 +1991,13 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		})
 		return
 	}
+	result := latestWorkerResult(results)
 	for _, action := range plan.Actions {
 		if strings.TrimSpace(action.When) != "after_success" {
 			continue
 		}
 		if err := s.executeBackgroundPullRequestFollowUpAction(ctx, task, pr, action, results); err != nil {
+			_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, result.WorkerID, err.Error())
 			_ = s.recordTaskAction(ctx, taskID, map[string]any{
 				"kind":          "pull_request_background_followup",
 				"status":        "continued",
@@ -1885,6 +2018,7 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		"url":           pr.URL,
 		"workerId":      result.WorkerID,
 	})
+	_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemSucceeded, result.WorkerID, "")
 }
 
 func (s *Service) executeBackgroundPullRequestFollowUpAction(ctx context.Context, task core.Task, pr core.PullRequest, action PlanAction, results []WorkerTurnResult) error {
@@ -1947,6 +2081,121 @@ func activePullRequestFollowUpWorker(snapshot core.Snapshot, taskID string, prID
 		}
 	}
 	return false
+}
+
+func pullRequestFollowUpWorkItem(snapshot core.Snapshot, taskID string, prID string, signature string) (core.WorkItem, bool) {
+	prID = strings.TrimSpace(prID)
+	if prID == "" {
+		return core.WorkItem{}, false
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || item.Kind != "pr.followup" || item.TargetKind != "pull_request" || item.TargetID != prID {
+			continue
+		}
+		if item.Status != core.WorkItemQueued && item.Status != core.WorkItemRunning {
+			continue
+		}
+		var metadata map[string]any
+		if len(item.Metadata) > 0 {
+			_ = json.Unmarshal(item.Metadata, &metadata)
+		}
+		itemSignature := strings.TrimSpace(stringMetadata(metadata, "feedbackSignature"))
+		if signature == "" || itemSignature == "" || itemSignature == signature {
+			return item, true
+		}
+	}
+	return core.WorkItem{}, false
+}
+
+func (s *Service) recordPullRequestFollowUpWorkItem(ctx context.Context, pr core.PullRequest, prompt string, feedbackSignature string) error {
+	metadata := map[string]any{
+		"pullRequestId":     pr.ID,
+		"repo":              pr.Repo,
+		"number":            pr.Number,
+		"url":               pr.URL,
+		"branch":            pr.Branch,
+		"feedbackSignature": feedbackSignature,
+	}
+	return s.recordWorkItemQueued(ctx, pr.TaskID, map[string]any{
+		"id":         pullRequestFollowUpWorkItemID(pr, feedbackSignature),
+		"kind":       "pr.followup",
+		"targetKind": "pull_request",
+		"targetId":   pr.ID,
+		"reason":     "Handle queued GitHub pull request feedback without blocking objective work.",
+		"prompt":     prompt,
+		"metadata":   metadata,
+	})
+}
+
+func (s *Service) recordWorkItemQueued(ctx context.Context, taskID string, payload map[string]any) error {
+	_, err := s.append(ctx, core.Event{
+		Type:    core.EventWorkItemQueued,
+		TaskID:  taskID,
+		Payload: core.MustJSON(payload),
+	})
+	return err
+}
+
+const defaultWorkItemLeaseDuration = 24 * time.Hour
+
+func workItemLeaseOwner(workerID string) string {
+	workerID = strings.TrimSpace(workerID)
+	if workerID != "" {
+		return "worker:" + workerID
+	}
+	return "daemon:local"
+}
+
+func (s *Service) recordWorkItemStarted(ctx context.Context, taskID string, itemID string, workerID string) error {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil
+	}
+	workerID = strings.TrimSpace(workerID)
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventWorkItemStarted,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":         itemID,
+			"workerId":   workerID,
+			"leaseOwner": workItemLeaseOwner(workerID),
+			"leaseUntil": time.Now().UTC().Add(defaultWorkItemLeaseDuration).Format(time.RFC3339Nano),
+		}),
+	})
+	return err
+}
+
+func (s *Service) recordWorkItemCompleted(ctx context.Context, taskID string, itemID string, status core.WorkItemStatus, workerID string, errorText string) error {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil
+	}
+	if status == "" {
+		status = core.WorkItemSucceeded
+	}
+	_, err := s.append(ctx, core.Event{
+		Type:   core.EventWorkItemCompleted,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":       itemID,
+			"status":   status,
+			"workerId": strings.TrimSpace(workerID),
+			"error":    strings.TrimSpace(errorText),
+		}),
+	})
+	return err
+}
+
+func pullRequestFollowUpWorkItemID(pr core.PullRequest, feedbackSignature string) string {
+	input := strings.Join([]string{
+		strings.TrimSpace(pr.TaskID),
+		strings.TrimSpace(pr.ID),
+		strings.ToLower(strings.TrimSpace(pr.Repo)),
+		fmt.Sprint(pr.Number),
+		strings.TrimSpace(feedbackSignature),
+	}, "\x00")
+	sum := sha256.Sum256([]byte(input))
+	return "pr_followup_" + hex.EncodeToString(sum[:8])
 }
 
 func pullRequestFollowUpSpawnID(pr core.PullRequest) string {
@@ -2611,6 +2860,26 @@ func pendingPullRequestFeedback(snapshot core.Snapshot, taskID string) []PullReq
 }
 
 func pendingPullRequestFeedbackFromSnapshot(snapshot core.Snapshot, taskID string) []PullRequestFeedbackItem {
+	if len(snapshot.PullRequestFeedback) > 0 {
+		var items []PullRequestFeedbackItem
+		itemByPullRequest := map[string]int{}
+		for _, item := range snapshot.PullRequestFeedback {
+			if item.TaskID != taskID || !strings.EqualFold(item.Status, "pending") {
+				continue
+			}
+			pr := pullRequestFromFeedbackItem(snapshot, taskID, item)
+			if pr.ID != "" && isTerminalPullRequestState(pr.State) {
+				continue
+			}
+			if index, ok := itemByPullRequest[item.PullRequestID]; ok {
+				items[index] = item
+				continue
+			}
+			itemByPullRequest[item.PullRequestID] = len(items)
+			items = append(items, item)
+		}
+		return items
+	}
 	pullRequests := map[string]core.PullRequest{}
 	trackedPullRequests := []core.PullRequest{}
 	for _, pr := range snapshot.PullRequests {
@@ -2722,6 +2991,15 @@ func pullRequestFeedbackAlreadyPending(snapshot core.Snapshot, taskID string, pr
 	}
 	currentSignature := pullRequestFeedbackSignature(current.Metadata)
 	hasUntriggeredFeedback := currentSignature != "" && pullRequestHasUntriggeredFeedback(current)
+	for _, item := range snapshot.PullRequestFeedback {
+		if item.TaskID != taskID || item.PullRequestID != prID || !strings.EqualFold(item.Status, "pending") {
+			continue
+		}
+		signature := strings.TrimSpace(item.FeedbackSignature)
+		if currentSignature == "" || signature == currentSignature || (signature == "" && !hasUntriggeredFeedback) {
+			return true
+		}
+	}
 	for _, event := range snapshot.Events {
 		if event.TaskID != taskID || event.Type != core.EventPRFollowUp {
 			continue

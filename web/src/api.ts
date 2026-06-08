@@ -167,11 +167,15 @@ export async function retryTask(taskId: string) {
 }
 
 export async function cancelTask(taskId: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+	return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+}
+
+export async function cancelWorkItem(taskId: string, itemId: string): Promise<void> {
+	return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(itemId)}/cancel`, { method: "POST" });
 }
 
 export async function clearTask(taskId: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
+	return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
 }
 
 export async function clearFinishedTasks() {
@@ -195,10 +199,6 @@ export async function getWorkerChanges(workerId: string): Promise<WorkerChangesR
 
 export async function applyWorkerChanges(workerId: string) {
   return requestJSON(`/api/workers/${workerId}/apply`, { method: "POST" });
-}
-
-export async function applyTaskResult(taskId: string) {
-  return requestJSON(`/api/tasks/${taskId}/apply`, { method: "POST" });
 }
 
 export async function publishTaskPullRequest(taskId: string, input: {

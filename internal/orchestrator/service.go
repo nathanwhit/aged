@@ -31,7 +31,6 @@ type WorkerChangesReview struct {
 }
 
 var (
-	standaloneNoPRPattern     = regexp.MustCompile(`\bno\s+pr\b`)
 	deferredNextWorkPattern   = regexp.MustCompile(`\b(?:i am|i'm|i will|i'll|will|going to|about to)\s+(?:run|running|rerun|execute|start|try|check|validate|test|rebuild|build)\b.*\bnext\b`)
 	pullRequestRepoNumberRE   = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)\b`)
 	pullRequestBareNumberRE   = regexp.MustCompile(`(?i)\b(?:PR|pull\s+request)\s*#?\s*([0-9]+)\b`)
@@ -105,6 +104,7 @@ type Service struct {
 	workerCaps  map[string]worker.Capabilities
 
 	steeringRestarts map[string]struct{}
+	activeWorkItems  map[string]struct{}
 
 	retainedArtifactCleanup        RetainedWorkspaceArtifactCleanupOptions
 	retainedArtifactCleanupEnabled bool
@@ -480,6 +480,7 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		remoteRuns:       map[string]remoteRun{},
 		workerCaps:       map[string]worker.Capabilities{},
 		steeringRestarts: map[string]struct{}{},
+		activeWorkItems:  map[string]struct{}{},
 	}
 	service.drivers = NewDriverRegistry(service)
 	return service
@@ -1067,6 +1068,13 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := s.recoverQueuedSpawnWorkItems(ctx, snapshot); err != nil {
+		return err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
 	if err := s.recoverOrphanedRunningGraphTasks(ctx, snapshot); err != nil {
 		return err
 	}
@@ -1117,6 +1125,40 @@ func (s *Service) RecoverRemoteWorkers(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) recoverQueuedSpawnWorkItems(ctx context.Context, snapshot core.Snapshot) error {
+	for _, task := range snapshot.Tasks {
+		if task.Status != core.TaskRunning && task.Status != core.TaskPlanning {
+			continue
+		}
+		hasQueuedSpawnWork := false
+		for _, item := range snapshot.WorkItems {
+			if item.TaskID == task.ID && item.Status == core.WorkItemQueued && isRunnableSpawnWorkItem(item, task.ID) {
+				hasQueuedSpawnWork = true
+				break
+			}
+		}
+		if !hasQueuedSpawnWork {
+			continue
+		}
+		started, err := s.startRunnableSpawnWorkItems(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if started == 0 {
+			continue
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":             "startup_spawn_work_recovery",
+			"status":           "resumed",
+			"reason":           "daemon restarted with queued spawned objective work; resuming runnable work items",
+			"startedWorkCount": started,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot core.Snapshot) error {
 	for _, task := range snapshot.Tasks {
 		if task.Status != core.TaskPlanning || taskHasActiveWorkers(snapshot, task.ID) {
@@ -1142,13 +1184,17 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 				if err := s.setTaskStatus(ctx, task.ID, core.TaskWaiting); err != nil {
 					return err
 				}
-				s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				if err := s.startObjectiveRoutine(ctx, task, "pr.followup", "Resume queued pull request feedback after daemon restart.", func(taskCtx context.Context) {
 					s.resumePullRequestFeedbackQueue(taskCtx, task.ID)
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
-				s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+				if err := s.startObjectiveRoutine(ctx, task, "pr.followup", "Resume interrupted pull request follow-up planning after daemon restart.", func(taskCtx context.Context) {
 					s.resumeLegacyPullRequestFollowUpPlanning(taskCtx, task.ID)
-				})
+				}); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -1169,9 +1215,11 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "recovering"
-			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Resume graph replanning from persisted worker results after daemon restart.", func(taskCtx context.Context) {
 				s.retryGraphTask(taskCtx, task, initial, results)
-			})
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		if plan, err := retryPlanForTask(snapshot, task.ID); err == nil {
@@ -1191,9 +1239,11 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "recovering"
-			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry the persisted plan after daemon restart.", func(taskCtx context.Context) {
 				s.retryTask(taskCtx, task, plan)
-			})
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		_, err := s.append(ctx, core.Event{
@@ -1208,9 +1258,11 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 		if err != nil {
 			return err
 		}
-		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+		if err := s.startObjectiveRoutine(ctx, task, "objective.plan", "Restart initial planning after daemon restart.", func(taskCtx context.Context) {
 			s.runTask(taskCtx, task)
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1241,9 +1293,11 @@ func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "pr.followup", "Retry interrupted pull request follow-up after daemon restart.", func(taskCtx context.Context) {
 				s.retryPullRequestFollowUpTask(taskCtx, task, plan)
-			})
+			}); err != nil {
+				return err
+			}
 			continue
 		}
 		initial, results, err := retryGraphStateForTask(snapshot, task.ID)
@@ -1275,13 +1329,11 @@ func (s *Service) recoverOrphanedRunningGraphTasks(ctx context.Context, snapshot
 		task.Error = ""
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
-		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
-			if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
-				s.retryFinalCandidateTask(taskCtx, task, results)
-				return
-			}
+		if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Resume objective replanning from persisted worker results after daemon restart.", func(taskCtx context.Context) {
 			s.retryGraphTask(taskCtx, task, initial, results)
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1590,6 +1642,86 @@ func (s *Service) startTaskRoutine(taskID string, fn func(context.Context)) {
 	}()
 }
 
+func (s *Service) startObjectiveRoutine(ctx context.Context, task core.Task, kind string, reason string, fn func(context.Context)) error {
+	itemID, err := s.queueObjectiveWorkItem(ctx, task, kind, reason)
+	if err != nil {
+		return err
+	}
+	s.startWorkItemRoutine(task.ID, itemID, "", fn)
+	return nil
+}
+
+func (s *Service) startObjectiveRoutineByID(ctx context.Context, taskID string, kind string, reason string, fn func(context.Context)) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	return s.startObjectiveRoutine(ctx, task, kind, reason, fn)
+}
+
+func (s *Service) queueObjectiveWorkItem(ctx context.Context, task core.Task, kind string, reason string) (string, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = "objective.plan"
+	}
+	itemID := uuid.NewString()
+	metadata := map[string]any{
+		"objectiveId": task.ID,
+	}
+	if phase := strings.TrimSpace(task.ObjectivePhase); phase != "" {
+		metadata["objectivePhase"] = phase
+	}
+	if err := s.recordWorkItemQueued(ctx, task.ID, map[string]any{
+		"id":         itemID,
+		"kind":       kind,
+		"targetKind": "objective",
+		"targetId":   task.ID,
+		"reason":     strings.TrimSpace(reason),
+		"prompt":     task.Prompt,
+		"metadata":   metadata,
+	}); err != nil {
+		return "", err
+	}
+	return itemID, nil
+}
+
+func (s *Service) startWorkItemRoutine(taskID string, itemID string, workerID string, fn func(context.Context)) {
+	s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+		if err := s.recordWorkItemStarted(taskCtx, taskID, itemID, workerID); err != nil {
+			_ = s.failTask(taskCtx, taskID, err)
+			return
+		}
+		fn(taskCtx)
+		_ = s.completeWorkItemFromTaskStatus(context.Background(), taskID, itemID, workerID)
+	})
+}
+
+func (s *Service) completeWorkItemFromTaskStatus(ctx context.Context, taskID string, itemID string, workerID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return s.recordWorkItemCompleted(ctx, taskID, itemID, core.WorkItemFailed, workerID, err.Error())
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return s.recordWorkItemCompleted(ctx, taskID, itemID, core.WorkItemFailed, workerID, "objective not found")
+	}
+	status := core.WorkItemSucceeded
+	errorText := ""
+	switch task.Status {
+	case core.TaskFailed:
+		status = core.WorkItemFailed
+		errorText = task.Error
+	case core.TaskCanceled:
+		status = core.WorkItemCanceled
+		errorText = task.Error
+	}
+	return s.recordWorkItemCompleted(ctx, taskID, itemID, status, workerID, errorText)
+}
+
 func (s *Service) beginSteeringRestart(taskID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1662,9 +1794,11 @@ func (s *Service) CreateTask(ctx context.Context, req core.CreateTaskRequest) (c
 		Metadata:     core.MustJSON(metadata),
 	}
 
-	s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+	if err := s.startObjectiveRoutine(ctx, task, "objective.plan", "Initial objective planning and execution.", func(taskCtx context.Context) {
 		s.runTask(taskCtx, task)
-	})
+	}); err != nil {
+		return core.Task{}, err
+	}
 	return task, nil
 }
 
@@ -1942,9 +2076,11 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		restartWorkerIDs = append(restartWorkerIDs, active.ID)
 	}
 	if status == core.TaskWaiting {
-		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+		if err := s.startObjectiveRoutineByID(ctx, taskID, "user.steering", "Resume waiting objective with new user steering.", func(taskCtx context.Context) {
 			s.resumeWaitingTask(taskCtx, taskID, req.Message)
-		})
+		}); err != nil {
+			return err
+		}
 	} else if len(restartWorkerIDs) > 0 {
 		if !s.beginSteeringRestart(taskID) {
 			_ = s.recordTaskAction(ctx, taskID, map[string]any{
@@ -1995,7 +2131,7 @@ func (s *Service) SteerWorker(ctx context.Context, workerID string, req core.Ste
 	if workerSteeringAlreadyPending(snapshot, task.ID, workerID, message) {
 		return nil
 	}
-	if _, err := s.append(ctx, core.Event{
+	event, err := s.append(ctx, core.Event{
 		Type:     core.EventWorkerSteered,
 		TaskID:   task.ID,
 		WorkerID: workerID,
@@ -2009,6 +2145,25 @@ func (s *Service) SteerWorker(ctx context.Context, workerID string, req core.Ste
 			"reason":     "user_worker_steering",
 			"message":    message,
 		}),
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.recordWorkItemQueued(ctx, task.ID, map[string]any{
+		"id":         workerSteeringWorkItemID(event.ID),
+		"kind":       "user.worker_steering",
+		"targetKind": "worker",
+		"targetId":   workerID,
+		"reason":     "Worker-specific steering queued for replanning.",
+		"prompt":     message,
+		"metadata": map[string]any{
+			"steeringEventId": event.ID,
+			"workerId":        workerID,
+			"nodeId":          node.ID,
+			"workerKind":      nonEmpty(workerState.Kind, node.WorkerKind),
+			"role":            node.Role,
+			"spawnId":         node.SpawnID,
+		},
 	}); err != nil {
 		return err
 	}
@@ -2022,9 +2177,11 @@ func (s *Service) SteerWorker(ctx context.Context, workerID string, req core.Ste
 		return err
 	}
 	if task.Status == core.TaskWaiting {
-		s.startTaskRoutine(task.ID, func(taskCtx context.Context) {
+		if err := s.startObjectiveRoutine(ctx, task, "user.steering", "Resume queued worker-specific steering.", func(taskCtx context.Context) {
 			s.resumeWorkerSteeringQueue(taskCtx, task.ID)
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -2168,9 +2325,11 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		task.Error = ""
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
-		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+		if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry durable loop objective.", func(taskCtx context.Context) {
 			s.runDurableLoopTask(taskCtx, task)
-		})
+		}); err != nil {
+			return core.Task{}, err
+		}
 		return task, nil
 	}
 	if task.Status == core.TaskFailed && latestTaskFailureMatches(snapshot, taskID, isGraphDependencyFailure) {
@@ -2183,9 +2342,11 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry objective graph after dependency failure.", func(taskCtx context.Context) {
 				s.retryGraphTask(taskCtx, task, initial, results)
-			})
+			}); err != nil {
+				return core.Task{}, err
+			}
 			return task, nil
 		}
 	}
@@ -2202,9 +2363,11 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "pr.followup", "Retry failed pull request follow-up work.", func(taskCtx context.Context) {
 				s.retryPullRequestFollowUpTask(taskCtx, task, plan)
-			})
+			}); err != nil {
+				return core.Task{}, err
+			}
 			return task, nil
 		}
 	}
@@ -2214,21 +2377,6 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
 		return task, nil
-	}
-	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
-		if _, results, graphErr := retryGraphStateForTask(snapshot, taskID); graphErr == nil {
-			if err := s.markTaskRetryPlanning(ctx, taskID); err != nil {
-				return core.Task{}, err
-			}
-			task.Status = core.TaskPlanning
-			task.Error = ""
-			task.ObjectiveStatus = core.ObjectiveActive
-			task.ObjectivePhase = "retrying"
-			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
-				s.retryFinalCandidateTask(taskCtx, task, results)
-			})
-			return task, nil
-		}
 	}
 	if task.Status == core.TaskFailed {
 		initial, results, graphErr := retryGraphStateForTask(snapshot, taskID)
@@ -2240,9 +2388,11 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 			task.Error = ""
 			task.ObjectiveStatus = core.ObjectiveActive
 			task.ObjectivePhase = "retrying"
-			s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+			if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry objective graph from persisted worker results.", func(taskCtx context.Context) {
 				s.retryGraphTask(taskCtx, task, initial, results)
-			})
+			}); err != nil {
+				return core.Task{}, err
+			}
 			return task, nil
 		}
 	}
@@ -2258,9 +2408,11 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 		task.Error = ""
 		task.ObjectiveStatus = core.ObjectiveActive
 		task.ObjectivePhase = "retrying"
-		s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+		if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry objective graph after dynamic replan failure.", func(taskCtx context.Context) {
 			s.retryGraphTask(taskCtx, task, initial, results)
-		})
+		}); err != nil {
+			return core.Task{}, err
+		}
 		return task, nil
 	}
 	plan, err := retryPlanForTask(snapshot, taskID)
@@ -2274,44 +2426,12 @@ func (s *Service) RetryTask(ctx context.Context, taskID string) (core.Task, erro
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "retrying"
-	s.startTaskRoutine(taskID, func(taskCtx context.Context) {
+	if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Retry latest objective plan.", func(taskCtx context.Context) {
 		s.retryTask(taskCtx, task, plan)
-	})
+	}); err != nil {
+		return core.Task{}, err
+	}
 	return task, nil
-}
-
-func (s *Service) retryFinalCandidateTask(ctx context.Context, task core.Task, results []WorkerTurnResult) {
-	if err := s.completeTask(ctx, task.ID, results, task.FinalCandidateWorkerID, "retry final candidate publication"); err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-	}
-}
-
-func shouldRetryGraphInsteadOfFinalCandidate(snapshot core.Snapshot, task core.Task) bool {
-	if !taskIsBroadObjective(task) || taskCompletionModeFromTask(task) != "github" {
-		return false
-	}
-	return taskSteeredAfterLatestFinalCandidate(snapshot, task.ID)
-}
-
-func taskSteeredAfterLatestFinalCandidate(snapshot core.Snapshot, taskID string) bool {
-	latestCandidateEventID := int64(0)
-	latestSteeringEventID := int64(0)
-	for _, event := range snapshot.Events {
-		if event.TaskID != taskID {
-			continue
-		}
-		switch event.Type {
-		case core.EventTaskCandidate:
-			if event.ID > latestCandidateEventID {
-				latestCandidateEventID = event.ID
-			}
-		case core.EventTaskSteered:
-			if event.ID > latestSteeringEventID {
-				latestSteeringEventID = event.ID
-			}
-		}
-	}
-	return latestCandidateEventID > 0 && latestSteeringEventID > latestCandidateEventID
 }
 
 func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) {
@@ -2360,10 +2480,6 @@ func (s *Service) resumeRecoveredRemoteTask(ctx context.Context, taskID string) 
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "recovering"
-	if strings.TrimSpace(task.FinalCandidateWorkerID) != "" && !shouldRetryGraphInsteadOfFinalCandidate(snapshot, task) {
-		s.retryFinalCandidateTask(ctx, task, results)
-		return
-	}
 	s.retryGraphTask(ctx, task, initial, results)
 }
 
@@ -2669,8 +2785,57 @@ func (s *Service) CancelTask(ctx context.Context, taskID string) error {
 		}
 		_ = s.CancelWorker(ctx, workerID)
 	}
+	if err := s.cancelTaskWorkItems(ctx, taskID); err != nil {
+		return err
+	}
 
 	return s.setTaskStatusWithReason(ctx, taskID, core.TaskCanceled, taskCancelReasonUser)
+}
+
+func (s *Service) CancelWorkItem(ctx context.Context, taskID string, itemID string) error {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return eventstore.ErrNotFound
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.ID != itemID || item.TaskID != taskID {
+			continue
+		}
+		if item.Status != core.WorkItemQueued && item.Status != core.WorkItemRunning {
+			return nil
+		}
+		workerID := strings.TrimSpace(item.WorkerID)
+		if workerID == "" && item.TargetKind == "worker" {
+			workerID = strings.TrimSpace(item.TargetID)
+		}
+		if workerID != "" {
+			if err := s.CancelWorker(ctx, workerID); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+				return err
+			}
+		}
+		return s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemCanceled, workerID, "work item canceled by user request")
+	}
+	return eventstore.ErrNotFound
+}
+
+func (s *Service) cancelTaskWorkItems(ctx context.Context, taskID string) error {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || (item.Status != core.WorkItemQueued && item.Status != core.WorkItemRunning) {
+			continue
+		}
+		if err := s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemCanceled, item.WorkerID, "task canceled by user request"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) ClearTask(ctx context.Context, taskID string) error {
@@ -2796,7 +2961,7 @@ func taskPullRequestStatesFromSnapshot(snapshot core.Snapshot, taskID string) []
 }
 
 func canPublishPullRequestForTask(task core.Task) bool {
-	return isTerminalTaskStatus(task.Status) || strings.TrimSpace(task.FinalCandidateWorkerID) != ""
+	return isTerminalTaskStatus(task.Status)
 }
 
 func (s *Service) ReviewWorkerChanges(ctx context.Context, workerID string) (WorkerChangesReview, error) {
@@ -2872,70 +3037,12 @@ func (s *Service) ApplyWorkerChanges(ctx context.Context, workerID string) (Work
 	return result, err
 }
 
-func (s *Service) ApplyTaskResult(ctx context.Context, taskID string) (WorkerApplyResult, error) {
-	return s.applyTaskResultWithRecovery(ctx, taskID, 0)
-}
-
-func (s *Service) applyTaskResultWithRecovery(ctx context.Context, taskID string, attempts int) (WorkerApplyResult, error) {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return WorkerApplyResult{}, err
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
-		return WorkerApplyResult{}, eventstore.ErrNotFound
-	}
-	if !isTerminalTaskStatus(task.Status) {
-		return WorkerApplyResult{}, errors.New("can only apply terminal task results")
-	}
-	if task.FinalCandidateWorkerID == "" {
-		return WorkerApplyResult{}, errors.New("task has no final candidate to apply")
-	}
-	result, err := s.ApplyWorkerChanges(ctx, task.FinalCandidateWorkerID)
-	if err != nil {
-		if recovered, recoverResult, recoverErr := s.recoverTaskApplyFailure(ctx, task, snapshot, err, attempts); recovered {
-			return recoverResult, recoverErr
-		}
-	}
-	return result, err
-}
-
-func (s *Service) recoverTaskApplyFailure(ctx context.Context, task core.Task, snapshot core.Snapshot, applyErr error, attempts int) (bool, WorkerApplyResult, error) {
-	if attempts >= 1 || !isRecoverableApplyConflict(applyErr) {
-		return false, WorkerApplyResult{}, nil
-	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, task.ID, snapshot, task.FinalCandidateWorkerID, applyErr, "local_apply_recovery", "after_apply_conflict", "local apply failed", nil)
-	if !recovery.Handled {
-		return false, WorkerApplyResult{}, nil
-	}
-	if recovery.Err != nil || !recovery.Completed {
-		return true, WorkerApplyResult{}, recovery.Err
-	}
-	candidateWorkerID, reason, err := resolveFinalCandidate(recovery.Results, recovery.SelectedWorkerID)
-	if err != nil {
-		return true, WorkerApplyResult{}, s.waitForFinalCandidateResolution(ctx, task.ID, err)
-	}
-	if _, err := s.append(ctx, core.Event{
-		Type:   core.EventTaskCandidate,
-		TaskID: task.ID,
-		Payload: core.MustJSON(map[string]any{
-			"workerId": candidateWorkerID,
-			"reason":   nonEmpty(reason, recovery.Reason, "local apply conflict recovered after replanning"),
-		}),
-	}); err != nil {
-		return true, WorkerApplyResult{}, err
-	}
-	applyResult, err := s.ApplyWorkerChanges(ctx, candidateWorkerID)
-	return true, applyResult, err
-}
-
 func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (ApplyPolicyRecommendation, error) {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
 		return ApplyPolicyRecommendation{}, err
 	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
+	if _, ok := findTask(snapshot, taskID); !ok {
 		return ApplyPolicyRecommendation{}, eventstore.ErrNotFound
 	}
 	candidates := applyCandidates(snapshot, taskID)
@@ -2944,20 +3051,6 @@ func (s *Service) RecommendApplyPolicy(ctx context.Context, taskID string) (Appl
 		Strategy:   "none",
 		Reason:     "no unapplied successful workers with source changes",
 		Candidates: candidates,
-	}
-	if task.FinalCandidateWorkerID != "" {
-		for _, candidate := range candidates {
-			if candidate.WorkerID == task.FinalCandidateWorkerID {
-				if candidate.Applied {
-					recommendation.Strategy = "already_applied"
-					recommendation.Reason = "final task candidate has already been applied"
-				} else {
-					recommendation.Strategy = "apply_final"
-					recommendation.Reason = "orchestrator selected a final task candidate"
-				}
-				return s.recordApplyPolicy(ctx, taskID, recommendation)
-			}
-		}
 	}
 	unapplied := 0
 	for _, candidate := range candidates {
@@ -3036,6 +3129,7 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		_ = s.failTask(ctx, task.ID, err)
 		return
 	}
+	normalizePlanShape(&plan)
 	if err := plan.Validate(); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 		return
@@ -3080,30 +3174,11 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		if s.handleWorkerSetFailureWithReplan(ctx, task, plan, results, results) {
 			return
 		}
+		if latest, ok := latestSuccessfulWorkerResult(results); ok {
+			followUpParentNodeID = latest.NodeID
+		}
 	} else {
-		result, err := s.runPlannedWorker(ctx, task, plan)
-		if err != nil {
-			if s.waitForRecoverableError(ctx, task.ID, "", err) {
-				return
-			}
-			if s.recoverWorkerFailureWithReplan(ctx, task, plan, results, err) {
-				return
-			}
-			_ = s.failTask(ctx, task.ID, err)
-			return
-		}
-		results = append(results, result)
-		if result.Status == core.WorkerWaiting {
-			s.handleWorkerQuestion(ctx, task, plan, results, result)
-			return
-		}
-		if result.Status == core.WorkerFailed && s.recoverWorkerFailureWithReplan(ctx, task, plan, results, nil) {
-			return
-		}
-		if !s.finishOrContinueTask(ctx, task.ID, result) {
-			return
-		}
-		followUpParentNodeID = result.NodeID
+		ok = true
 	}
 	if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, plan, results, followUpParentNodeID); err != nil {
 		if s.waitForRecoverableError(ctx, task.ID, "", err) {
@@ -3117,12 +3192,12 @@ func (s *Service) runTask(ctx context.Context, task core.Task) {
 		results = nextResults
 	}
 
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, plan, results)
 	if !replanOK {
 		return
 	}
 
-	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, task.ID, results, "", completionReason)
 }
 
 func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, err error) bool {
@@ -3149,18 +3224,17 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 				"status":   "started",
 				"error":    failure.Error,
 			})
-			ok, selectedWorkerID, reason, results := s.replanLoop(ctx, task, initial, results)
+			ok, reason, results := s.replanLoop(ctx, task, initial, results)
 			if !ok {
 				return true
 			}
 			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
-				"kind":     "worker_failure_recovery",
-				"when":     "after_worker_failure",
-				"reason":   nonEmpty(reason, "Orchestrator selected a recovery result."),
-				"workerId": selectedWorkerID,
-				"status":   "completed",
+				"kind":   "worker_failure_recovery",
+				"when":   "after_worker_failure",
+				"reason": nonEmpty(reason, "Orchestrator selected a recovery result."),
+				"status": "completed",
 			})
-			_ = s.completeTask(ctx, task.ID, results, selectedWorkerID, reason)
+			_ = s.completeTask(ctx, task.ID, results, "", reason)
 			return true
 		}
 		_ = s.waitForUserAction(ctx, task.ID, failure.WorkerID, blocker.Reason, blocker.Question, map[string]any{
@@ -3179,18 +3253,17 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 		"status":   "started",
 		"error":    failure.Error,
 	})
-	ok, selectedWorkerID, reason, results := s.replanLoop(ctx, task, initial, results)
+	ok, reason, results := s.replanLoop(ctx, task, initial, results)
 	if !ok {
 		return true
 	}
 	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
-		"kind":     "worker_failure_recovery",
-		"when":     "after_worker_failure",
-		"reason":   nonEmpty(reason, "Orchestrator selected a recovery result."),
-		"workerId": selectedWorkerID,
-		"status":   "completed",
+		"kind":   "worker_failure_recovery",
+		"when":   "after_worker_failure",
+		"reason": nonEmpty(reason, "Orchestrator selected a recovery result."),
+		"status": "completed",
 	})
-	_ = s.completeTask(ctx, task.ID, results, selectedWorkerID, reason)
+	_ = s.completeTask(ctx, task.ID, results, "", reason)
 	return true
 }
 
@@ -3246,6 +3319,8 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 				"workerId": waiting.WorkerID,
 			}),
 		})
+		s.recordLatestUserQuestionWorkItemCompleted(ctx, task.ID, waiting.WorkerID)
+		normalizePlanShape(decision.Plan)
 		if decision.Plan.Metadata == nil {
 			decision.Plan.Metadata = map[string]any{}
 		}
@@ -3289,18 +3364,18 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 			_ = s.failTask(ctx, task.ID, err)
 		} else if ok {
 			nextResults = updatedResults
-			replanOK, finalCandidateWorkerID, finalCandidateReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
+			replanOK, completionReason, nextResults := s.replanLoop(ctx, task, *decision.Plan, nextResults)
 			if !replanOK {
 				return
 			}
-			_ = s.completeTask(ctx, task.ID, nextResults, nonEmpty(decision.FinalCandidateWorkerID, finalCandidateWorkerID), nonEmpty(decision.Rationale, finalCandidateReason))
+			_ = s.completeTask(ctx, task.ID, nextResults, "", nonEmpty(decision.Rationale, completionReason))
 		}
 	case "wait":
 		_ = s.waitForUserAction(ctx, task.ID, waiting.WorkerID, "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, question), map[string]any{
 			"rationale": decision.Rationale,
 		})
 	case "complete":
-		_ = s.completeTask(ctx, task.ID, results, decision.FinalCandidateWorkerID, decision.Rationale)
+		_ = s.completeTask(ctx, task.ID, results, "", decision.Rationale)
 	case "fail":
 		_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "worker question could not be answered")))
 	}
@@ -3327,10 +3402,8 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 			"reason":   "user_feedback",
 		}),
 	})
+	s.recordLatestUserQuestionWorkItemCompleted(ctx, taskID, waitingWorkerID)
 	if s.retryWaitingPublishPullRequestAction(ctx, task, snapshot) {
-		return
-	}
-	if s.retryWaitingFinalCandidatePublication(ctx, task, snapshot) {
 		return
 	}
 	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "replanning", "Resuming task with user feedback."); err != nil {
@@ -3348,6 +3421,7 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
+	normalizePlanShape(&plan)
 	if err := plan.Validate(); err != nil {
 		_ = s.failTask(ctx, taskID, err)
 		return
@@ -3384,11 +3458,11 @@ func (s *Service) resumeWaitingTask(ctx context.Context, taskID string, feedback
 		_ = s.failTask(ctx, taskID, err)
 	} else if ok {
 		results = nextResults
-		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+		replanOK, completionReason, results := s.replanLoop(ctx, task, plan, results)
 		if !replanOK {
 			return
 		}
-		_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+		_ = s.completeTask(ctx, taskID, results, "", completionReason)
 	}
 }
 
@@ -3406,6 +3480,7 @@ func (s *Service) resumeLegacyPullRequestFollowUpPlanning(ctx context.Context, t
 		_ = s.failTask(ctx, taskID, err)
 		return
 	}
+	normalizePlanShape(&plan)
 	if err := plan.Validate(); err != nil {
 		_ = s.failTask(ctx, taskID, err)
 		return
@@ -3436,11 +3511,11 @@ func (s *Service) resumeLegacyPullRequestFollowUpPlanning(ctx context.Context, t
 		_ = s.failTask(ctx, taskID, err)
 	} else if ok {
 		results = nextResults
-		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+		replanOK, completionReason, results := s.replanLoop(ctx, task, plan, results)
 		if !replanOK {
 			return
 		}
-		_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+		_ = s.completeTask(ctx, taskID, results, "", completionReason)
 	}
 }
 
@@ -3473,11 +3548,11 @@ func (s *Service) resumePullRequestFeedbackQueue(ctx context.Context, taskID str
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "pr_needs_work"
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, initial, results)
 	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, taskID, results, "", completionReason)
 }
 
 func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) {
@@ -3489,7 +3564,8 @@ func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) 
 	if !ok || task.Status != core.TaskWaiting {
 		return
 	}
-	if len(pendingWorkerSteering(snapshot, taskID)) == 0 {
+	pending := pendingWorkerSteering(snapshot, taskID)
+	if len(pending) == 0 {
 		return
 	}
 	if s.resumeCodeReviewGateSteering(ctx, task, snapshot) {
@@ -3512,11 +3588,12 @@ func (s *Service) resumeWorkerSteeringQueue(ctx context.Context, taskID string) 
 	task.Error = ""
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = "worker_steering"
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, initial, results)
+	s.recordWorkerSteeringWorkItemsCompleted(ctx, taskID, pending)
 	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, taskID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, taskID, results, "", completionReason)
 }
 
 func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
@@ -3574,6 +3651,7 @@ func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Ta
 		_ = s.failTask(ctx, task.ID, err)
 		return true
 	}
+	_ = s.recordWorkItemCompleted(ctx, task.ID, workerSteeringWorkItemID(steering.EventID), core.WorkItemSucceeded, steering.WorkerID, "")
 	result, err := s.runPlannedWorker(ctx, task, plan)
 	if err != nil {
 		result = failedFollowUpResult(plan, err)
@@ -3618,11 +3696,11 @@ func (s *Service) resumeCodeReviewGateSteering(ctx context.Context, task core.Ta
 		if !ok {
 			return true
 		}
-		replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+		replanOK, completionReason, results := s.replanLoop(ctx, task, initial, results)
 		if !replanOK {
 			return true
 		}
-		_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+		_ = s.completeTask(ctx, task.ID, results, "", completionReason)
 		return true
 	}
 	_ = s.completeTaskWithPublishRecovery(ctx, task.ID, results, candidate.WorkerID, reason, publishRecoveryState{})
@@ -3656,33 +3734,6 @@ func latestPublishPullRequestPlanActionForCandidate(snapshot core.Snapshot, task
 	return PlanAction{}, false
 }
 
-func (s *Service) retryWaitingFinalCandidatePublication(ctx context.Context, task core.Task, snapshot core.Snapshot) bool {
-	candidateWorkerID := strings.TrimSpace(task.FinalCandidateWorkerID)
-	if candidateWorkerID == "" || task.ObjectiveStatus != core.ObjectiveWaitingUser || task.ObjectivePhase != "approval_needed" {
-		return false
-	}
-	if !latestApprovalNeededMatches(snapshot, task.ID, candidateWorkerID, "ssh_signing_agent_failed") {
-		return false
-	}
-	_, results, err := retryGraphStateForTask(snapshot, task.ID)
-	if err != nil {
-		_ = s.failTask(ctx, task.ID, err)
-		return true
-	}
-	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "retrying", "Retrying completion pull request publication after user remediation."); err != nil {
-		return true
-	}
-	if err := s.setTaskStatus(ctx, task.ID, core.TaskPlanning); err != nil {
-		return true
-	}
-	task.Status = core.TaskPlanning
-	task.Error = ""
-	task.ObjectiveStatus = core.ObjectiveActive
-	task.ObjectivePhase = "retrying"
-	s.retryFinalCandidateTask(ctx, task, results)
-	return true
-}
-
 func latestApprovalNeededMatches(snapshot core.Snapshot, taskID string, workerID string, reason string) bool {
 	for i := len(snapshot.Events) - 1; i >= 0; i-- {
 		event := snapshot.Events[i]
@@ -3704,6 +3755,7 @@ func latestApprovalNeededMatches(snapshot core.Snapshot, taskID string, workerID
 }
 
 func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
+	normalizePlanShape(&plan)
 	if _, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskPlanned,
 		TaskID:  task.ID,
@@ -3734,14 +3786,15 @@ func (s *Service) retryTask(ctx context.Context, task core.Task, plan Plan) {
 	} else {
 		results = nextResults
 	}
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, plan, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, plan, results)
 	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, task.ID, results, "", completionReason)
 }
 
 func (s *Service) retryPullRequestFollowUpTask(ctx context.Context, task core.Task, plan Plan) {
+	normalizePlanShape(&plan)
 	if _, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskPlanned,
 		TaskID:  task.ID,
@@ -3822,11 +3875,11 @@ func (s *Service) resumeTaskAfterBackgroundPullRequestFollowUp(ctx context.Conte
 		}
 		return
 	}
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, initial, results)
 	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, task.ID, results, "", completionReason)
 }
 
 func (s *Service) completeRetriedPullRequestFollowUp(ctx context.Context, task core.Task, plan Plan, results []WorkerTurnResult) {
@@ -3884,27 +3937,15 @@ func (s *Service) runPlanWorkerSet(ctx context.Context, task core.Task, plan Pla
 		}
 		return results, true, nil
 	}
-	result, err := s.runPlannedWorker(ctx, task, plan)
-	if err != nil {
-		return results, false, err
-	}
-	results = append(results, result)
-	if result.Status == core.WorkerWaiting {
-		s.handleWorkerQuestion(ctx, task, plan, results, result)
-		return results, false, nil
-	}
-	if !s.finishOrContinueTask(ctx, task.ID, result) {
-		return results, false, nil
-	}
 	return results, true, nil
 }
 
 func (s *Service) retryGraphTask(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) {
-	replanOK, finalCandidateWorkerID, finalCandidateReason, results := s.replanLoop(ctx, task, initial, results)
+	replanOK, completionReason, results := s.replanLoop(ctx, task, initial, results)
 	if !replanOK {
 		return
 	}
-	_ = s.completeTask(ctx, task.ID, results, finalCandidateWorkerID, finalCandidateReason)
+	_ = s.completeTask(ctx, task.ID, results, "", completionReason)
 }
 
 func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Plan) (WorkerTurnResult, error) {
@@ -4188,6 +4229,11 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
+	workItemID, err := s.recordPlanWorkItemStarted(ctx, task.ID, workerID, plan)
+	if err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
@@ -4239,6 +4285,9 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
+		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, err); completeErr != nil {
+			return WorkerTurnResult{}, completeErr
+		}
 		return runState.turnResult(workerID, plan, status, err, changes), nil
 	}
 
@@ -4254,6 +4303,9 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
+		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, statusErr); completeErr != nil {
+			return WorkerTurnResult{}, completeErr
+		}
 		return runState.turnResult(workerID, plan, status, statusErr, changes), nil
 	}
 
@@ -4275,6 +4327,9 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
+	if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, statusErr); completeErr != nil {
+		return WorkerTurnResult{}, completeErr
+	}
 	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
 }
 
@@ -4679,6 +4734,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
 		return WorkerTurnResult{}, err
 	}
+	workItemID, err := s.recordPlanWorkItemStarted(ctx, task.ID, workerID, plan)
+	if err != nil {
+		_ = s.setExecutionNodeStatus(ctx, task.ID, nodeID, core.WorkerFailed)
+		return WorkerTurnResult{}, err
+	}
 
 	workerCtx, cancel := context.WithCancel(ctx)
 	s.mu.Lock()
@@ -4715,6 +4775,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, WorkspaceResultFailed)
+		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, core.WorkerFailed, err); completeErr != nil {
+			return WorkerTurnResult{}, completeErr
+		}
 		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	if err := s.sshRunner.Start(workerCtx, remoteRun, command, stdin); err != nil {
@@ -4724,6 +4787,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, WorkspaceResultFailed)
+		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, core.WorkerFailed, err); completeErr != nil {
+			return WorkerTurnResult{}, completeErr
+		}
 		return runState.turnResult(workerID, plan, core.WorkerFailed, err, changes), nil
 	}
 	sshRunner := s.sshRunner
@@ -4752,6 +4818,9 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain terminal remote worker callbacks: " + err.Error()})
 	}
 	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResultForWorkerStatus(workerStatus))
+	if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, workerStatus, statusErr); completeErr != nil {
+		return WorkerTurnResult{}, completeErr
+	}
 	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
 }
 
@@ -5341,6 +5410,23 @@ func (s *Service) handleWorkerUpdatePullRequestCallback(ctx context.Context, tas
 	}
 	updated, err := s.UpdateTaskPullRequest(ctx, taskID, pr, req)
 	if err != nil {
+		if errors.Is(err, errTerminalPullRequest) || errors.Is(err, errPullRequestTargetMismatch) {
+			errorText := "pull request is already closed or merged; publish a fresh pull request for new candidate work"
+			if errors.Is(err, errPullRequestTargetMismatch) {
+				errorText = err.Error()
+			}
+			return s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":          "update_pull_request",
+				"when":          "worker_callback",
+				"source":        source,
+				"callbackId":    callback.ID,
+				"workerId":      workerID,
+				"pullRequestId": pr.ID,
+				"inputs":        inputs,
+				"status":        "skipped",
+				"error":         errorText,
+			})
+		}
 		return fmt.Errorf("update pull request from %s callback %s: %w", source, callback.ID, err)
 	}
 	snapshot, err := s.store.Snapshot(ctx)
@@ -5592,114 +5678,12 @@ func (s *Service) completeTask(ctx context.Context, taskID string, results []Wor
 }
 
 type publishRecoveryState struct {
-	Attempts               int
-	BlockedFinalCandidates map[string]string
+	Attempts int
 }
 
 func (s *Service) completeTaskWithPublishRecovery(ctx context.Context, taskID string, results []WorkerTurnResult, selectedWorkerID string, reason string, recoveryState publishRecoveryState) error {
-	candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, selectedWorkerID)
-	if err != nil {
-		return s.waitForFinalCandidateResolution(ctx, taskID, err)
-	}
-	if candidateWorkerID != "" {
-		if strings.TrimSpace(reason) == "" {
-			reason = candidateReason
-		}
-		if _, err := s.append(ctx, core.Event{
-			Type:   core.EventTaskCandidate,
-			TaskID: taskID,
-			Payload: core.MustJSON(map[string]any{
-				"workerId": candidateWorkerID,
-				"reason":   reason,
-			}),
-		}); err != nil {
-			return err
-		}
-		if err := s.recordTaskMilestone(ctx, taskID, "candidate_ready", "candidate_ready", "Final candidate selected.", map[string]any{
-			"workerId": candidateWorkerID,
-			"reason":   reason,
-		}); err != nil {
-			return err
-		}
-	}
-	if pr, ok := s.terminalCompletionPullRequestForTask(ctx, taskID); ok {
-		switch {
-		case strings.EqualFold(pr.State, "MERGED"):
-			if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "merged", pullRequestObjectiveSummary(pr, "merged")); err != nil {
-				return err
-			}
-			return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
-		case strings.EqualFold(pr.State, "CLOSED"):
-			if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveAbandoned, "pr_closed", pullRequestObjectiveSummary(pr, "pr_closed")); err != nil {
-				return err
-			}
-			return s.setTaskStatus(ctx, taskID, core.TaskCanceled)
-		}
-	}
-	if pr, ok := s.supersedingOpenContinuingPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
-		status, phase := objectiveForPullRequest(pr)
-		if phase == "" {
-			status = core.ObjectiveWaitingExternal
-			phase = "pr_open"
-		}
-		if err := s.updateTaskObjective(ctx, taskID, status, phase, pullRequestObjectiveSummary(pr, phase)); err != nil {
-			return err
-		}
-		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
-	}
-	if pr, ok := s.openPullRequestForTask(ctx, taskID); ok && !s.retryingCompletionPullRequestPublication(ctx, taskID) {
-		if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "pr_open", pullRequestObjectiveSummary(pr, "pr_open")); err != nil {
-			return err
-		}
-		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
-	}
-	if candidateWorkerID != "" && s.taskCompletionMode(ctx, taskID) == "github" {
-		if handled, recoverErr := s.recoverUnpublishableCompletionCandidate(ctx, taskID, results, candidateWorkerID, reason); handled {
-			return recoverErr
-		}
-		publicationAction := completionPublicationReviewAction(s.latestCompletionPullRequestBody(ctx, taskID))
-		if ready, rejectionReason, err := s.reviewCompletionPublicationReadiness(ctx, taskID, publicationAction, results, candidateWorkerID); err != nil {
-			return err
-		} else if !ready {
-			if handled, recoverErr := s.recoverPublicationReadinessRejectedCandidate(ctx, taskID, results, candidateWorkerID, rejectionReason); handled {
-				return recoverErr
-			}
-			return nil
-		}
-		review, err := s.reviewCandidateBeforePullRequest(ctx, taskID, results, candidateWorkerID, "completion")
-		if err != nil {
-			return err
-		}
-		results = review.Results
-		if !review.Ready {
-			if review.Status == "failed" {
-				_ = s.waitForUserAction(ctx, taskID, review.ReviewWorkerID, "code_review_gate", "Code review worker failed before it could approve or reject publication.\n\n"+review.Reason+"\n\nSteer the failed review worker to retry the review, choose a different review provider, or steer the task to take another path.", map[string]any{
-					"candidateWorkerId": candidateWorkerID,
-					"reviewWorkerId":    review.ReviewWorkerID,
-					"phase":             "completion",
-					"error":             review.Reason,
-				})
-				return nil
-			}
-			if handled, recoverErr := s.recoverCodeReviewBlockedCandidate(ctx, taskID, results, candidateWorkerID, review.Reason); handled {
-				return recoverErr
-			}
-			return nil
-		}
-		if _, err := s.PublishTaskPullRequest(ctx, taskID, core.PublishPullRequestRequest{
-			WorkerID: candidateWorkerID,
-			Body:     stringMetadata(publicationAction.Inputs, "body"),
-		}); err != nil {
-			publishErr := fmt.Errorf("publish completion pull request: %w", err)
-			if handled, recoverErr := s.recoverCompletionPublishFailure(ctx, taskID, results, candidateWorkerID, publishErr, recoveryState); handled {
-				return recoverErr
-			}
-			_ = s.failTask(ctx, taskID, publishErr)
-			return err
-		}
-		return s.setTaskStatus(ctx, taskID, core.TaskWaiting)
-	}
-	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "satisfied", "Local task result is complete."); err != nil {
+	_, _, _, _ = results, selectedWorkerID, reason, recoveryState
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveSatisfied, "satisfied", "Task objective is complete."); err != nil {
 		return err
 	}
 	return s.setTaskStatus(ctx, taskID, core.TaskSucceeded)
@@ -6069,281 +6053,28 @@ func codeReviewAttempts(snapshot core.Snapshot, taskID string, candidateWorkerID
 }
 
 func (s *Service) recoverCodeReviewBlockedCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, reason string) (bool, error) {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
+	if err := s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "code_review_recovery",
+		"when":     "before_completion_pr",
+		"reason":   "Code review blocked publication; waiting for explicit steering.",
+		"workerId": candidateWorkerID,
+		"status":   "waiting",
+		"error":    reason,
+	}); err != nil {
 		return true, err
 	}
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason), "code_review_recovery", "before_completion_pr", "code review blocked publication", map[string]string{candidateWorkerID: reason})
-	if !recovery.Handled {
-		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "code_review_gate", "Code review blocked publication.\n\n"+reason+"\n\nSteer the task to fix the findings, select a different candidate, or publish manually.", map[string]any{
-			"error": reason,
-		})
-		return true, nil
-	}
-	if recovery.Err != nil || !recovery.Completed {
-		return true, recovery.Err
-	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
-}
-
-func (s *Service) retryingCompletionPullRequestPublication(ctx context.Context, taskID string) bool {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return false
-	}
-	task, ok := findTask(snapshot, taskID)
-	return ok && taskCompletionModeFromTask(task) == "github" && task.ObjectivePhase == "retrying"
-}
-
-func (s *Service) latestCompletionPullRequestBody(ctx context.Context, taskID string) string {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return ""
-	}
-	for i := len(snapshot.Events) - 1; i >= 0; i-- {
-		event := snapshot.Events[i]
-		if event.TaskID != taskID || event.Type != core.EventTaskReplanned {
-			continue
-		}
-		var payload struct {
-			Decision ReplanDecision `json:"decision"`
-		}
-		if err := json.Unmarshal(event.Payload, &payload); err != nil {
-			continue
-		}
-		if payload.Decision.Action != "complete" {
-			continue
-		}
-		return strings.TrimSpace(payload.Decision.PullRequestBody)
-	}
-	return ""
-}
-
-func (s *Service) recoverUnpublishableCompletionCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, completionReason string) (bool, error) {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return true, err
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
-		return true, eventstore.ErrNotFound
-	}
-	candidate, ok := workerResultByID(results, candidateWorkerID)
-	if !ok {
-		return false, nil
-	}
-	blockReason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, completionReason)
-	if !blocked {
-		return false, nil
-	}
-	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(blockReason), true)
-	if !recovery.Handled {
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":     "completion_publish_readiness_recovery",
-			"when":     "before_publish",
-			"reason":   "Final candidate is not ready for publication.",
-			"workerId": candidateWorkerID,
-			"status":   "waiting",
-			"error":    blockReason,
-		})
-		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness", "The selected final candidate is not ready to publish as a completion pull request.\n\n"+blockReason+"\n\nSteer the task to continue, select a different final candidate, or explicitly publish anyway.", map[string]any{
-			"error": blockReason,
-		})
-		return true, nil
-	}
-	if recovery.Err != nil || !recovery.Completed {
-		return true, recovery.Err
-	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
-}
-
-func (s *Service) recoverCompletionReadinessWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, allowBlockedCandidateValidation bool) finalCandidateRecoveryResult {
-	if _, ok := s.brain.(ReplanProvider); !ok {
-		return finalCandidateRecoveryResult{}
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
-		return finalCandidateRecoveryResult{Handled: true, Err: eventstore.ErrNotFound}
-	}
-	initial, results, err := retryGraphStateForTask(snapshot, taskID)
-	if err != nil {
-		return finalCandidateRecoveryResult{}
-	}
-	candidate, ok := workerResultByID(results, candidateWorkerID)
-	if !ok || strings.TrimSpace(candidate.Kind) == "" {
-		return finalCandidateRecoveryResult{}
-	}
-	results = annotateFinalCandidateFailure(results, candidateWorkerID, "completion publish readiness failed", failureErr)
-	if err := s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":     "completion_publish_readiness_recovery",
-		"when":     "before_publish",
-		"reason":   "Final candidate does not satisfy the task objective yet; asking the orchestrator to continue or select a different candidate.",
-		"workerId": candidateWorkerID,
-		"status":   "started",
-		"error":    failureErr.Error(),
-	}); err != nil {
-		return finalCandidateRecoveryResult{Handled: true, Err: err}
-	}
-	blockedFinalCandidates := map[string]string{candidateWorkerID: failureErr.Error()}
-	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
-		BlockedFinalCandidates:          blockedFinalCandidates,
-		AllowBlockedCandidateValidation: allowBlockedCandidateValidation,
-		RecoveryHint:                    fmt.Sprintf("completion readiness failed for worker %s: %s. Do not complete with this blocked candidate unless a successful validation worker confirms it. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable.", candidateWorkerID, failureErr.Error()),
+	_ = results
+	_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "code_review_gate", "Code review blocked publication.\n\n"+reason+"\n\nSteer the task to fix the findings or publish/update a specific PR artifact explicitly.", map[string]any{
+		"error": reason,
 	})
-	if !ok {
-		return finalCandidateRecoveryResult{Handled: true, Results: results}
-	}
-	if selectedWorkerID == "" {
-		if candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, ""); err == nil {
-			selectedWorkerID = candidateWorkerID
-			reason = nonEmpty(reason, candidateReason)
-		}
-	}
-	if selectedWorkerID == "" {
-		return finalCandidateRecoveryResult{Handled: true, Results: results}
-	}
-	if err := s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":     "completion_publish_readiness_recovery",
-		"when":     "before_publish",
-		"reason":   nonEmpty(reason, "Completion readiness recovery selected a new candidate."),
-		"workerId": selectedWorkerID,
-		"status":   "completed",
-	}); err != nil {
-		return finalCandidateRecoveryResult{Handled: true, Err: err}
-	}
-	return finalCandidateRecoveryResult{
-		Handled:          true,
-		Completed:        true,
-		SelectedWorkerID: selectedWorkerID,
-		Reason:           reason,
-		Results:          results,
-	}
+	return true, nil
 }
 
-func (s *Service) recoverCompletionPublishFailure(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, publishErr error, recoveryState publishRecoveryState) (bool, error) {
-	if !isRecoverablePublishConflict(publishErr) {
-		return false, nil
-	}
-	if recoveryState.Attempts >= maxCompletionPublishRecoveryAttempts {
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":     "completion_publish_recovery",
-			"when":     "after_publish_conflict",
-			"reason":   "Completion publish recovery reached the retry limit.",
-			"workerId": candidateWorkerID,
-			"status":   "waiting",
-			"error":    publishErr.Error(),
-		})
-		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_conflict_recovery_limit", "Publishing the completion pull request still conflicts after multiple orchestrated repair attempts. Steer the task with how to resolve the remaining conflicts or publish manually from the retained worker workspace.", map[string]any{
-			"error":                   publishErr.Error(),
-			"blockedFinalCandidates":  sortedMapKeys(recoveryState.BlockedFinalCandidates),
-			"publishRecoveryAttempts": recoveryState.Attempts,
-		})
-		return true, nil
-	}
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return false, err
-	}
-	blockedFinalCandidates := maps.Clone(recoveryState.BlockedFinalCandidates)
-	if blockedFinalCandidates == nil {
-		blockedFinalCandidates = map[string]string{}
-	}
-	blockedFinalCandidates[candidateWorkerID] = publishErr.Error()
-	recovery := s.recoverFinalCandidateWithReplan(ctx, taskID, snapshot, candidateWorkerID, publishErr, "completion_publish_recovery", "after_publish_conflict", "completion publish failed", blockedFinalCandidates)
-	if !recovery.Handled {
-		return false, nil
-	}
-	if recovery.Err != nil || !recovery.Completed {
-		return true, recovery.Err
-	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{
-		Attempts:               recoveryState.Attempts + 1,
-		BlockedFinalCandidates: blockedFinalCandidates,
-	})
-}
-
-type finalCandidateRecoveryResult struct {
-	Handled          bool
-	Completed        bool
-	SelectedWorkerID string
-	Reason           string
-	Results          []WorkerTurnResult
-	Err              error
-}
-
-func (s *Service) recoverFinalCandidateWithReplan(ctx context.Context, taskID string, snapshot core.Snapshot, candidateWorkerID string, failureErr error, actionKind string, actionWhen string, failureLabel string, blockedFinalCandidates map[string]string) finalCandidateRecoveryResult {
-	if _, ok := s.brain.(ReplanProvider); !ok {
-		return finalCandidateRecoveryResult{}
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
-		return finalCandidateRecoveryResult{Handled: true, Err: eventstore.ErrNotFound}
-	}
-	initial, results, err := retryGraphStateForTask(snapshot, taskID)
-	if err != nil {
-		return finalCandidateRecoveryResult{}
-	}
-	candidate, ok := workerResultByID(results, candidateWorkerID)
-	if !ok || strings.TrimSpace(candidate.Kind) == "" {
-		return finalCandidateRecoveryResult{}
-	}
-	results = annotateFinalCandidateFailure(results, candidateWorkerID, failureLabel, failureErr)
-	if err := s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":     actionKind,
-		"when":     actionWhen,
-		"reason":   "Final candidate finalization failed; asking the orchestrator to choose a recovery plan.",
-		"workerId": candidateWorkerID,
-		"status":   "started",
-		"error":    failureErr.Error(),
-	}); err != nil {
-		return finalCandidateRecoveryResult{Handled: true, Err: err}
-	}
-	blockedFinalCandidates = maps.Clone(blockedFinalCandidates)
-	if blockedFinalCandidates == nil {
-		blockedFinalCandidates = map[string]string{}
-	}
-	blockedFinalCandidates[candidateWorkerID] = failureErr.Error()
-	ok, selectedWorkerID, reason, results := s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{
-		BlockedFinalCandidates:         blockedFinalCandidates,
-		AllowBlockedBasePatchConflicts: true,
-		RecoveryHint:                   fmt.Sprintf("%s for worker %s. Do not complete with a blocked final candidate. Schedule a repair or consolidation worker that starts from the blocked worker changes, resolves conflicts against the current checkout, and produces a new candidate.", failureLabel, candidateWorkerID),
-		RequiredRepairWorkerID:         candidateWorkerID,
-		RequiredRepairReason:           failureErr.Error(),
-		FinalizationRecovery:           true,
-	})
-	if !ok {
-		return finalCandidateRecoveryResult{Handled: true, Results: results}
-	}
-	if selectedWorkerID == "" {
-		if candidateWorkerID, candidateReason, err := resolveFinalCandidate(results, ""); err == nil {
-			selectedWorkerID = candidateWorkerID
-			reason = nonEmpty(reason, candidateReason)
-		}
-	}
-	if err := s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":       actionKind,
-		"when":       actionWhen,
-		"reason":     nonEmpty(reason, "Orchestrator selected a recovery result."),
-		"workerId":   selectedWorkerID,
-		"baseWorker": candidateWorkerID,
-		"status":     "completed",
-	}); err != nil {
-		return finalCandidateRecoveryResult{Handled: true, Err: err}
-	}
-	return finalCandidateRecoveryResult{
-		Handled:          true,
-		Completed:        true,
-		SelectedWorkerID: selectedWorkerID,
-		Reason:           reason,
-		Results:          results,
-	}
-}
-
-func annotateFinalCandidateFailure(results []WorkerTurnResult, candidateWorkerID string, label string, failureErr error) []WorkerTurnResult {
+func annotateWorkerFailure(results []WorkerTurnResult, workerID string, label string, failureErr error) []WorkerTurnResult {
 	out := make([]WorkerTurnResult, len(results))
 	copy(out, results)
 	for index := range out {
-		if out[index].WorkerID != candidateWorkerID {
+		if out[index].WorkerID != workerID {
 			continue
 		}
 		message := strings.TrimSpace(label + ": " + failureErr.Error())
@@ -6819,7 +6550,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		_, err = s.publishTaskPullRequest(ctx, task.ID, req, recordCompletedAction)
 		if err != nil {
 			if boolMetadata(action.Inputs, "continueAfterPublish") && isRecoverablePublishConflict(err) {
-				results = annotateFinalCandidateFailure(results, workerID, "intermediate publish failed", err)
+				results = annotateWorkerFailure(results, workerID, "intermediate publish failed", err)
 				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":     action.Kind,
 					"when":     nonEmpty(action.When, "after_success"),
@@ -6958,6 +6689,25 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		updated, err := s.UpdateTaskPullRequest(ctx, task.ID, pr, req)
 		if err != nil {
+			if errors.Is(err, errTerminalPullRequest) || errors.Is(err, errPullRequestTargetMismatch) {
+				errorText := "pull request is already closed or merged; publish a fresh pull request for new candidate work"
+				if errors.Is(err, errPullRequestTargetMismatch) {
+					errorText = err.Error()
+				}
+				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
+					"kind":          action.Kind,
+					"when":          nonEmpty(action.When, "after_success"),
+					"reason":        action.Reason,
+					"inputs":        action.Inputs,
+					"workerId":      workerID,
+					"pullRequestId": pr.ID,
+					"status":        "skipped",
+					"error":         errorText,
+				}); actionErr != nil {
+					return false, results, actionErr
+				}
+				return true, results, nil
+			}
 			if s.waitForRecoverableError(ctx, task.ID, workerID, err) {
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":          action.Kind,
@@ -6972,7 +6722,7 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 				return false, results, nil
 			}
 			if pullRequestContinuesTask(pr) {
-				results = annotateFinalCandidateFailure(results, workerID, "intermediate pull request update failed", err)
+				results = annotateWorkerFailure(results, workerID, "intermediate pull request update failed", err)
 				if actionErr := s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":          action.Kind,
 					"when":          nonEmpty(action.When, "after_success"),
@@ -7088,6 +6838,45 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			return false, results, err
 		}
 		return true, results, nil
+	case "spawn_work":
+		items, err := s.queueWorkItemsFromAction(ctx, task, action)
+		if err != nil {
+			return false, results, err
+		}
+		started, err := s.startRunnableSpawnWorkItems(ctx, task.ID)
+		if err != nil {
+			return false, results, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":              action.Kind,
+			"when":              nonEmpty(action.When, "after_success"),
+			"reason":            action.Reason,
+			"inputs":            action.Inputs,
+			"queuedWorkItemIds": workItemIDs(items),
+			"queuedWorkCount":   len(items),
+			"startedWorkCount":  started,
+		}); err != nil {
+			return false, results, err
+		}
+		return false, results, nil
+	case "finish_objective":
+		summary := stringMetadata(action.Inputs, "summary")
+		if summary == "" {
+			summary = action.Reason
+		}
+		if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveSatisfied, "satisfied", summary); err != nil {
+			return false, results, err
+		}
+		if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+			"kind":   action.Kind,
+			"when":   nonEmpty(action.When, "after_success"),
+			"reason": action.Reason,
+			"inputs": action.Inputs,
+			"status": "completed",
+		}); err != nil {
+			return false, results, err
+		}
+		return false, results, s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
 	case "wait_external":
 		phase := stringMetadata(action.Inputs, "phase")
 		if phase == "" {
@@ -7173,11 +6962,450 @@ func (s *Service) waitForMissingPublishCandidate(ctx context.Context, task core.
 }
 
 type childTaskSpec struct {
-	Title          string   `json:"title"`
-	Prompt         string   `json:"prompt"`
-	WorkstreamID   string   `json:"workstreamId,omitempty"`
-	CompletionMode string   `json:"completionMode,omitempty"`
-	DependsOn      []string `json:"dependsOn,omitempty"`
+	Title        string   `json:"title"`
+	Prompt       string   `json:"prompt"`
+	WorkstreamID string   `json:"workstreamId,omitempty"`
+	DependsOn    []string `json:"dependsOn,omitempty"`
+}
+
+type spawnedWorkItemSpec struct {
+	ID              string         `json:"id,omitempty"`
+	Kind            string         `json:"kind"`
+	Reason          string         `json:"reason,omitempty"`
+	Prompt          string         `json:"prompt,omitempty"`
+	TargetKind      string         `json:"targetKind,omitempty"`
+	TargetID        string         `json:"targetId,omitempty"`
+	WorkerKind      string         `json:"workerKind,omitempty"`
+	ReasoningEffort string         `json:"reasoningEffort,omitempty"`
+	DependsOn       []string       `json:"dependsOn,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+func (s *Service) queueWorkItemsFromAction(ctx context.Context, task core.Task, action PlanAction) ([]core.WorkItem, error) {
+	rawItems := anySliceMetadata(action.Inputs, "items")
+	if len(rawItems) == 0 {
+		return nil, errors.New("spawn_work requires at least one item")
+	}
+	queued := make([]core.WorkItem, 0, len(rawItems))
+	for index, raw := range rawItems {
+		spec, err := spawnedWorkItemSpecFromInput(raw)
+		if err != nil {
+			return nil, fmt.Errorf("spawn_work inputs.items[%d]: %w", index, err)
+		}
+		itemID := strings.TrimSpace(spec.ID)
+		if itemID == "" {
+			itemID = uuid.NewString()
+		}
+		kind := nonEmpty(spec.Kind, "objective.implement")
+		targetKind := nonEmpty(spec.TargetKind, "objective")
+		targetID := nonEmpty(spec.TargetID, task.ID)
+		metadata := maps.Clone(spec.Metadata)
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata["sourceAction"] = action.Kind
+		if spec.WorkerKind != "" {
+			metadata["workerKind"] = spec.WorkerKind
+		}
+		if spec.ReasoningEffort != "" {
+			metadata["reasoningEffort"] = spec.ReasoningEffort
+		}
+		if len(spec.DependsOn) > 0 {
+			metadata["dependsOn"] = spec.DependsOn
+		}
+		if err := s.recordWorkItemQueued(ctx, task.ID, map[string]any{
+			"id":         itemID,
+			"kind":       kind,
+			"targetKind": targetKind,
+			"targetId":   targetID,
+			"reason":     spec.Reason,
+			"prompt":     spec.Prompt,
+			"metadata":   metadata,
+		}); err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		queued = append(queued, core.WorkItem{
+			ID:         itemID,
+			TaskID:     task.ID,
+			Kind:       kind,
+			Status:     core.WorkItemQueued,
+			TargetKind: targetKind,
+			TargetID:   targetID,
+			Reason:     spec.Reason,
+			Prompt:     spec.Prompt,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+			Metadata:   core.MustJSON(metadata),
+		})
+	}
+	return queued, nil
+}
+
+func spawnedWorkItemSpecFromInput(raw any) (spawnedWorkItemSpec, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return spawnedWorkItemSpec{}, err
+	}
+	var spec spawnedWorkItemSpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return spawnedWorkItemSpec{}, err
+	}
+	spec.Kind = strings.TrimSpace(spec.Kind)
+	if spec.Kind == "" {
+		spec.Kind = "objective.implement"
+	}
+	spec.ID = strings.TrimSpace(spec.ID)
+	spec.Reason = strings.TrimSpace(spec.Reason)
+	spec.Prompt = strings.TrimSpace(spec.Prompt)
+	spec.TargetKind = strings.TrimSpace(spec.TargetKind)
+	spec.TargetID = strings.TrimSpace(spec.TargetID)
+	spec.WorkerKind = strings.TrimSpace(spec.WorkerKind)
+	spec.ReasoningEffort = strings.TrimSpace(spec.ReasoningEffort)
+	spec.DependsOn = dedupeTrimmedStrings(spec.DependsOn)
+	return spec, nil
+}
+
+func workItemIDs(items []core.WorkItem) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.ID)
+	}
+	return out
+}
+
+func (s *Service) startRunnableSpawnWorkItems(ctx context.Context, taskID string) (int, error) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		return 0, eventstore.ErrNotFound
+	}
+	if isTerminalTaskStatus(task.Status) {
+		return 0, nil
+	}
+	if err := s.failBlockedSpawnWorkItems(ctx, snapshot, taskID); err != nil {
+		return 0, err
+	}
+	snapshot, err = s.store.Snapshot(ctx)
+	if err != nil {
+		return 0, err
+	}
+	items := runnableSpawnWorkItems(snapshot, taskID)
+	started := 0
+	for _, item := range items {
+		if !s.claimActiveWorkItem(item.ID) {
+			continue
+		}
+		started++
+		go s.runSpawnedWorkItem(context.Background(), taskID, item.ID)
+	}
+	return started, nil
+}
+
+func (s *Service) runSpawnedWorkItem(ctx context.Context, taskID string, itemID string) {
+	defer s.releaseActiveWorkItem(itemID)
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, "", err.Error())
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || isTerminalTaskStatus(task.Status) {
+		return
+	}
+	item, ok := workItemByIDFromSnapshot(snapshot, taskID, itemID)
+	if !ok || item.Status != core.WorkItemQueued {
+		return
+	}
+	if !spawnWorkItemDependenciesSatisfied(snapshot, taskID, item) {
+		return
+	}
+	plan, err := s.planForSpawnedWorkItem(snapshot, task, item)
+	if err != nil {
+		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, "", err.Error())
+		s.resumeObjectiveAfterSpawnWorkDrained(context.Background(), taskID)
+		return
+	}
+	if _, err := s.append(ctx, core.Event{
+		Type:    core.EventTaskPlanned,
+		TaskID:  task.ID,
+		Payload: core.MustJSON(plan),
+	}); err != nil {
+		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, "", err.Error())
+		s.resumeObjectiveAfterSpawnWorkDrained(context.Background(), taskID)
+		return
+	}
+	result, err := s.runPlannedWorker(ctx, task, plan)
+	if err != nil {
+		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, result.WorkerID, err.Error())
+		s.resumeObjectiveAfterSpawnWorkDrained(context.Background(), taskID)
+		return
+	}
+	if result.Status == core.WorkerWaiting {
+		s.handleWorkerQuestion(context.Background(), task, plan, completedWorkerResultsForTask(snapshot, taskID), result)
+		return
+	}
+	if _, err := s.startRunnableSpawnWorkItems(context.Background(), taskID); err != nil {
+		_ = s.recordTaskAction(context.Background(), taskID, map[string]any{
+			"kind":   "spawn_work_scheduler",
+			"status": "failed",
+			"reason": "failed to start newly unblocked spawned work items",
+			"error":  err.Error(),
+		})
+	}
+	s.resumeObjectiveAfterSpawnWorkDrained(context.Background(), taskID)
+}
+
+func (s *Service) planForSpawnedWorkItem(snapshot core.Snapshot, task core.Task, item core.WorkItem) (Plan, error) {
+	metadata := workItemMetadata(item)
+	dependsOn := stringSliceMetadata(metadata, "dependsOn")
+	results := completedWorkerResultsForTask(snapshot, task.ID)
+	role := nonEmpty(stringMetadata(metadata, "role"), strings.TrimPrefix(item.Kind, "objective."), item.Kind)
+	reason := nonEmpty(item.Reason, stringMetadata(metadata, "reason"), "Run spawned objective work item.")
+	prompt := strings.TrimSpace(item.Prompt)
+	if prompt == "" {
+		prompt = fmt.Sprintf("Run this objective work item.\n\nKind: %s\nReason: %s", item.Kind, reason)
+	}
+	prompt = buildInitialWorkerPrompt(prompt, results, dependsOn)
+	spawn := SpawnRequest{
+		ID:              item.ID,
+		Role:            role,
+		Reason:          reason,
+		WorkerKind:      stringMetadata(metadata, "workerKind"),
+		ReasoningEffort: stringMetadata(metadata, "reasoningEffort"),
+	}
+	workerKind := s.workerKindForSpawn(spawn, "")
+	if _, ok := s.runners[workerKind]; !ok {
+		return Plan{}, fmt.Errorf("unknown worker kind %q for spawned work item %s", workerKind, item.ID)
+	}
+	reasoningEffort := normalizeReasoningEffort(spawn.ReasoningEffort)
+	planMetadata := maps.Clone(metadata)
+	if planMetadata == nil {
+		planMetadata = map[string]any{}
+	}
+	planMetadata["brain"] = nonEmpty(stringMetadata(planMetadata, "brain"), "work-item-scheduler")
+	planMetadata["scheduler"] = nonEmpty(stringMetadata(planMetadata, "scheduler"), "work-item")
+	planMetadata["workItemID"] = item.ID
+	planMetadata["workItemKind"] = item.Kind
+	planMetadata["spawnID"] = item.ID
+	planMetadata["spawnRole"] = role
+	planMetadata["spawnReason"] = reason
+	planMetadata["dependsOn"] = dependsOn
+	planMetadata["nodeID"] = nonEmpty(stringMetadata(planMetadata, "nodeID"), uuid.NewString())
+	planMetadata["planID"] = nonEmpty(stringMetadata(planMetadata, "planID"), uuid.NewString())
+	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
+		planMetadata["baseWorkerID"] = baseWorkerID
+	}
+	if parentNodeID := latestNodeIDForDependencies(results, dependsOn); parentNodeID != "" && stringMetadata(planMetadata, "parentNodeID") == "" {
+		planMetadata["parentNodeID"] = parentNodeID
+	}
+	if reasoningEffort != "" {
+		planMetadata["reasoningEffort"] = reasoningEffort
+	}
+	return Plan{
+		WorkerKind:      workerKind,
+		Prompt:          prompt,
+		ReasoningEffort: reasoningEffort,
+		Rationale:       "spawned work item: " + reason,
+		Steps: []PlanStep{{
+			Title:       "Run " + role,
+			Description: reason,
+		}},
+		Metadata: planMetadata,
+	}, nil
+}
+
+func runnableSpawnWorkItems(snapshot core.Snapshot, taskID string) []core.WorkItem {
+	items := []core.WorkItem{}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || item.Status != core.WorkItemQueued || !isRunnableSpawnWorkItem(item, taskID) {
+			continue
+		}
+		if !spawnWorkItemDependenciesSatisfied(snapshot, taskID, item) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt.Before(items[j].CreatedAt)
+	})
+	return items
+}
+
+func isRunnableSpawnWorkItem(item core.WorkItem, taskID string) bool {
+	if !isSpawnWorkItem(item) {
+		return false
+	}
+	if item.Status != core.WorkItemQueued {
+		return false
+	}
+	if item.TargetKind != "" && item.TargetKind != "objective" {
+		return false
+	}
+	if item.TargetID != "" && item.TargetID != taskID {
+		return false
+	}
+	return true
+}
+
+func isSpawnWorkItem(item core.WorkItem) bool {
+	metadata := workItemMetadata(item)
+	if stringMetadata(metadata, "sourceAction") != "spawn_work" {
+		return false
+	}
+	return strings.HasPrefix(item.Kind, "objective.")
+}
+
+func (s *Service) failBlockedSpawnWorkItems(ctx context.Context, snapshot core.Snapshot, taskID string) error {
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || item.Status != core.WorkItemQueued || !isRunnableSpawnWorkItem(item, taskID) {
+			continue
+		}
+		dep, ok := failedSpawnWorkDependency(snapshot, taskID, item)
+		if !ok {
+			continue
+		}
+		if err := s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemFailed, "", "dependency "+dep+" did not complete successfully"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func spawnWorkItemDependenciesSatisfied(snapshot core.Snapshot, taskID string, item core.WorkItem) bool {
+	for _, dep := range stringSliceMetadata(workItemMetadata(item), "dependsOn") {
+		if !spawnWorkDependencySatisfied(snapshot, taskID, dep) {
+			return false
+		}
+	}
+	return true
+}
+
+func spawnWorkDependencySatisfied(snapshot core.Snapshot, taskID string, dep string) bool {
+	dep = strings.TrimSpace(dep)
+	if dep == "" {
+		return true
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID == taskID && item.ID == dep {
+			return item.Status == core.WorkItemSucceeded
+		}
+	}
+	for _, result := range completedWorkerResultsForTask(snapshot, taskID) {
+		if result.SpawnID == dep || result.WorkerID == dep {
+			return result.Status == core.WorkerSucceeded
+		}
+	}
+	return false
+}
+
+func failedSpawnWorkDependency(snapshot core.Snapshot, taskID string, item core.WorkItem) (string, bool) {
+	for _, dep := range stringSliceMetadata(workItemMetadata(item), "dependsOn") {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			continue
+		}
+		for _, candidate := range snapshot.WorkItems {
+			if candidate.TaskID != taskID || candidate.ID != dep {
+				continue
+			}
+			if candidate.Status == core.WorkItemFailed || candidate.Status == core.WorkItemCanceled {
+				return dep, true
+			}
+		}
+		for _, result := range completedWorkerResultsForTask(snapshot, taskID) {
+			if result.SpawnID != dep && result.WorkerID != dep {
+				continue
+			}
+			if result.Status == core.WorkerFailed || result.Status == core.WorkerCanceled {
+				return dep, true
+			}
+		}
+	}
+	return "", false
+}
+
+func (s *Service) resumeObjectiveAfterSpawnWorkDrained(ctx context.Context, taskID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok || task.Status != core.TaskRunning {
+		return
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || !isSpawnWorkItem(item) {
+			continue
+		}
+		if item.Status == core.WorkItemQueued || item.Status == core.WorkItemRunning {
+			return
+		}
+	}
+	initial, results, err := retryGraphStateForTask(snapshot, taskID)
+	if err != nil {
+		return
+	}
+	replanWorkItemID := "spawn_work_replan:" + taskID
+	if !s.claimActiveWorkItem(replanWorkItemID) {
+		return
+	}
+	if err := s.startObjectiveRoutine(ctx, task, "session.recover", "Resume objective replanning after spawned work items completed.", func(taskCtx context.Context) {
+		defer s.releaseActiveWorkItem(replanWorkItemID)
+		s.retryGraphTask(taskCtx, task, initial, results)
+	}); err != nil {
+		s.releaseActiveWorkItem(replanWorkItemID)
+	}
+}
+
+func (s *Service) claimActiveWorkItem(itemID string) bool {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.activeWorkItems[itemID]; ok {
+		return false
+	}
+	s.activeWorkItems[itemID] = struct{}{}
+	return true
+}
+
+func (s *Service) releaseActiveWorkItem(itemID string) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.activeWorkItems, itemID)
+}
+
+func workItemByIDFromSnapshot(snapshot core.Snapshot, taskID string, itemID string) (core.WorkItem, bool) {
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID == taskID && item.ID == itemID {
+			return item, true
+		}
+	}
+	return core.WorkItem{}, false
+}
+
+func workItemMetadata(item core.WorkItem) map[string]any {
+	metadata := map[string]any{}
+	if len(item.Metadata) == 0 {
+		return metadata
+	}
+	if err := json.Unmarshal(item.Metadata, &metadata); err != nil {
+		return map[string]any{}
+	}
+	if metadata == nil {
+		return map[string]any{}
+	}
+	return metadata
 }
 
 func (s *Service) createChildTasksFromAction(ctx context.Context, parent core.Task, action PlanAction) ([]core.Task, error) {
@@ -7197,15 +7425,6 @@ func (s *Service) createChildTasksFromAction(ctx context.Context, parent core.Ta
 		}
 		if len(spec.DependsOn) > 0 {
 			metadata["dependsOn"] = spec.DependsOn
-		}
-		switch strings.ToLower(strings.TrimSpace(spec.CompletionMode)) {
-		case "":
-		case "github":
-			metadata["completionMode"] = "github"
-		case "local":
-			metadata["completionMode"] = "local"
-		default:
-			return nil, fmt.Errorf("completionMode must be github or local")
 		}
 		req, err := NormalizeCreateTaskRequest(core.CreateTaskRequest{
 			ProjectID:    parent.ProjectID,
@@ -7240,7 +7459,6 @@ func childTaskSpecFromInput(raw any) (childTaskSpec, error) {
 	spec.Title = strings.TrimSpace(spec.Title)
 	spec.Prompt = strings.TrimSpace(spec.Prompt)
 	spec.WorkstreamID = strings.TrimSpace(spec.WorkstreamID)
-	spec.CompletionMode = strings.TrimSpace(spec.CompletionMode)
 	spec.DependsOn = trimStringSlice(spec.DependsOn)
 	if spec.Title == "" {
 		return childTaskSpec{}, errors.New("title is required")
@@ -7277,29 +7495,6 @@ func latestSuccessfulWorkerResult(results []WorkerTurnResult) (WorkerTurnResult,
 		}
 	}
 	return WorkerTurnResult{}, false
-}
-
-func completionPublicationReviewAction(body string) PlanAction {
-	return PlanAction{
-		Kind:   "publish_pull_request",
-		When:   "before_completion",
-		Reason: "publish completion pull request",
-		Inputs: map[string]any{
-			"body": strings.TrimSpace(body),
-		},
-	}
-}
-
-func (s *Service) reviewCompletionPublicationReadiness(ctx context.Context, taskID string, action PlanAction, results []WorkerTurnResult, workerID string) (bool, string, error) {
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return false, "", err
-	}
-	task, ok := findTask(snapshot, taskID)
-	if !ok {
-		return false, "", eventstore.ErrNotFound
-	}
-	return s.reviewTaskPublicationReadiness(ctx, task, action, results, workerID)
 }
 
 func (s *Service) reviewPlanPublicationReadiness(ctx context.Context, task core.Task, action PlanAction, results []WorkerTurnResult, workerID string) (bool, error) {
@@ -7406,34 +7601,6 @@ func (s *Service) reviewTaskPublicationReadiness(ctx context.Context, task core.
 	})
 }
 
-func (s *Service) recoverPublicationReadinessRejectedCandidate(ctx context.Context, taskID string, results []WorkerTurnResult, candidateWorkerID string, reason string) (bool, error) {
-	if strings.TrimSpace(reason) == "" {
-		reason = "publication readiness review rejected completion pull request"
-	}
-	snapshot, err := s.store.Snapshot(ctx)
-	if err != nil {
-		return true, err
-	}
-	recovery := s.recoverCompletionReadinessWithReplan(ctx, taskID, snapshot, candidateWorkerID, errors.New(reason), false)
-	if !recovery.Handled {
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":     "completion_publish_readiness_recovery",
-			"when":     "before_publish",
-			"reason":   "Publication readiness review blocked completion pull request.",
-			"workerId": candidateWorkerID,
-			"status":   "waiting",
-			"error":    reason,
-		})
-		_ = s.waitForUserAction(ctx, taskID, candidateWorkerID, "publish_readiness_review", "Publication readiness review blocked the completion pull request.\n\n"+reason+"\n\nSteer the task to continue, select a different final candidate, or explicitly publish anyway.", map[string]any{
-			"error": reason,
-		})
-		return true, nil
-	}
-	if recovery.Err != nil || !recovery.Completed {
-		return true, recovery.Err
-	}
-	return true, s.completeTaskWithPublishRecovery(ctx, taskID, recovery.Results, recovery.SelectedWorkerID, recovery.Reason, publishRecoveryState{})
-}
 func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload map[string]any) error {
 	_, err := s.append(ctx, core.Event{
 		Type:    core.EventTaskAction,
@@ -7445,14 +7612,12 @@ func (s *Service) recordTaskAction(ctx context.Context, taskID string, payload m
 
 func (s *Service) recordRejectedReplanCompletion(ctx context.Context, taskID string, turn int, decision ReplanDecision, reason string) error {
 	return s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":                   "replan_completion_rejected",
-		"status":                 "rejected",
-		"turn":                   turn,
-		"reason":                 reason,
-		"workerId":               decision.FinalCandidateWorkerID,
-		"replanAction":           decision.Action,
-		"replanRationale":        decision.Rationale,
-		"finalCandidateWorkerId": decision.FinalCandidateWorkerID,
+		"kind":            "replan_completion_rejected",
+		"status":          "rejected",
+		"turn":            turn,
+		"reason":          reason,
+		"replanAction":    decision.Action,
+		"replanRationale": decision.Rationale,
 	})
 }
 
@@ -7487,13 +7652,34 @@ func (s *Service) recordUserActionNeeded(ctx context.Context, taskID string, wor
 			}
 		}
 	}
-	_, err := s.append(ctx, core.Event{
+	event, err := s.append(ctx, core.Event{
 		Type:     core.EventApprovalNeeded,
 		TaskID:   taskID,
 		WorkerID: strings.TrimSpace(workerID),
 		Payload:  core.MustJSON(payload),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	targetKind := "task"
+	targetID := taskID
+	if strings.TrimSpace(workerID) != "" {
+		targetKind = "worker"
+		targetID = strings.TrimSpace(workerID)
+	}
+	return s.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         userQuestionWorkItemID(event.ID),
+		"kind":       "user.question",
+		"targetKind": targetKind,
+		"targetId":   targetID,
+		"reason":     payload["reason"],
+		"prompt":     payload["question"],
+		"metadata": map[string]any{
+			"approvalEventId": event.ID,
+			"workerId":        strings.TrimSpace(workerID),
+			"reason":          payload["reason"],
+		},
+	})
 }
 
 func (s *Service) waitForRecoverableError(ctx context.Context, taskID string, workerID string, err error) bool {
@@ -7640,25 +7826,6 @@ func classifyUserRecoverableBlocker(text string) (userRecoverableBlocker, bool) 
 	return userRecoverableBlocker{}, false
 }
 
-func (s *Service) waitForFinalCandidateResolution(ctx context.Context, taskID string, err error) error {
-	_, _ = s.append(ctx, core.Event{
-		Type:   core.EventApprovalNeeded,
-		TaskID: taskID,
-		Payload: core.MustJSON(map[string]any{
-			"question": "Final candidate selection is ambiguous or points at a non-applyable worker. Retry after steering the orchestrator to consolidate or select the intended candidate.",
-			"reason":   "final_candidate_selection",
-			"error":    err.Error(),
-		}),
-	})
-	if statusErr := s.setTaskStatus(ctx, taskID, core.TaskWaiting); statusErr != nil {
-		return statusErr
-	}
-	if objectiveErr := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingUser, "approval_needed", "Final candidate selection needs user or orchestrator approval."); objectiveErr != nil {
-		return objectiveErr
-	}
-	return err
-}
-
 func replanMadeProgress(before []WorkerTurnResult, after []WorkerTurnResult) bool {
 	if len(after) <= len(before) {
 		return false
@@ -7705,20 +7872,6 @@ func validatesBlockedCandidate(results []WorkerTurnResult, selectedWorkerID stri
 	return false
 }
 
-func sortedMapKeys(values map[string]string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		if strings.TrimSpace(key) != "" {
-			keys = append(keys, key)
-		}
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func (s *Service) completionReadinessBlockReason(ctx context.Context, task core.Task, candidate WorkerTurnResult, completionReason string) (string, bool) {
 	reviewer, ok := s.brain.(CompletionReviewProvider)
 	if !ok {
@@ -7741,34 +7894,21 @@ func (s *Service) completionReadinessBlockReason(ctx context.Context, task core.
 	}
 	reason := strings.TrimSpace(review.Reason)
 	if reason == "" {
-		reason = "selected final candidate does not satisfy the task objective yet"
+		reason = "completion candidate does not satisfy the task objective yet"
 	}
 	return reason, true
 }
 
-func (s *Service) taskCompletionMode(ctx context.Context, taskID string) string {
+func (s *Service) taskIsBroadObjective(ctx context.Context, taskID string) bool {
 	snapshot, err := s.store.Snapshot(ctx)
 	if err != nil {
-		return "local"
+		return false
 	}
 	task, ok := findTask(snapshot, taskID)
 	if !ok {
-		return "local"
+		return false
 	}
-	return taskCompletionModeFromTask(task)
-}
-
-func taskCompletionModeFromTask(task core.Task) string {
-	var metadata map[string]any
-	if len(task.Metadata) > 0 {
-		_ = json.Unmarshal(task.Metadata, &metadata)
-	}
-	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["completionMode"]))) {
-	case "github":
-		return "github"
-	default:
-		return "local"
-	}
+	return taskIsBroadObjective(task)
 }
 
 func taskIsBroadObjective(task core.Task) bool {
@@ -7780,27 +7920,17 @@ func taskIsBroadObjective(task core.Task) bool {
 }
 
 type replanLoopOptions struct {
-	BlockedFinalCandidates          map[string]string
-	AllowBlockedBasePatchConflicts  bool
-	AllowBlockedCandidateValidation bool
-	RecoveryHint                    string
-	RequiredRepairWorkerID          string
-	RequiredRepairReason            string
-	FinalizationRecovery            bool
+	RecoveryHint string
 }
 
-func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) replanLoop(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult) (bool, string, []WorkerTurnResult) {
 	return s.replanLoopWithOptions(ctx, task, initial, results, replanLoopOptions{})
 }
 
-func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, initial Plan, results []WorkerTurnResult, options replanLoopOptions) (bool, string, []WorkerTurnResult) {
 	replanner, ok := s.brain.(ReplanProvider)
 	if !ok {
-		return true, "", "", results
-	}
-	blockedFinalCandidates := map[string]string{}
-	for workerID, reason := range options.BlockedFinalCandidates {
-		blockedFinalCandidates[workerID] = reason
+		return true, "", results
 	}
 	recoveryHint := options.RecoveryHint
 	stalledTurns := 0
@@ -7810,18 +7940,16 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		stateSnapshot, err := s.store.Snapshot(ctx)
 		if err != nil {
 			_ = s.failTask(ctx, task.ID, err)
-			return false, "", "", results
+			return false, "", results
 		}
-		if taskIsTerminalFromSnapshot(stateSnapshot, task.ID) && !options.FinalizationRecovery {
-			return false, "", "", results
+		if taskIsTerminalFromSnapshot(stateSnapshot, task.ID) {
+			return false, "", results
 		}
 		if limitUnproductiveTurns && stalledTurns >= maxConsecutiveUnproductiveReplanTurns {
 			recoveryOptions := options
-			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
 			return s.recoverReplanLimit(ctx, task, turn, results, recoveryOptions)
 		}
-		blockedFinalCandidateIDs := sortedMapKeys(blockedFinalCandidates)
 		decision, err := replanner.Replan(ctx, task, OrchestrationState{
 			InitialPlan:                initial,
 			WorkPlan:                   currentWorkPlan,
@@ -7833,21 +7961,21 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			PendingPullRequestFeedback: pendingPullRequestFeedbackFromSnapshot(stateSnapshot, task.ID),
 			PendingWorkerSteering:      pendingWorkerSteering(stateSnapshot, task.ID),
 			Turn:                       turn,
-			BlockedFinalCandidateIDs:   blockedFinalCandidateIDs,
 			RecoveryHint:               recoveryHint,
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				return false, "", "", results
+				return false, "", results
 			}
 			recoveryOptions := options
-			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
 			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("dynamic replan failed: %w", err), recoveryOptions)
 		}
+		if decision.Plan != nil {
+			normalizePlanShape(decision.Plan)
+		}
 		if err := decision.Validate(); err != nil {
 			recoveryOptions := options
-			recoveryOptions.BlockedFinalCandidates = blockedFinalCandidates
 			recoveryOptions.RecoveryHint = recoveryHint
 			return s.recoverReplanError(ctx, task, turn, results, fmt.Errorf("invalid dynamic replan decision: %w", err), recoveryOptions)
 		}
@@ -7860,12 +7988,12 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}),
 		}); err != nil {
 			_ = s.failTask(ctx, task.ID, err)
-			return false, "", "", results
+			return false, "", results
 		}
 		if decision.WorkPlan != nil {
 			if err := s.updateTaskWorkPlan(ctx, task.ID, *decision.WorkPlan); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
+				return false, "", results
 			}
 			currentWorkPlan = decision.WorkPlan
 		}
@@ -7875,7 +8003,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				reason := "queued pull request feedback must be handled before completing the task"
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
-					return false, "", "", results
+					return false, "", results
 				}
 				stalledTurns++
 				continue
@@ -7884,72 +8012,32 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				reason := "queued worker steering must be handled before completing the task"
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
-					return false, "", "", results
+					return false, "", results
 				}
 				stalledTurns++
 				continue
 			}
-			if taskCompletionModeFromTask(task) != "github" {
-				if candidateWorkerID, _, err := resolveFinalCandidate(results, decision.FinalCandidateWorkerID); err == nil && candidateWorkerID != "" {
-					if candidate, ok := workerResultByID(results, candidateWorkerID); ok {
-						if reason, blocked := s.completionReadinessBlockReason(ctx, task, candidate, decision.Rationale); blocked {
-							blockedFinalCandidates[candidateWorkerID] = reason
-							recoveryHint = reason + " Do not complete with this blocked candidate. Continue with the next worker turn that can satisfy the task objective, select a different final candidate, or wait if the objective is no longer actionable."
-							if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
-								_ = s.failTask(ctx, task.ID, err)
-								return false, "", "", results
-							}
-							stalledTurns++
-							continue
-						}
-					}
-				}
+			return true, decision.Rationale, results
+		case "finish_objective":
+			if err := s.finishObjectiveFromReplan(ctx, task, decision); err != nil {
+				_ = s.failTask(ctx, task.ID, err)
 			}
-			if len(blockedFinalCandidates) > 0 {
-				candidateWorkerID, _, candidateErr := resolveFinalCandidate(results, decision.FinalCandidateWorkerID)
-				if candidateErr != nil || candidateWorkerID == "" {
-					if options.AllowBlockedCandidateValidation {
-						for blockedWorkerID := range blockedFinalCandidates {
-							if validatesBlockedCandidate(results, decision.FinalCandidateWorkerID, blockedWorkerID) {
-								return true, blockedWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
-							}
-						}
-					}
-					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "recovery requires a new final candidate because the previous candidate failed finalization"); err != nil {
-						_ = s.failTask(ctx, task.ID, err)
-						return false, "", "", results
-					}
-					stalledTurns++
-					continue
-				}
-				if reason := blockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
-					if options.AllowBlockedCandidateValidation && validatesBlockedCandidate(results, decision.FinalCandidateWorkerID, candidateWorkerID) {
-						return true, candidateWorkerID, nonEmpty(decision.Rationale, "successful validation worker confirmed the blocked candidate"), results
-					}
-					if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, "blocked final candidate "+candidateWorkerID+" already failed finalization: "+reason); err != nil {
-						_ = s.failTask(ctx, task.ID, err)
-						return false, "", "", results
-					}
-					stalledTurns++
-					continue
-				}
-			}
-			return true, decision.FinalCandidateWorkerID, decision.Rationale, results
+			return false, "", results
 		case "wait":
 			_ = s.waitForUserAction(ctx, task.ID, "", "orchestrator_wait", nonEmpty(decision.Message, decision.Rationale, "The orchestrator needs user input before continuing."), map[string]any{
 				"turn":      turn,
 				"rationale": decision.Rationale,
 			})
-			return false, "", "", results
+			return false, "", results
 		case "fail":
 			_ = s.failTask(ctx, task.ID, errors.New(nonEmpty(decision.Message, decision.Rationale, "dynamic replan failed task")))
-			return false, "", "", results
+			return false, "", results
 		case "continue":
 			if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			} else if terminal && !options.FinalizationRecovery {
-				return false, "", "", results
+				return false, "", results
+			} else if terminal {
+				return false, "", results
 			}
 			beforeResults := results
 			next := *decision.Plan
@@ -7961,7 +8049,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 						"reason": mismatchReason,
 					}); err != nil {
 						_ = s.failTask(ctx, task.ID, err)
-						return false, "", "", results
+						return false, "", results
 					}
 					stalledTurns++
 					continue
@@ -7975,20 +8063,9 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
-			if strings.TrimSpace(options.RequiredRepairWorkerID) != "" {
-				next = forceConflictRepairPlan(task, next, options.RequiredRepairWorkerID, nonEmpty(options.RequiredRepairReason, recoveryHint), blockedFinalCandidates)
-			}
 			if shouldInheritLatestCandidate(next.Metadata) {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
-				}
-			}
-			if options.AllowBlockedBasePatchConflicts {
-				baseWorkerID := candidateBaseWorkerID(next.Metadata)
-				if _, blocked := blockedFinalCandidates[baseWorkerID]; blocked {
-					next.Metadata["allowBasePatchConflicts"] = true
-					next.Metadata["recoveryBaseWorkerID"] = baseWorkerID
-					next.Metadata["recoveryHint"] = recoveryHint
 				}
 			}
 			normalizePlanReasoning(&next)
@@ -7998,35 +8075,35 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				Payload: core.MustJSON(next),
 			}); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
+				return false, "", results
 			}
 			earlyActions, remainingActions := splitPreFollowUpActions(next.Actions, results)
 			if len(earlyActions) > 0 {
 				beforePRs, err := s.taskPullRequestCount(ctx, task.ID)
 				if err != nil {
 					_ = s.failTask(ctx, task.ID, err)
-					return false, "", "", results
+					return false, "", results
 				}
 				var keepGoing bool
 				keepGoing, results, err = s.runPlanActions(ctx, task, planWithActions(next, earlyActions), results)
 				if err != nil {
 					if ctx.Err() != nil {
-						return false, "", "", results
+						return false, "", results
 					}
 					if s.waitForRecoverableError(ctx, task.ID, "", err) {
-						return false, "", "", results
+						return false, "", results
 					}
 					_ = s.failTask(ctx, task.ID, err)
-					return false, "", "", results
+					return false, "", results
 				}
 				if !keepGoing {
-					return false, "", "", results
+					return false, "", results
 				}
 				if containsPublishPullRequestAction(earlyActions) {
 					afterPRs, err := s.taskPullRequestCount(ctx, task.ID)
 					if err != nil {
 						_ = s.failTask(ctx, task.ID, err)
-						return false, "", "", results
+						return false, "", results
 					}
 					if afterPRs <= beforePRs {
 						stalledTurns++
@@ -8049,10 +8126,10 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			if err != nil {
 				if ctx.Err() != nil {
-					return false, "", "", results
+					return false, "", results
 				}
 				if s.waitForRecoverableError(ctx, task.ID, "", err) {
-					return false, "", "", results
+					return false, "", results
 				}
 				results = append(results, failedFollowUpResult(next, err))
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -8067,14 +8144,14 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			}
 			if !ok {
 				results = append(results, nextResults...)
-				return false, "", "", results
+				return false, "", results
 			}
 			results = append(results, nextResults...)
 			if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			} else if terminal && !options.FinalizationRecovery {
-				return false, "", "", results
+				return false, "", results
+			} else if terminal {
+				return false, "", results
 			}
 			if failed := firstWorkerResultWithStatus(nextResults, core.WorkerFailed); failed.Status == core.WorkerFailed {
 				if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failed.Error, failed.Summary)); ok {
@@ -8088,7 +8165,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 						"resumeHint": "After fixing the environment or setup issue, respond on this task with what changed.",
 						"error":      failed.Error,
 					})
-					return false, "", "", results
+					return false, "", results
 				}
 				_ = s.recordTaskAction(ctx, task.ID, map[string]any{
 					"kind":     "worker_failure_recovery",
@@ -8102,24 +8179,20 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				continue
 			}
 			if !s.finishOrContinueResults(ctx, task.ID, nextResults) {
-				return false, "", "", results
+				return false, "", results
 			}
 			latest := latestWorkerResult(nextResults)
-			if options.FinalizationRecovery {
-				reason := nonEmpty(latest.Summary, next.Rationale, "finalization recovery worker produced a new candidate")
-				return true, latest.WorkerID, reason, results
-			}
 			if ok, nextResults, err := s.runDeferredPlanWork(ctx, task, next, results, latest.NodeID); err != nil {
 				if ctx.Err() != nil {
-					return false, "", "", results
+					return false, "", results
 				}
 				if s.waitForRecoverableError(ctx, task.ID, latest.WorkerID, err) {
-					return false, "", "", results
+					return false, "", results
 				}
 				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
+				return false, "", results
 			} else if !ok {
-				return false, "", "", results
+				return false, "", results
 			} else {
 				results = nextResults
 			}
@@ -8132,24 +8205,42 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	}
 }
 
-func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) finishObjectiveFromReplan(ctx context.Context, task core.Task, decision ReplanDecision) error {
+	summary := nonEmpty(decision.Message, decision.Rationale, "Objective finished.")
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveSatisfied, "satisfied", summary); err != nil {
+		return err
+	}
+	if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":      "finish_objective",
+		"when":      "replan",
+		"reason":    decision.Rationale,
+		"summary":   summary,
+		"status":    "completed",
+		"replanned": true,
+	}); err != nil {
+		return err
+	}
+	return s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, []WorkerTurnResult) {
 	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
 		CompleteReasonPrefix: "fallback completion after replanner error",
-		CompleteMessage:      "The replanner returned an invalid decision, so aged used the deterministic final-candidate fallback.",
-		WaitRationale:        "replanner returned an invalid decision and deterministic final-candidate fallback is ambiguous",
-		WaitQuestion:         "Dynamic replanning failed and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
+		CompleteMessage:      "The replanner returned an invalid decision, so aged paused for explicit steering.",
+		WaitRationale:        "replanner returned an invalid decision",
+		WaitQuestion:         "Dynamic replanning failed. Provide steering so aged can continue with explicit work items/actions.",
 		WaitReason:           "dynamic_replan_error",
 		WaitObjective:        "Dynamic replanning needs user steering before continuing.",
 	})
 }
 
-func (s *Service) recoverReplanLimit(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, options replanLoopOptions) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) recoverReplanLimit(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, options replanLoopOptions) (bool, string, []WorkerTurnResult) {
 	replanErr := fmt.Errorf("dynamic replanning reached %d consecutive turns without productive progress", maxConsecutiveUnproductiveReplanTurns)
 	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
 		CompleteReasonPrefix: "fallback completion after dynamic replanning stalled",
-		CompleteMessage:      "Dynamic replanning stopped making productive progress, so aged used the deterministic final-candidate fallback instead of failing the task.",
-		WaitRationale:        "dynamic replanning stopped making productive progress and deterministic final-candidate fallback is ambiguous",
-		WaitQuestion:         "Dynamic replanning stopped making productive progress and final candidate selection is ambiguous. Provide steering or retry after resolving the competing candidates.",
+		CompleteMessage:      "Dynamic replanning stopped making productive progress, so aged paused for explicit steering.",
+		WaitRationale:        "dynamic replanning stopped making productive progress",
+		WaitQuestion:         "Dynamic replanning stopped making productive progress. Provide steering so aged can continue with explicit work items/actions.",
 		WaitReason:           "dynamic_replan_limit",
 		WaitObjective:        "Dynamic replanning stopped making productive progress and needs user steering before continuing.",
 	})
@@ -8164,116 +8255,27 @@ type replanFallbackConfig struct {
 	WaitObjective        string
 }
 
-func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, string, []WorkerTurnResult) {
+func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, []WorkerTurnResult) {
 	if pendingReason := s.pendingReplanQueueBlockReason(ctx, task.ID); pendingReason != "" {
 		s.waitForReplanFallback(ctx, task, turn, replanErr, config, pendingReason)
-		return false, "", "", results
+		return false, "", results
 	}
 	if isReplanContextWindowError(replanErr) {
 		s.waitForReplanContextOverflow(ctx, task, turn, replanErr, results)
-		return false, "", "", results
+		return false, "", results
 	}
-	if taskIsBroadObjective(task) && taskCompletionModeFromTask(task) == "github" && !options.FinalizationRecovery {
-		s.waitForReplanFallback(ctx, task, turn, replanErr, config, "broad GitHub objectives require explicit replanning or publish_pull_request actions before publication")
-		return false, "", "", results
-	}
-	candidateWorkerID, candidateReason, candidateErr := resolveFinalCandidate(results, "")
-	if candidateErr == nil && candidateWorkerID != "" {
-		if reason := options.BlockedFinalCandidates[candidateWorkerID]; strings.TrimSpace(reason) != "" {
-			candidateErr = fmt.Errorf("fallback final candidate %s is blocked: %s", candidateWorkerID, reason)
-		} else {
-			reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
-			if candidateReason != "" {
-				reason += "; " + candidateReason
-			}
-			if _, err := s.append(ctx, core.Event{
-				Type:   core.EventTaskReplanned,
-				TaskID: task.ID,
-				Payload: core.MustJSON(map[string]any{
-					"turn": turn,
-					"decision": ReplanDecision{
-						Action:                 "complete",
-						FinalCandidateWorkerID: candidateWorkerID,
-						Rationale:              reason,
-						Message:                config.CompleteMessage,
-					},
-					"fallback": true,
-					"error":    replanErr.Error(),
-				}),
-			}); err != nil {
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			}
-			return true, candidateWorkerID, reason, results
-		}
-	}
-	if taskCompletionModeFromTask(task) != "github" && candidateWorkerID == "" {
-		if workerID, workerReason := deterministicLocalNoChangeCompletionWorker(results); workerID != "" {
-			reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
-			if workerReason != "" {
-				reason += "; " + workerReason
-			}
-			if _, err := s.append(ctx, core.Event{
-				Type:   core.EventTaskReplanned,
-				TaskID: task.ID,
-				Payload: core.MustJSON(map[string]any{
-					"turn": turn,
-					"decision": ReplanDecision{
-						Action:                 "complete",
-						FinalCandidateWorkerID: workerID,
-						Rationale:              reason,
-						Message:                config.CompleteMessage,
-					},
-					"fallback": true,
-					"error":    replanErr.Error(),
-				}),
-			}); err != nil {
-				_ = s.failTask(ctx, task.ID, err)
-				return false, "", "", results
-			}
-			return true, workerID, reason, results
-		}
-	}
-	if candidateWorkerID, candidateReason := latestCandidateLeafExcluding(results, options.BlockedFinalCandidates); candidateWorkerID != "" {
-		reason := config.CompleteReasonPrefix + ": " + replanErr.Error()
-		if candidateReason != "" {
-			reason += "; " + candidateReason
-		}
-		if _, err := s.append(ctx, core.Event{
-			Type:   core.EventTaskReplanned,
-			TaskID: task.ID,
-			Payload: core.MustJSON(map[string]any{
-				"turn": turn,
-				"decision": ReplanDecision{
-					Action:                 "complete",
-					FinalCandidateWorkerID: candidateWorkerID,
-					Rationale:              reason,
-					Message:                config.CompleteMessage,
-				},
-				"fallback": true,
-				"error":    replanErr.Error(),
-			}),
-		}); err != nil {
-			_ = s.failTask(ctx, task.ID, err)
-			return false, "", "", results
-		}
-		return true, candidateWorkerID, reason, results
-	}
-	candidateError := "no deterministic final candidate available"
-	if candidateErr != nil {
-		candidateError = candidateErr.Error()
-	}
-	s.waitForReplanFallback(ctx, task, turn, replanErr, config, candidateError)
-	return false, "", "", results
+	_ = options
+	s.waitForReplanFallback(ctx, task, turn, replanErr, config, "the replanner must emit explicit work items/actions or finish_objective")
+	return false, "", results
 }
 
 func (s *Service) pendingReplanQueueBlockReason(ctx context.Context, taskID string) string {
 	var reasons []string
 	if pending := s.pendingPullRequestFeedback(ctx, taskID); len(pending) > 0 {
-		reasons = append(reasons, "queued pull request feedback must be handled before deterministic fallback completion")
+		reasons = append(reasons, "queued pull request feedback must be handled before completion")
 	}
 	if pending := s.pendingWorkerSteering(ctx, taskID); len(pending) > 0 {
-		reasons = append(reasons, "queued worker steering must be handled before deterministic fallback completion")
+		reasons = append(reasons, "queued worker steering must be handled before completion")
 	}
 	return strings.Join(reasons, "; ")
 }
@@ -8308,7 +8310,7 @@ func (s *Service) waitForReplanFallback(ctx context.Context, task core.Task, tur
 
 func (s *Service) waitForReplanContextOverflow(ctx context.Context, task core.Task, turn int, replanErr error, results []WorkerTurnResult) {
 	digest := latestCompactReplanDigest(results)
-	message := "Replan context too large. aged could not fit the compact orchestration state into the model context window, so it paused instead of selecting an old final candidate."
+	message := "Replan context too large. aged could not fit the compact orchestration state into the model context window, so it paused for explicit steering."
 	if digest != "" {
 		message += "\n\nLatest compact digest:\n" + digest
 	}
@@ -8425,57 +8427,6 @@ func annotateWorkerSteeringPlan(plan Plan, item WorkerSteeringItem) Plan {
 		plan.Metadata["steeredWorkerSpawnID"] = item.SpawnID
 	}
 	return plan
-}
-
-func forceConflictRepairPlan(task core.Task, plan Plan, blockedWorkerID string, repairReason string, blocked map[string]string) Plan {
-	if plan.Metadata == nil {
-		plan.Metadata = map[string]any{}
-	}
-	originalPrompt := strings.TrimSpace(plan.Prompt)
-	plan.Prompt = buildConflictRepairPrompt(task, blockedWorkerID, repairReason, sortedMapKeys(blocked), originalPrompt)
-	plan.Rationale = nonEmpty(plan.Rationale, "Repair blocked final candidate so it applies cleanly.")
-	plan.Metadata["baseWorkerID"] = blockedWorkerID
-	plan.Metadata["allowBasePatchConflicts"] = true
-	plan.Metadata["recoveryBaseWorkerID"] = blockedWorkerID
-	plan.Metadata["recoveryHint"] = repairReason
-	plan.Metadata["forcedConflictRepair"] = true
-	plan.Metadata["workspaceReusePolicy"] = "fresh"
-	return plan
-}
-
-func buildConflictRepairPrompt(task core.Task, blockedWorkerID string, repairReason string, blockedWorkerIDs []string, originalPrompt string) string {
-	var builder strings.Builder
-	builder.WriteString("# Conflict Repair Task\n\n")
-	builder.WriteString("The previous final candidate could not be published or applied because its patch conflicts with the current checkout.\n\n")
-	builder.WriteString("Blocked worker ID: ")
-	builder.WriteString(blockedWorkerID)
-	builder.WriteString("\n")
-	if strings.TrimSpace(repairReason) != "" {
-		builder.WriteString("Failure:\n")
-		builder.WriteString(strings.TrimSpace(repairReason))
-		builder.WriteString("\n\n")
-	}
-	if len(blockedWorkerIDs) > 0 {
-		builder.WriteString("Already blocked final candidates:\n")
-		for _, id := range blockedWorkerIDs {
-			builder.WriteString("- ")
-			builder.WriteString(id)
-			builder.WriteString("\n")
-		}
-		builder.WriteString("\n")
-	}
-	builder.WriteString("Original task:\n")
-	builder.WriteString(task.Title)
-	builder.WriteString("\n\n")
-	builder.WriteString(task.Prompt)
-	builder.WriteString("\n\n")
-	builder.WriteString("Your only job in this turn is to produce a new candidate that preserves the blocked worker's intended changes while resolving the conflicts against the current checkout. Do not run a review-only pass. Do not merely validate the old candidate. Make the code changes needed for the repaired candidate, remove conflict markers if any, and run the focused tests needed to show the repaired patch is applyable.\n")
-	if originalPrompt != "" {
-		builder.WriteString("\nScheduler's original recovery request, for context only:\n")
-		builder.WriteString(originalPrompt)
-		builder.WriteString("\n")
-	}
-	return builder.String()
 }
 
 type followUpNode struct {
@@ -8645,8 +8596,12 @@ func (s *Service) initialWorkerPlan(initial Plan, worker WorkerRequest, results 
 	metadata["dependsOn"] = dependsOn
 	metadata["turn"] = turn
 	metadata["parentRationale"] = initial.Rationale
+	metadata["workItemKind"] = objectiveWorkerWorkItemKind(role, reason)
 	if baseWorkerID := latestCandidateWorkerIDForDependencies(results, dependsOn); baseWorkerID != "" {
 		metadata["baseWorkerID"] = baseWorkerID
+	}
+	if parentNodeID := latestNodeIDForDependencies(results, dependsOn); parentNodeID != "" && stringMetadata(metadata, "parentNodeID") == "" {
+		metadata["parentNodeID"] = parentNodeID
 	}
 	if reasoningEffort != "" {
 		metadata["reasoningEffort"] = reasoningEffort
@@ -8722,6 +8677,23 @@ func latestCandidateWorkerIDForDependencies(results []WorkerTurnResult, dependsO
 		result := results[i]
 		if deps[result.SpawnID] && result.Status == core.WorkerSucceeded && resultHasCandidateChanges(result) {
 			return result.WorkerID
+		}
+	}
+	return ""
+}
+
+func latestNodeIDForDependencies(results []WorkerTurnResult, dependsOn []string) string {
+	if len(dependsOn) == 0 {
+		return ""
+	}
+	deps := map[string]bool{}
+	for _, dep := range dependsOn {
+		deps[strings.TrimSpace(dep)] = true
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if deps[result.SpawnID] && strings.TrimSpace(result.NodeID) != "" {
+			return result.NodeID
 		}
 	}
 	return ""
@@ -8995,6 +8967,7 @@ func (s *Service) followUpPlan(task core.Task, initial Plan, spawn SpawnRequest,
 			"dependsOn":       dependsOn,
 			"parentNodeID":    parentNodeID,
 			"parentRationale": initial.Rationale,
+			"workItemKind":    objectiveWorkerWorkItemKind(spawn.Role, spawn.Reason),
 		},
 	}
 	if baseWorkerID != "" {
@@ -9458,7 +9431,6 @@ func NormalizeCreateTaskRequest(req core.CreateTaskRequest) (core.CreateTaskRequ
 	if err != nil {
 		return core.CreateTaskRequest{}, err
 	}
-	ensureDefaultTaskCompletionMode(metadata, req.Prompt)
 	req.Metadata = core.MustJSON(metadata)
 	return req, nil
 }
@@ -9476,23 +9448,6 @@ func createTaskMetadataMap(raw json.RawMessage) (map[string]any, error) {
 	return metadata, nil
 }
 
-func ensureDefaultTaskCompletionMode(metadata map[string]any, prompt string) {
-	if taskMetadataExecutionMode(metadata) == executionModeLoop {
-		return
-	}
-	if stringMetadataValue(metadata["completionMode"]) == "" {
-		if promptRequestsLocalCompletion(prompt) {
-			metadata["completionMode"] = "local"
-			metadata["completionModeInferred"] = true
-		} else {
-			metadata["completionMode"] = "github"
-			if promptRequestsGitHubCompletion(prompt) {
-				metadata["completionModeInferred"] = true
-			}
-		}
-	}
-}
-
 func taskMetadataExecutionMode(metadata map[string]any) string {
 	switch strings.ToLower(strings.TrimSpace(stringMetadataValue(metadata["executionMode"]))) {
 	case "loop", "durable_loop", "agent_loop":
@@ -9500,35 +9455,6 @@ func taskMetadataExecutionMode(metadata map[string]any) string {
 	default:
 		return "orchestrated"
 	}
-}
-
-func promptRequestsLocalCompletion(prompt string) bool {
-	lower := strings.ToLower(prompt)
-	return strings.Contains(lower, "local-only") ||
-		strings.Contains(lower, "local only") ||
-		strings.Contains(lower, "local completion") ||
-		strings.Contains(lower, "complete locally") ||
-		strings.Contains(lower, "without a pr") ||
-		strings.Contains(lower, "without pr") ||
-		strings.Contains(lower, "do not open a pr") ||
-		strings.Contains(lower, "do not open pr") ||
-		strings.Contains(lower, "don't open a pr") ||
-		strings.Contains(lower, "don't open pr") ||
-		standaloneNoPRPattern.MatchString(lower)
-}
-
-func promptRequestsGitHubCompletion(prompt string) bool {
-	lower := strings.ToLower(prompt)
-	return strings.Contains(lower, "open pr") ||
-		strings.Contains(lower, "open a pr") ||
-		strings.Contains(lower, "open pull request") ||
-		strings.Contains(lower, "open a pull request") ||
-		strings.Contains(lower, "create pr") ||
-		strings.Contains(lower, "create a pr") ||
-		strings.Contains(lower, "create pull request") ||
-		strings.Contains(lower, "make sure it gets merged") ||
-		strings.Contains(lower, "until merged") ||
-		strings.Contains(lower, "babysit")
 }
 
 func taskTargetLabels(task core.Task) map[string]string {
@@ -9792,6 +9718,151 @@ func workerSteeringAlreadyPending(snapshot core.Snapshot, taskID string, workerI
 	return false
 }
 
+func workerSteeringWorkItemID(eventID int64) string {
+	return "worker_steering_" + strconv.FormatInt(eventID, 10)
+}
+
+func planWorkerWorkItemID(taskID string, plan Plan) string {
+	if id := strings.TrimSpace(stringMetadata(plan.Metadata, "workItemID")); id != "" {
+		return id
+	}
+	nodeID := strings.TrimSpace(stringMetadata(plan.Metadata, "nodeID"))
+	if nodeID != "" {
+		return "objective_worker_" + nodeID
+	}
+	planID := strings.TrimSpace(stringMetadata(plan.Metadata, "planID"))
+	if planID != "" {
+		return "objective_worker_" + planID
+	}
+	spawnID := strings.TrimSpace(stringMetadata(plan.Metadata, "spawnID"))
+	if spawnID != "" {
+		return "objective_worker_" + strings.TrimSpace(taskID) + "_" + spawnID
+	}
+	return ""
+}
+
+func (s *Service) recordPlanWorkItemStarted(ctx context.Context, taskID string, workerID string, plan Plan) (string, error) {
+	kind := strings.TrimSpace(stringMetadata(plan.Metadata, "workItemKind"))
+	if kind == "" {
+		return "", nil
+	}
+	itemID := planWorkerWorkItemID(taskID, plan)
+	if itemID == "" {
+		return "", nil
+	}
+	if plan.Metadata != nil {
+		plan.Metadata["workItemID"] = itemID
+	}
+	role := stringMetadata(plan.Metadata, "spawnRole")
+	reason := stringMetadata(plan.Metadata, "spawnReason")
+	if reason == "" {
+		reason = plan.Rationale
+	}
+	if err := s.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         itemID,
+		"kind":       kind,
+		"targetKind": "worker",
+		"targetId":   workerID,
+		"reason":     reason,
+		"prompt":     plan.Prompt,
+		"metadata": map[string]any{
+			"workerId":        workerID,
+			"workerKind":      plan.WorkerKind,
+			"nodeId":          stringMetadata(plan.Metadata, "nodeID"),
+			"planId":          stringMetadata(plan.Metadata, "planID"),
+			"spawnId":         stringMetadata(plan.Metadata, "spawnID"),
+			"role":            role,
+			"reason":          reason,
+			"dependsOn":       stringSliceMetadata(plan.Metadata, "dependsOn"),
+			"parentNodeId":    stringMetadata(plan.Metadata, "parentNodeID"),
+			"baseWorkerId":    stringMetadata(plan.Metadata, "baseWorkerID"),
+			"reasoningEffort": stringMetadata(plan.Metadata, "reasoningEffort"),
+			"sourceAction":    stringMetadata(plan.Metadata, "sourceAction"),
+		},
+	}); err != nil {
+		return "", err
+	}
+	if err := s.recordWorkItemStarted(ctx, taskID, itemID, workerID); err != nil {
+		return "", err
+	}
+	return itemID, nil
+}
+
+func (s *Service) recordPlanWorkItemCompletedForWorker(ctx context.Context, taskID string, itemID string, workerID string, status core.WorkerStatus, statusErr error) error {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" || status == core.WorkerWaiting {
+		return nil
+	}
+	workStatus := workItemStatusForWorkerStatus(status)
+	errText := ""
+	if statusErr != nil {
+		errText = statusErr.Error()
+	}
+	return s.recordWorkItemCompleted(ctx, taskID, itemID, workStatus, workerID, errText)
+}
+
+func workItemStatusForWorkerStatus(status core.WorkerStatus) core.WorkItemStatus {
+	switch status {
+	case core.WorkerSucceeded:
+		return core.WorkItemSucceeded
+	case core.WorkerCanceled:
+		return core.WorkItemCanceled
+	default:
+		return core.WorkItemFailed
+	}
+}
+
+func objectiveWorkerWorkItemKind(role string, reason string) string {
+	text := strings.ToLower(role + " " + reason)
+	switch {
+	case strings.Contains(text, "compose") || strings.Contains(text, "reconcile") || strings.Contains(text, "integrate"):
+		return "objective.compose"
+	case strings.Contains(text, "slice") || strings.Contains(text, "shard") || strings.Contains(text, "file set") || strings.Contains(text, "subsystem") || strings.Contains(text, "port "):
+		return "objective.slice"
+	case strings.Contains(text, "validate") || strings.Contains(text, "verify") || strings.Contains(text, "test") || strings.Contains(text, "review") || strings.Contains(text, "benchmark"):
+		return "objective.validate"
+	default:
+		return "objective.implement"
+	}
+}
+
+func userQuestionWorkItemID(eventID int64) string {
+	return "user_question_" + strconv.FormatInt(eventID, 10)
+}
+
+func (s *Service) recordWorkerSteeringWorkItemsCompleted(ctx context.Context, taskID string, items []WorkerSteeringItem) {
+	for _, item := range items {
+		_ = s.recordWorkItemCompleted(ctx, taskID, workerSteeringWorkItemID(item.EventID), core.WorkItemSucceeded, item.WorkerID, "")
+	}
+}
+
+func (s *Service) recordLatestUserQuestionWorkItemCompleted(ctx context.Context, taskID string, workerID string) {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return
+	}
+	workerID = strings.TrimSpace(workerID)
+	var latest core.WorkItem
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || item.Kind != "user.question" || item.Status != core.WorkItemQueued {
+			continue
+		}
+		if workerID != "" && item.TargetKind == "worker" && item.TargetID != workerID {
+			continue
+		}
+		if workerID == "" && item.TargetKind == "worker" {
+			continue
+		}
+		if latest.ID == "" || item.CreatedAt.After(latest.CreatedAt) {
+			latest = item
+		}
+	}
+	if latest.ID == "" {
+		return
+	}
+	_ = s.recordWorkItemCompleted(ctx, taskID, latest.ID, core.WorkItemSucceeded, workerID, "")
+}
+
 func retryPlanForTask(snapshot core.Snapshot, taskID string) (Plan, error) {
 	var plans []Plan
 	var workerIDs []string
@@ -9995,9 +10066,8 @@ func taskFailureRecoverableFromGraph(snapshot core.Snapshot, taskID string, resu
 	if latestTaskFailureMatches(snapshot, taskID, func(errorText string) bool {
 		return errorText == "" ||
 			strings.Contains(errorText, "dynamic replan") ||
-			strings.Contains(errorText, "final candidate") ||
-			strings.Contains(errorText, "selected final candidate") ||
-			strings.Contains(errorText, "multiple competing final candidates") ||
+			strings.Contains(errorText, "candidate selection") ||
+			strings.Contains(errorText, "multiple competing candidates") ||
 			strings.Contains(errorText, "worker command failed")
 	}) {
 		return true

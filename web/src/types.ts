@@ -44,7 +44,6 @@ export type Task = {
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
-  finalCandidateWorkerId?: string;
   appliedWorkerId?: string;
   milestones?: TaskMilestone[];
   workPlan?: WorkPlan;
@@ -80,6 +79,24 @@ export type TaskArtifact = {
   name?: string;
   url?: string;
   ref?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type Artifact = TaskArtifact & {
+  taskId: string;
+};
+
+export type MemoryEntry = {
+  id: string;
+  projectId?: string;
+  taskId?: string;
+  kind: string;
+  sourceEventId?: number;
+  sourceEvent?: string;
+  workerId?: string;
+  summary: string;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
@@ -434,6 +451,53 @@ export type PullRequestState = {
   metadata?: Record<string, unknown>;
 };
 
+export type PullRequestFeedback = {
+  id: string;
+  taskId: string;
+  pullRequestId: string;
+  eventId?: number;
+  attempt?: number;
+  status?: string;
+  reason?: string;
+  repo?: string;
+  number?: number;
+  url?: string;
+  branch?: string;
+  base?: string;
+  state?: string;
+  checksStatus?: string;
+  mergeStatus?: string;
+  reviewStatus?: string;
+  feedbackSignature?: string;
+  feedbackBody?: string;
+  prompt?: string;
+  createdAt: string;
+  updatedAt: string;
+  handledAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type SteeringItem = {
+  id: string;
+  taskId: string;
+  workerId?: string;
+  nodeId?: string;
+  workerKind?: string;
+  role?: string;
+  spawnId?: string;
+  candidateWorkerId?: string;
+  reviewPhase?: string;
+  targetKind?: string;
+  targetId?: string;
+  status?: string;
+  reason?: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  appliedAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type WatchPullRequestsInput = {
   repo?: string;
   number?: number;
@@ -444,15 +508,90 @@ export type WatchPullRequestsInput = {
   limit?: number;
 };
 
+export type WorkItem = {
+  id: string;
+  taskId: string;
+  kind: string;
+  status: string;
+  targetKind?: string;
+  targetId?: string;
+  reason?: string;
+  prompt?: string;
+  workerId?: string;
+  leaseOwner?: string;
+  leaseUntil?: string;
+  attempt?: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type Question = {
+  id: string;
+  taskId: string;
+  workerId?: string;
+  reason?: string;
+  question: string;
+  answer?: string;
+  decided: boolean;
+  approved?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type Session = {
+  id: string;
+  taskId: string;
+  workerId: string;
+  nodeId?: string;
+  workerKind?: string;
+  role?: string;
+  spawnId?: string;
+  status: WorkerStatus;
+  targetId?: string;
+  targetKind?: string;
+  remoteSession?: string;
+  remoteRunDir?: string;
+  remoteWorkDir?: string;
+  workspaceRoot?: string;
+  workspaceCwd?: string;
+  sourceRoot?: string;
+  workspaceName?: string;
+  workspaceMode?: string;
+  vcsType?: string;
+  sharedRoot?: string;
+  sharedArtifactsDir?: string;
+  sharedWorkerDir?: string;
+  providerSessionId?: string;
+  currentAction?: string;
+  currentActionLabel?: string;
+  currentActionAt?: string;
+  currentActionEvent?: number;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type Snapshot = {
   tasks: Task[] | null;
   workers: Worker[] | null;
   executionNodes?: ExecutionNode[] | null;
+  workItems?: WorkItem[] | null;
+  artifacts?: Artifact[] | null;
+  memoryEntries?: MemoryEntry[] | null;
+  questions?: Question[] | null;
+  sessions?: Session[] | null;
   targets?: TargetState[] | null;
   plugins?: Plugin[] | null;
   promptSets?: PromptSet[] | null;
   projects?: Project[] | null;
   pullRequests?: PullRequestState[] | null;
+  pullRequestFeedback?: PullRequestFeedback[] | null;
+  steering?: SteeringItem[] | null;
   orchestrationGraphs?: OrchestrationGraph[] | null;
   lastEventId?: number;
   events: EventRecord[] | null;

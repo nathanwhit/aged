@@ -132,16 +132,15 @@ func TestCodexBrainIncludesTaskMetadataInPromptPayload(t *testing.T) {
 		Title:  "Large migration",
 		Prompt: "Split the migration into reviewable PRs.",
 		Metadata: core.MustJSON(map[string]any{
-			"completionMode": "github",
-			"objectiveMode":  "broad",
+			"objectiveMode": "broad",
 		}),
 	}, nil)
 
 	if !strings.Contains(prompt, `"objectiveMode": "broad"`) {
 		t.Fatalf("scheduler prompt missing objectiveMode metadata:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, `"completionMode": "github"`) {
-		t.Fatalf("scheduler prompt missing completionMode:\n%s", prompt)
+	if strings.Contains(prompt, `"completionMode"`) {
+		t.Fatalf("scheduler prompt should not promote completionMode:\n%s", prompt)
 	}
 
 	replanPayload := replanPromptPayload(core.Task{
@@ -149,8 +148,7 @@ func TestCodexBrainIncludesTaskMetadataInPromptPayload(t *testing.T) {
 		Title:  "Large migration",
 		Prompt: "Split the migration into reviewable PRs.",
 		Metadata: core.MustJSON(map[string]any{
-			"completionMode": "github",
-			"objectiveMode":  "broad",
+			"objectiveMode": "broad",
 		}),
 	}, OrchestrationState{})
 	data, err := json.Marshal(replanPayload)
@@ -159,6 +157,34 @@ func TestCodexBrainIncludesTaskMetadataInPromptPayload(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"objectiveMode":"broad"`) {
 		t.Fatalf("replan prompt payload missing objectiveMode metadata: %s", data)
+	}
+
+	payload := taskPromptPayload(core.Task{
+		ID:     "task-broad-no-completion",
+		Title:  "Large migration",
+		Prompt: "Split the migration into reviewable PRs.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode": "broad",
+		}),
+	})
+	if _, ok := payload["completionMode"]; ok {
+		t.Fatalf("broad objective without explicit completion mode should not invent one: %+v", payload)
+	}
+}
+
+func TestReplanDecisionAllowsFinishObjective(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+			"action": "finish_objective",
+			"pullRequestBody": "",
+			"rationale": "all reviewable slices landed",
+		"message": "Objective finished.",
+		"plan": null
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatalf("finish_objective replan decision rejected: %v", err)
 	}
 }
 
@@ -221,10 +247,9 @@ func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 			WorkerID: "ancient-worker",
 			Summary:  "LEDGER_FACT: preserve the old architecture decision while routine old worker results are trimmed" + strings.Repeat("l", 50000),
 		}},
-		Results:                  results,
-		Turn:                     2,
-		BlockedFinalCandidateIDs: []string{"worker-1"},
-		RecoveryHint:             "repair the blocked candidate" + strings.Repeat("h", 50000),
+		Results:      results,
+		Turn:         2,
+		RecoveryHint: "repair the blocked candidate" + strings.Repeat("h", 50000),
 	})
 
 	if len(prompt) >= 1_048_576 {
@@ -608,7 +633,6 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 func TestDecodeReplanDecisionComplete(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "complete",
-		"finalCandidateWorkerId": "worker-123",
 		"pullRequestBody": "## Summary\n- Ready to publish.",
 		"rationale": "all follow-up work is done",
 		"message": "ready for user review",
@@ -625,9 +649,6 @@ func TestDecodeReplanDecisionComplete(t *testing.T) {
 	}
 	if decision.Plan != nil {
 		t.Fatalf("plan = %+v", decision.Plan)
-	}
-	if decision.FinalCandidateWorkerID != "worker-123" {
-		t.Fatalf("final candidate = %q", decision.FinalCandidateWorkerID)
 	}
 	if !strings.Contains(decision.PullRequestBody, "Ready to publish") {
 		t.Fatalf("pull request body = %q", decision.PullRequestBody)
@@ -851,7 +872,7 @@ func TestCodexBrainReviewPromptsDoNotInlineSchedulerTemplate(t *testing.T) {
 		},
 	}
 	prompts := map[string]string{
-		"completion":  brain.completionReviewPrompt(task, candidate, "final candidate selected"),
+		"completion":  brain.completionReviewPrompt(task, candidate, "completion candidate ready"),
 		"publication": brain.publicationReviewPrompt(task, candidate, PlanAction{Kind: "publish_pull_request"}),
 		"pr_update": brain.publicationReviewPrompt(task, candidate, PlanAction{
 			Kind: "update_pull_request",
@@ -958,11 +979,9 @@ func TestDefaultPromptsKeepBroadObjectivesInTaskGraph(t *testing.T) {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		body := string(data)
-		if !strings.Contains(body, "Normal `completionMode=github` tasks should produce exactly one completion pull request") &&
-			!strings.Contains(body, "Narrow `completionMode=github` tasks should produce exactly one completion pull request") &&
-			!strings.Contains(body, "Normal GitHub-completion tasks should converge on one final candidate and one completion pull request") &&
-			!strings.Contains(body, "Narrow GitHub-completion tasks should converge on one final candidate and one completion pull request") {
-			t.Fatalf("%s does not constrain normal GitHub-mode tasks to one completion PR:\n%s", path, body)
+		if !strings.Contains(body, "Task completion never publishes a pull request implicitly") &&
+			!strings.Contains(body, "Completing a task never publishes a pull request") {
+			t.Fatalf("%s does not require explicit pull request publication:\n%s", path, body)
 		}
 		if !strings.Contains(body, "continueAfterPublish") || !strings.Contains(body, "large") {
 			t.Fatalf("%s does not reserve continueAfterPublish for broad large objectives:\n%s", path, body)
@@ -999,12 +1018,12 @@ func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 				"Use `workers` for initial execution",
 				"Root workers with empty `dependsOn` can run in parallel immediately",
 				"Workers with dependencies wait until all dependency worker ids finish",
-				"legacy compatibility fallback fields only when `workers` is absent",
 				"Never return arrays of strings for `steps`, `requiredApprovals`, `workers`, or `spawns`",
 			},
 			forbidden: []string{
 				"Choose the worker and shape the initial execution plan",
 				"one primary worker establish",
+				"legacy compatibility fallback fields",
 				"Spawns with no `dependsOn` can run in parallel after the initial worker succeeds",
 				"Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`",
 			},
@@ -1017,11 +1036,11 @@ func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 				`"dependsOn": ["inspect"]`,
 				`same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns`,
 				`Root workers with empty dependsOn can run in parallel immediately`,
-				`legacy compatibility fallback fields only when workers is absent`,
 				`"steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects`,
 			},
 			forbidden: []string{
 				`same exact schema as the scheduler plan: workerKind, workerPrompt`,
+				`legacy compatibility fallback fields`,
 				`Use workerId "" to mean the latest successful candidate worker`,
 				`"steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects`,
 			},

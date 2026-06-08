@@ -241,14 +241,6 @@ func planResponseFormat() map[string]any {
 				"additionalProperties": false,
 				"required":             []string{"reasoningEffort", "rationale", "workPlan", "steps", "requiredApprovals", "actions", "workers", "spawns"},
 				"properties": map[string]any{
-					"workerKind": map[string]any{
-						"type":        "string",
-						"description": "Legacy fallback worker kind. Prefer workers[].workerKind for new plans.",
-					},
-					"workerPrompt": map[string]any{
-						"type":        "string",
-						"description": "Legacy fallback worker prompt. Prefer workers[].workerPrompt for new plans.",
-					},
 					"reasoningEffort": map[string]any{
 						"type": "string",
 						"enum": []string{"default", "low", "medium", "high", "xhigh", "max"},
@@ -288,7 +280,7 @@ func planResponseFormat() map[string]any {
 							"additionalProperties": false,
 							"required":             []string{"kind", "when", "reason", "workerId", "inputs"},
 							"properties": map[string]any{
-								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "create_tasks"}},
+								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "spawn_work", "create_tasks", "finish_objective"}},
 								"when":     map[string]any{"type": "string", "enum": []string{"immediate", "after_success"}},
 								"reason":   map[string]any{"type": "string"},
 								"workerId": map[string]any{"type": "string"},

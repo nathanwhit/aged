@@ -401,11 +401,6 @@ func (s *Server) mcpToolCall(r *http.Request, raw json.RawMessage) (any, error) 
 		if err == nil {
 			result, err = s.service.ApplyWorkerChanges(r.Context(), req.WorkerID)
 		}
-	case "aged_apply_task_result":
-		req, err := decodeMCPArg[mcpTaskIDRequest](params.Arguments)
-		if err == nil {
-			result, err = s.service.ApplyTaskResult(r.Context(), req.TaskID)
-		}
 	default:
 		return nil, mcpToolNotFound(params.Name)
 	}
@@ -804,7 +799,7 @@ func mcpTools() []mcpTool {
 		{
 			Name:        "aged_create_task",
 			Title:       "Create aged task",
-			Description: "Create a durable orchestrated task from a concrete work prompt. Tasks default to GitHub PR completion; pass metadata.completionMode=\"local\" only for an explicit local-only request. Use this for 'do it' after synthesizing the actual task from conversation context.",
+			Description: "Create a durable orchestrated task from a concrete work prompt. Task completion does not publish pull requests implicitly; PRs are explicit publish_pull_request artifacts planned by the scheduler. Use this for 'do it' after synthesizing the actual task from conversation context.",
 			InputSchema: objectSchema(map[string]any{
 				"projectId":  stringSchema("Optional project id."),
 				"title":      stringSchema("Short task title. Optional; aged can generate one when omitted."),
@@ -990,12 +985,6 @@ func mcpTools() []mcpTool {
 			Title:       "Apply worker changes",
 			Description: "Manually apply a worker's changes to the source checkout.",
 			InputSchema: objectSchema(map[string]any{"workerId": stringSchema("Worker id.")}, []string{"workerId"}),
-		},
-		{
-			Name:        "aged_apply_task_result",
-			Title:       "Apply task result",
-			Description: "Apply the selected final task candidate locally.",
-			InputSchema: objectSchema(map[string]any{"taskId": stringSchema("Task id.")}, []string{"taskId"}),
 		},
 	}
 }

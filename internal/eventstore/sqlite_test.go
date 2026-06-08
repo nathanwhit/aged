@@ -372,6 +372,9 @@ func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 	if len(snapshot.ExecutionNodes) != 1 || !snapshot.ExecutionNodes[0].UpdatedAt.Equal(outputAt) {
 		t.Fatalf("node updatedAt = %+v, want %s", snapshot.ExecutionNodes, outputAt)
 	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].CurrentAction != "still working" || snapshot.Sessions[0].CurrentActionLabel != "log" {
+		t.Fatalf("session current action = %+v", snapshot.Sessions)
+	}
 
 	summary, err := store.SnapshotSummary(ctx)
 	if err != nil {
@@ -382,6 +385,9 @@ func TestSnapshotUpdatesWorkerActivityFromOutput(t *testing.T) {
 	}
 	if len(summary.Workers) != 1 || !summary.Workers[0].UpdatedAt.Equal(snapshot.Workers[0].UpdatedAt) {
 		t.Fatalf("summary worker updatedAt = %+v, want %s", summary.Workers, snapshot.Workers[0].UpdatedAt)
+	}
+	if len(summary.Sessions) != 1 || summary.Sessions[0].CurrentAction != "still working" || summary.Sessions[0].CurrentActionEvent == 0 {
+		t.Fatalf("summary session current action = %+v", summary.Sessions)
 	}
 	if len(summary.ExecutionNodes) != 1 || !summary.ExecutionNodes[0].UpdatedAt.Equal(snapshot.ExecutionNodes[0].UpdatedAt) {
 		t.Fatalf("summary node updatedAt = %+v, want %s", summary.ExecutionNodes, snapshot.ExecutionNodes[0].UpdatedAt)
@@ -654,6 +660,52 @@ func TestReadModelMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
 		},
 		core.Event{
 			At:     startedAt.Add(5 * time.Second),
+			Type:   core.EventWorkItemQueued,
+			TaskID: "task-projection",
+			Payload: core.MustJSON(map[string]any{
+				"id":         "work-projection",
+				"kind":       "objective.slice",
+				"targetKind": "worker",
+				"targetId":   "worker-projection",
+				"reason":     "run projection worker",
+			}),
+		},
+		core.Event{
+			At:     startedAt.Add(6 * time.Second),
+			Type:   core.EventWorkItemStarted,
+			TaskID: "task-projection",
+			Payload: core.MustJSON(map[string]any{
+				"id":         "work-projection",
+				"workerId":   "worker-projection",
+				"leaseOwner": "worker:worker-projection",
+				"leaseUntil": startedAt.Add(time.Hour).Format(time.RFC3339Nano),
+			}),
+		},
+		core.Event{
+			At:     startedAt.Add(7 * time.Second),
+			Type:   core.EventWorkItemCompleted,
+			TaskID: "task-projection",
+			Payload: core.MustJSON(map[string]any{
+				"id":       "work-projection",
+				"workerId": "worker-projection",
+				"status":   core.WorkItemSucceeded,
+			}),
+		},
+		core.Event{
+			At:       startedAt.Add(8 * time.Second),
+			Type:     core.EventTaskAction,
+			TaskID:   "task-projection",
+			WorkerID: "worker-projection",
+			Payload: core.MustJSON(map[string]any{
+				"kind":     "worker_result_digest",
+				"status":   "recorded",
+				"reason":   "benchmark result improved after caching baseline binary",
+				"workerId": "worker-projection",
+				"metadata": map[string]any{"summary": "benchmark result improved after caching baseline binary"},
+			}),
+		},
+		core.Event{
+			At:     startedAt.Add(9 * time.Second),
 			Type:   core.EventTaskPlanned,
 			TaskID: "task-projection",
 			Payload: core.MustJSON(map[string]any{
@@ -666,18 +718,19 @@ func TestReadModelMatchesReplayAndTracksNonProjectionEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := projectionInputEvents(ctx, store.db, 0)
-	if err != nil {
-		t.Fatal(err)
+	if projected.LastEventID != 10 {
+		t.Fatalf("projected last event id = %d, want 10", projected.LastEventID)
 	}
-	replayed, err := store.snapshotFromEvents(ctx, events, false)
-	if err != nil {
-		t.Fatal(err)
+	if len(projected.WorkItems) != 1 {
+		t.Fatalf("projected work items = %+v", projected.WorkItems)
 	}
-	if projected.LastEventID != 6 {
-		t.Fatalf("projected last event id = %d, want 6", projected.LastEventID)
+	item := projected.WorkItems[0]
+	if item.Attempt != 1 || item.LeaseOwner != "" || item.LeaseUntil != nil {
+		t.Fatalf("terminal work item lease = owner %q until %v attempt %d; want cleared lease and attempt 1", item.LeaseOwner, item.LeaseUntil, item.Attempt)
 	}
-	assertSnapshotsEqual(t, projected, replayed)
+	if len(projected.MemoryEntries) != 1 || projected.MemoryEntries[0].Kind != "worker_result_digest" || !strings.Contains(projected.MemoryEntries[0].Summary, "benchmark result improved") {
+		t.Fatalf("projected memory entries = %+v", projected.MemoryEntries)
+	}
 }
 
 func TestReadModelWorkerOutputDoesNotRewriteRows(t *testing.T) {
@@ -733,7 +786,7 @@ func TestReadModelWorkerOutputDoesNotRewriteRows(t *testing.T) {
 		Type:     core.EventWorkerOutput,
 		TaskID:   "task-output-watermark",
 		WorkerID: "worker-output-watermark",
-		Payload:  core.MustJSON(map[string]any{"text": strings.Repeat("x", 4096)}),
+		Payload:  core.MustJSON(map[string]any{"kind": "log", "stream": "stdout", "text": strings.Repeat("x", 4096)}),
 	})
 
 	var lastEventID int64
@@ -750,6 +803,14 @@ func TestReadModelWorkerOutputDoesNotRewriteRows(t *testing.T) {
 	if workerAfter != workerBefore {
 		t.Fatal("worker output rewrote worker read-model row")
 	}
+	var label string
+	var action string
+	if err := store.db.QueryRowContext(ctx, `SELECT label, current_action FROM worker_output_watermarks WHERE worker_id = ?`, "worker-output-watermark").Scan(&label, &action); err != nil {
+		t.Fatal(err)
+	}
+	if label != "log:stdout" || len(action) > 603 || !strings.HasSuffix(action, "...") {
+		t.Fatalf("watermark activity = label %q action length %d suffix %q", label, len(action), action[max(0, len(action)-3):])
+	}
 
 	snapshot, err := store.SnapshotSummary(ctx)
 	if err != nil {
@@ -760,6 +821,9 @@ func TestReadModelWorkerOutputDoesNotRewriteRows(t *testing.T) {
 	}
 	if len(snapshot.ExecutionNodes) != 1 || !snapshot.ExecutionNodes[0].UpdatedAt.Equal(outputAt) {
 		t.Fatalf("node updatedAt = %+v, want %s", snapshot.ExecutionNodes, outputAt)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].CurrentActionLabel != "log:stdout" || len(snapshot.Sessions[0].CurrentAction) > 603 {
+		t.Fatalf("session current action = %+v", snapshot.Sessions)
 	}
 }
 
@@ -852,8 +916,8 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 				"title":  "Compact cards",
 				"prompt": largeText,
 				"metadata": map[string]any{
-					"completionMode": "github",
-					"large":          largeText,
+					"objectiveMode": "broad",
+					"large":         largeText,
 				},
 			}),
 		},
@@ -872,7 +936,15 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 			Type:     core.EventWorkerWorkspace,
 			TaskID:   "task-cards-compact",
 			WorkerID: "worker-cards-compact",
-			Payload:  core.MustJSON(map[string]any{"workspace": largeText}),
+			Payload: core.MustJSON(map[string]any{
+				"root":          "/tmp/aged/workspaces/worker-cards-compact",
+				"cwd":           "/tmp/aged/workspaces/worker-cards-compact/repo",
+				"sourceRoot":    "/tmp/aged/source",
+				"workspaceName": "worker-cards-compact",
+				"mode":          "worktree",
+				"vcsType":       "git",
+				"workspace":     largeText,
+			}),
 		},
 		core.Event{
 			Type:     core.EventWorkerCreated,
@@ -889,6 +961,15 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 			TaskID: "task-cards-compact",
 			Payload: core.MustJSON(map[string]any{
 				"items": []map[string]any{{"id": "one", "title": largeText}},
+			}),
+		},
+		core.Event{
+			Type:   core.EventWorkItemQueued,
+			TaskID: "task-cards-compact",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "work-item-cards-compact",
+				"kind":   "pr.followup",
+				"reason": "Handle review feedback.",
 			}),
 		},
 		core.Event{
@@ -926,38 +1007,19 @@ func TestSnapshotTaskCardsUseCompactProjection(t *testing.T) {
 	if len(cardJSON) >= len(fullJSON)/4 {
 		t.Fatalf("task card snapshot length = %d, full snapshot length = %d; want card snapshot much smaller", len(cardJSON), len(fullJSON))
 	}
-	var fullRowBytes int
-	var cardRowBytes int
-	if err := store.db.QueryRowContext(ctx, `
-SELECT coalesce(sum(length(data)), 0)
-FROM (
-	SELECT prompt || metadata || milestones || artifacts AS data FROM task_read_models
-	UNION ALL SELECT prompt || metadata FROM worker_read_models
-	UNION ALL SELECT metadata FROM execution_node_read_models
-	UNION ALL SELECT metadata FROM pull_request_read_models
-)`).Scan(&fullRowBytes); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.db.QueryRowContext(ctx, `
-SELECT coalesce(sum(row_bytes), 0)
-FROM (
-	SELECT length(title) + length(error) + length(metadata) AS row_bytes FROM task_cards
-	UNION ALL SELECT length(kind) + length(status) + length(command) + length(prompt_error) FROM task_card_workers
-	UNION ALL SELECT length(worker_kind) + length(status) + length(reason) + length(depends_on) FROM task_card_execution_nodes
-	UNION ALL SELECT length(repo) + length(url) + length(branch) + length(base) + length(title) + length(state) FROM task_card_pull_requests
-)`).Scan(&cardRowBytes); err != nil {
-		t.Fatal(err)
-	}
-	if cardRowBytes >= fullRowBytes/4 {
-		t.Fatalf("task card read model bytes = %d, full table bytes = %d; want card read model much smaller", cardRowBytes, fullRowBytes)
-	}
-
 	var legacyBlobTables int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'snapshot_projection'`).Scan(&legacyBlobTables); err != nil {
 		t.Fatal(err)
 	}
 	if legacyBlobTables != 0 {
 		t.Fatalf("legacy snapshot_projection table exists")
+	}
+	var duplicateCardTables int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'task_card%'`).Scan(&duplicateCardTables); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateCardTables != 0 {
+		t.Fatalf("duplicate task card tables exist")
 	}
 	if _, err := store.SnapshotSummary(ctx); err != nil {
 		t.Fatalf("SnapshotSummary should not depend on legacy projection blob: %v", err)
@@ -974,6 +1036,12 @@ FROM (
 	}
 	if len(snapshot.ExecutionNodes) != 1 || len(snapshot.ExecutionNodes[0].Metadata) != 0 {
 		t.Fatalf("card node was not compacted: %+v", snapshot.ExecutionNodes)
+	}
+	if len(snapshot.WorkItems) != 1 || snapshot.WorkItems[0].ID != "work-item-cards-compact" {
+		t.Fatalf("card work items = %+v", snapshot.WorkItems)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].WorkspaceCWD == "" || len(snapshot.Sessions[0].Metadata) != 0 {
+		t.Fatalf("card sessions = %+v", snapshot.Sessions)
 	}
 	if len(snapshot.PullRequests) != 1 || len(snapshot.PullRequests[0].Metadata) != 0 {
 		t.Fatalf("card pull request was not compacted: %+v", snapshot.PullRequests)
@@ -1038,24 +1106,8 @@ func TestSnapshotTaskCardsProjectionPrunesTerminalDetails(t *testing.T) {
 	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].Prompt != "" {
 		t.Fatalf("card snapshot task = %+v", snapshot.Tasks)
 	}
-	if len(snapshot.Workers) != 0 || len(snapshot.ExecutionNodes) != 0 || len(snapshot.PullRequests) != 0 {
-		t.Fatalf("terminal details were retained: workers=%+v nodes=%+v pullRequests=%+v", snapshot.Workers, snapshot.ExecutionNodes, snapshot.PullRequests)
-	}
-}
-
-func assertSnapshotsEqual(tb testing.TB, got core.Snapshot, want core.Snapshot) {
-	tb.Helper()
-
-	gotJSON, err := json.Marshal(got)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	wantJSON, err := json.Marshal(want)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	if string(gotJSON) != string(wantJSON) {
-		tb.Fatalf("snapshots differ\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	if len(snapshot.Workers) != 0 || len(snapshot.ExecutionNodes) != 0 || len(snapshot.WorkItems) != 0 || len(snapshot.Sessions) != 0 || len(snapshot.PullRequests) != 0 {
+		t.Fatalf("terminal details were retained: workers=%+v nodes=%+v workItems=%+v sessions=%+v pullRequests=%+v", snapshot.Workers, snapshot.ExecutionNodes, snapshot.WorkItems, snapshot.Sessions, snapshot.PullRequests)
 	}
 }
 
@@ -1238,25 +1290,6 @@ func BenchmarkReadModelLargeHistory(b *testing.B) {
 
 	seedLargeSnapshotHistory(b, ctx, store, 100, 5, 40)
 
-	b.Run("replay-summary", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			events, err := projectionInputEvents(ctx, store.db, 0)
-			if err != nil {
-				b.Fatal(err)
-			}
-			snapshot, err := store.snapshotFromEvents(ctx, events, false)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if i == 0 {
-				payload, err := json.Marshal(snapshot)
-				if err != nil {
-					b.Fatal(err)
-				}
-				b.ReportMetric(float64(len(payload)), "payload_bytes")
-			}
-		}
-	})
 	b.Run("projected-summary", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			snapshot, err := store.SnapshotSummary(ctx)
@@ -1404,7 +1437,7 @@ func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 			TaskID: taskID,
 			Payload: core.MustJSON(map[string]any{
 				"status": core.TaskFailed,
-				"error":  "publish completion pull request: patch does not apply",
+				"error":  "apply worker patch: patch does not apply",
 			}),
 		},
 	)
@@ -1416,7 +1449,7 @@ func TestSnapshotCarriesTaskStatusError(t *testing.T) {
 	if len(snapshot.Tasks) != 1 {
 		t.Fatalf("tasks = %d, want 1", len(snapshot.Tasks))
 	}
-	if snapshot.Tasks[0].Error != "publish completion pull request: patch does not apply" {
+	if snapshot.Tasks[0].Error != "apply worker patch: patch does not apply" {
 		t.Fatalf("task error = %q", snapshot.Tasks[0].Error)
 	}
 }
@@ -1548,6 +1581,9 @@ func TestSnapshotProjectsTaskObjectiveMilestonesAndArtifacts(t *testing.T) {
 	if len(task.Artifacts) != 1 || task.Artifacts[0].ID != "pr-1" {
 		t.Fatalf("artifacts = %+v", task.Artifacts)
 	}
+	if len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].TaskID != taskID || snapshot.Artifacts[0].ID != "pr-1" {
+		t.Fatalf("snapshot artifacts = %+v", snapshot.Artifacts)
+	}
 	if task.WorkPlan == nil || task.WorkPlan.Validation[0].ID != "monitor" {
 		t.Fatalf("work plan = %+v", task.WorkPlan)
 	}
@@ -1601,6 +1637,24 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 			WorkerID: "worker-1",
 			Payload:  core.MustJSON(map[string]any{}),
 		},
+		core.Event{
+			Type:     core.EventWorkerWorkspace,
+			TaskID:   "task-1",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"root":               "/runs/aged-worker/repo",
+				"cwd":                "/runs/aged-worker/repo",
+				"sourceRoot":         "/repo",
+				"workspaceName":      "aged-worker",
+				"mode":               "remote-worktree",
+				"vcsType":            "git",
+				"sharedRoot":         "/runs/shared/task-1",
+				"sharedArtifactsDir": "/runs/shared/task-1/artifacts",
+				"sharedWorkerDir":    "/runs/shared/task-1/workers/worker-1",
+				"targetId":           "vm-1",
+				"targetKind":         "ssh",
+			}),
+		},
 	)
 
 	snapshot, err := store.Snapshot(ctx)
@@ -1614,6 +1668,16 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	if node.ID != "node-0" || node.Status != core.WorkerRunning || node.Role != "implementer" || node.TargetID != "vm-1" || node.RemoteSession != "aged-worker" {
 		t.Fatalf("node = %+v", node)
 	}
+	if len(snapshot.Sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(snapshot.Sessions))
+	}
+	session := snapshot.Sessions[0]
+	if session.WorkerID != "worker-1" || session.NodeID != "node-0" || session.Status != core.WorkerRunning || session.Role != "implementer" || session.RemoteSession != "aged-worker" || session.WorkspaceCWD != "/runs/aged-worker/repo" {
+		t.Fatalf("session = %+v", session)
+	}
+	if session.SharedRoot != "/runs/shared/task-1" || session.SharedArtifactsDir != "/runs/shared/task-1/artifacts" || session.SharedWorkerDir != "/runs/shared/task-1/workers/worker-1" {
+		t.Fatalf("session shared scratch = root %q artifacts %q worker %q", session.SharedRoot, session.SharedArtifactsDir, session.SharedWorkerDir)
+	}
 	if len(snapshot.OrchestrationGraphs) != 1 {
 		t.Fatalf("graphs = %d, want 1", len(snapshot.OrchestrationGraphs))
 	}
@@ -1623,6 +1687,260 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	}
 	if len(graph.Edges) != 2 {
 		t.Fatalf("graph edges = %+v, want parent and dependency edges", graph.Edges)
+	}
+}
+
+func TestSnapshotProjectsQuestions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-questions",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Questions",
+				"prompt": "Ask for input.",
+			}),
+		},
+		core.Event{
+			Type:     core.EventApprovalNeeded,
+			TaskID:   "task-questions",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"reason":   "missing_credentials",
+				"question": "Which token should be used?",
+			}),
+		},
+		core.Event{
+			Type:     core.EventApprovalDecided,
+			TaskID:   "task-questions",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"approved": true,
+				"answer":   "Use the session token.",
+				"reason":   "user_feedback",
+			}),
+		},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Questions) != 1 {
+		t.Fatalf("questions = %+v, want one projected question", snapshot.Questions)
+	}
+	question := snapshot.Questions[0]
+	if question.TaskID != "task-questions" || question.WorkerID != "worker-1" || question.Reason != "missing_credentials" || question.Question != "Which token should be used?" {
+		t.Fatalf("question = %+v", question)
+	}
+	if !question.Decided || question.Approved == nil || !*question.Approved || question.Answer != "Use the session token." {
+		t.Fatalf("question decision = %+v", question)
+	}
+
+	cards, err := store.SnapshotTaskCards(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards.Questions) != 0 {
+		t.Fatalf("card questions = %+v, want only undecided active questions", cards.Questions)
+	}
+}
+
+func TestSnapshotProjectsPullRequestFeedback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-pr-feedback",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "PR feedback",
+				"prompt": "Handle review feedback.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: "task-pr-feedback",
+			Payload: core.MustJSON(map[string]any{
+				"id":     "denoland/deno#41",
+				"repo":   "denoland/deno",
+				"number": 41,
+				"url":    "https://github.com/denoland/deno/pull/41",
+				"branch": "codex/feedback",
+				"base":   "main",
+				"title":  "Improve the thing",
+				"state":  "OPEN",
+				"metadata": map[string]any{
+					"latestPullRequestFeedbackSignature": "sig-review",
+					"latestPullRequestFeedbackBody":      "Please improve the PR description.",
+				},
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRFollowUp,
+			TaskID: "task-pr-feedback",
+			Payload: core.MustJSON(map[string]any{
+				"id":                "denoland/deno#41",
+				"repo":              "denoland/deno",
+				"number":            41,
+				"feedbackSignature": "sig-review",
+				"prompt":            "Address PR feedback.",
+			}),
+		},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequestFeedback) != 1 {
+		t.Fatalf("pull request feedback = %+v, want one row", snapshot.PullRequestFeedback)
+	}
+	feedback := snapshot.PullRequestFeedback[0]
+	if feedback.TaskID != "task-pr-feedback" || feedback.PullRequestID != "denoland/deno#41" || feedback.Status != "pending" || feedback.FeedbackSignature != "sig-review" {
+		t.Fatalf("feedback = %+v", feedback)
+	}
+	if feedback.FeedbackBody != "Please improve the PR description." || feedback.Prompt != "Address PR feedback." {
+		t.Fatalf("feedback body/prompt = %+v", feedback)
+	}
+	cards, err := store.SnapshotTaskCards(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards.PullRequestFeedback) != 1 || cards.PullRequestFeedback[0].FeedbackBody != "" || cards.PullRequestFeedback[0].Prompt != "" {
+		t.Fatalf("card feedback = %+v, want compact pending feedback", cards.PullRequestFeedback)
+	}
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskAction,
+			TaskID: "task-pr-feedback",
+			Payload: core.MustJSON(map[string]any{
+				"kind":          "update_pull_request",
+				"pullRequestId": "denoland/deno#41",
+				"inputs": map[string]any{
+					"id":    "denoland/deno#41",
+					"title": "Improve PR description",
+				},
+			}),
+		},
+	)
+
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequestFeedback) != 1 || snapshot.PullRequestFeedback[0].Status != "handled" || snapshot.PullRequestFeedback[0].HandledAt == nil {
+		t.Fatalf("handled feedback = %+v", snapshot.PullRequestFeedback)
+	}
+	cards, err = store.SnapshotTaskCards(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards.PullRequestFeedback) != 0 {
+		t.Fatalf("card feedback = %+v, want handled feedback omitted", cards.PullRequestFeedback)
+	}
+}
+
+func TestSnapshotProjectsSteering(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-steering",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Steering",
+				"prompt": "Accept steering.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventTaskSteered,
+			TaskID: "task-steering",
+			Payload: core.MustJSON(map[string]any{
+				"message": "Use release-lite builds.",
+			}),
+		},
+		core.Event{
+			Type:    core.EventTaskPlanned,
+			TaskID:  "task-steering",
+			Payload: core.MustJSON(map[string]any{"workerKind": "mock", "workerPrompt": "continue"}),
+		},
+		core.Event{
+			Type:   core.EventExecutionPlanned,
+			TaskID: "task-steering",
+			Payload: core.MustJSON(map[string]any{
+				"nodeId":     "node-1",
+				"workerId":   "worker-1",
+				"workerKind": "codex",
+				"role":       "implementer",
+			}),
+		},
+		core.Event{
+			Type:     core.EventWorkerCreated,
+			TaskID:   "task-steering",
+			WorkerID: "worker-1",
+			Payload:  core.MustJSON(map[string]any{"kind": "codex"}),
+		},
+		core.Event{
+			Type:     core.EventWorkerSteered,
+			TaskID:   "task-steering",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"workerId": "worker-1",
+				"message":  "Focus this worker on the PR description.",
+				"status":   "pending",
+				"reason":   "user_worker_steering",
+			}),
+		},
+		core.Event{
+			Type:   core.EventWorkItemQueued,
+			TaskID: "task-steering",
+			Payload: core.MustJSON(map[string]any{
+				"id":         "worker_steering_6",
+				"kind":       "user.worker_steering",
+				"targetKind": "worker",
+				"targetId":   "worker-1",
+			}),
+		},
+		core.Event{
+			Type:   core.EventWorkItemCompleted,
+			TaskID: "task-steering",
+			Payload: core.MustJSON(map[string]any{
+				"id":       "worker_steering_6",
+				"kind":     "user.worker_steering",
+				"status":   core.WorkItemSucceeded,
+				"workerId": "worker-1",
+			}),
+		},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Steering) != 2 {
+		t.Fatalf("steering = %+v, want task and worker steering", snapshot.Steering)
+	}
+	taskSteering := snapshot.Steering[0]
+	if taskSteering.TargetKind != "task" || taskSteering.Status != "applied" || taskSteering.AppliedAt == nil {
+		t.Fatalf("task steering = %+v", taskSteering)
+	}
+	workerSteering := snapshot.Steering[1]
+	if workerSteering.TargetKind != "worker" || workerSteering.TargetID != "worker-1" || workerSteering.Status != string(core.WorkItemSucceeded) || workerSteering.AppliedAt == nil {
+		t.Fatalf("worker steering = %+v", workerSteering)
+	}
+
+	cards, err := store.SnapshotTaskCards(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards.Steering) != 0 {
+		t.Fatalf("card steering = %+v, want applied steering omitted", cards.Steering)
 	}
 }
 

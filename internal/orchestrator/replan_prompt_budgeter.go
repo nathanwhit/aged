@@ -40,7 +40,6 @@ type ReplanPromptState struct {
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
 	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`
-	BlockedFinalCandidateIDs   []string                  `json:"blockedFinalCandidateIds,omitempty"`
 	RecoveryHint               string                    `json:"recoveryHint,omitempty"`
 	PromptBudget               ReplanPromptBudgetSummary `json:"promptBudget"`
 }
@@ -106,14 +105,10 @@ func (b ReplanPromptBudgeter) BoundState(state OrchestrationState) ReplanPromptS
 	if b.TotalTokens <= 0 {
 		b = DefaultReplanPromptBudgeter()
 	}
-	blocked := map[string]bool{}
-	for _, id := range state.BlockedFinalCandidateIDs {
-		blocked[id] = true
-	}
 	bounded := ReplanPromptState{
 		InitialPlan:                compactPlanForPrompt(state.InitialPlan),
 		WorkPlan:                   compactWorkPlanForPrompt(state.WorkPlan),
-		RecentResults:              b.compactRecentResults(state.Results, blocked),
+		RecentResults:              b.compactRecentResults(state.Results),
 		ContextLedger:              b.compactContextLedger(state.ContextLedger),
 		Artifacts:                  b.compactArtifacts(state.Artifacts),
 		PullRequests:               compactPullRequestsForPrompt(state.PullRequests),
@@ -121,7 +116,6 @@ func (b ReplanPromptBudgeter) BoundState(state OrchestrationState) ReplanPromptS
 		PendingPullRequestFeedback: b.compactPullRequestFeedback(state.PendingPullRequestFeedback),
 		PendingWorkerSteering:      compactWorkerSteeringForPrompt(state.PendingWorkerSteering),
 		Turn:                       state.Turn,
-		BlockedFinalCandidateIDs:   append([]string{}, state.BlockedFinalCandidateIDs...),
 		RecoveryHint:               truncateStringForPrompt(state.RecoveryHint, tokensToApproxChars(1000)),
 	}
 	bounded.PromptBudget = ReplanPromptBudgetSummary{
@@ -143,7 +137,7 @@ func (b ReplanPromptBudgeter) BoundState(state OrchestrationState) ReplanPromptS
 	return bounded
 }
 
-func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult, blocked map[string]bool) []WorkerTurnResult {
+func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult) []WorkerTurnResult {
 	if len(results) == 0 {
 		return nil
 	}
@@ -156,7 +150,7 @@ func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult, b
 		keep[i] = true
 	}
 	for i, result := range results {
-		if blocked[result.WorkerID] || result.Status == core.WorkerFailed || result.Status == core.WorkerCanceled || result.Status == core.WorkerWaiting {
+		if result.Status == core.WorkerFailed || result.Status == core.WorkerCanceled || result.Status == core.WorkerWaiting {
 			keep[i] = true
 		}
 	}
@@ -171,7 +165,7 @@ func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult, b
 	for recentTokens.tokens() > b.RecentResultsTokens {
 		dropped := false
 		for i, result := range recent {
-			if isHighPriorityPromptResult(result, blocked) {
+			if isHighPriorityPromptResult(result) {
 				continue
 			}
 			recent = append(recent[:i], recent[i+1:]...)
@@ -185,7 +179,7 @@ func (b ReplanPromptBudgeter) compactRecentResults(results []WorkerTurnResult, b
 		for i := range recent {
 			recent[i].Summary = truncateStringForPrompt(recent[i].Summary, tokensToApproxChars(500))
 			recent[i].Error = truncateStringForPrompt(recent[i].Error, tokensToApproxChars(500))
-			if !blocked[recent[i].WorkerID] && len(recent[i].Changes.ChangedFiles) > 8 {
+			if len(recent[i].Changes.ChangedFiles) > 8 {
 				recent[i].Changes.ChangedFiles = recent[i].Changes.ChangedFiles[:8]
 			}
 		}
@@ -406,8 +400,8 @@ func tinyArtifactContent(content string) string {
 	return ""
 }
 
-func isHighPriorityPromptResult(result WorkerTurnResult, blocked map[string]bool) bool {
-	return blocked[result.WorkerID] || result.Status == core.WorkerFailed || result.Status == core.WorkerCanceled || result.Status == core.WorkerWaiting || resultHasCandidateChanges(result)
+func isHighPriorityPromptResult(result WorkerTurnResult) bool {
+	return result.Status == core.WorkerFailed || result.Status == core.WorkerCanceled || result.Status == core.WorkerWaiting || resultHasCandidateChanges(result)
 }
 
 func approxJSONTokens(value any) int {

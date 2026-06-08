@@ -48,6 +48,44 @@ type Plan struct {
 	Metadata          map[string]any    `json:"metadata,omitempty"`
 }
 
+func normalizePlanShape(plan *Plan) {
+	if plan == nil {
+		return
+	}
+	legacyKind := strings.TrimSpace(plan.WorkerKind)
+	legacyPrompt := strings.TrimSpace(plan.Prompt)
+	if len(plan.Workers) > 0 {
+		for index := range plan.Workers {
+			if strings.TrimSpace(plan.Workers[index].WorkerKind) == "" {
+				plan.Workers[index].WorkerKind = legacyKind
+			}
+			if strings.TrimSpace(plan.Workers[index].Prompt) == "" {
+				plan.Workers[index].Prompt = legacyPrompt
+			}
+		}
+		plan.WorkerKind = ""
+		plan.Prompt = ""
+		return
+	}
+	if legacyKind == "" || legacyPrompt == "" {
+		return
+	}
+	reason := strings.TrimSpace(plan.Rationale)
+	if reason == "" {
+		reason = "Run the planned worker turn."
+	}
+	plan.Workers = []WorkerRequest{{
+		ID:              "main",
+		Role:            "worker",
+		Reason:          reason,
+		WorkerKind:      legacyKind,
+		Prompt:          legacyPrompt,
+		ReasoningEffort: plan.ReasoningEffort,
+	}}
+	plan.WorkerKind = ""
+	plan.Prompt = ""
+}
+
 type PlanStep struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
@@ -96,7 +134,6 @@ type OrchestrationState struct {
 	PendingPullRequestFeedback []PullRequestFeedbackItem `json:"pendingPullRequestFeedback,omitempty"`
 	PendingWorkerSteering      []WorkerSteeringItem      `json:"pendingWorkerSteering,omitempty"`
 	Turn                       int                       `json:"turn"`
-	BlockedFinalCandidateIDs   []string                  `json:"blockedFinalCandidateIds,omitempty"`
 	RecoveryHint               string                    `json:"recoveryHint,omitempty"`
 }
 
@@ -119,24 +156,7 @@ type ReplanPullRequestState struct {
 	PublicationPhase     string `json:"publicationPhase,omitempty"`
 }
 
-type PullRequestFeedbackItem struct {
-	EventID           int64  `json:"eventId"`
-	PullRequestID     string `json:"pullRequestId"`
-	Attempt           int    `json:"attempt,omitempty"`
-	Reason            string `json:"reason,omitempty"`
-	Repo              string `json:"repo,omitempty"`
-	Number            int    `json:"number,omitempty"`
-	URL               string `json:"url,omitempty"`
-	Branch            string `json:"branch,omitempty"`
-	Base              string `json:"base,omitempty"`
-	State             string `json:"state,omitempty"`
-	ChecksStatus      string `json:"checksStatus,omitempty"`
-	MergeStatus       string `json:"mergeStatus,omitempty"`
-	ReviewStatus      string `json:"reviewStatus,omitempty"`
-	FeedbackSignature string `json:"feedbackSignature,omitempty"`
-	FeedbackBody      string `json:"feedbackBody,omitempty"`
-	Prompt            string `json:"prompt,omitempty"`
-}
+type PullRequestFeedbackItem = core.PullRequestFeedback
 
 type WorkerSteeringItem struct {
 	EventID           int64  `json:"eventId"`
@@ -169,14 +189,13 @@ type ContextLedgerEntry struct {
 }
 
 type ReplanDecision struct {
-	Action                 string         `json:"action"`
-	Plan                   *Plan          `json:"plan,omitempty"`
-	FinalCandidateWorkerID string         `json:"finalCandidateWorkerId,omitempty"`
-	PullRequestBody        string         `json:"pullRequestBody,omitempty"`
-	Rationale              string         `json:"rationale,omitempty"`
-	Message                string         `json:"message,omitempty"`
-	WorkPlan               *core.WorkPlan `json:"workPlan,omitempty"`
-	Metadata               map[string]any `json:"metadata,omitempty"`
+	Action          string         `json:"action"`
+	Plan            *Plan          `json:"plan,omitempty"`
+	PullRequestBody string         `json:"pullRequestBody,omitempty"`
+	Rationale       string         `json:"rationale,omitempty"`
+	Message         string         `json:"message,omitempty"`
+	WorkPlan        *core.WorkPlan `json:"workPlan,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 type CompletionReview struct {
@@ -192,12 +211,15 @@ type PublicationReview struct {
 }
 
 func (p Plan) Validate() error {
+	normalizePlanShape(&p)
 	if len(p.Workers) == 0 {
-		if strings.TrimSpace(p.WorkerKind) == "" {
-			return errors.New("plan workerKind is required")
+		if len(p.Actions) == 0 {
+			return errors.New("plan workers must contain at least one worker")
 		}
-		if strings.TrimSpace(p.Prompt) == "" {
-			return errors.New("plan workerPrompt is required")
+		for _, action := range p.Actions {
+			if strings.TrimSpace(action.When) != "immediate" {
+				return errors.New("workerless plans may only contain immediate actions")
+			}
 		}
 	} else if err := validateWorkerRequests(p.Workers); err != nil {
 		return err
@@ -252,9 +274,9 @@ func workerRequestID(worker WorkerRequest, index int) string {
 
 func (a PlanAction) Validate() error {
 	switch strings.TrimSpace(a.Kind) {
-	case "publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "create_tasks":
+	case "publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "spawn_work", "create_tasks", "finish_objective":
 	default:
-		return errors.New("kind must be one of publish_pull_request, update_pull_request, watch_pull_requests, wait_external, ask_user, or create_tasks")
+		return errors.New("kind must be one of publish_pull_request, update_pull_request, watch_pull_requests, wait_external, ask_user, spawn_work, create_tasks, or finish_objective")
 	}
 	switch strings.TrimSpace(a.When) {
 	case "", "after_success", "immediate":
@@ -270,6 +292,9 @@ func (a PlanAction) Validate() error {
 	if strings.TrimSpace(a.Kind) == "create_tasks" && len(anySliceMetadata(a.Inputs, "tasks")) == 0 {
 		return errors.New("create_tasks inputs.tasks is required")
 	}
+	if strings.TrimSpace(a.Kind) == "spawn_work" && len(anySliceMetadata(a.Inputs, "items")) == 0 {
+		return errors.New("spawn_work inputs.items is required")
+	}
 	return nil
 }
 
@@ -280,10 +305,10 @@ func (d ReplanDecision) Validate() error {
 			return errors.New("replan continue action requires plan")
 		}
 		return d.Plan.Validate()
-	case "complete", "wait", "fail":
+	case "complete", "finish_objective", "wait", "fail":
 		return nil
 	default:
-		return errors.New("replan action must be one of continue, complete, wait, or fail")
+		return errors.New("replan action must be one of continue, complete, finish_objective, wait, or fail")
 	}
 }
 

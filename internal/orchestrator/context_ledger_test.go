@@ -118,6 +118,77 @@ func TestProjectTaskContextLedgerKeepsOldHighValueFactAcrossManyChangedResults(t
 	}
 }
 
+func TestContextLedgerFromMemoryEntriesCarriesMetadata(t *testing.T) {
+	entries := contextLedgerFromMemoryEntries([]core.MemoryEntry{
+		{
+			Kind:          "worker_result_digest",
+			SourceEventID: 42,
+			SourceEvent:   string(core.EventTaskAction),
+			WorkerID:      "worker-1",
+			Summary:       "decision: keep the validator harness local to the objective",
+			Metadata:      core.MustJSON(map[string]any{"nodeId": "node-1"}),
+		},
+	})
+
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	if entries[0].Summary != "decision: keep the validator harness local to the objective" {
+		t.Fatalf("summary = %q", entries[0].Summary)
+	}
+	if entries[0].Metadata["nodeId"] != "node-1" {
+		t.Fatalf("missing metadata: %+v", entries[0].Metadata)
+	}
+	if entries[0].Metadata["sourceEventId"] != float64(42) {
+		t.Fatalf("source event metadata = %#v", entries[0].Metadata["sourceEventId"])
+	}
+}
+
+func TestMergeContextLedgerEntriesPreservesMemoryEntries(t *testing.T) {
+	primary := []ContextLedgerEntry{
+		{
+			Kind:     "worker_result_digest",
+			WorkerID: "memory-worker",
+			Summary:  "decision: this objective must publish separate coherent PRs",
+		},
+	}
+	var secondary []ContextLedgerEntry
+	for index := 0; index < maxContextLedgerEntries*2; index++ {
+		secondary = append(secondary, ContextLedgerEntry{
+			Kind:     "candidate_result",
+			WorkerID: fmt.Sprintf("worker-%02d", index),
+			Summary:  fmt.Sprintf("changed result %02d", index),
+		})
+	}
+
+	merged := mergeContextLedgerEntries(primary, secondary)
+	if len(merged) != maxContextLedgerEntries {
+		t.Fatalf("merged entries = %d, want %d", len(merged), maxContextLedgerEntries)
+	}
+	if !ledgerContainsWorker(merged, "memory-worker") {
+		t.Fatalf("merged ledger dropped table-backed memory entry: %+v", merged)
+	}
+	if ledgerContainsWorker(merged, "worker-00") {
+		t.Fatalf("merged ledger kept old secondary entry instead of recent tail: %+v", merged)
+	}
+	if !ledgerContainsWorker(merged, fmt.Sprintf("worker-%02d", maxContextLedgerEntries*2-1)) {
+		t.Fatalf("merged ledger dropped recent secondary entry: %+v", merged)
+	}
+}
+
+func TestMergeContextLedgerEntriesDeduplicatesMemoryAndProjectedEntries(t *testing.T) {
+	entry := ContextLedgerEntry{
+		Kind:     "worker_result_digest",
+		WorkerID: "worker-1",
+		Summary:  "baseline binary was built from the wrong commit",
+	}
+
+	merged := mergeContextLedgerEntries([]ContextLedgerEntry{entry}, []ContextLedgerEntry{entry})
+	if len(merged) != 1 {
+		t.Fatalf("merged entries = %d, want 1: %+v", len(merged), merged)
+	}
+}
+
 func ledgerContainsSummary(entries []ContextLedgerEntry, needle string) bool {
 	for _, entry := range entries {
 		if strings.Contains(entry.Summary, needle) {

@@ -213,11 +213,17 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 			"title":  "Done",
 			"prompt": "large prompt",
 			"metadata": map[string]any{
-				"completionMode": "github",
-				"loopPrompt":     strings.Repeat("x", 2048),
+				"objectiveMode": "broad",
+				"loopPrompt":    strings.Repeat("x", 2048),
 			},
 		})},
 		{Type: core.EventWorkerCreated, TaskID: "done", WorkerID: "done-worker", Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkItemQueued, TaskID: "done", Payload: core.MustJSON(map[string]any{"id": "done-work", "kind": "objective.implement"})},
+		{Type: core.EventTaskArtifact, TaskID: "done", Payload: core.MustJSON(map[string]any{"id": "done-artifact", "kind": "benchmark", "name": "Done benchmark", "ref": "shared/done", "metadata": map[string]any{"content": strings.Repeat("a", 2048), "workerId": "done-worker"}})},
+		{Type: core.EventApprovalNeeded, TaskID: "done", WorkerID: "done-worker", Payload: core.MustJSON(map[string]any{"reason": "done_question", "question": "Done question?"})},
+		{Type: core.EventTaskSteered, TaskID: "done", Payload: core.MustJSON(map[string]any{"message": "Done steering."})},
+		{Type: core.EventPRPublished, TaskID: "done", Payload: core.MustJSON(map[string]any{"id": "repo#1", "repo": "owner/repo", "number": 1, "url": "https://github.com/owner/repo/pull/1", "branch": "done-pr", "state": "OPEN", "metadata": map[string]any{"latestPullRequestFeedbackSignature": "done-sig", "latestPullRequestFeedbackBody": "Done feedback."}})},
+		{Type: core.EventPRFollowUp, TaskID: "done", Payload: core.MustJSON(map[string]any{"id": "repo#1", "repo": "owner/repo", "number": 1, "feedbackSignature": "done-sig", "prompt": "Handle done feedback."})},
 		{Type: core.EventTaskStatus, TaskID: "done", Payload: core.MustJSON(map[string]any{"status": core.TaskSucceeded})},
 		{Type: core.EventTaskCreated, TaskID: "active", Payload: core.MustJSON(map[string]any{
 			"title":  "Active",
@@ -228,6 +234,12 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 			},
 		})},
 		{Type: core.EventWorkerCreated, TaskID: "active", WorkerID: "active-worker", Payload: core.MustJSON(map[string]any{"kind": "mock", "prompt": strings.Repeat("z", 2048), "metadata": map[string]any{"large": strings.Repeat("m", 2048)}})},
+		{Type: core.EventWorkItemQueued, TaskID: "active", Payload: core.MustJSON(map[string]any{"id": "active-work", "kind": "objective.implement"})},
+		{Type: core.EventTaskArtifact, TaskID: "active", Payload: core.MustJSON(map[string]any{"id": "active-artifact", "kind": "benchmark", "name": "Active benchmark", "ref": "shared/active", "metadata": map[string]any{"content": strings.Repeat("b", 2048), "workerId": "active-worker"}})},
+		{Type: core.EventApprovalNeeded, TaskID: "active", WorkerID: "active-worker", Payload: core.MustJSON(map[string]any{"reason": "active_question", "question": "Active question?"})},
+		{Type: core.EventTaskSteered, TaskID: "active", Payload: core.MustJSON(map[string]any{"message": "Active steering."})},
+		{Type: core.EventPRPublished, TaskID: "active", Payload: core.MustJSON(map[string]any{"id": "repo#2", "repo": "owner/repo", "number": 2, "url": "https://github.com/owner/repo/pull/2", "branch": "active-pr", "state": "OPEN", "metadata": map[string]any{"latestPullRequestFeedbackSignature": "active-sig", "latestPullRequestFeedbackBody": "Active feedback."}})},
+		{Type: core.EventPRFollowUp, TaskID: "active", Payload: core.MustJSON(map[string]any{"id": "repo#2", "repo": "owner/repo", "number": 2, "feedbackSignature": "active-sig", "prompt": "Handle active feedback."})},
 		{Type: core.EventTaskStatus, TaskID: "active", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})},
 	} {
 		if _, err := store.Append(ctx, event); err != nil {
@@ -263,7 +275,7 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	if strings.Contains(string(taskByID(snapshot.Tasks, "done").Metadata), "loopPrompt") {
 		t.Fatalf("task card metadata kept large loopPrompt: %s", taskByID(snapshot.Tasks, "done").Metadata)
 	}
-	if !strings.Contains(string(taskByID(snapshot.Tasks, "done").Metadata), "completionMode") {
+	if !strings.Contains(string(taskByID(snapshot.Tasks, "done").Metadata), "objectiveMode") {
 		t.Fatalf("task card metadata dropped card metadata: %s", taskByID(snapshot.Tasks, "done").Metadata)
 	}
 	if len(snapshot.Workers) != 1 || snapshot.Workers[0].TaskID != "active" {
@@ -271,6 +283,18 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	}
 	if snapshot.Workers[0].Prompt != "" || len(snapshot.Workers[0].Metadata) != 0 {
 		t.Fatalf("worker card kept detail payload: %+v", snapshot.Workers[0])
+	}
+	if len(snapshot.PullRequestFeedback) != 1 || snapshot.PullRequestFeedback[0].TaskID != "active" || snapshot.PullRequestFeedback[0].FeedbackBody != "" {
+		t.Fatalf("card feedback = %+v, want compact active feedback only", snapshot.PullRequestFeedback)
+	}
+	if len(snapshot.Artifacts) != 1 || snapshot.Artifacts[0].TaskID != "active" || snapshot.Artifacts[0].ID != "active-artifact" {
+		t.Fatalf("card artifacts = %+v, want compact active artifacts only", snapshot.Artifacts)
+	}
+	if strings.Contains(string(snapshot.Artifacts[0].Metadata), "content") || !strings.Contains(string(snapshot.Artifacts[0].Metadata), "workerId") {
+		t.Fatalf("card artifact metadata = %s, want compact metadata", snapshot.Artifacts[0].Metadata)
+	}
+	if len(snapshot.Steering) != 1 || snapshot.Steering[0].TaskID != "active" || snapshot.Steering[0].Message != "Active steering." {
+		t.Fatalf("card steering = %+v, want active steering only", snapshot.Steering)
 	}
 
 	taskRes, err := http.Get(server.URL + "/api/tasks/done")
@@ -290,6 +314,24 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	}
 	if len(taskSnapshot.Workers) != 1 || taskSnapshot.Workers[0].ID != "done-worker" {
 		t.Fatalf("task snapshot workers = %+v", taskSnapshot.Workers)
+	}
+	if len(taskSnapshot.WorkItems) != 1 || taskSnapshot.WorkItems[0].ID != "done-work" {
+		t.Fatalf("task snapshot work items = %+v", taskSnapshot.WorkItems)
+	}
+	if len(taskSnapshot.Artifacts) != 1 || taskSnapshot.Artifacts[0].ID != "done-artifact" || taskSnapshot.Artifacts[0].TaskID != "done" {
+		t.Fatalf("task snapshot artifacts = %+v", taskSnapshot.Artifacts)
+	}
+	if len(taskSnapshot.Questions) != 1 || taskSnapshot.Questions[0].Question != "Done question?" {
+		t.Fatalf("task snapshot questions = %+v", taskSnapshot.Questions)
+	}
+	if len(taskSnapshot.Sessions) != 1 || taskSnapshot.Sessions[0].WorkerID != "done-worker" {
+		t.Fatalf("task snapshot sessions = %+v", taskSnapshot.Sessions)
+	}
+	if len(taskSnapshot.PullRequestFeedback) != 1 || taskSnapshot.PullRequestFeedback[0].TaskID != "done" || taskSnapshot.PullRequestFeedback[0].FeedbackBody != "Done feedback." {
+		t.Fatalf("task snapshot feedback = %+v", taskSnapshot.PullRequestFeedback)
+	}
+	if len(taskSnapshot.Steering) != 1 || taskSnapshot.Steering[0].TaskID != "done" || taskSnapshot.Steering[0].Message != "Done steering." {
+		t.Fatalf("task snapshot steering = %+v", taskSnapshot.Steering)
 	}
 }
 
@@ -463,7 +505,7 @@ func TestMCPCreateTaskAndReadResources(t *testing.T) {
 	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "github" {
+	if _, ok := metadata["completionMode"]; ok {
 		t.Fatalf("metadata = %+v", metadata)
 	}
 
@@ -1729,7 +1771,7 @@ func TestTaskLookupFindsExternalSourceTask(t *testing.T) {
 	if err := json.Unmarshal(created.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "github" {
+	if _, ok := metadata["completionMode"]; ok {
 		t.Fatalf("metadata = %+v", metadata)
 	}
 

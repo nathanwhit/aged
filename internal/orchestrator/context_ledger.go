@@ -34,11 +34,75 @@ type contextLedgerWorkerInfo struct {
 }
 
 func (s *Service) taskContextLedger(ctx context.Context, taskID string) []ContextLedgerEntry {
+	var memoryEntries []core.MemoryEntry
+	if snapshot, err := s.store.SnapshotSummary(ctx); err == nil {
+		for _, entry := range snapshot.MemoryEntries {
+			if entry.TaskID == taskID {
+				memoryEntries = append(memoryEntries, entry)
+			}
+		}
+	}
 	events, err := s.store.ListTaskLedgerEvents(ctx, taskID)
 	if err != nil {
+		return contextLedgerFromMemoryEntries(memoryEntries)
+	}
+	return mergeContextLedgerEntries(contextLedgerFromMemoryEntries(memoryEntries), projectTaskContextLedger(events, taskID))
+}
+
+func contextLedgerFromMemoryEntries(entries []core.MemoryEntry) []ContextLedgerEntry {
+	if len(entries) == 0 {
 		return nil
 	}
-	return projectTaskContextLedger(events, taskID)
+	out := make([]ContextLedgerEntry, 0, len(entries))
+	for _, entry := range entries {
+		metadata := map[string]any{}
+		if len(entry.Metadata) > 0 {
+			_ = json.Unmarshal(entry.Metadata, &metadata)
+		}
+		metadata["sourceEventId"] = float64(entry.SourceEventID)
+		out = append(out, compactContextLedgerEntry(ContextLedgerEntry{
+			Kind:        entry.Kind,
+			SourceEvent: entry.SourceEvent,
+			WorkerID:    entry.WorkerID,
+			Summary:     entry.Summary,
+			Metadata:    metadata,
+		}))
+	}
+	return out
+}
+
+func mergeContextLedgerEntries(primary []ContextLedgerEntry, secondary []ContextLedgerEntry) []ContextLedgerEntry {
+	if len(primary) == 0 {
+		return secondary
+	}
+	seen := map[string]bool{}
+	add := func(entries *[]ContextLedgerEntry, entry ContextLedgerEntry) {
+		key := entry.Kind + "\x00" + entry.WorkerID + "\x00" + entry.Summary
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		*entries = append(*entries, entry)
+	}
+	primaryEntries := make([]ContextLedgerEntry, 0, len(primary))
+	for _, entry := range primary {
+		add(&primaryEntries, entry)
+	}
+	secondaryEntries := make([]ContextLedgerEntry, 0, len(secondary))
+	for _, entry := range secondary {
+		add(&secondaryEntries, entry)
+	}
+	if len(primaryEntries) >= maxContextLedgerEntries {
+		return primaryEntries[len(primaryEntries)-maxContextLedgerEntries:]
+	}
+	remaining := maxContextLedgerEntries - len(primaryEntries)
+	if len(secondaryEntries) > remaining {
+		secondaryEntries = secondaryEntries[len(secondaryEntries)-remaining:]
+	}
+	merged := make([]ContextLedgerEntry, 0, len(primaryEntries)+len(secondaryEntries))
+	merged = append(merged, primaryEntries...)
+	merged = append(merged, secondaryEntries...)
+	return merged
 }
 
 func projectTaskContextLedger(events []core.Event, taskID string) []ContextLedgerEntry {

@@ -22,20 +22,27 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyTaskResult, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { EventRecord, ExecutionNode, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestPolicy, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
   tasks: Task[];
   workers: Worker[];
   executionNodes: ExecutionNode[];
+  workItems: WorkItem[];
+  artifacts: Artifact[];
+  memoryEntries: MemoryEntry[];
+  questions: Question[];
+  sessions: Session[];
   targets: TargetState[];
   plugins: Plugin[];
   promptSets: PromptSet[];
   projects: Project[];
   pullRequests: PullRequestState[];
+  pullRequestFeedback: PullRequestFeedback[];
+  steering: SteeringItem[];
   orchestrationGraphs: OrchestrationGraph[];
   lastEventId: number;
   snapshotEventId: number;
@@ -43,14 +50,14 @@ type AppSnapshot = {
 };
 
 type TaskStartInput = {
-  runMode?: RunMode;
+  taskMode?: TaskMode;
   projectId?: string;
   title: string;
   prompt: string;
   metadata?: Record<string, unknown>;
 };
 
-type RunMode = "one-shot" | "objective" | "loop";
+type TaskMode = "one-shot" | "objective" | "loop";
 
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
@@ -58,11 +65,18 @@ const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
   executionNodes: [],
+  workItems: [],
+  artifacts: [],
+  memoryEntries: [],
+  questions: [],
+  sessions: [],
   targets: [],
   plugins: [],
   promptSets: [],
   projects: [],
   pullRequests: [],
+  pullRequestFeedback: [],
+  steering: [],
   orchestrationGraphs: [],
   lastEventId: 0,
   snapshotEventId: 0,
@@ -107,6 +121,13 @@ const EMPTY_WORKERS: Worker[] = [];
 const EMPTY_EXECUTION_NODES: ExecutionNode[] = [];
 const EMPTY_EVENTS: EventRecord[] = [];
 const EMPTY_PULL_REQUESTS: PullRequestState[] = [];
+const EMPTY_PULL_REQUEST_FEEDBACK: PullRequestFeedback[] = [];
+const EMPTY_STEERING: SteeringItem[] = [];
+const EMPTY_WORK_ITEMS: WorkItem[] = [];
+const EMPTY_ARTIFACTS: Artifact[] = [];
+const EMPTY_MEMORY_ENTRIES: MemoryEntry[] = [];
+const EMPTY_QUESTIONS: Question[] = [];
+const EMPTY_SESSIONS: Session[] = [];
 const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "task-detail", span: 12, minHeight: 0 },
   { id: "current-state", span: 4, minHeight: 0 },
@@ -207,8 +228,15 @@ function App() {
   const taskById = useMemo(() => new Map(snapshot.tasks.map((task) => [task.id, task])), [snapshot.tasks]);
   const workersByTask = useMemo(() => groupByTask(snapshot.workers, (worker) => worker.taskId), [snapshot.workers]);
   const nodesByTask = useMemo(() => groupByTask(snapshot.executionNodes, (node) => node.taskId), [snapshot.executionNodes]);
+  const workItemsByTask = useMemo(() => groupByTask(snapshot.workItems, (item) => item.taskId), [snapshot.workItems]);
+  const artifactsByTask = useMemo(() => groupByTask(snapshot.artifacts, (artifact) => artifact.taskId), [snapshot.artifacts]);
+  const memoryEntriesByTask = useMemo(() => groupByTask(snapshot.memoryEntries, (entry) => entry.taskId), [snapshot.memoryEntries]);
+  const questionsByTask = useMemo(() => groupByTask(snapshot.questions, (question) => question.taskId), [snapshot.questions]);
+  const sessionsByTask = useMemo(() => groupByTask(snapshot.sessions, (session) => session.taskId), [snapshot.sessions]);
   const eventsByTask = useMemo(() => groupByTask(snapshot.events, (event) => event.taskId), [snapshot.events]);
   const pullRequestsByTask = useMemo(() => groupByTask(snapshot.pullRequests, (pr) => pr.taskId), [snapshot.pullRequests]);
+  const pullRequestFeedbackByTask = useMemo(() => groupByTask(snapshot.pullRequestFeedback, (feedback) => feedback.taskId), [snapshot.pullRequestFeedback]);
+  const steeringByTask = useMemo(() => groupByTask(snapshot.steering, (item) => item.taskId), [snapshot.steering]);
   const graphByTask = useMemo(() => mapByTask(snapshot.orchestrationGraphs, (graph) => graph.taskId), [snapshot.orchestrationGraphs]);
   const selectedTask = taskById.get(selectedTaskId) ?? preferredTask(snapshot.tasks);
 
@@ -245,10 +273,17 @@ function App() {
   }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
   const selectedWorkers = selectedTask ? workersByTask.get(selectedTask.id) ?? EMPTY_WORKERS : EMPTY_WORKERS;
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
+  const selectedWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
+  const selectedArtifacts = selectedTask ? artifactsByTask.get(selectedTask.id) ?? selectedTask.artifacts?.map((artifact) => ({ ...artifact, taskId: selectedTask.id })) ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
+  const selectedMemoryEntries = selectedTask ? memoryEntriesByTask.get(selectedTask.id) ?? EMPTY_MEMORY_ENTRIES : EMPTY_MEMORY_ENTRIES;
+  const selectedQuestions = selectedTask ? questionsByTask.get(selectedTask.id) ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS;
+  const selectedSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
   const selectedGraph = selectedTask ? graphByTask.get(selectedTask.id) : undefined;
   const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const selectedEventsByWorker = useMemo(() => groupByWorker(selectedEvents), [selectedEvents]);
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
+  const selectedPullRequestFeedback = selectedTask ? pullRequestFeedbackByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUEST_FEEDBACK : EMPTY_PULL_REQUEST_FEEDBACK;
+  const selectedSteering = selectedTask ? steeringByTask.get(selectedTask.id) ?? EMPTY_STEERING : EMPTY_STEERING;
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
   const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
   const selectedWorkerEvents = selectedWorker ? selectedEventsByWorker.get(selectedWorker.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
@@ -379,7 +414,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onRetry={handleRetryTask} onReview={getWorkerChanges} onApply={applyTaskResult} onApplied={refresh} onSteer={steerTask} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -388,6 +423,7 @@ function App() {
             <PullRequestPanel
               task={selectedTask}
               pullRequests={selectedPullRequests}
+              pullRequestFeedback={selectedPullRequestFeedback}
               onPublish={publishTaskPullRequest}
               onWatch={watchTaskPullRequests}
               onRefresh={refreshPullRequest}
@@ -400,7 +436,7 @@ function App() {
         {
           id: "current-state",
           title: "Current State",
-          element: <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} />,
+          element: <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} workItems={selectedWorkItems} sessions={selectedSessions} />,
         },
         {
           id: "workers",
@@ -537,7 +573,7 @@ function App() {
           <TaskComposer
             onCreate={async (input) => {
               setError("");
-              const { runMode, ...request } = input;
+              const { taskMode, ...request } = input;
               const task = await createTask(request);
               setSnapshot((current) => upsertTask(current, task));
               setSelectedTaskId(task.id);
@@ -1001,13 +1037,15 @@ function durableLoopPromptValue(task: Task): string {
 }
 
 function canPublishPullRequest(task: Task): boolean {
-  return isTerminalTask(task) || Boolean(task.finalCandidateWorkerId);
+  return isTerminalTask(task);
 }
 
-function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[] }) {
+function WorkSummary({ progress, nodes, workers, workItems, sessions }: { progress: WorkProgress; nodes: ExecutionNode[]; workers: Worker[]; workItems: WorkItem[]; sessions: Session[] }) {
   const activeNodes = nodes.filter((node) => node.status === "running" || node.status === "queued" || node.status === "waiting");
   const activeWorkers = workers.filter((worker) => worker.status === "running" || worker.status === "queued" || worker.status === "waiting");
-  const activeCount = activeNodes.length || activeWorkers.length;
+  const activeWorkItems = workItems.filter((item) => item.status === "queued" || item.status === "running");
+  const activeSessions = sessions.filter((session) => session.status === "running" || session.status === "queued" || session.status === "waiting");
+  const activeCount = activeSessions.length || activeNodes.length || activeWorkers.length || activeWorkItems.length;
   return (
     <section className="panel summary-panel">
       <div className="panel-title">
@@ -1026,15 +1064,43 @@ function WorkSummary({ progress, nodes, workers }: { progress: WorkProgress; nod
       </div>
       <div className="active-work">
         <strong>{activeCount} active</strong>
-        {(activeNodes.length > 0 ? activeNodes : activeWorkers).slice(0, 4).map((item) => {
-          const idle = formatWorkerIdle(item.status, item.updatedAt);
-          return (
-            <span key={item.id}>
-              {"workerKind" in item ? (item.role || item.workerKind) : item.kind} <Status value={item.status} />
-              {idle ? ` idle ${idle}` : ""}
-            </span>
-          );
-        })}
+        {activeSessions.length > 0
+          ? activeSessions.slice(0, 4).map((item) => {
+              const idle = formatWorkerIdle(item.status, item.updatedAt);
+              return (
+                <span key={item.id}>
+                  {item.role || item.workerKind || "worker"} <Status value={item.status} />
+                  {item.remoteSession ? ` ${item.remoteSession}` : ""}
+                  {idle ? ` idle ${idle}` : ""}
+                </span>
+              );
+            })
+          : activeNodes.length > 0
+          ? activeNodes.slice(0, 4).map((item) => {
+              const idle = formatWorkerIdle(item.status, item.updatedAt);
+              return (
+                <span key={item.id}>
+                  {item.role || item.workerKind} <Status value={item.status} />
+                  {idle ? ` idle ${idle}` : ""}
+                </span>
+              );
+            })
+          : activeWorkers.length > 0
+            ? activeWorkers.slice(0, 4).map((item) => {
+                const idle = formatWorkerIdle(item.status, item.updatedAt);
+                return (
+                  <span key={item.id}>
+                    {item.kind} <Status value={item.status} />
+                    {idle ? ` idle ${idle}` : ""}
+                  </span>
+                );
+              })
+            : activeWorkItems.slice(0, 4).map((item) => (
+                <span key={item.id}>
+                  {item.kind} <Status value={item.status} />
+                  {item.leaseOwner ? ` ${item.leaseOwner}` : ""}
+                </span>
+              ))}
       </div>
     </section>
   );
@@ -1071,8 +1137,7 @@ function TaskComposer({
   const [requiredTargetID, setRequiredTargetID] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [runMode, setRunMode] = useState<RunMode>("one-shot");
-  const [completionMode, setCompletionMode] = useState<"local" | "github">("github");
+  const [taskMode, setTaskMode] = useState<TaskMode>("one-shot");
   const [loopWorkerKind, setLoopWorkerKind] = useState("codex");
   const [loopRole, setLoopRole] = useState("maintenance_pr_loop");
   const [loopIntervalSeconds, setLoopIntervalSeconds] = useState("300");
@@ -1081,23 +1146,23 @@ function TaskComposer({
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const interval = Math.max(0, Number.parseInt(loopIntervalSeconds, 10) || 0);
-    const metadata: Record<string, unknown> = runMode === "loop"
+    const metadata: Record<string, unknown> = taskMode === "loop"
       ? {
           executionMode: "loop",
           loopWorkerKind: loopWorkerKind.trim() || "codex",
           loopRole: loopRole.trim() || "maintenance_pr_loop",
           loopIntervalSeconds: interval,
         }
-      : runMode === "objective"
-        ? { objectiveMode: "broad", completionMode: "github" }
-        : { completionMode };
+      : taskMode === "objective"
+        ? { objectiveMode: "broad" }
+        : {};
     if (promptSetId) {
       metadata.promptSetId = promptSetId;
     }
     if (requiredTargetID) {
       metadata.requiredTargetID = requiredTargetID;
     }
-    const input = { runMode, projectId: projectId || undefined, title, prompt, metadata };
+    const input = { taskMode, projectId: projectId || undefined, title, prompt, metadata };
     setBusy(true);
     onStartPending(input);
     try {
@@ -1106,8 +1171,7 @@ function TaskComposer({
       setPrompt("");
       setPromptSetId("");
       setRequiredTargetID("");
-      setRunMode("one-shot");
-      setCompletionMode("github");
+      setTaskMode("one-shot");
       setLoopWorkerKind("codex");
       setLoopRole("maintenance_pr_loop");
       setLoopIntervalSeconds("300");
@@ -1155,33 +1219,25 @@ function TaskComposer({
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
       </label>
-      <fieldset className="run-mode-control">
+      <fieldset className="task-mode-control">
         <legend>Run mode</legend>
-        <label className={runMode === "one-shot" ? "run-mode-option selected" : "run-mode-option"}>
-          <input type="radio" name="run-mode" value="one-shot" checked={runMode === "one-shot"} onChange={() => setRunMode("one-shot")} />
+        <label className={taskMode === "one-shot" ? "task-mode-option selected" : "task-mode-option"}>
+          <input type="radio" name="task-mode" value="one-shot" checked={taskMode === "one-shot"} onChange={() => setTaskMode("one-shot")} />
           <Play size={16} />
           <span>One-shot</span>
         </label>
-        <label className={runMode === "objective" ? "run-mode-option selected" : "run-mode-option"}>
-          <input type="radio" name="run-mode" value="objective" checked={runMode === "objective"} onChange={() => setRunMode("objective")} />
+        <label className={taskMode === "objective" ? "task-mode-option selected" : "task-mode-option"}>
+          <input type="radio" name="task-mode" value="objective" checked={taskMode === "objective"} onChange={() => setTaskMode("objective")} />
           <FolderPlus size={16} />
           <span>Objective</span>
         </label>
-        <label className={runMode === "loop" ? "run-mode-option selected" : "run-mode-option"}>
-          <input type="radio" name="run-mode" value="loop" checked={runMode === "loop"} onChange={() => setRunMode("loop")} />
+        <label className={taskMode === "loop" ? "task-mode-option selected" : "task-mode-option"}>
+          <input type="radio" name="task-mode" value="loop" checked={taskMode === "loop"} onChange={() => setTaskMode("loop")} />
           <RefreshCw size={16} />
           <span>Durable loop</span>
         </label>
       </fieldset>
-      {runMode === "one-shot" ? (
-        <label>
-          Completion
-          <select value={completionMode} onChange={(event) => setCompletionMode(event.target.value as "local" | "github")}>
-            <option value="github">GitHub: open PR when complete</option>
-            <option value="local">Local: review diff here and apply result</option>
-          </select>
-        </label>
-      ) : runMode === "loop" ? (
+      {taskMode === "loop" ? (
         <div className="loop-config">
           <label>
             Worker kind
@@ -1229,7 +1285,7 @@ function PendingTaskRow({ task }: { task: TaskStartInput }) {
           <LoaderCircle className="spin" size={12} />
           Starting
         </span>
-        {task.runMode === "objective" && <span className="pill subtle">Objective</span>}
+        {task.taskMode === "objective" && <span className="pill subtle">Objective</span>}
         {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
       </div>
     </div>
@@ -1602,10 +1658,10 @@ function ProjectPanel({
           </label>
           {reviewGateEnabled && (
             <div className="loop-config">
-              <label className="checkbox-label">
-                <input type="checkbox" checked={reviewBeforeCompletionPR} onChange={(event) => setReviewBeforeCompletionPR(event.target.checked)} />
-                Review completion PRs
-              </label>
+	              <label className="checkbox-label">
+	                <input type="checkbox" checked={reviewBeforeCompletionPR} onChange={(event) => setReviewBeforeCompletionPR(event.target.checked)} />
+	                Review final PR artifacts
+	              </label>
               <label className="checkbox-label">
                 <input type="checkbox" checked={reviewBeforeIntermediatePR} onChange={(event) => setReviewBeforeIntermediatePR(event.target.checked)} />
                 Review intermediate PRs
@@ -1764,14 +1820,20 @@ function TaskDetail({
   task,
   workers,
   nodes,
+  workItems,
+  artifacts,
+  memoryEntries,
+  questions,
+  sessions,
+  pullRequestFeedback,
+  steering,
   targets,
   events,
   onCancel,
   onRetry,
-  onReview,
-  onApply,
-  onApplied,
   onSteer,
+  onSteerWorker,
+  onCancelWorkItem,
   onUpdateLoopConfig,
   onLoopConfigUpdated,
   retrying,
@@ -1780,48 +1842,41 @@ function TaskDetail({
   task: Task;
   workers: Worker[];
   nodes: ExecutionNode[];
+  workItems: WorkItem[];
+  artifacts: Artifact[];
+  memoryEntries: MemoryEntry[];
+  questions: Question[];
+  sessions: Session[];
+  pullRequestFeedback: PullRequestFeedback[];
+  steering: SteeringItem[];
   targets: TargetState[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
-  onReview: (id: string) => Promise<WorkerChangesReview>;
-  onApply: (id: string) => Promise<void>;
-  onApplied: () => Promise<void>;
   onSteer: (id: string, message: string) => Promise<void>;
+  onSteerWorker: (id: string, message: string) => Promise<void>;
+  onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
   onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
   retrying: boolean;
   onError: (message: string) => void;
 }) {
   const [message, setMessage] = useState("");
-  const [applying, setApplying] = useState(false);
   const [loopIntervalInput, setLoopIntervalInput] = useState("");
   const [loopPromptInput, setLoopPromptInput] = useState("");
   const [loopTargetInput, setLoopTargetInput] = useState("");
   const [savingLoopConfig, setSavingLoopConfig] = useState(false);
-  const [diff, setDiff] = useState<DiffReviewState | undefined>();
-  const completionMode = String(task.metadata?.completionMode ?? "local");
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
   const currentLoopPrompt = durableLoopPromptValue(task);
   const requiredTargetID = requiredTargetIDFromMetadata(task.metadata);
   const hasCustomLoopPrompt = durableLoop && currentLoopPrompt !== task.prompt;
-  const finalWorkerId = task.finalCandidateWorkerId ?? "";
   const eventsByWorker = useMemo(() => groupByWorker(events), [events]);
-  const finalWorkerEvents = finalWorkerId ? eventsByWorker.get(finalWorkerId) ?? EMPTY_EVENTS : EMPTY_EVENTS;
-  const finalWorkerApplied = finalWorkerId !== "" && (task.appliedWorkerId === finalWorkerId || workerChangesApplied(finalWorkerEvents, finalWorkerId));
-  const canApplyResult = !durableLoop && completionMode !== "github" && isTerminalTask(task) && finalWorkerId !== "" && !finalWorkerApplied;
-  const finalCompletion = finalWorkerId ? latestWorkerCompletion(finalWorkerEvents, finalWorkerId) : {};
-  const finalChangedFiles = finalCompletion.changedFiles ?? finalCompletion.workspaceChanges?.changedFiles ?? [];
   const workerUpdate = currentWorkerUpdate(workers, nodes, eventsByWorker);
-  const approvals = approvalStates(events);
-  const pendingApprovals = task.objectiveStatus === "waiting_user" ? approvals.filter((approval) => !approval.decided).slice(0, 1) : [];
+  const approvals = questions.length > 0 ? questionApprovalStates(questions) : approvalStates(events);
+  const pendingApprovals = approvals.filter((approval) => !approval.decided).slice(0, 4);
   const taskError = task.error || latestTaskStatusError(events);
-
-  useEffect(() => {
-    setDiff(undefined);
-  }, [finalWorkerId]);
 
   useEffect(() => {
     setLoopIntervalInput(String(loopInterval));
@@ -1835,16 +1890,6 @@ function TaskDetail({
       await onSteer(task.id, message);
       setMessage("");
     } catch (err) { onError(errorMessage(err)); }
-  }
-
-  async function applyResult() {
-    setApplying(true);
-    try {
-      await onApply(task.id);
-      await onApplied();
-    } catch (err) { onError(errorMessage(err)); } finally {
-      setApplying(false);
-    }
   }
 
   async function updateLoopConfig(event: React.FormEvent) {
@@ -1882,33 +1927,6 @@ function TaskDetail({
     }
   }
 
-  async function toggleFinalDiff() {
-    if (!finalWorkerId) return;
-    if (diff?.open) {
-      setDiff({ ...diff, open: false });
-      return;
-    }
-    if (diff?.loaded) {
-      setDiff({ ...diff, open: true });
-      return;
-    }
-    setDiff({ open: true, loading: true, loaded: false, diff: "" });
-    try {
-      const review = await onReview(finalWorkerId);
-      setDiff({
-        open: true,
-        loading: false,
-        loaded: true,
-        diff: review.changes.diff ?? "",
-        error: review.changes.error,
-      });
-    } catch (err) {
-      const error = errorMessage(err);
-      setDiff({ open: true, loading: false, loaded: true, diff: "", error });
-      onError(error);
-    }
-  }
-
   return (
     <section className="panel detail">
       <div className="detail-heading">
@@ -1918,7 +1936,7 @@ function TaskDetail({
             {task.projectId && <span>Project {task.projectId}</span>}
             <span>{task.id.slice(0, 8)}</span>
             {requiredTargetID && <span>Target {requiredTargetID}</span>}
-            <span>{completionMode === "github" ? "GitHub completion" : "Local completion"}</span>
+            <span>{broadObjective ? "Objective orchestration" : durableLoop ? "Durable loop" : "Task orchestration"}</span>
             {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
         </div>
@@ -1928,14 +1946,7 @@ function TaskDetail({
           {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
           {broadObjective && <span className="pill">Objective mode</span>}
           {durableLoop && <span className="pill">Loop mode</span>}
-          {!durableLoop && completionMode === "github" && <span className="pill">GitHub mode</span>}
-          {canApplyResult && (
-            <button className="primary compact" disabled={applying} onClick={applyResult} title="Apply final task result locally">
-              <Check size={16} />
-              {applying ? "Applying" : "Apply Result"}
-            </button>
-          )}
-          {(task.appliedWorkerId || finalWorkerApplied) && <span className="pill">Applied</span>}
+          {task.appliedWorkerId && <span className="pill">Applied worker {task.appliedWorkerId.slice(0, 8)}</span>}
           {isRetryableTask(task) && (
             <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
               <RefreshCw size={18} />
@@ -1962,9 +1973,10 @@ function TaskDetail({
           )}
         </div>
       </details>
-      {(task.artifacts?.length || task.milestones?.length) && (
-        <TaskObjectiveStrip task={task} />
+      {(artifacts.length || task.artifacts?.length || task.milestones?.length) && (
+        <TaskObjectiveStrip task={task} artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []} />
       )}
+      <MemoryEntryPanel entries={memoryEntries} />
       {taskError && (
         <div className="task-failure">
           <strong>Failure details</strong>
@@ -1973,6 +1985,10 @@ function TaskDetail({
       )}
       {pendingApprovals.length > 0 && <ApprovalPanel approvals={pendingApprovals} onUseMessage={setMessage} />}
       <WorkerProgressSpotlight update={workerUpdate} />
+      <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onError={onError} />
+      <SessionQueue sessions={sessions} onSteer={onSteerWorker} onError={onError} />
+      <SteeringQueue items={steering} />
+      <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
       {durableLoop && (
         <form className="loop-settings" onSubmit={updateLoopConfig}>
           <label>
@@ -1998,34 +2014,11 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
-      {finalWorkerId && finalChangedFiles.length > 0 && (
-        <div className="worker-review final-result-review">
-          <details>
-            <summary>{finalChangedFiles.length} changed files</summary>
-            <ul>
-              {finalChangedFiles.slice(0, 8).map((file) => (
-                <li key={`${file.status}-${file.path}`}>
-                  <code>{file.status ?? "changed"}</code>
-                  <span>{file.path}</span>
-                </li>
-              ))}
-            </ul>
-          </details>
-          <div className="worker-review-actions">
-            <button className="secondary compact" disabled={diff?.loading} onClick={toggleFinalDiff} title={diff?.open ? "Hide final result diff" : "Show final result diff"}>
-              <FileText size={16} />
-              {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
-            </button>
-          </div>
-          {diff?.open && <DiffViewer state={diff} />}
-        </div>
-      )}
     </section>
   );
 }
 
-function TaskObjectiveStrip({ task }: { task: Task }) {
-  const artifacts = task.artifacts ?? [];
+function TaskObjectiveStrip({ task, artifacts }: { task: Task; artifacts: Artifact[] }) {
   const milestones = task.milestones ?? [];
   const latestMilestone = milestones[milestones.length - 1];
   return (
@@ -2054,8 +2047,241 @@ function TaskObjectiveStrip({ task }: { task: Task }) {
   );
 }
 
+function WorkItemQueue({ taskId, items, onCancel, onError }: { taskId: string; items: WorkItem[]; onCancel: (taskId: string, itemId: string) => Promise<void>; onError: (message: string) => void }) {
+  const [canceling, setCanceling] = useState<Record<string, boolean>>({});
+  const sorted = [...items].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  const activeCount = sorted.filter((item) => item.status === "queued" || item.status === "running").length;
+  if (sorted.length === 0) return null;
+  async function cancelItem(item: WorkItem) {
+    setCanceling((current) => ({ ...current, [item.id]: true }));
+    try {
+      await onCancel(taskId, item.id);
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setCanceling((current) => ({ ...current, [item.id]: false }));
+    }
+  }
+  return (
+    <section className="work-item-queue">
+      <div className="work-item-title">
+        <strong>Work Queue</strong>
+        <span>{activeCount} active</span>
+      </div>
+      <div className="work-item-list">
+        {sorted.slice(0, 8).map((item) => (
+          <article key={item.id} className="work-item-card">
+            <div>
+              <strong>{humanizeKey(item.kind)}</strong>
+              <span className="work-item-card-actions">
+                <small>{new Date(item.updatedAt || item.createdAt).toLocaleTimeString()}</small>
+                {(item.status === "queued" || item.status === "running") && (
+                  <button className="icon-button danger small" disabled={Boolean(canceling[item.id])} onClick={() => cancelItem(item)} title="Cancel work item">
+                    <CircleStop size={14} />
+                  </button>
+                )}
+              </span>
+            </div>
+            <div className="work-item-meta">
+              <Status value={item.status} />
+              {item.targetKind && <span className="pill">{humanizeKey(item.targetKind)}</span>}
+              {item.targetId && <span className="pill">{item.targetId}</span>}
+              {item.workerId && <span className="pill">Worker {item.workerId.slice(0, 8)}</span>}
+              {item.leaseOwner && <span className="pill">Lease {item.leaseOwner}</span>}
+              {item.attempt ? <span className="pill">Attempt {item.attempt}</span> : null}
+              {item.leaseUntil && <span className="pill">Until {new Date(item.leaseUntil).toLocaleTimeString()}</span>}
+            </div>
+            {item.reason && <p>{item.reason}</p>}
+            {item.error && <TruncatedBlock label="Work item error" value={item.error} className="tool-output failed" limit={900} />}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MemoryEntryPanel({ entries }: { entries: MemoryEntry[] }) {
+  const sorted = [...entries].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  if (sorted.length === 0) return null;
+  return (
+    <section className="work-item-queue">
+      <div className="work-item-title">
+        <strong>Memory</strong>
+        <span>{sorted.length} entries</span>
+      </div>
+      <div className="work-item-list">
+        {sorted.slice(0, 8).map((entry) => (
+          <article key={entry.id} className="work-item-card">
+            <div>
+              <strong>{humanizeKey(entry.kind)}</strong>
+              <small>{new Date(entry.updatedAt || entry.createdAt).toLocaleTimeString()}</small>
+            </div>
+            <div className="work-item-meta">
+              {entry.workerId && <span className="pill">Worker {entry.workerId.slice(0, 8)}</span>}
+              {entry.sourceEvent && <span className="pill">{entry.sourceEvent}</span>}
+            </div>
+            <p>{entry.summary}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PullRequestFeedbackQueue({ feedback }: { feedback: PullRequestFeedback[] }) {
+  const pending = feedback
+    .filter((item) => item.status === "pending")
+    .sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  if (pending.length === 0) return null;
+  return (
+    <section className="work-item-queue">
+      <div className="work-item-title">
+        <strong>PR Feedback Queue</strong>
+        <span>{pending.length} pending</span>
+      </div>
+      <div className="work-item-list">
+        {pending.slice(0, 6).map((item) => (
+          <article key={item.id} className="work-item-card">
+            <div>
+              <strong>{pullRequestFeedbackTitle(item)}</strong>
+              <small>{new Date(item.updatedAt || item.createdAt).toLocaleTimeString()}</small>
+            </div>
+            <div className="work-item-meta">
+              <Status value={item.status ?? "pending"} />
+              {item.reviewStatus && <span className="pill">{item.reviewStatus.toLowerCase()}</span>}
+              {item.checksStatus && <span className="pill">{item.checksStatus.toLowerCase()}</span>}
+              {item.mergeStatus && <span className="pill">{item.mergeStatus.toLowerCase()}</span>}
+            </div>
+            {item.reason && <p>{item.reason}</p>}
+            {item.feedbackBody && <TruncatedBlock label="Feedback" value={item.feedbackBody} className="tool-output" limit={900} />}
+            {item.prompt && <TruncatedBlock label="Follow-up prompt" value={item.prompt} className="tool-output" limit={700} />}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function pullRequestFeedbackTitle(item: PullRequestFeedback): string {
+  if (item.repo && item.number) return `${item.repo}#${item.number}`;
+  if (item.url) return item.url;
+  if (item.branch) return item.branch;
+  return item.pullRequestId || "Pull request";
+}
+
+function SteeringQueue({ items }: { items: SteeringItem[] }) {
+  const visible = [...items]
+    .filter((item) => item.status === "pending" || item.status === "queued" || item.status === "running" || item.status === "applied")
+    .sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  const pendingCount = visible.filter((item) => item.status === "pending" || item.status === "queued" || item.status === "running").length;
+  if (visible.length === 0) return null;
+  return (
+    <section className="work-item-queue">
+      <div className="work-item-title">
+        <strong>Steering Queue</strong>
+        <span>{pendingCount} pending</span>
+      </div>
+      <div className="work-item-list">
+        {visible.slice(0, 6).map((item) => (
+          <article key={item.id} className="work-item-card">
+            <div>
+              <strong>{steeringTitle(item)}</strong>
+              <small>{new Date(item.updatedAt || item.createdAt).toLocaleTimeString()}</small>
+            </div>
+            <div className="work-item-meta">
+              <Status value={item.status ?? "pending"} />
+              {item.targetKind && <span className="pill">{humanizeKey(item.targetKind)}</span>}
+              {item.targetId && <span className="pill">{item.targetKind === "worker" ? item.targetId.slice(0, 8) : item.targetId}</span>}
+              {item.workerKind && <span className="pill">{item.workerKind}</span>}
+              {item.role && <span className="pill">{humanizeKey(item.role)}</span>}
+            </div>
+            <TruncatedBlock label="Steering" value={item.message} className="tool-output" limit={900} />
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function steeringTitle(item: SteeringItem): string {
+  if (item.targetKind === "worker" && item.workerId) return `Worker ${item.workerId.slice(0, 8)}`;
+  if (item.targetKind === "task") return "Task steering";
+  return item.reason ? humanizeKey(item.reason) : "Steering";
+}
+
+function SessionQueue({ sessions, onSteer, onError }: { sessions: Session[]; onSteer: (id: string, message: string) => Promise<void>; onError: (message: string) => void }) {
+  const [steering, setSteering] = useState<Record<string, string>>({});
+  const sorted = [...sessions].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  const activeCount = sorted.filter((session) => session.status === "queued" || session.status === "running" || session.status === "waiting").length;
+  if (sorted.length === 0) return null;
+  async function steer(event: React.FormEvent, workerID: string) {
+    event.preventDefault();
+    const message = steering[workerID] ?? "";
+    try {
+      await onSteer(workerID, message);
+      setSteering((items) => ({ ...items, [workerID]: "" }));
+    } catch (err) {
+      onError(errorMessage(err));
+    }
+  }
+  return (
+    <section className="session-queue">
+      <div className="work-item-title">
+        <strong>Sessions</strong>
+        <span>{activeCount} active</span>
+      </div>
+      <div className="session-list">
+        {sorted.slice(0, 10).map((session) => {
+          const location = session.workspaceCwd || session.remoteWorkDir || session.workspaceRoot || "";
+          const scratchLocation = session.sharedWorkerDir || session.sharedArtifactsDir || session.sharedRoot || "";
+          const updatedAt = session.updatedAt || session.startedAt || session.createdAt;
+          const currentActionAt = session.currentActionAt || updatedAt;
+          return (
+            <article key={session.id} className="session-card">
+              <div className="session-main">
+                <div>
+                  <strong>{session.role ? humanizeKey(session.role) : session.workerKind || "Worker"}</strong>
+                  <small>{session.workerId.slice(0, 8)}</small>
+                </div>
+                <Status value={session.status} />
+              </div>
+              <div className="session-meta">
+                {session.targetKind && <span>{humanizeKey(session.targetKind)}</span>}
+                {session.targetId && <span>{session.targetId}</span>}
+                {session.remoteSession && <span>{session.remoteSession}</span>}
+                {session.workspaceName && <span>{session.workspaceName}</span>}
+                {session.workspaceMode && <span>{humanizeKey(session.workspaceMode)}</span>}
+                {session.vcsType && <span>{session.vcsType}</span>}
+                {scratchLocation && <span>scratch</span>}
+                {updatedAt && <span>{new Date(updatedAt).toLocaleTimeString()}</span>}
+              </div>
+              {location && <code className="session-path">{location}</code>}
+              {scratchLocation && <code className="session-path muted">{scratchLocation}</code>}
+              {session.currentAction && (
+                <div className="session-current-action">
+                  <span>{session.currentActionLabel || "output"}</span>
+                  <p>{session.currentAction}</p>
+                  {currentActionAt && <small>{new Date(currentActionAt).toLocaleTimeString()}</small>}
+                </div>
+              )}
+              {!isTerminalWorkerStatus(session.status) && (
+                <form className="session-steer" onSubmit={(event) => steer(event, session.workerId)}>
+                  <input value={steering[session.workerId] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [session.workerId]: event.target.value }))} placeholder="Steer this session..." required />
+                  <button className="icon-button" title="Send session steering">
+                    <Send size={16} />
+                  </button>
+                </form>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 type ApprovalState = {
-  id: number;
+  id: string;
   at: string;
   question: string;
   reason: string;
@@ -2068,6 +2294,20 @@ type ApprovalState = {
   decided: boolean;
   answer?: string;
 };
+
+function questionApprovalStates(questions: Question[]): ApprovalState[] {
+  return [...questions]
+    .sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt))
+    .map((question) => ({
+      id: question.id,
+      at: question.updatedAt || question.createdAt,
+      question: question.question || "Approval needed.",
+      reason: question.reason || "approval",
+      workerId: question.workerId,
+      decided: question.decided,
+      answer: question.answer,
+    }));
+}
 
 function ApprovalPanel({ approvals, onUseMessage }: { approvals: ApprovalState[]; onUseMessage: (message: string) => void }) {
   return (
@@ -2146,6 +2386,7 @@ function WorkerProgressSpotlight({ update }: { update: WorkerProgressUpdate | un
 function PullRequestPanel({
   task,
   pullRequests,
+  pullRequestFeedback,
   onPublish,
   onWatch,
   onRefresh,
@@ -2155,6 +2396,7 @@ function PullRequestPanel({
 }: {
   task: Task;
   pullRequests: PullRequestState[];
+  pullRequestFeedback: PullRequestFeedback[];
   onPublish: (taskId: string) => Promise<PullRequestState>;
   onWatch: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
   onRefresh: (id: string) => Promise<PullRequestState>;
@@ -2168,6 +2410,13 @@ function PullRequestPanel({
   const [watchUrl, setWatchUrl] = useState("");
   const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const canPublish = canPublishPullRequest(task) && (broadObjective || pullRequests.length === 0);
+  const feedbackByPullRequest = useMemo(() => {
+    const byPR = new Map<string, PullRequestFeedback[]>();
+    for (const item of pullRequestFeedback) {
+      byPR.set(item.pullRequestId, [...(byPR.get(item.pullRequestId) ?? []), item]);
+    }
+    return byPR;
+  }, [pullRequestFeedback]);
 
   async function run(action: string, fn: () => Promise<unknown>) {
     setBusy(action);
@@ -2216,32 +2465,46 @@ function PullRequestPanel({
         <p className="empty">No pull request has been opened for this task.</p>
       ) : (
         <div className="pr-list">
-          {pullRequests.map((pr) => (
-            <article key={pr.id} className="pr-card">
-              <div className="pr-main">
-                <a href={pr.url} target="_blank" rel="noreferrer">
-                  {pr.repo}
-                  {pr.number ? `#${pr.number}` : ""}
-                </a>
-                <small>{pr.title}</small>
-              </div>
-              <div className="pr-statuses">
-                <Status value={pr.state?.toLowerCase() || "waiting"} />
-                {pr.checksStatus && <span className="pill">{pr.checksStatus}</span>}
-                {pr.reviewStatus && <span className="pill">{pr.reviewStatus.toLowerCase()}</span>}
-              </div>
-              <div className="pr-actions">
-                <button className="secondary compact" disabled={busy === `refresh:${pr.id}`} onClick={() => run(`refresh:${pr.id}`, () => onRefresh(pr.id))}>
-                  <RefreshCw size={16} />
-                  Refresh
-                </button>
-                <button className="secondary compact" disabled={Boolean(pr.babysitterTaskId) || busy === `babysit:${pr.id}`} onClick={() => run(`babysit:${pr.id}`, () => onBabysit(pr.id))}>
-                  <Bot size={16} />
-                  {pr.babysitterTaskId ? "Babysitting" : "Babysit"}
-                </button>
-              </div>
-            </article>
-          ))}
+          {pullRequests.map((pr) => {
+            const pendingFeedback = (feedbackByPullRequest.get(pr.id) ?? []).filter((item) => item.status === "pending");
+            return (
+              <article key={pr.id} className="pr-card">
+                <div className="pr-main">
+                  <a href={pr.url} target="_blank" rel="noreferrer">
+                    {pr.repo}
+                    {pr.number ? `#${pr.number}` : ""}
+                  </a>
+                  <small>{pr.title}</small>
+                </div>
+                <div className="pr-statuses">
+                  <Status value={pr.state?.toLowerCase() || "waiting"} />
+                  {pr.checksStatus && <span className="pill">{pr.checksStatus}</span>}
+                  {pr.reviewStatus && <span className="pill">{pr.reviewStatus.toLowerCase()}</span>}
+                  {pendingFeedback.length > 0 && <span className="pill">{pendingFeedback.length} feedback</span>}
+                </div>
+                {pendingFeedback.length > 0 && (
+                  <div className="pr-feedback-list">
+                    {pendingFeedback.slice(0, 3).map((item) => (
+                      <div key={item.id} className="pr-feedback-item">
+                        <small>{item.reason ? humanizeKey(item.reason) : "Pending feedback"}</small>
+                        <span>{item.feedbackBody || item.prompt || item.feedbackSignature || "Feedback is queued for follow-up."}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="pr-actions">
+                  <button className="secondary compact" disabled={busy === `refresh:${pr.id}`} onClick={() => run(`refresh:${pr.id}`, () => onRefresh(pr.id))}>
+                    <RefreshCw size={16} />
+                    Refresh
+                  </button>
+                  <button className="secondary compact" disabled={Boolean(pr.babysitterTaskId) || busy === `babysit:${pr.id}`} onClick={() => run(`babysit:${pr.id}`, () => onBabysit(pr.id))}>
+                    <Bot size={16} />
+                    {pr.babysitterTaskId ? "Babysitting" : "Babysit"}
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
     </section>
@@ -2370,7 +2633,6 @@ function WorkerList({
               const completion = workerId ? latestWorkerCompletion(workerEvents, workerId) : {};
               const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
               const applied = workerId ? workerChangesApplied(workerEvents, workerId) : false;
-              const isFinalCandidate = task.finalCandidateWorkerId === workerId;
               const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
             const diff = workerId ? diffs[workerId] : undefined;
             const dependencies = node?.dependsOn ?? graph?.edges.filter((edge) => edge.to === (graphNode?.id ?? node?.id)).map((edge) => edge.from) ?? [];
@@ -2440,9 +2702,9 @@ function WorkerList({
                         <FileText size={16} />
                         {diff?.loading ? "Loading" : diff?.open ? "Hide Diff" : "Diff"}
                       </button>
-                      <button className="secondary compact" disabled={!workerId || applied || applying === workerId || isFinalCandidate} onClick={() => apply(workerId)} title={isFinalCandidate ? "Use Apply Result on the task" : applied ? "Worker changes already applied" : "Manual worker apply"}>
+                      <button className="secondary compact" disabled={!workerId || applied || applying === workerId} onClick={() => apply(workerId)} title={applied ? "Worker changes already applied" : "Manual worker apply"}>
                         <Check size={16} />
-                        {isFinalCandidate ? "Final" : applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
+                        {applied ? "Applied" : applying === workerId ? "Applying" : "Manual Apply"}
                       </button>
                     </div>
                     {diff?.open && <DiffViewer state={diff} />}
@@ -3765,7 +4027,7 @@ function approvalStates(events: EventRecord[]): ApprovalState[] {
         return !reason || !decidedReason || reason === decidedReason || decidedReason === "user_feedback" || decidedReason === "autonomous_replan";
       });
       return {
-        id: event.id,
+        id: String(event.id),
         at: event.at,
         question,
         reason,
@@ -4558,6 +4820,17 @@ function compactEventDisplay(event: EventRecord): string {
   if (event.type === "execution.node_status") {
     return payloadValue(payload.status) || "Node status changed";
   }
+  if (event.type === "work_item.queued") {
+    const kind = payloadValue(payload.kind) || "work";
+    const target = payloadValue(payload.targetId);
+    return target ? `Queued ${kind} for ${target}` : `Queued ${kind}`;
+  }
+  if (event.type === "work_item.started") {
+    return "Work item started";
+  }
+  if (event.type === "work_item.completed") {
+    return payloadValue(payload.status) || "Work item completed";
+  }
   if (event.type === "approval.needed") {
     return payloadValue(payload.question || payload.error || payload.reason) || "Approval needed";
   }
@@ -4833,16 +5106,24 @@ function Status({ value }: { value: string }) {
 function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
   const executionNodes = snapshot.executionNodes ?? [];
   const tasks = snapshot.tasks ?? [];
+  const artifacts = snapshot.artifacts ?? tasks.flatMap((task) => (task.artifacts ?? []).map((artifact) => ({ ...artifact, taskId: task.id })));
   const lastEventId = snapshot.lastEventId ?? snapshot.events?.at(-1)?.id ?? 0;
   return {
     tasks,
     workers: snapshot.workers ?? [],
     executionNodes,
+    workItems: snapshot.workItems ?? [],
+    artifacts,
+    memoryEntries: snapshot.memoryEntries ?? [],
+    questions: snapshot.questions ?? [],
+    sessions: snapshot.sessions ?? [],
     targets: snapshot.targets ?? [],
     plugins: snapshot.plugins ?? [],
     promptSets: snapshot.promptSets ?? [],
     projects: snapshot.projects ?? [],
     pullRequests: snapshot.pullRequests ?? [],
+    pullRequestFeedback: snapshot.pullRequestFeedback ?? [],
+    steering: snapshot.steering ?? [],
     orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
     lastEventId,
     snapshotEventId: lastEventId,
@@ -4889,9 +5170,37 @@ function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): Ap
       ...snapshot.executionNodes.filter((node) => !taskIds.has(node.taskId)),
       ...taskSnapshot.executionNodes,
     ],
+    workItems: [
+      ...snapshot.workItems.filter((item) => !taskIds.has(item.taskId)),
+      ...taskSnapshot.workItems,
+    ],
+    artifacts: [
+      ...snapshot.artifacts.filter((artifact) => !taskIds.has(artifact.taskId)),
+      ...taskSnapshot.artifacts,
+    ],
+    memoryEntries: [
+      ...snapshot.memoryEntries.filter((entry) => !entry.taskId || !taskIds.has(entry.taskId)),
+      ...taskSnapshot.memoryEntries,
+    ],
+    questions: [
+      ...snapshot.questions.filter((question) => !taskIds.has(question.taskId)),
+      ...taskSnapshot.questions,
+    ],
+    sessions: [
+      ...snapshot.sessions.filter((session) => !taskIds.has(session.taskId)),
+      ...taskSnapshot.sessions,
+    ],
     pullRequests: [
       ...snapshot.pullRequests.filter((pr) => !taskIds.has(pr.taskId)),
       ...taskSnapshot.pullRequests,
+    ],
+    pullRequestFeedback: [
+      ...snapshot.pullRequestFeedback.filter((feedback) => !taskIds.has(feedback.taskId)),
+      ...taskSnapshot.pullRequestFeedback,
+    ],
+    steering: [
+      ...snapshot.steering.filter((item) => !taskIds.has(item.taskId)),
+      ...taskSnapshot.steering,
     ],
     orchestrationGraphs: [
       ...snapshot.orchestrationGraphs.filter((graph) => !taskIds.has(graph.taskId)),
@@ -4960,6 +5269,38 @@ function maxEventId(events: EventRecord[]): number {
 
 function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {
   const payload = asRecord(event.payload);
+  const nextSessions = applySessionProjection(snapshot.sessions, event, payload);
+  if (nextSessions !== snapshot.sessions) {
+    snapshot = { ...snapshot, sessions: nextSessions };
+  }
+  if (event.type === "work_item.queued" || event.type === "work_item.started" || event.type === "work_item.completed") {
+    const workItems = applyWorkItemProjection(snapshot.workItems, event, payload);
+    return {
+      ...snapshot,
+      workItems,
+      steering: event.type === "work_item.completed" ? applySteeringWorkItemCompletedProjection(snapshot.steering, workItems, event, payload) : snapshot.steering,
+    };
+  }
+  if (event.type === "approval.needed" || event.type === "approval.decided") {
+    return { ...snapshot, questions: applyQuestionProjection(snapshot.questions, event, payload) };
+  }
+  if (event.type === "pull_request.followup_started") {
+    return { ...snapshot, pullRequestFeedback: applyPullRequestFeedbackProjection(snapshot.pullRequestFeedback, snapshot.pullRequests, event, payload) };
+  }
+  if (event.type === "task.action_executed") {
+    const memoryEntry = memoryEntryFromTaskAction(snapshot.tasks, event, payload);
+    return {
+      ...snapshot,
+      pullRequestFeedback: applyPullRequestFeedbackActionProjection(snapshot.pullRequestFeedback, event, payload),
+      memoryEntries: memoryEntry ? upsertById(snapshot.memoryEntries, memoryEntry) : snapshot.memoryEntries,
+    };
+  }
+  if (event.type === "task.steered" || event.type === "worker.steering_queued") {
+    return { ...snapshot, steering: applySteeringProjection(snapshot.steering, snapshot.workers, snapshot.executionNodes, event, payload) };
+  }
+  if (event.type === "task.planned" || event.type === "task.replanned") {
+    return { ...snapshot, steering: applyTaskSteeringAppliedProjection(snapshot.steering, event.taskId ?? "", event.id, event.at) };
+  }
   if (event.type === "task.created" && event.taskId) {
     const task: Task = {
       id: event.taskId,
@@ -5010,10 +5351,6 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       orchestrationGraphs: deriveOrchestrationGraphs(tasks, snapshot.executionNodes),
     };
   }
-  if (event.type === "task.final_candidate_selected" && event.taskId) {
-    const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
-    return task ? { ...snapshot, tasks: upsertById(snapshot.tasks, { ...task, finalCandidateWorkerId: String(payload.workerId ?? "") || undefined, updatedAt: event.at }) } : snapshot;
-  }
   if (event.type === "task.objective_updated" && event.taskId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
     return task ? { ...snapshot, tasks: upsertById(snapshot.tasks, { ...task, objectiveStatus: String(payload.status ?? task.objectiveStatus) as Task["objectiveStatus"], objectivePhase: String(payload.phase ?? task.objectivePhase ?? ""), updatedAt: event.at }) } : snapshot;
@@ -5039,19 +5376,31 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
   if (event.type === "task.artifact_recorded" && event.taskId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
     if (!task) return snapshot;
+    const artifact: Artifact = {
+      id: String(payload.id ?? "") || `event-${event.id}`,
+      taskId: event.taskId,
+      kind: String(payload.kind ?? ""),
+      name: String(payload.name ?? "") || undefined,
+      url: String(payload.url ?? "") || undefined,
+      ref: String(payload.ref ?? "") || undefined,
+      createdAt: event.at,
+      updatedAt: event.at,
+      metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+    };
     return {
       ...snapshot,
+      artifacts: upsertArtifactClient(snapshot.artifacts, artifact),
       tasks: upsertById(snapshot.tasks, {
         ...task,
         artifacts: upsertTaskArtifactClient(task.artifacts ?? [], {
-          id: String(payload.id ?? ""),
-          kind: String(payload.kind ?? ""),
-          name: String(payload.name ?? "") || undefined,
-          url: String(payload.url ?? "") || undefined,
-          ref: String(payload.ref ?? "") || undefined,
-          createdAt: event.at,
-          updatedAt: event.at,
-          metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+          id: artifact.id,
+          kind: artifact.kind,
+          name: artifact.name,
+          url: artifact.url,
+          ref: artifact.ref,
+          createdAt: artifact.createdAt,
+          updatedAt: artifact.updatedAt,
+          metadata: artifact.metadata,
         }),
         updatedAt: event.at,
       }),
@@ -5063,7 +5412,14 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       tasks: snapshot.tasks.filter((task) => task.id !== event.taskId),
       workers: snapshot.workers.filter((worker) => worker.taskId !== event.taskId),
       executionNodes: snapshot.executionNodes.filter((node) => node.taskId !== event.taskId),
+      workItems: snapshot.workItems.filter((item) => item.taskId !== event.taskId),
+      artifacts: snapshot.artifacts.filter((artifact) => artifact.taskId !== event.taskId),
+      memoryEntries: snapshot.memoryEntries.filter((entry) => entry.taskId !== event.taskId),
+      questions: snapshot.questions.filter((question) => question.taskId !== event.taskId),
+      sessions: snapshot.sessions.filter((session) => session.taskId !== event.taskId),
       pullRequests: snapshot.pullRequests.filter((pr) => pr.taskId !== event.taskId),
+      pullRequestFeedback: snapshot.pullRequestFeedback.filter((feedback) => feedback.taskId !== event.taskId),
+      steering: snapshot.steering.filter((item) => item.taskId !== event.taskId),
       orchestrationGraphs: snapshot.orchestrationGraphs.filter((graph) => graph.taskId !== event.taskId),
     };
   }
@@ -5133,35 +5489,43 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const id = String(payload.id ?? "") || `${String(payload.repo ?? "")}#${String(payload.number ?? "")}`;
     if (!id) return snapshot;
     const existing = snapshot.pullRequests.find((candidate) => candidate.id === id);
+    const nextPullRequest = {
+      ...existing,
+      id,
+      taskId: event.taskId,
+      repo: String(payload.repo ?? "") || existing?.repo || "",
+      number: typeof payload.number === "number" ? payload.number : existing?.number,
+      url: String(payload.url ?? "") || existing?.url || "",
+      branch: String(payload.branch ?? "") || existing?.branch || "",
+      base: String(payload.base ?? "") || existing?.base || "",
+      title: String(payload.title ?? "") || existing?.title || "",
+      state: String(payload.state ?? "") || existing?.state,
+      draft: Boolean(payload.draft),
+      checksStatus: String(payload.checksStatus ?? "") || existing?.checksStatus,
+      checksConclusion: String(payload.checksConclusion ?? "") || existing?.checksConclusion,
+      mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
+      mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
+      reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
+      createdAt: existing?.createdAt || event.at,
+      updatedAt: event.at,
+      metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
+    };
     return {
       ...snapshot,
-      pullRequests: upsertById(snapshot.pullRequests, {
-        ...existing,
-        id,
-        taskId: event.taskId,
-        repo: String(payload.repo ?? "") || existing?.repo || "",
-        number: typeof payload.number === "number" ? payload.number : existing?.number,
-        url: String(payload.url ?? "") || existing?.url || "",
-        branch: String(payload.branch ?? "") || existing?.branch || "",
-        base: String(payload.base ?? "") || existing?.base || "",
-        title: String(payload.title ?? "") || existing?.title || "",
-        state: String(payload.state ?? "") || existing?.state,
-        draft: Boolean(payload.draft),
-        checksStatus: String(payload.checksStatus ?? "") || existing?.checksStatus,
-        checksConclusion: String(payload.checksConclusion ?? "") || existing?.checksConclusion,
-        mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
-        mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
-        reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
-        createdAt: existing?.createdAt || event.at,
-        updatedAt: event.at,
-        metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
-      }),
+      pullRequests: upsertById(snapshot.pullRequests, nextPullRequest),
+      pullRequestFeedback: refreshPullRequestFeedbackProjection(snapshot.pullRequestFeedback, nextPullRequest, event.at),
     };
   }
   if (event.type === "pull_request.status_checked") {
     const id = String(payload.id ?? "");
     const pr = snapshot.pullRequests.find((candidate) => candidate.id === id);
-    return pr ? { ...snapshot, pullRequests: upsertById(snapshot.pullRequests, { ...pr, state: String(payload.state ?? "") || pr.state, draft: Boolean(payload.draft), checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus, checksConclusion: String(payload.checksConclusion ?? "") || pr.checksConclusion, mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus, mergeable: String(payload.mergeable ?? "") || pr.mergeable, reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus, updatedAt: event.at, metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata }) } : snapshot;
+    if (!pr) return snapshot;
+    const nextPullRequest = { ...pr, state: String(payload.state ?? "") || pr.state, draft: Boolean(payload.draft), checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus, checksConclusion: String(payload.checksConclusion ?? "") || pr.checksConclusion, mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus, mergeable: String(payload.mergeable ?? "") || pr.mergeable, reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus, updatedAt: event.at, metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata };
+    return {
+      ...snapshot,
+      pullRequests: upsertById(snapshot.pullRequests, nextPullRequest),
+      pullRequestFeedback: refreshPullRequestFeedbackProjection(snapshot.pullRequestFeedback, nextPullRequest, event.at),
+    };
   }
   if (event.type === "pull_request.babysitter_started") {
     const id = String(payload.id ?? "");
@@ -5183,6 +5547,451 @@ function mergeById<T extends { id: string }>(left: T[], right: T[]): T[] {
     merged = upsertById(merged, item);
   }
   return merged;
+}
+
+function applySteeringProjection(items: SteeringItem[], workers: Worker[], nodes: ExecutionNode[], event: EventRecord, payload: Record<string, unknown>): SteeringItem[] {
+  if (!event.taskId) return items;
+  if (event.type === "task.steered") {
+    const message = payloadValue(payload.message).trim();
+    if (!message) return items;
+    return upsertById(items, {
+      id: `task_steering_${event.id}`,
+      taskId: event.taskId,
+      targetKind: "task",
+      targetId: event.taskId,
+      status: "pending",
+      reason: payloadValue(payload.reason) || "user_task_steering",
+      message,
+      createdAt: event.at,
+      updatedAt: event.at,
+      metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+    });
+  }
+  const workerId = payloadValue(payload.workerId) || event.workerId || "";
+  const message = payloadValue(payload.message).trim();
+  if (!workerId || !message) return items;
+  const worker = workers.find((candidate) => candidate.id === workerId);
+  const node = nodes.find((candidate) => candidate.workerId === workerId);
+  return upsertById(items, {
+    id: `worker_steering_${event.id}`,
+    taskId: event.taskId,
+    workerId,
+    nodeId: payloadValue(payload.nodeId) || node?.id,
+    workerKind: payloadValue(payload.workerKind) || worker?.kind || node?.workerKind,
+    role: payloadValue(payload.role) || node?.role,
+    spawnId: payloadValue(payload.spawnId) || node?.spawnId,
+    candidateWorkerId: undefined,
+    reviewPhase: undefined,
+    targetKind: "worker",
+    targetId: workerId,
+    status: payloadValue(payload.status) || "pending",
+    reason: payloadValue(payload.reason) || "user_worker_steering",
+    message,
+    createdAt: event.at,
+    updatedAt: event.at,
+    metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
+  });
+}
+
+function applyTaskSteeringAppliedProjection(items: SteeringItem[], taskId: string, eventId: number, at: string): SteeringItem[] {
+  if (!taskId) return items;
+  return items.map((item) => {
+    if (item.taskId !== taskId || item.targetKind !== "task" || item.status !== "pending") return item;
+    const itemEventId = Number.parseInt(item.id.split("_").at(-1) ?? "0", 10);
+    if (!Number.isFinite(itemEventId) || itemEventId >= eventId) return item;
+    return { ...item, status: "applied", appliedAt: at, updatedAt: at };
+  });
+}
+
+function applySteeringWorkItemCompletedProjection(items: SteeringItem[], workItems: WorkItem[], event: EventRecord, payload: Record<string, unknown>): SteeringItem[] {
+  const id = payloadValue(payload.id);
+  if (!id.startsWith("worker_steering_")) return items;
+  const workItem = workItems.find((item) => item.id === id);
+  if (workItem?.kind !== "user.worker_steering") return items;
+  return items.map((item) => item.id === id ? {
+    ...item,
+    status: workItem.status,
+    workerId: workItem.workerId || item.workerId,
+    appliedAt: event.at,
+    updatedAt: event.at,
+  } : item);
+}
+
+function applyPullRequestFeedbackProjection(items: PullRequestFeedback[], pullRequests: PullRequestState[], event: EventRecord, payload: Record<string, unknown>): PullRequestFeedback[] {
+  if (!event.taskId) return items;
+  const rawID = payloadValue(payload.id);
+  if (!rawID) return items;
+  const pr = pullRequests.find((candidate) => candidate.taskId === event.taskId && pullRequestFeedbackTargetMatches(candidate, rawID, payload));
+  const pullRequestId = pr?.id || rawID;
+  const feedbackSignature = pr ? unhandledPullRequestFeedbackSignature(pr, payloadValue(payload.feedbackSignature)) : payloadValue(payload.feedbackSignature);
+  const id = `${event.taskId}:${pullRequestId}:${feedbackSignature || event.id}`;
+  const existing = items.find((item) => item.id === id);
+  const next: PullRequestFeedback = refreshPullRequestFeedbackProjectionItem({
+    id,
+    taskId: event.taskId,
+    pullRequestId,
+    eventId: event.id,
+    attempt: numberPayload(payload.attempt),
+    status: "pending",
+    reason: payloadValue(payload.reason) || undefined,
+    repo: payloadValue(payload.repo) || pr?.repo,
+    number: numberPayload(payload.number) || pr?.number,
+    url: payloadValue(payload.url) || pr?.url,
+    branch: payloadValue(payload.branch) || pr?.branch,
+    base: payloadValue(payload.base) || pr?.base,
+    state: payloadValue(payload.state) || pr?.state,
+    checksStatus: payloadValue(payload.checksStatus) || pr?.checksStatus,
+    mergeStatus: payloadValue(payload.mergeStatus) || pr?.mergeStatus,
+    reviewStatus: payloadValue(payload.reviewStatus) || pr?.reviewStatus,
+    feedbackSignature,
+    feedbackBody: pr && feedbackSignature ? latestPullRequestFeedbackBody(pr.metadata) : undefined,
+    prompt: payloadValue(payload.prompt) || undefined,
+    createdAt: existing?.createdAt || event.at,
+    updatedAt: event.at,
+    metadata: existing?.metadata,
+  }, pr, event.at);
+  return upsertById(items, next);
+}
+
+function applyPullRequestFeedbackActionProjection(items: PullRequestFeedback[], event: EventRecord, payload: Record<string, unknown>): PullRequestFeedback[] {
+  const kind = payloadValue(payload.kind);
+  const status = payloadValue(payload.status);
+  if (status === "started" || status === "waiting" || status === "continued") return items;
+  const inputs = isRecord(payload.inputs) ? payload.inputs : {};
+  const pullRequestId = payloadValue(payload.pullRequestId);
+  return items.map((item) => {
+    if (item.taskId !== event.taskId || item.status !== "pending") return item;
+    let handled = false;
+    if (kind === "watch_pull_requests") {
+      handled = !item.feedbackSignature && pullRequestFeedbackActionMatches(item, pullRequestId, inputs);
+    }
+    if (kind === "update_pull_request") {
+      handled = !status && pullRequestFeedbackActionMatches(item, pullRequestId, inputs);
+      if (handled && pullRequestFeedbackRequiresMetadataUpdate(item) && !updatePullRequestActionHasMetadata(inputs)) {
+        handled = false;
+      }
+    }
+    return handled ? { ...item, status: "handled", handledAt: event.at, updatedAt: event.at } : item;
+  });
+}
+
+function refreshPullRequestFeedbackProjection(items: PullRequestFeedback[], pr: PullRequestState, at: string): PullRequestFeedback[] {
+  return items.map((item) => {
+    if (item.taskId !== pr.taskId || item.pullRequestId !== pr.id || item.status !== "pending") return item;
+    return refreshPullRequestFeedbackProjectionItem(item, pr, at);
+  });
+}
+
+function refreshPullRequestFeedbackProjectionItem(item: PullRequestFeedback, pr: PullRequestState | undefined, at: string): PullRequestFeedback {
+  if (!pr) return item;
+  const next: PullRequestFeedback = {
+    ...item,
+    repo: item.repo || pr.repo,
+    number: item.number || pr.number,
+    url: item.url || pr.url,
+    branch: item.branch || pr.branch,
+    base: item.base || pr.base,
+    state: pr.state || item.state,
+    checksStatus: pr.checksStatus || item.checksStatus,
+    mergeStatus: pr.mergeStatus || item.mergeStatus,
+    reviewStatus: pr.reviewStatus || item.reviewStatus,
+    feedbackBody: item.feedbackSignature ? latestPullRequestFeedbackBody(pr.metadata) : item.feedbackBody,
+    updatedAt: at,
+  };
+  if (isTerminalPullRequestState(pr.state) || (item.feedbackSignature && !unhandledPullRequestFeedbackSignature(pr, item.feedbackSignature))) {
+    return { ...next, status: "handled", handledAt: at };
+  }
+  return next;
+}
+
+function pullRequestFeedbackTargetMatches(pr: PullRequestState, id: string, payload: Record<string, unknown>): boolean {
+  if (id && pr.id === id) return true;
+  const repo = payloadValue(payload.repo);
+  const number = numberPayload(payload.number);
+  if (repo && number && pr.repo.toLowerCase() === repo.toLowerCase() && pr.number === number) return true;
+  const url = payloadValue(payload.url);
+  if (url && pr.url.toLowerCase() === url.toLowerCase()) return true;
+  const branch = payloadValue(payload.branch);
+  return Boolean(branch && pr.branch === branch && (!repo || pr.repo.toLowerCase() === repo.toLowerCase()));
+}
+
+function pullRequestFeedbackActionMatches(item: PullRequestFeedback, pullRequestId: string, inputs: Record<string, unknown>): boolean {
+  if (pullRequestId && pullRequestId === item.pullRequestId) return true;
+  const id = payloadValue(inputs.id);
+  if (id && id === item.pullRequestId) return true;
+  const url = payloadValue(inputs.url);
+  if (url && item.url && url.toLowerCase() === item.url.toLowerCase()) return true;
+  const repo = payloadValue(inputs.repo);
+  const number = numberPayload(inputs.number);
+  if (repo && number && item.repo && repo.toLowerCase() === item.repo.toLowerCase() && number === item.number) return true;
+  const branch = payloadValue(inputs.branch) || payloadValue(inputs.headBranch);
+  return Boolean(branch && branch === item.branch && (!repo || !item.repo || repo.toLowerCase() === item.repo.toLowerCase()));
+}
+
+function unhandledPullRequestFeedbackSignature(pr: PullRequestState, signature: string): string {
+  signature = signature.trim();
+  if (!signature) return "";
+  const current = latestPullRequestFeedbackSignature(pr.metadata);
+  const triggered = latestPullRequestTriggeredFeedbackSignature(pr.metadata);
+  return current === signature && triggered !== signature ? signature : "";
+}
+
+function latestPullRequestFeedbackSignature(metadata: Record<string, unknown> | undefined): string {
+  return payloadValue(metadata?.latestPullRequestFeedbackSignature) || payloadValue(metadata?.latestConversationCommentSignature);
+}
+
+function latestPullRequestTriggeredFeedbackSignature(metadata: Record<string, unknown> | undefined): string {
+  return payloadValue(metadata?.latestPullRequestFeedbackTriggeredSignature) || payloadValue(metadata?.latestConversationCommentTriggeredSignature);
+}
+
+function latestPullRequestFeedbackBody(metadata: Record<string, unknown> | undefined): string {
+  return payloadValue(metadata?.latestPullRequestFeedbackBody) || payloadValue(metadata?.latestConversationCommentBody);
+}
+
+function pullRequestFeedbackRequiresMetadataUpdate(item: PullRequestFeedback): boolean {
+  const body = (item.feedbackBody ?? "").toLowerCase();
+  return body.includes("title") || body.includes("description") || body.includes("pr body") || body.includes("pull request body");
+}
+
+function updatePullRequestActionHasMetadata(inputs: Record<string, unknown>): boolean {
+  return Boolean(payloadValue(inputs.title) || payloadValue(inputs.body));
+}
+
+function isTerminalPullRequestState(state: string | undefined): boolean {
+  return state === "MERGED" || state === "CLOSED";
+}
+
+function numberPayload(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function applyWorkItemProjection(items: WorkItem[], event: EventRecord, payload: Record<string, unknown>): WorkItem[] {
+  const id = payloadValue(payload.id);
+  if (!id) return items;
+  const existing = items.find((item) => item.id === id);
+  if (event.type === "work_item.queued") {
+    const next: WorkItem = {
+      id,
+      taskId: event.taskId ?? existing?.taskId ?? "",
+      kind: payloadValue(payload.kind) || existing?.kind || "work",
+      status: "queued",
+      targetKind: payloadValue(payload.targetKind) || undefined,
+      targetId: payloadValue(payload.targetId) || undefined,
+      reason: payloadValue(payload.reason) || undefined,
+      prompt: payloadValue(payload.prompt) || undefined,
+      workerId: existing?.workerId,
+      leaseOwner: undefined,
+      leaseUntil: undefined,
+      attempt: existing?.attempt,
+      createdAt: existing?.createdAt || event.at,
+      updatedAt: event.at,
+      metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
+    };
+    return upsertById(items, next);
+  }
+  if (!existing) return items;
+  if (event.type === "work_item.started") {
+    return upsertById(items, {
+      ...existing,
+      status: "running",
+      workerId: payloadValue(payload.workerId) || undefined,
+      leaseOwner: payloadValue(payload.leaseOwner) || undefined,
+      leaseUntil: payloadValue(payload.leaseUntil) || undefined,
+      attempt: Number(payload.attempt ?? existing.attempt ?? 0) || (existing.attempt ?? 0) + 1,
+      updatedAt: event.at,
+    });
+  }
+  if (event.type === "work_item.completed") {
+    return upsertById(items, {
+      ...existing,
+      status: payloadValue(payload.status) || existing.status,
+      workerId: payloadValue(payload.workerId) || existing.workerId,
+      leaseOwner: undefined,
+      leaseUntil: undefined,
+      error: payloadValue(payload.error) || undefined,
+      updatedAt: event.at,
+    });
+  }
+  return items;
+}
+
+function applyQuestionProjection(questions: Question[], event: EventRecord, payload: Record<string, unknown>): Question[] {
+  if (event.type === "approval.needed") {
+    const id = `approval_${event.id}`;
+    const existing = questions.find((question) => question.id === id);
+    return upsertById(questions, {
+      ...existing,
+      id,
+      taskId: event.taskId ?? existing?.taskId ?? "",
+      workerId: event.workerId || payloadValue(payload.workerId) || existing?.workerId,
+      reason: payloadValue(payload.reason) || existing?.reason,
+      question: payloadValue(payload.question || payload.error || payload.summary) || existing?.question || "Approval needed.",
+      decided: existing?.decided ?? false,
+      answer: existing?.answer,
+      approved: existing?.approved,
+      createdAt: existing?.createdAt || event.at,
+      updatedAt: event.at,
+      metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
+    });
+  }
+  if (event.type !== "approval.decided") {
+    return questions;
+  }
+  const workerId = event.workerId || payloadValue(payload.workerId);
+  let selected: Question | undefined;
+  for (const question of questions) {
+    if (question.taskId !== event.taskId || question.decided) continue;
+    if (workerId && question.workerId && question.workerId !== workerId) continue;
+    if (!selected || Date.parse(question.createdAt) > Date.parse(selected.createdAt)) {
+      selected = question;
+    }
+  }
+  if (!selected && workerId) {
+    for (const question of questions) {
+      if (question.taskId !== event.taskId || question.decided) continue;
+      if (!selected || Date.parse(question.createdAt) > Date.parse(selected.createdAt)) {
+        selected = question;
+      }
+    }
+  }
+  if (!selected) return questions;
+  return upsertById(questions, {
+    ...selected,
+    decided: true,
+    answer: payloadValue(payload.answer || payload.message) || selected.answer,
+    approved: typeof payload.approved === "boolean" ? payload.approved : selected.approved,
+    updatedAt: event.at,
+  });
+}
+
+function applySessionProjection(sessions: Session[], event: EventRecord, payload: Record<string, unknown>): Session[] {
+  if (event.type === "execution.node_planned" && event.taskId) {
+    const workerId = payloadValue(payload.workerId) || event.workerId || "";
+    if (!workerId) return sessions;
+    const existing = sessions.find((session) => session.id === workerId);
+    return upsertById(sessions, {
+      ...existing,
+      id: workerId,
+      taskId: event.taskId,
+      workerId,
+      nodeId: payloadValue(payload.nodeId) || existing?.nodeId,
+      workerKind: payloadValue(payload.workerKind) || existing?.workerKind,
+      role: payloadValue(payload.role) || existing?.role,
+      spawnId: payloadValue(payload.spawnId) || existing?.spawnId,
+      status: existing?.status || "queued",
+      targetId: payloadValue(payload.targetId) || existing?.targetId,
+      targetKind: payloadValue(payload.targetKind) || existing?.targetKind,
+      remoteSession: payloadValue(payload.remoteSession) || existing?.remoteSession,
+      remoteRunDir: payloadValue(payload.remoteRunDir) || existing?.remoteRunDir,
+      remoteWorkDir: payloadValue(payload.remoteWorkDir) || existing?.remoteWorkDir,
+      createdAt: existing?.createdAt || event.at,
+      startedAt: existing?.startedAt,
+      updatedAt: event.at,
+      completedAt: existing?.completedAt,
+      metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
+    });
+  }
+  if (event.type === "execution.node_status") {
+    const nodeId = payloadValue(payload.nodeId);
+    const status = payloadValue(payload.status) as WorkerStatus;
+    const existing = sessions.find((session) => session.nodeId === nodeId);
+    if (!existing) return sessions;
+    return upsertById(sessions, sessionWithStatus(existing, status, event.at));
+  }
+  if (event.type === "worker.created" && event.workerId && event.taskId) {
+    const existing = sessions.find((session) => session.id === event.workerId);
+    const metadata = isRecord(payload.metadata) ? payload.metadata : existing?.metadata;
+    return upsertById(sessions, {
+      ...existing,
+      id: event.workerId,
+      taskId: event.taskId,
+      workerId: event.workerId,
+      workerKind: payloadValue(payload.kind) || existing?.workerKind,
+      status: existing?.status || "queued",
+      providerSessionId: metadata ? payloadValue(metadata.providerSessionId) || existing?.providerSessionId : existing?.providerSessionId,
+      createdAt: existing?.createdAt || event.at,
+      startedAt: existing?.startedAt,
+      updatedAt: event.at,
+      completedAt: existing?.completedAt,
+      metadata,
+    });
+  }
+  if (event.type === "worker.workspace_prepared" && event.workerId) {
+    const existing = sessions.find((session) => session.id === event.workerId);
+    if (!existing && !event.taskId) return sessions;
+    return upsertById(sessions, {
+      ...existing,
+      id: event.workerId,
+      taskId: existing?.taskId || event.taskId || payloadValue(payload.taskId),
+      workerId: event.workerId,
+      status: existing?.status || "queued",
+      targetId: payloadValue(payload.targetId) || existing?.targetId,
+      targetKind: payloadValue(payload.targetKind) || existing?.targetKind,
+      workspaceRoot: payloadValue(payload.root) || existing?.workspaceRoot,
+      workspaceCwd: payloadValue(payload.cwd) || existing?.workspaceCwd,
+      sourceRoot: payloadValue(payload.sourceRoot) || existing?.sourceRoot,
+      workspaceName: payloadValue(payload.workspaceName) || existing?.workspaceName,
+      workspaceMode: payloadValue(payload.mode) || existing?.workspaceMode,
+      vcsType: payloadValue(payload.vcsType) || existing?.vcsType,
+      sharedRoot: payloadValue(payload.sharedRoot) || existing?.sharedRoot,
+      sharedArtifactsDir: payloadValue(payload.sharedArtifactsDir) || existing?.sharedArtifactsDir,
+      sharedWorkerDir: payloadValue(payload.sharedWorkerDir) || existing?.sharedWorkerDir,
+      createdAt: existing?.createdAt || event.at,
+      startedAt: existing?.startedAt,
+      updatedAt: event.at,
+      completedAt: existing?.completedAt,
+      metadata: { ...(existing?.metadata ?? {}), workspace: payload },
+    });
+  }
+  if ((event.type === "worker.started" || event.type === "worker.completed") && event.workerId) {
+    const existing = sessions.find((session) => session.id === event.workerId);
+    if (!existing && !event.taskId) return sessions;
+    const status = event.type === "worker.started" ? "running" : payloadValue(payload.status) as WorkerStatus;
+    return upsertById(sessions, sessionWithStatus({
+      ...existing,
+      id: event.workerId,
+      taskId: existing?.taskId || event.taskId || "",
+      workerId: event.workerId,
+      status: existing?.status || "queued",
+      createdAt: existing?.createdAt || event.at,
+      updatedAt: existing?.updatedAt || event.at,
+    }, status, event.at));
+  }
+  if (event.type === "worker.output" && event.workerId) {
+    const existing = sessions.find((session) => session.id === event.workerId);
+    if (!existing || isTerminalWorkerStatus(existing.status)) return sessions;
+    return upsertById(sessions, {
+      ...existing,
+      currentAction: truncateSessionAction(eventDisplayText(event), 600),
+      currentActionLabel: truncateSessionAction(workerEventLabel(event), 80),
+      currentActionAt: event.at,
+      currentActionEvent: event.id,
+      updatedAt: event.at,
+    });
+  }
+  return sessions;
+}
+
+function truncateSessionAction(value: string, limit: number): string {
+  const compact = value.trim().replace(/\s+/g, " ");
+  if (limit <= 0 || compact.length <= limit) return compact;
+  return `${compact.slice(0, limit)}...`;
+}
+
+function sessionWithStatus(session: Session, status: WorkerStatus, at: string): Session {
+  const terminal = isTerminalWorkerStatus(status);
+  return {
+    ...session,
+    status: status || session.status,
+    startedAt: status === "running" ? session.startedAt || at : session.startedAt,
+    completedAt: terminal ? session.completedAt || at : session.completedAt,
+    updatedAt: at,
+  };
 }
 
 function objectiveStatusForTaskStatus(status: Task["status"]): Task["objectiveStatus"] {
@@ -5217,195 +6026,40 @@ function upsertTaskArtifactClient(items: NonNullable<Task["artifacts"]>, next: N
     : [...items, next];
 }
 
-function rebuildSnapshot(snapshot: AppSnapshot): AppSnapshot {
-  const tasks = new Map<string, Task>();
-  const workers = new Map<string, Worker>();
-  const executionNodes = new Map<string, ExecutionNode>();
-  const pullRequests = new Map<string, PullRequestState>();
-  const clearedTasks = new Set<string>();
+function upsertArtifactClient(items: Artifact[], next: Artifact): Artifact[] {
+  if (!next.id) return [...items, next];
+  return items.some((item) => item.id === next.id)
+    ? items.map((item) => (item.id === next.id ? { ...next, createdAt: next.createdAt || item.createdAt } : item))
+    : [...items, next];
+}
 
-  for (const event of snapshot.events) {
-    const payload = event.payload as Record<string, unknown>;
-    if (event.type === "task.created" && event.taskId) {
-      tasks.set(event.taskId, {
-        id: event.taskId,
-        projectId: String(payload.projectId ?? "") || (isRecord(payload.metadata) ? String(payload.metadata.projectId ?? "") : undefined),
-        workstreamId: isRecord(payload.metadata) ? String(payload.metadata.workstreamId ?? "") || undefined : undefined,
-        title: String(payload.title ?? "Untitled task"),
-        prompt: String(payload.prompt ?? ""),
-        status: "queued",
-        createdAt: event.at,
-        updatedAt: event.at,
-        metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
-      });
-    }
-    if (event.type === "task.status" && event.taskId) {
-      const task = tasks.get(event.taskId);
-      if (task) {
-        tasks.set(event.taskId, {
-          ...task,
-          status: String(payload.status) as Task["status"],
-          error: payloadValue(payload.error) || undefined,
-          updatedAt: event.at,
-        });
-      }
-    }
-    if (event.type === "task.updated" && event.taskId) {
-      const task = tasks.get(event.taskId);
-      if (task) {
-        const metadataPatch = asRecord(payload.metadataPatch);
-        tasks.set(event.taskId, {
-          ...task,
-          title: payloadValue(payload.title) || task.title,
-          prompt: payloadValue(payload.prompt) || task.prompt,
-          metadata: Object.keys(metadataPatch).length > 0 ? { ...(task.metadata ?? {}), ...metadataPatch } : task.metadata,
-          updatedAt: event.at,
-        });
-      }
-    }
-    if (event.type === "task.final_candidate_selected" && event.taskId) {
-      const task = tasks.get(event.taskId);
-      if (task) {
-        tasks.set(event.taskId, { ...task, finalCandidateWorkerId: String(payload.workerId ?? "") || undefined, updatedAt: event.at });
-      }
-    }
-    if (event.type === "task.cleared" && event.taskId) {
-      clearedTasks.add(event.taskId);
-    }
-    if (event.type === "execution.node_planned" && event.taskId) {
-      const nodeId = String(payload.nodeId ?? "");
-      if (nodeId) {
-        executionNodes.set(nodeId, {
-          id: nodeId,
-          taskId: event.taskId,
-          workerId: String(payload.workerId ?? event.workerId ?? "") || undefined,
-          workerKind: String(payload.workerKind ?? "unknown"),
-          status: "queued",
-          planId: String(payload.planId ?? "") || undefined,
-          parentNodeId: String(payload.parentNodeId ?? "") || undefined,
-          spawnId: String(payload.spawnId ?? "") || undefined,
-          role: String(payload.role ?? "") || undefined,
-          reason: String(payload.reason ?? "") || undefined,
-          targetId: String(payload.targetId ?? "") || undefined,
-          targetKind: String(payload.targetKind ?? "") || undefined,
-          remoteSession: String(payload.remoteSession ?? "") || undefined,
-          remoteRunDir: String(payload.remoteRunDir ?? "") || undefined,
-          remoteWorkDir: String(payload.remoteWorkDir ?? "") || undefined,
-          dependsOn: Array.isArray(payload.dependsOn) ? payload.dependsOn.map(String) : undefined,
-          createdAt: event.at,
-          updatedAt: event.at,
-        });
-      }
-    }
-    if (event.type === "execution.node_status") {
-      const nodeId = String(payload.nodeId ?? "");
-      const node = executionNodes.get(nodeId);
-      if (node) {
-        executionNodes.set(nodeId, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
-      }
-    }
-    if (event.type === "worker.created" && event.workerId && event.taskId) {
-      workers.set(event.workerId, workerFromCreatedEvent(workers.get(event.workerId), event, payload));
-    }
-    if (event.type === "worker.started" && event.workerId) {
-      const worker = workers.get(event.workerId);
-      if (worker) workers.set(event.workerId, { ...worker, status: "running", updatedAt: event.at });
-      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
-      if (node) executionNodes.set(node.id, { ...node, status: "running", updatedAt: event.at });
-    }
-    if (event.type === "worker.completed" && event.workerId) {
-      const worker = workers.get(event.workerId);
-      if (worker) workers.set(event.workerId, { ...worker, status: String(payload.status) as Worker["status"], updatedAt: event.at });
-      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
-      if (node) executionNodes.set(node.id, { ...node, status: String(payload.status) as Worker["status"], updatedAt: event.at });
-    }
-    if (event.type === "worker.output" && event.workerId) {
-      const worker = workers.get(event.workerId);
-      if (worker && !isTerminalWorkerStatus(worker.status)) workers.set(event.workerId, { ...worker, updatedAt: event.at });
-      const node = [...executionNodes.values()].find((candidate) => candidate.workerId === event.workerId);
-      if (node && !isTerminalWorkerStatus(node.status)) executionNodes.set(node.id, { ...node, updatedAt: event.at });
-    }
-    if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
-      const task = tasks.get(event.taskId);
-      if (task) {
-        tasks.set(event.taskId, { ...task, appliedWorkerId: event.workerId, updatedAt: event.at });
-      }
-    }
-    if ((event.type === "pull_request.published" || event.type === "pull_request.updated") && event.taskId) {
-      const prId = String(payload.id ?? "");
-      if (prId) {
-        const existing = pullRequests.get(prId);
-        pullRequests.set(prId, {
-          ...existing,
-          id: prId,
-          taskId: event.taskId,
-          repo: String(payload.repo ?? "") || existing?.repo || "",
-          number: typeof payload.number === "number" ? payload.number : existing?.number,
-          url: String(payload.url ?? "") || existing?.url || "",
-          branch: String(payload.branch ?? "") || existing?.branch || "",
-          base: String(payload.base ?? "") || existing?.base || "",
-          title: String(payload.title ?? "") || existing?.title || "",
-          state: String(payload.state ?? "") || existing?.state,
-          draft: Boolean(payload.draft),
-          checksStatus: String(payload.checksStatus ?? "") || existing?.checksStatus,
-          checksConclusion: String(payload.checksConclusion ?? "") || existing?.checksConclusion,
-          mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
-          mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
-          reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
-          createdAt: existing?.createdAt || event.at,
-          updatedAt: event.at,
-          metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
-        });
-      }
-    }
-    if (event.type === "pull_request.status_checked") {
-      const prId = String(payload.id ?? "");
-      const pr = pullRequests.get(prId);
-      if (pr) {
-        pullRequests.set(prId, {
-          ...pr,
-          state: String(payload.state ?? "") || pr.state,
-          draft: Boolean(payload.draft),
-          checksStatus: String(payload.checksStatus ?? "") || pr.checksStatus,
-          checksConclusion: String(payload.checksConclusion ?? "") || pr.checksConclusion,
-          mergeStatus: String(payload.mergeStatus ?? "") || pr.mergeStatus,
-          mergeable: String(payload.mergeable ?? "") || pr.mergeable,
-          reviewStatus: String(payload.reviewStatus ?? "") || pr.reviewStatus,
-          updatedAt: event.at,
-          metadata: isRecord(payload.metadata) ? payload.metadata : pr.metadata,
-        });
-      }
-    }
-    if (event.type === "pull_request.babysitter_started") {
-      const prId = String(payload.id ?? "");
-      const pr = pullRequests.get(prId);
-      if (pr) {
-        pullRequests.set(prId, {
-          ...pr,
-          babysitterTaskId: String(payload.babysitterTaskId ?? "") || pr.babysitterTaskId,
-          updatedAt: event.at,
-        });
-      }
-    }
-  }
-
+function memoryEntryFromTaskAction(tasks: Task[], event: EventRecord, payload: Record<string, unknown>): MemoryEntry | undefined {
+  if (!event.taskId) return undefined;
+  const kind = payloadValue(payload.kind);
+  const status = payloadValue(payload.status);
+  const summary = payloadValue(payload.summary) || payloadValue(payload.reason);
+  if (!summary) return undefined;
+  const important = kind === "worker_result_digest" || status === "failed" || status === "waiting" || status === "rejected" || highValueMemoryText(summary);
+  if (!important) return undefined;
+  const task = tasks.find((candidate) => candidate.id === event.taskId);
   return {
-    tasks: [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
-    workers: [...workers.values()].filter((worker) => !clearedTasks.has(worker.taskId)),
-    executionNodes: [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
-    orchestrationGraphs: deriveOrchestrationGraphs(
-      [...tasks.values()].filter((task) => !clearedTasks.has(task.id)),
-      [...executionNodes.values()].filter((node) => !clearedTasks.has(node.taskId)),
-    ),
-    projects: snapshot.projects,
-    plugins: snapshot.plugins,
-    promptSets: snapshot.promptSets,
-    pullRequests: [...pullRequests.values()].filter((pr) => !clearedTasks.has(pr.taskId)),
-    targets: snapshot.targets,
-    lastEventId: snapshot.lastEventId,
-    snapshotEventId: snapshot.snapshotEventId,
-    events: snapshot.events,
+    id: `memory-${event.id}`,
+    projectId: task?.projectId,
+    taskId: event.taskId,
+    kind: kind || "task_action",
+    sourceEventId: event.id,
+    sourceEvent: event.type,
+    workerId: payloadValue(payload.workerId) || event.workerId || undefined,
+    summary,
+    createdAt: event.at,
+    updatedAt: event.at,
+    metadata: isRecord(payload.metadata) ? payload.metadata : undefined,
   };
+}
+
+function highValueMemoryText(text: string): boolean {
+  const lower = text.toLowerCase();
+  return ["decision:", "decided", "blocked", "blocker", "root cause", "baseline", "benchmark", "regression", "invariant"].some((marker) => lower.includes(marker));
 }
 
 function deriveOrchestrationGraphs(tasks: Task[], nodes: ExecutionNode[]): OrchestrationGraph[] {

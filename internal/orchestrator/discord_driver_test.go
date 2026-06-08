@@ -60,8 +60,8 @@ func TestDiscordDriverSkipsHistoryThenCreatesTaskFromPrefix(t *testing.T) {
 	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "github" {
-		t.Fatalf("metadata = %+v", metadata)
+	if _, ok := metadata["completionMode"]; ok {
+		t.Fatalf("metadata = %+v, want no completionMode", metadata)
 	}
 	if !strings.Contains(client.sent[len(client.sent)-1], "Created aged task") {
 		t.Fatalf("sent messages = %+v", client.sent)
@@ -170,13 +170,12 @@ func TestDiscordDriverStructuredProposalRoutesProject(t *testing.T) {
 		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
 		answer: `{
 			"reply": "I can do that in the Node.js project.",
-			"proposedTask": {
-				"projectId": "node",
-				"title": "Improve Node Benchmarks",
-				"prompt": "Improve performance on the Node.js benchmarks.",
-				"completionMode": "local"
-			}
-		}`,
+				"proposedTask": {
+					"projectId": "node",
+					"title": "Improve Node Benchmarks",
+					"prompt": "Improve performance on the Node.js benchmarks."
+				}
+			}`,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
@@ -222,8 +221,8 @@ func TestDiscordDriverStructuredProposalRoutesProject(t *testing.T) {
 	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "local" {
-		t.Fatalf("metadata = %+v", metadata)
+	if _, ok := metadata["completionMode"]; ok {
+		t.Fatalf("metadata = %+v, want no completionMode", metadata)
 	}
 }
 
@@ -629,7 +628,7 @@ func TestDiscordAssistantPromptDescribesPublishConfirmation(t *testing.T) {
 	prompt := discordAssistantPrompt("publish a PR")
 
 	for _, want := range []string{
-		`"publish_pr", "apply_task_result", and "apply_worker_changes"`,
+		`"publish_pr" and "apply_worker_changes"`,
 		"set confirmed true only when the user explicitly confirms publishing or applying changes",
 		"otherwise leave confirmed false so the bot can ask for confirmation",
 	} {

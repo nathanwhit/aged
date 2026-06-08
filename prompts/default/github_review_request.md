@@ -12,7 +12,7 @@ Schedule one bounded review worker. The worker prompt must tell the worker to:
 - Avoid making code changes unless the notification explicitly asks aged to implement changes in the repository.
 - Report which review action it submitted and include links or identifiers for any review comments it created.
 
-Do not plan PR publication for this task. The expected artifact is the GitHub review itself, and the task completion mode should remain local.
+Do not plan PR publication for this task. The expected artifact is the GitHub review itself.
 
 Schedule this task. Return only the JSON plan, with no prose or markdown.
 
