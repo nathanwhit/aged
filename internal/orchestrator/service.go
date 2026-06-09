@@ -1558,6 +1558,16 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 
 	runState := &workerRunState{}
 	sink := eventSink{service: s, taskID: node.TaskID, workerID: node.WorkerID, state: runState}
+	plan := recoveredExecutionNodePlan(node)
+	workItemID, workItemErr := s.recordRecoveredPlanWorkItemStarted(ctx, node.TaskID, node.WorkerID, plan)
+	if workItemErr != nil {
+		_ = s.recordTaskAction(ctx, node.TaskID, map[string]any{
+			"kind":     "startup_remote_worker_recovery",
+			"status":   "work_item_record_failed",
+			"workerID": node.WorkerID,
+			"reason":   workItemErr.Error(),
+		})
+	}
 	sshRunner := s.sshRunner
 	sshRunner.CallbackHandler = s.handleRemoteWorkerCallbacks
 	status, err := sshRunner.Poll(workerCtx, run, worker.ParserForKind(node.WorkerKind), sink)
@@ -1571,13 +1581,17 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 		statusErr = context.Canceled
 	}
 	changes := s.sshRunner.DescribeChanges(ctx, run)
-	_, _ = s.append(ctx, core.Event{
-		Type:     core.EventWorkerCompleted,
-		TaskID:   node.TaskID,
-		WorkerID: node.WorkerID,
-		Payload:  core.MustJSON(runState.completionPayload(workerStatus, statusErr, changes)),
-	})
+	workerStatus, statusErr = runState.normalizeCompletionStatus(plan, workerStatus, statusErr, changes)
+	_ = s.appendWorkerCompleted(ctx, node.TaskID, node.WorkerID, runState.completionPayload(workerStatus, statusErr, changes))
 	_ = s.recordWorkerArtifacts(ctx, node.TaskID, node.WorkerID, node.WorkerKind, runState, changes)
+	if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, node.TaskID, workItemID, node.WorkerID, workerStatus, statusErr); completeErr != nil {
+		_ = s.recordTaskAction(ctx, node.TaskID, map[string]any{
+			"kind":     "startup_remote_worker_recovery",
+			"status":   "work_item_complete_failed",
+			"workerID": node.WorkerID,
+			"reason":   completeErr.Error(),
+		})
+	}
 	s.cleanupTerminalWorkspaceArtifacts(ctx, node.TaskID, node.WorkerID, PreparedWorkspace{
 		Root:            run.RunDir,
 		CWD:             run.WorkDir,
@@ -1599,6 +1613,81 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 		return
 	}
 	go s.resumeRecoveredRemoteTask(context.Background(), node.TaskID)
+}
+
+func (s *Service) recordRecoveredPlanWorkItemStarted(ctx context.Context, taskID string, workerID string, plan Plan) (string, error) {
+	if strings.TrimSpace(stringMetadata(plan.Metadata, "workItemKind")) == "" {
+		return "", nil
+	}
+	itemID := planWorkerWorkItemID(taskID, plan)
+	if itemID == "" {
+		return "", nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	if item, ok := workItemByIDFromSnapshot(snapshot, taskID, itemID); ok {
+		if item.Status == core.WorkItemRunning && strings.TrimSpace(item.WorkerID) == strings.TrimSpace(workerID) {
+			return itemID, nil
+		}
+		if item.Status == core.WorkItemSucceeded || item.Status == core.WorkItemFailed || item.Status == core.WorkItemCanceled {
+			return "", nil
+		}
+	}
+	if strings.TrimSpace(stringMetadata(plan.Metadata, "sourceAction")) == "plan" {
+		delete(plan.Metadata, "sourceAction")
+	}
+	return s.recordPlanWorkItemStarted(ctx, taskID, workerID, plan)
+}
+
+func recoveredExecutionNodePlan(node core.ExecutionNode) Plan {
+	metadata := map[string]any{}
+	if len(node.Metadata) > 0 {
+		_ = json.Unmarshal(node.Metadata, &metadata)
+	}
+	putIfMissing := func(key string, value any) {
+		if value == nil {
+			return
+		}
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+			return
+		}
+		if _, ok := metadata[key]; !ok {
+			metadata[key] = value
+		}
+	}
+	putIfMissing("nodeID", node.ID)
+	putIfMissing("planID", node.PlanID)
+	putIfMissing("parentNodeID", node.ParentNodeID)
+	putIfMissing("spawnID", node.SpawnID)
+	putIfMissing("spawnRole", node.Role)
+	putIfMissing("spawnReason", node.Reason)
+	putIfMissing("targetID", node.TargetID)
+	putIfMissing("targetKind", node.TargetKind)
+	putIfMissing("remoteSession", node.RemoteSession)
+	putIfMissing("remoteRunDir", node.RemoteRunDir)
+	putIfMissing("remoteWorkDir", node.RemoteWorkDir)
+	if len(node.DependsOn) > 0 {
+		putIfMissing("dependsOn", node.DependsOn)
+	}
+	if strings.TrimSpace(stringMetadata(metadata, "workItemID")) == "" && strings.TrimSpace(node.PlanID) == "" && strings.TrimSpace(node.SpawnID) == "" {
+		putIfMissing("workItemID", "recovered_worker_"+node.WorkerID)
+	}
+	if strings.TrimSpace(stringMetadata(metadata, "workItemKind")) == "" {
+		role := strings.Join([]string{node.Role, node.SpawnID, stringMetadata(metadata, "scheduledWorkerID")}, " ")
+		reason := strings.Join([]string{node.Reason, stringMetadata(metadata, "rationale"), stringMetadata(metadata, "parentRationale")}, " ")
+		putIfMissing("workItemKind", objectiveWorkerWorkItemKind(role, reason))
+	}
+	if strings.TrimSpace(stringMetadata(metadata, "sourceAction")) == "" {
+		putIfMissing("sourceAction", "recovered_worker")
+	}
+	return Plan{
+		WorkerKind:      node.WorkerKind,
+		Rationale:       node.Reason,
+		ReasoningEffort: stringMetadata(metadata, "reasoningEffort"),
+		Metadata:        metadata,
+	}
 }
 
 func (s *Service) Events(ctx context.Context, afterID int64, limit int) ([]core.Event, error) {
@@ -10889,6 +10978,11 @@ func planMetadata(plan Plan) map[string]any {
 		"remoteWorkDir",
 		"initialWorker",
 		"scheduledWorkerID",
+		"workItemID",
+		"workItemKind",
+		"sourceAction",
+		"executeActionsOnSuccess",
+		"planActions",
 		"spawnID",
 		"spawnReason",
 		"spawnRole",

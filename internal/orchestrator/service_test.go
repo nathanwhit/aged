@@ -7937,15 +7937,16 @@ func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 	if err := service.RecoverRemoteWorkers(ctx); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForEvent(t, store, core.EventWorkerCompleted, taskID)
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return runner.callsValue() == 1
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("runner calls = %d, want 1; events = %s", runner.callsValue(), taskEventSummary(snapshot.Events, taskID))
+	})
 	if !hasTaskAction(snapshot.Events, taskID, "startup_planning_recovery", "resumed") {
 		t.Fatalf("missing startup planning recovery action")
 	}
 	if hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
 		t.Fatalf("planning recovery should not ask for user input")
-	}
-	if runner.callsValue() != 1 {
-		t.Fatalf("runner calls = %d, want 1", runner.callsValue())
 	}
 }
 
@@ -8433,6 +8434,131 @@ func TestCancelTaskAfterRestartReconstructsWorkersFromSnapshot(t *testing.T) {
 	}
 	if status := taskStatus(snapshot, taskID); status != core.TaskCanceled {
 		t.Fatalf("task status = %q, want canceled", status)
+	}
+}
+
+func TestRecoveredRemoteWorkerCompletesPlanWorkItem(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-recovered-work-item"
+	workerID := "worker-recovered-work-item"
+	workItemID := "objective_worker_node-recovered-work-item"
+	remoteTarget := TargetConfig{
+		ID:       "vm-1",
+		Kind:     TargetKindSSH,
+		Host:     "vm",
+		WorkDir:  "/repo",
+		WorkRoot: "/runs",
+		Capacity: TargetCapacity{MaxWorkers: 1, CPUWeight: 1},
+	}
+	targets := NewTargetRegistry([]TargetConfig{remoteTarget})
+	service := NewServiceWithWorkspaceManagerAndTargets(
+		store,
+		fixedBrain{plan: testWorkItemPlan("mock", "noop")},
+		map[string]worker.Runner{"mock": eventRunner{kind: "mock"}},
+		t.TempDir(),
+		fakeWorkspaceManager{cwd: t.TempDir()},
+		targets,
+		SSHRunner{Executor: &fakeRemoteExecutor{}, PollInterval: time.Millisecond},
+	)
+
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Recovered work item",
+			"prompt": "Finish after restart",
+			"metadata": map[string]any{
+				"objectiveMode": "broad",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskStatus,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"status": core.TaskRunning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":     workItemID,
+		"kind":   "objective.validate",
+		"reason": "validate recovered worker output",
+		"metadata": map[string]any{
+			"sourceAction": "plan",
+			"planID":       "plan-recovered",
+			"workItemKind": "objective.validate",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemStarted(ctx, taskID, workItemID, workerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventExecutionPlanned,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"nodeId":        "node-recovered-work-item",
+			"workerId":      workerID,
+			"workerKind":    "mock",
+			"planId":        "plan-recovered",
+			"targetId":      "vm-1",
+			"targetKind":    "ssh",
+			"remoteSession": "aged-recovered-work-item",
+			"remoteRunDir":  "/runs/aged-recovered-work-item",
+			"remoteWorkDir": "/repo",
+			"metadata": map[string]any{
+				"sourceAction": "plan",
+				"planID":       "plan-recovered",
+				"workItemKind": "objective.validate",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerCreated,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload: core.MustJSON(map[string]any{
+			"kind": "mock",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:     core.EventWorkerStarted,
+		TaskID:   taskID,
+		WorkerID: workerID,
+		Payload:  core.MustJSON(map[string]any{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.RecoverRemoteWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		item, ok := workItemByID(snapshot, workItemID)
+		return ok && item.Status == core.WorkItemSucceeded && item.WorkerID == workerID
+	}, func(snapshot core.Snapshot) string {
+		item, ok := workItemByID(snapshot, workItemID)
+		return fmt.Sprintf("recovered work item = %+v ok=%v, want succeeded for worker", item, ok)
+	})
+	item, ok := workItemByID(snapshot, workItemID)
+	if !ok || item.Status != core.WorkItemSucceeded || item.WorkerID != workerID {
+		t.Fatalf("recovered work item = %+v ok=%v, want succeeded for worker", item, ok)
+	}
+	if item.Attempt != 1 {
+		t.Fatalf("recovered work item attempt = %d, want original attempt preserved", item.Attempt)
 	}
 }
 
