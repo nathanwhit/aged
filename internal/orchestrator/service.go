@@ -7303,8 +7303,11 @@ func (s *Service) queuePlanWorkItems(ctx context.Context, task core.Task, plan P
 		metadata["dependsOn"] = queuedDependencyIDs(request.DependsOn, itemIDs)
 		metadata["role"] = workItemRole(kind, request.Reason)
 		metadata["planRationale"] = plan.Rationale
-		if actions := deferredPlanActions(plan.Actions); len(actions) > 0 {
+		if actions := deferredPlanActionsForWorkItem(plan.Actions, baseItemID); len(actions) > 0 {
 			metadata["planActions"] = actions
+			if deferredPlanActionsTargetWorkItem(actions, baseItemID) {
+				metadata["executeActionsOnSuccess"] = true
+			}
 		}
 		if plan.Metadata != nil {
 			metadata["planMetadata"] = plan.Metadata
@@ -7533,14 +7536,48 @@ func immediateWorkItemActionPlan(plan Plan) (Plan, []PlanAction) {
 	actionPlan := plan
 	actionPlan.Actions = nil
 	skippedWatchActions := []PlanAction{}
+	skipWatchActions := boolMetadata(plan.Metadata, "backgroundPullRequestFollowUp")
 	for _, action := range plan.Actions {
-		if strings.TrimSpace(action.Kind) == "watch_pull_requests" {
+		if skipWatchActions && strings.TrimSpace(action.Kind) == "watch_pull_requests" {
 			skippedWatchActions = append(skippedWatchActions, action)
 			continue
 		}
 		actionPlan.Actions = append(actionPlan.Actions, action)
 	}
 	return actionPlan, skippedWatchActions
+}
+
+func deferredPlanActionsForWorkItem(actions []PlanAction, workItemID string) []PlanAction {
+	out := []PlanAction{}
+	for _, action := range deferredPlanActions(actions) {
+		if planActionHasWorkerRef(action) && !planActionTargetsWorkItem(action, workItemID) {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+func deferredPlanActionsTargetWorkItem(actions []PlanAction, workItemID string) bool {
+	for _, action := range actions {
+		if planActionTargetsWorkItem(action, workItemID) {
+			return true
+		}
+	}
+	return false
+}
+
+func planActionHasWorkerRef(action PlanAction) bool {
+	return strings.TrimSpace(action.WorkerID) != ""
+}
+
+func planActionTargetsWorkItem(action PlanAction, workItemID string) bool {
+	ref := strings.TrimSpace(action.WorkerID)
+	workItemID = strings.TrimSpace(workItemID)
+	if ref == "" || workItemID == "" {
+		return false
+	}
+	return ref == workItemID || strings.HasSuffix(workItemID, ":"+ref) || strings.HasSuffix(ref, ":"+workItemID)
 }
 
 func (s *Service) recordWorkItemFollowUpStatus(ctx context.Context, taskID string, item core.WorkItem, status string, reason string, workerID string, errorText string) {
