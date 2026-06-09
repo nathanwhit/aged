@@ -506,26 +506,24 @@ func (b *CodexBrain) claudeArgs() []string {
 
 func decodeReplanDecision(data []byte) (ReplanDecision, error) {
 	var raw struct {
-		Action                 string          `json:"action"`
-		Plan                   json.RawMessage `json:"plan,omitempty"`
-		FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
-		PullRequestBody        string          `json:"pullRequestBody,omitempty"`
-		Rationale              string          `json:"rationale,omitempty"`
-		Message                string          `json:"message,omitempty"`
-		WorkPlan               *core.WorkPlan  `json:"workPlan,omitempty"`
-		Metadata               map[string]any  `json:"metadata,omitempty"`
+		Action          string          `json:"action"`
+		Plan            json.RawMessage `json:"plan,omitempty"`
+		PullRequestBody string          `json:"pullRequestBody,omitempty"`
+		Rationale       string          `json:"rationale,omitempty"`
+		Message         string          `json:"message,omitempty"`
+		WorkPlan        *core.WorkPlan  `json:"workPlan,omitempty"`
+		Metadata        map[string]any  `json:"metadata,omitempty"`
 	}
 	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
 		return ReplanDecision{}, err
 	}
 	decision := ReplanDecision{
-		Action:                 raw.Action,
-		FinalCandidateWorkerID: raw.FinalCandidateWorkerID,
-		PullRequestBody:        raw.PullRequestBody,
-		Rationale:              raw.Rationale,
-		Message:                raw.Message,
-		WorkPlan:               raw.WorkPlan,
-		Metadata:               raw.Metadata,
+		Action:          raw.Action,
+		PullRequestBody: raw.PullRequestBody,
+		Rationale:       raw.Rationale,
+		Message:         raw.Message,
+		WorkPlan:        raw.WorkPlan,
+		Metadata:        raw.Metadata,
 	}
 	if len(raw.Plan) > 0 && string(raw.Plan) != "null" {
 		plan, err := decodeCodexPlan(raw.Plan)
@@ -571,16 +569,13 @@ func decodePublicationReview(data []byte) (PublicationReview, error) {
 
 func decodeCodexPlan(data []byte) (Plan, error) {
 	var raw struct {
-		WorkerKind        string          `json:"workerKind"`
-		Prompt            string          `json:"workerPrompt"`
 		ReasoningEffort   string          `json:"reasoningEffort,omitempty"`
 		Rationale         string          `json:"rationale,omitempty"`
 		WorkPlan          *core.WorkPlan  `json:"workPlan,omitempty"`
 		Steps             json.RawMessage `json:"steps,omitempty"`
 		RequiredApprovals json.RawMessage `json:"requiredApprovals,omitempty"`
 		Actions           json.RawMessage `json:"actions,omitempty"`
-		Workers           json.RawMessage `json:"workers,omitempty"`
-		Spawns            json.RawMessage `json:"spawns,omitempty"`
+		WorkItems         json.RawMessage `json:"workItems,omitempty"`
 		Metadata          map[string]any  `json:"metadata,omitempty"`
 	}
 	if err := unmarshalPossiblyWrappedJSONObject(data, &raw); err != nil {
@@ -598,25 +593,18 @@ func decodeCodexPlan(data []byte) (Plan, error) {
 	if err != nil {
 		return Plan{}, fmt.Errorf("decode actions: %w", err)
 	}
-	workers, err := decodeWorkerRequests(raw.Workers)
+	workItems, err := decodeWorkItemRequests(raw.WorkItems)
 	if err != nil {
-		return Plan{}, fmt.Errorf("decode workers: %w", err)
-	}
-	spawns, err := decodeSpawnRequests(raw.Spawns)
-	if err != nil {
-		return Plan{}, fmt.Errorf("decode spawns: %w", err)
+		return Plan{}, fmt.Errorf("decode workItems: %w", err)
 	}
 	return Plan{
-		WorkerKind:        raw.WorkerKind,
-		Prompt:            raw.Prompt,
 		ReasoningEffort:   raw.ReasoningEffort,
 		Rationale:         raw.Rationale,
 		WorkPlan:          raw.WorkPlan,
 		Steps:             steps,
 		RequiredApprovals: approvals,
 		Actions:           actions,
-		Workers:           workers,
-		Spawns:            spawns,
+		WorkItems:         workItems,
 		Metadata:          raw.Metadata,
 	}, nil
 }
@@ -735,38 +723,15 @@ func decodePlanActions(data json.RawMessage) ([]PlanAction, error) {
 	return actions, nil
 }
 
-func decodeWorkerRequests(data json.RawMessage) ([]WorkerRequest, error) {
+func decodeWorkItemRequests(data json.RawMessage) ([]WorkItemRequest, error) {
 	if len(data) == 0 || string(data) == "null" {
 		return nil, nil
 	}
-	var workers []WorkerRequest
-	if err := json.Unmarshal(data, &workers); err != nil {
+	var items []WorkItemRequest
+	if err := json.Unmarshal(data, &items); err != nil {
 		return nil, err
 	}
-	return workers, nil
-}
-
-func decodeSpawnRequests(data json.RawMessage) ([]SpawnRequest, error) {
-	if len(data) == 0 || string(data) == "null" {
-		return nil, nil
-	}
-	var spawns []SpawnRequest
-	if err := json.Unmarshal(data, &spawns); err == nil {
-		return spawns, nil
-	}
-	var labels []string
-	if err := json.Unmarshal(data, &labels); err != nil {
-		return nil, err
-	}
-	spawns = make([]SpawnRequest, 0, len(labels))
-	for _, label := range labels {
-		label = strings.TrimSpace(label)
-		if label == "" {
-			continue
-		}
-		spawns = append(spawns, SpawnRequest{Role: label, Reason: label})
-	}
-	return spawns, nil
+	return items, nil
 }
 
 func (b *CodexBrain) prompt(task core.Task, steering []string) string {
@@ -877,11 +842,10 @@ func codeReviewPromptPayload(task core.Task, candidate WorkerTurnResult, policy 
 
 func taskPromptPayload(task core.Task) map[string]any {
 	payload := map[string]any{
-		"id":             task.ID,
-		"projectId":      task.ProjectID,
-		"title":          task.Title,
-		"prompt":         task.Prompt,
-		"completionMode": taskCompletionModeFromTask(task),
+		"id":        task.ID,
+		"projectId": task.ProjectID,
+		"title":     task.Title,
+		"prompt":    task.Prompt,
 	}
 	metadata, err := createTaskMetadataMap(task.Metadata)
 	if err == nil && len(metadata) > 0 {
@@ -912,8 +876,6 @@ The JSON object must have exactly these top-level fields:
 
 {
   "action": "complete",
-  "finalCandidateWorkerId": "worker-id-or-empty",
-  "pullRequestBody": "string",
   "rationale": "string",
   "message": "string",
   "workPlan": null,
@@ -921,15 +883,11 @@ The JSON object must have exactly these top-level fields:
 }
 
 Field rules:
-- "action" must be exactly one of "continue", "complete", "wait", or "fail".
-- Use "complete" when the task appears done.
-- Narrow GitHub-completion tasks should converge on one final candidate and one completion pull request. If task.metadata.objectiveMode is "broad", or if the task is large, exploratory, performance-oriented, or explicitly expected to produce multiple reviewable results, keep ownership in this task: split the objective into focused PR outputs, use "continue" to schedule each next graph turn, and use publish_pull_request actions with continueAfterPublish while more slices remain. After an intermediate PR is opened with continueAfterPublish, keep replanning the objective immediately while PR babysitting happens in parallel; do not wait on GitHub state unless no more objective work can proceed.
-- Internal setup, benchmark harnesses, profiling, triage, validation baselines, and proposed PR slices belong in this task's graph, work plan, or artifacts. Do not collapse a large objective into one massive PR, and do not schedule sibling tasks for PR-sized slices unless the user explicitly needs separate task lifecycles. Use create_tasks only when the user explicitly needs a separate user-facing task with its own lifecycle.
-- When action is "complete" and the task completionMode is "github", write the pull request description in "pullRequestBody". Write it the way a human contributor opening this PR would write it, not as a status report to the orchestrator. Describe what the code changes do and any notable behavior, API, or migration impact a reviewer should know, and list the tests or commands actually run to validate the change under a "## Test plan" or "## Validation" heading. Prefer a short "## Summary" with bullet points covering the substantive code changes. Do not restate or paraphrase the user's task prompt, the orchestrator's framing, or the worker's instructions; reviewers will read the PR diff, not the task description. Do not mention orchestration internals such as worker ids, task ids, replan or scheduler rationale, "remote worker", "candidate", "aged", or how the change was scheduled. Do not include changed-file lists, file paths in headings, or diffstats because the PR diff already shows them. Keep the body tight: omit a section rather than padding it.
-- When action is not "complete" or the task completionMode is not "github", set "pullRequestBody" to an empty string.
-- When action is "complete" and more than one successful worker produced candidate changes, set "finalCandidateWorkerId" to the worker id whose changes should be the final task result. If no existing changed candidate should be final, use "continue" to schedule a consolidation, validation, or fix worker instead.
-- When action is "complete" and there is only one changed candidate lineage, "finalCandidateWorkerId" may be empty; do not set it to a no-change review or validation worker unless the correct final result is to complete without publishing changes.
-- When the task is already satisfied and no code changes or pull request are needed, use "complete", set "finalCandidateWorkerId" to the successful no-change worker that established that result, and set "pullRequestBody" to an empty string even when completionMode is "github".
+- "action" must be exactly one of "continue", "complete", "finish_objective", "wait", or "fail".
+- Use "complete" when the objective is satisfied and no more workers, PR actions, questions, or external waits are needed. Use "finish_objective" when a broad objective is satisfied and a user-facing completion summary would help.
+- Completing a task never publishes a pull request. Pull requests are explicit artifacts created only by publish_pull_request actions. If code should be reviewed on GitHub, use "continue" with a publish_pull_request action for the specific worker output. If task.metadata.objectiveMode is "broad", or if the task is large, exploratory, performance-oriented, or explicitly expected to produce multiple reviewable results, keep ownership in this task: split the objective into focused PR outputs, use "continue" to schedule each next graph turn, and use publish_pull_request actions with continueAfterPublish while more slices remain. After an intermediate PR is opened with continueAfterPublish, keep replanning the objective immediately while PR babysitting happens in parallel; do not wait on GitHub state unless no more objective work can proceed.
+- Internal setup, benchmark harnesses, profiling, triage, validation baselines, and proposed PR slices belong in this task's graph, work plan, or artifacts. Do not collapse a large objective into one massive PR, and do not schedule sibling tasks for PR-sized slices unless the user explicitly needs separate task lifecycles. Use spawn_work to enqueue internal objective work items such as objective.plan, objective.implement, objective.slice, objective.compose, pr.followup, pr.ci_repair, pr.review_reply, user.steering, user.question_answered, or session.recover. Use create_tasks only when the user explicitly needs a separate user-facing task with its own lifecycle.
+- To open or update a pull request, use publish_pull_request or update_pull_request actions with explicit inputs.title and inputs.body. Completion never chooses or applies a hidden completion worker result.
 - Use "continue" when another worker turn is needed.
 - Use state.recentResults for the latest compact worker turn summaries. Use state.contextLedger as compact durable memory for older high-signal facts from persisted task events. The prompt budgeter omits raw worker output, full stdout logs, giant artifact contents, and routine old worker turns.
 - Use state.artifacts for durable task artifact metadata. Artifact contents are omitted unless tiny; do not infer source changes from artifact metadata alone.
@@ -942,17 +900,16 @@ Field rules:
 - Use "fail" when the task cannot continue.
 - Use "workPlan" for the durable engineering decomposition of the whole objective. Set it to null when the existing work plan is still accurate. Include a full updated work plan when worker results change progress, split the task differently, reveal a blocker, finish a stream, add validation work, or change risks. The updated work plan should include summary, workstreams, validation, and risks.
 - "workPlan" item statuses should usually be "pending", "running", "blocked", "done", or "dropped". Keep ids stable across turns when they still refer to the same workstream.
-- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workers, spawns.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workItems.
 - The top-level "workPlan" is the durable task update. The continue plan's "workPlan" exists because continue plans use the scheduler schema; it should match the top-level "workPlan" when you are changing the durable plan for the next turn. If the current durable plan remains accurate, include the current work plan in plan.workPlan and set top-level "workPlan" to null.
-- The continue plan must use workers for initial execution. Each workers[] object must include id, role, reason, workerKind, workerPrompt, reasoningEffort, and dependsOn. Root workers with empty dependsOn can run in parallel immediately. Workers with dependencies wait until all dependency worker ids finish.
-- Top-level workerKind and workerPrompt are legacy compatibility fallback fields only when workers is absent. Do not use them for new continue plans.
-- The continue plan may include actions. Use action kind "publish_pull_request" to publish the latest candidate worker as a durable intermediate PR artifact. A publish_pull_request action must include inputs.title and inputs.body; do not rely on aged to generate either one. inputs.title must describe the specific PR-sized change, not the overall task or broad objective. When a publish_pull_request or update_pull_request action pushes code changes, provide inputs.commitMessage when you can write a more precise commit subject than the PR title. inputs.commitMessage must be a short imperative or conventional-commit subject describing the code diff, such as "refactor(cron): remove saffron dependency" or "Widen cron schedule search horizon"; never use worker status narration such as "tests passed", "pushed changes", "doing final status", "ready to publish", or "opening a PR". Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use inputs.continueAfterPublish=true for broad, large, or long-running objectives when more slices should be pursued after opening this PR; after such an intermediate PR, the next plan should continue objective work immediately and leave the PR to the babysitter. Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened. Narrow GitHub-completion tasks should publish at most one completion PR. Use action kind "create_tasks" only when a genuinely separate user-facing task should be created; do not use it for internal setup, investigation, benchmark harnesses, validation, or PR slices inside the current objective. Use action kind "update_pull_request" only for an existing non-terminal PR that is still the right review artifact. For update_pull_request that should push code changes, set workerId to the specific worker or spawn id that produced the changes for that PR; do not rely on task-wide latest-candidate inference because broad objective tasks may have multiple active PRs. When update_pull_request references a worker that produced code changes, aged will push those worker changes to the PR branch by default even if inputs.title or inputs.body are also present. Set inputs.metadataOnly=true or inputs.includeChanges=false only when the action must update title/body without pushing worker workspace changes. If a PR is closed, treat it as historical feedback and publish a fresh PR for new candidate work. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event that actually blocks further objective work. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
-- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks. For publish_pull_request, use workerId "" to mean the final successful candidate worker when unambiguous; when multiple workers can produce competing candidates, schedule consolidation or validation before publishing. For update_pull_request, use workerId "" only for metadata-only title/body updates or no-change inspection/watch transitions. Use inputs {} when no extra inputs are needed for non-publish actions.
-- Each spawn object must include role and reason, and may include id, workerKind, and dependsOn. Use id and dependsOn to express parallel/dependency scheduling between spawned workers.
-- Spawn objects with no dependsOn may run in parallel. Spawn objects with dependsOn wait for those spawn ids to succeed.
+- The continue plan must use workItems for next-turn execution, or use immediate actions with an empty workItems array when no worker turn is needed. Each workItems[] object must include id, kind, reason, prompt, targetKind, targetId, workerKind, reasoningEffort, dependsOn, and metadata. Root work items with empty dependsOn can run in parallel immediately. Work items with dependencies wait until all dependency work item ids finish.
+- The continue plan may include actions. Use action kind "publish_pull_request" to publish a worker result as a durable PR artifact. A publish_pull_request action must include inputs.title and inputs.body; do not rely on aged to generate either one. inputs.title must describe the specific PR-sized change, not the overall task or broad objective. When a publish_pull_request or update_pull_request action pushes code changes, provide inputs.commitMessage when you can write a more precise commit subject than the PR title. inputs.commitMessage must be a short imperative or conventional-commit subject describing the code diff, such as "refactor(cron): remove saffron dependency" or "Widen cron schedule search horizon"; never use worker status narration such as "tests passed", "pushed changes", "doing final status", "ready to publish", or "opening a PR". Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use inputs.continueAfterPublish=true for broad, large, or long-running objectives when more slices should be pursued after opening this PR; after such an intermediate PR, the next plan should continue objective work immediately and leave the PR to the babysitter. Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened. Use action kind "create_tasks" only when a genuinely separate user-facing task should be created; do not use it for internal setup, investigation, benchmark harnesses, validation, or PR slices inside the current objective. Use action kind "update_pull_request" only for an existing non-terminal PR that is still the right review artifact. For update_pull_request that should push code changes, set workerId to the specific worker or work item id that produced the changes for that PR; do not rely on task-wide latest-result inference because broad objective tasks may have multiple active PRs. When update_pull_request references a worker that produced code changes, aged will push those worker changes to the PR branch by default even if inputs.title or inputs.body are also present. Set inputs.metadataOnly=true or inputs.includeChanges=false only when the action must update title/body without pushing worker workspace changes. If a PR is closed, treat it as historical feedback and publish a fresh PR for new worker output. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event that actually blocks further objective work. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing. Use "finish_objective" when a broad objective is done and no additional PR should be published; include inputs.summary when a concise completion summary would help the user.
+- Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks, user questions, or durable spawn_work fanout. For publish_pull_request and code-changing update_pull_request actions, set workerId to the specific worker or work item id that produced the coherent PR-sized diff. Use workerId "" only when the action is metadata-only or does not consume worker changes. Use inputs {} when no extra inputs are needed for non-publish actions.
+- Use workItems for future objective work, broad fanout, PR slices, compose work, PR follow-up, CI repair, review replies, and work that should survive daemon restart. spawn_work remains available only as an explicit action/tool callback for action-only fanout.
 - When action is not "continue", "plan" must be null or omitted.
+- When action is "finish_objective", put the user-facing completion summary in "message".
 - "reasoningEffort" inside plan must be one of "default", "low", "medium", "high", "xhigh", or "max".
-- "steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects, never arrays of strings.
+- "steps", "requiredApprovals", and "workItems" inside plan must be arrays of objects, never arrays of strings.
 
 Dynamic replanning input:
 
@@ -967,7 +924,7 @@ func (b *CodexBrain) completionReviewPrompt(task core.Task, candidate WorkerTurn
 	}
 	return builtinReviewHeader + `
 
-You are reviewing whether the selected final candidate actually satisfies the user's task objective.
+You are reviewing whether the objective is actually satisfied by the current worker results and PR artifacts.
 
 Return exactly one JSON object and nothing else. Do not wrap it in markdown.
 The first non-whitespace character of your response must be "{", and the last non-whitespace character must be "}".
@@ -980,7 +937,7 @@ The JSON object must have exactly these top-level fields:
 }
 
 Readiness rules:
-- Set "ready": true only when the selected candidate is an appropriate final result for the task as the user stated it.
+- Set "ready": true only when the candidate is an appropriate completion result for the task as the user stated it.
 - Set "ready": false when the task describes an ongoing, multi-turn, keep-working, babysitting, monitoring, or open-ended objective and the candidate is only an intermediate artifact.
 - Set "ready": false when the candidate or completion reason says more implementation, validation, review response, benchmarking, or follow-up work is still needed.
 - Set "ready": false when the candidate does not address the actual task objective, even if it produced useful setup, test, benchmark, documentation, or diagnostic artifacts.
@@ -1081,7 +1038,6 @@ func compactCandidateForReviewPrompt(result WorkerTurnResult, includeDiff bool) 
 }
 
 func compactPlanForPrompt(plan Plan) Plan {
-	plan.Prompt = truncateStringForPrompt(plan.Prompt, maxPromptPlanTextBytes)
 	plan.Rationale = truncateStringForPrompt(plan.Rationale, maxPromptRationaleBytes)
 	plan.WorkPlan = compactWorkPlanForPrompt(plan.WorkPlan)
 	for index := range plan.Steps {
@@ -1095,14 +1051,9 @@ func compactPlanForPrompt(plan Plan) Plan {
 	for index := range plan.Actions {
 		plan.Actions[index].Reason = truncateStringForPrompt(plan.Actions[index].Reason, maxPromptRationaleBytes)
 	}
-	for index := range plan.Workers {
-		plan.Workers[index].Role = truncateStringForPrompt(plan.Workers[index].Role, maxPromptRationaleBytes)
-		plan.Workers[index].Reason = truncateStringForPrompt(plan.Workers[index].Reason, maxPromptRationaleBytes)
-		plan.Workers[index].Prompt = truncateStringForPrompt(plan.Workers[index].Prompt, maxPromptPlanTextBytes)
-	}
-	for index := range plan.Spawns {
-		plan.Spawns[index].Role = truncateStringForPrompt(plan.Spawns[index].Role, maxPromptRationaleBytes)
-		plan.Spawns[index].Reason = truncateStringForPrompt(plan.Spawns[index].Reason, maxPromptRationaleBytes)
+	for index := range plan.WorkItems {
+		plan.WorkItems[index].Reason = truncateStringForPrompt(plan.WorkItems[index].Reason, maxPromptRationaleBytes)
+		plan.WorkItems[index].Prompt = truncateStringForPrompt(plan.WorkItems[index].Prompt, maxPromptPlanTextBytes)
 	}
 	return plan
 }

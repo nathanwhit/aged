@@ -14,15 +14,14 @@ import (
 const defaultTaskDetailEventLimit = 30
 
 type TaskDetail struct {
-	Task               core.Task                 `json:"task"`
-	Project            *core.Project             `json:"project,omitempty"`
-	Workers            []TaskDetailWorker        `json:"workers"`
-	ExecutionNodes     []core.ExecutionNode      `json:"executionNodes"`
-	OrchestrationGraph *core.OrchestrationGraph  `json:"orchestrationGraph,omitempty"`
-	PullRequests       []core.PullRequest        `json:"pullRequests"`
-	RecentEvents       []core.Event              `json:"recentEvents"`
-	ApplyPolicy        ApplyPolicyRecommendation `json:"applyPolicy"`
-	AvailableActions   []AvailableAction         `json:"availableActions"`
+	Task             core.Task                 `json:"task"`
+	Project          *core.Project             `json:"project,omitempty"`
+	Workers          []TaskDetailWorker        `json:"workers"`
+	ExecutionNodes   []core.ExecutionNode      `json:"executionNodes"`
+	PullRequests     []core.PullRequest        `json:"pullRequests"`
+	RecentEvents     []core.Event              `json:"recentEvents"`
+	ApplyPolicy      ApplyPolicyRecommendation `json:"applyPolicy"`
+	AvailableActions []AvailableAction         `json:"availableActions"`
 }
 
 type TaskDetailWorker struct {
@@ -89,14 +88,13 @@ func BuildTaskDetailAt(snapshot core.Snapshot, taskID string, eventLimit int, no
 		}
 	}
 	detail := TaskDetail{
-		Task:               task,
-		Workers:            taskDetailWorkersAt(snapshot, taskID, now, staleAfter),
-		ExecutionNodes:     executionNodes,
-		PullRequests:       pullRequests,
-		RecentEvents:       recentTaskEvents(snapshot.Events, taskID, eventLimit),
-		ApplyPolicy:        taskApplyPolicy(snapshot, taskID),
-		AvailableActions:   taskAvailableActions(snapshot, task, pullRequests),
-		OrchestrationGraph: taskOrchestrationGraph(snapshot, taskID),
+		Task:             task,
+		Workers:          taskDetailWorkersAt(snapshot, taskID, now, staleAfter),
+		ExecutionNodes:   executionNodes,
+		PullRequests:     pullRequests,
+		RecentEvents:     recentTaskEvents(snapshot.Events, taskID, eventLimit),
+		ApplyPolicy:      taskApplyPolicy(snapshot, taskID),
+		AvailableActions: taskAvailableActions(snapshot, task, pullRequests),
 	}
 	if project, ok := projectByID(snapshot.Projects, task.ProjectID); ok {
 		detail.Project = &project
@@ -178,15 +176,6 @@ func taskDetailWorkersAt(snapshot core.Snapshot, taskID string, now time.Time, s
 	return workers
 }
 
-func taskOrchestrationGraph(snapshot core.Snapshot, taskID string) *core.OrchestrationGraph {
-	for _, graph := range snapshot.OrchestrationGraphs {
-		if graph.TaskID == taskID {
-			return &graph
-		}
-	}
-	return nil
-}
-
 func recentTaskEvents(events []core.Event, taskID string, limit int) []core.Event {
 	return recentEvents(events, limit, func(event core.Event) bool {
 		return event.TaskID == taskID
@@ -253,21 +242,6 @@ func taskApplyPolicy(snapshot core.Snapshot, taskID string) ApplyPolicyRecommend
 		Reason:     "no unapplied successful workers with source changes",
 		Candidates: candidates,
 	}
-	task, ok := findTask(snapshot, taskID)
-	if ok && task.FinalCandidateWorkerID != "" {
-		for _, candidate := range candidates {
-			if candidate.WorkerID == task.FinalCandidateWorkerID {
-				if candidate.Applied {
-					recommendation.Strategy = "already_applied"
-					recommendation.Reason = "final task candidate has already been applied"
-				} else {
-					recommendation.Strategy = "apply_final"
-					recommendation.Reason = "orchestrator selected a final task candidate"
-				}
-				return recommendation
-			}
-		}
-	}
 	unapplied := 0
 	for _, candidate := range candidates {
 		if !candidate.Applied {
@@ -299,9 +273,6 @@ func taskAvailableActions(snapshot core.Snapshot, task core.Task, pullRequests [
 	if isTerminalTaskStatus(task.Status) {
 		actions = append(actions, AvailableAction{Name: "aged_clear_task", Description: "Hide this finished task from active snapshots.", TargetID: task.ID})
 	}
-	if taskCanApplyFinalResult(snapshot, task) {
-		actions = append(actions, AvailableAction{Name: "aged_apply_task_result", Description: "Apply the selected final worker result locally.", TargetID: task.ID})
-	}
 	if canPublishPullRequestForTask(task) && len(pullRequests) == 0 {
 		actions = append(actions, AvailableAction{Name: "aged_publish_pr", Description: "Open a GitHub pull request for this task result.", TargetID: task.ID})
 	}
@@ -328,32 +299,4 @@ func workerAvailableActions(worker core.Worker, applied bool, hasChanges bool) [
 		)
 	}
 	return actions
-}
-
-func taskCanApplyFinalResult(snapshot core.Snapshot, task core.Task) bool {
-	if !isTerminalTaskStatus(task.Status) || strings.TrimSpace(task.FinalCandidateWorkerID) == "" {
-		return false
-	}
-	if taskCompletionMode(task) == "github" {
-		return false
-	}
-	for _, event := range snapshot.Events {
-		if event.Type == core.EventWorkerApplied && event.WorkerID == task.FinalCandidateWorkerID {
-			return false
-		}
-	}
-	return true
-}
-
-func taskCompletionMode(task core.Task) string {
-	var metadata map[string]any
-	if len(task.Metadata) > 0 && json.Unmarshal(task.Metadata, &metadata) == nil {
-		if value, ok := metadata["completionMode"].(string); ok && strings.TrimSpace(value) != "" {
-			switch strings.ToLower(strings.TrimSpace(value)) {
-			case "github":
-				return "github"
-			}
-		}
-	}
-	return "local"
 }

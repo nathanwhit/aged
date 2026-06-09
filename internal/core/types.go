@@ -47,7 +47,6 @@ const (
 	EventTaskPlanned       EventType = "task.planned"
 	EventTaskReplanned     EventType = "task.replanned"
 	EventTaskSteered       EventType = "task.steered"
-	EventTaskCandidate     EventType = "task.final_candidate_selected"
 	EventTaskObjective     EventType = "task.objective_updated"
 	EventTaskMilestone     EventType = "task.milestone_reached"
 	EventTaskWorkPlan      EventType = "task.work_plan_updated"
@@ -74,6 +73,9 @@ const (
 	EventPRStatusChecked   EventType = "pull_request.status_checked"
 	EventPRBabysitter      EventType = "pull_request.babysitter_started"
 	EventPRFollowUp        EventType = "pull_request.followup_started"
+	EventWorkItemQueued    EventType = "work_item.queued"
+	EventWorkItemStarted   EventType = "work_item.started"
+	EventWorkItemCompleted EventType = "work_item.completed"
 )
 
 type Event struct {
@@ -86,23 +88,22 @@ type Event struct {
 }
 
 type Task struct {
-	ID                     string          `json:"id"`
-	ProjectID              string          `json:"projectId,omitempty"`
-	WorkstreamID           string          `json:"workstreamId,omitempty"`
-	Title                  string          `json:"title"`
-	Prompt                 string          `json:"prompt"`
-	Status                 TaskStatus      `json:"status"`
-	Error                  string          `json:"error,omitempty"`
-	ObjectiveStatus        ObjectiveStatus `json:"objectiveStatus,omitempty"`
-	ObjectivePhase         string          `json:"objectivePhase,omitempty"`
-	CreatedAt              time.Time       `json:"createdAt"`
-	UpdatedAt              time.Time       `json:"updatedAt"`
-	Metadata               json.RawMessage `json:"metadata,omitempty"`
-	FinalCandidateWorkerID string          `json:"finalCandidateWorkerId,omitempty"`
-	AppliedWorkerID        string          `json:"appliedWorkerId,omitempty"`
-	Milestones             []TaskMilestone `json:"milestones,omitempty"`
-	WorkPlan               *WorkPlan       `json:"workPlan,omitempty"`
-	Artifacts              []TaskArtifact  `json:"artifacts,omitempty"`
+	ID              string          `json:"id"`
+	ProjectID       string          `json:"projectId,omitempty"`
+	WorkstreamID    string          `json:"workstreamId,omitempty"`
+	Title           string          `json:"title"`
+	Prompt          string          `json:"prompt"`
+	Status          TaskStatus      `json:"status"`
+	Error           string          `json:"error,omitempty"`
+	ObjectiveStatus ObjectiveStatus `json:"objectiveStatus,omitempty"`
+	ObjectivePhase  string          `json:"objectivePhase,omitempty"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	AppliedWorkerID string          `json:"appliedWorkerId,omitempty"`
+	Milestones      []TaskMilestone `json:"milestones,omitempty"`
+	WorkPlan        *WorkPlan       `json:"workPlan,omitempty"`
+	Artifacts       []TaskArtifact  `json:"artifacts,omitempty"`
 }
 
 type TaskMilestone struct {
@@ -122,6 +123,32 @@ type TaskArtifact struct {
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+type Artifact struct {
+	ID        string          `json:"id"`
+	TaskID    string          `json:"taskId"`
+	Kind      string          `json:"kind"`
+	Name      string          `json:"name,omitempty"`
+	URL       string          `json:"url,omitempty"`
+	Ref       string          `json:"ref,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+type MemoryEntry struct {
+	ID            string          `json:"id"`
+	ProjectID     string          `json:"projectId,omitempty"`
+	TaskID        string          `json:"taskId,omitempty"`
+	Kind          string          `json:"kind"`
+	SourceEventID int64           `json:"sourceEventId,omitempty"`
+	SourceEvent   string          `json:"sourceEvent,omitempty"`
+	WorkerID      string          `json:"workerId,omitempty"`
+	Summary       string          `json:"summary"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
 }
 
 type WorkPlan struct {
@@ -173,6 +200,84 @@ type ExecutionNode struct {
 	CreatedAt     time.Time       `json:"createdAt"`
 	UpdatedAt     time.Time       `json:"updatedAt"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
+}
+
+type WorkItemStatus string
+
+const (
+	WorkItemQueued    WorkItemStatus = "queued"
+	WorkItemRunning   WorkItemStatus = "running"
+	WorkItemSucceeded WorkItemStatus = "succeeded"
+	WorkItemFailed    WorkItemStatus = "failed"
+	WorkItemCanceled  WorkItemStatus = "canceled"
+)
+
+type WorkItem struct {
+	ID         string          `json:"id"`
+	TaskID     string          `json:"taskId"`
+	Kind       string          `json:"kind"`
+	Status     WorkItemStatus  `json:"status"`
+	TargetKind string          `json:"targetKind,omitempty"`
+	TargetID   string          `json:"targetId,omitempty"`
+	Reason     string          `json:"reason,omitempty"`
+	Prompt     string          `json:"prompt,omitempty"`
+	WorkerID   string          `json:"workerId,omitempty"`
+	LeaseOwner string          `json:"leaseOwner,omitempty"`
+	LeaseUntil *time.Time      `json:"leaseUntil,omitempty"`
+	Attempt    int             `json:"attempt,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	CreatedAt  time.Time       `json:"createdAt"`
+	UpdatedAt  time.Time       `json:"updatedAt"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+type Question struct {
+	ID        string          `json:"id"`
+	TaskID    string          `json:"taskId"`
+	WorkerID  string          `json:"workerId,omitempty"`
+	Reason    string          `json:"reason,omitempty"`
+	Question  string          `json:"question"`
+	Answer    string          `json:"answer,omitempty"`
+	Decided   bool            `json:"decided"`
+	Approved  *bool           `json:"approved,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+}
+
+type Session struct {
+	ID                 string          `json:"id"`
+	TaskID             string          `json:"taskId"`
+	WorkerID           string          `json:"workerId"`
+	NodeID             string          `json:"nodeId,omitempty"`
+	WorkerKind         string          `json:"workerKind,omitempty"`
+	Role               string          `json:"role,omitempty"`
+	SpawnID            string          `json:"spawnId,omitempty"`
+	Status             WorkerStatus    `json:"status"`
+	TargetID           string          `json:"targetId,omitempty"`
+	TargetKind         string          `json:"targetKind,omitempty"`
+	RemoteSession      string          `json:"remoteSession,omitempty"`
+	RemoteRunDir       string          `json:"remoteRunDir,omitempty"`
+	RemoteWorkDir      string          `json:"remoteWorkDir,omitempty"`
+	WorkspaceRoot      string          `json:"workspaceRoot,omitempty"`
+	WorkspaceCWD       string          `json:"workspaceCwd,omitempty"`
+	SourceRoot         string          `json:"sourceRoot,omitempty"`
+	WorkspaceName      string          `json:"workspaceName,omitempty"`
+	WorkspaceMode      string          `json:"workspaceMode,omitempty"`
+	VCSType            string          `json:"vcsType,omitempty"`
+	SharedRoot         string          `json:"sharedRoot,omitempty"`
+	SharedArtifactsDir string          `json:"sharedArtifactsDir,omitempty"`
+	SharedWorkerDir    string          `json:"sharedWorkerDir,omitempty"`
+	ProviderSessionID  string          `json:"providerSessionId,omitempty"`
+	CurrentAction      string          `json:"currentAction,omitempty"`
+	CurrentActionLabel string          `json:"currentActionLabel,omitempty"`
+	CurrentActionAt    *time.Time      `json:"currentActionAt,omitempty"`
+	CurrentActionEvent int64           `json:"currentActionEvent,omitempty"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	StartedAt          *time.Time      `json:"startedAt,omitempty"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
+	CompletedAt        *time.Time      `json:"completedAt,omitempty"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 
 type TargetCapacity struct {
@@ -348,45 +453,62 @@ type PullRequest struct {
 	Mergeable        string          `json:"mergeable,omitempty"`
 	ReviewStatus     string          `json:"reviewStatus,omitempty"`
 	BabysitterTaskID string          `json:"babysitterTaskId,omitempty"`
+	BranchOwner      string          `json:"branchOwner,omitempty"`
+	BranchOwnerDir   string          `json:"branchOwnerDir,omitempty"`
+	BranchHead       string          `json:"branchHead,omitempty"`
+	UpdateLeaseOwner string          `json:"updateLeaseOwner,omitempty"`
+	UpdateLeaseDir   string          `json:"updateLeaseDir,omitempty"`
+	UpdateBaseHead   string          `json:"updateBaseHead,omitempty"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
 }
 
-type OrchestrationGraph struct {
-	TaskID    string                    `json:"taskId"`
-	Status    TaskStatus                `json:"status"`
-	Nodes     []OrchestrationGraphNode  `json:"nodes"`
-	Edges     []OrchestrationGraphEdge  `json:"edges"`
-	Summary   OrchestrationGraphSummary `json:"summary"`
-	UpdatedAt time.Time                 `json:"updatedAt"`
+type PullRequestFeedback struct {
+	ID                string          `json:"id"`
+	TaskID            string          `json:"taskId"`
+	PullRequestID     string          `json:"pullRequestId"`
+	EventID           int64           `json:"eventId"`
+	Attempt           int             `json:"attempt,omitempty"`
+	Status            string          `json:"status,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
+	Repo              string          `json:"repo,omitempty"`
+	Number            int             `json:"number,omitempty"`
+	URL               string          `json:"url,omitempty"`
+	Branch            string          `json:"branch,omitempty"`
+	Base              string          `json:"base,omitempty"`
+	State             string          `json:"state,omitempty"`
+	ChecksStatus      string          `json:"checksStatus,omitempty"`
+	MergeStatus       string          `json:"mergeStatus,omitempty"`
+	ReviewStatus      string          `json:"reviewStatus,omitempty"`
+	FeedbackSignature string          `json:"feedbackSignature,omitempty"`
+	FeedbackBody      string          `json:"feedbackBody,omitempty"`
+	Prompt            string          `json:"prompt,omitempty"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+	HandledAt         *time.Time      `json:"handledAt,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
-type OrchestrationGraphNode struct {
-	ID         string       `json:"id"`
-	WorkerID   string       `json:"workerId,omitempty"`
-	WorkerKind string       `json:"workerKind"`
-	Status     WorkerStatus `json:"status"`
-	Role       string       `json:"role,omitempty"`
-	Reason     string       `json:"reason,omitempty"`
-	SpawnID    string       `json:"spawnId,omitempty"`
-	TargetID   string       `json:"targetId,omitempty"`
-	TargetKind string       `json:"targetKind,omitempty"`
-}
-
-type OrchestrationGraphEdge struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Reason string `json:"reason,omitempty"`
-}
-
-type OrchestrationGraphSummary struct {
-	Total    int `json:"total"`
-	Running  int `json:"running"`
-	Waiting  int `json:"waiting"`
-	Done     int `json:"done"`
-	Failed   int `json:"failed"`
-	Canceled int `json:"canceled"`
+type SteeringItem struct {
+	ID                string          `json:"id"`
+	TaskID            string          `json:"taskId"`
+	WorkerID          string          `json:"workerId,omitempty"`
+	NodeID            string          `json:"nodeId,omitempty"`
+	WorkerKind        string          `json:"workerKind,omitempty"`
+	Role              string          `json:"role,omitempty"`
+	SpawnID           string          `json:"spawnId,omitempty"`
+	CandidateWorkerID string          `json:"candidateWorkerId,omitempty"`
+	ReviewPhase       string          `json:"reviewPhase,omitempty"`
+	TargetKind        string          `json:"targetKind,omitempty"`
+	TargetID          string          `json:"targetId,omitempty"`
+	Status            string          `json:"status,omitempty"`
+	Reason            string          `json:"reason,omitempty"`
+	Message           string          `json:"message"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+	AppliedAt         *time.Time      `json:"appliedAt,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
 type CreateTaskRequest struct {
@@ -447,7 +569,13 @@ type WatchPullRequestsRequest struct {
 }
 
 type SteeringRequest struct {
-	Message string `json:"message"`
+	Message    string `json:"message"`
+	TargetKind string `json:"targetKind,omitempty"`
+	TargetID   string `json:"targetId,omitempty"`
+}
+
+type AnswerQuestionRequest struct {
+	Answer string `json:"answer"`
 }
 
 type ApprovalDecision struct {
@@ -456,17 +584,23 @@ type ApprovalDecision struct {
 }
 
 type Snapshot struct {
-	Tasks               []Task               `json:"tasks"`
-	Workers             []Worker             `json:"workers"`
-	ExecutionNodes      []ExecutionNode      `json:"executionNodes"`
-	Targets             []TargetState        `json:"targets,omitempty"`
-	Plugins             []Plugin             `json:"plugins,omitempty"`
-	PromptSets          []PromptSet          `json:"promptSets,omitempty"`
-	Projects            []Project            `json:"projects,omitempty"`
-	PullRequests        []PullRequest        `json:"pullRequests,omitempty"`
-	OrchestrationGraphs []OrchestrationGraph `json:"orchestrationGraphs,omitempty"`
-	LastEventID         int64                `json:"lastEventId,omitempty"`
-	Events              []Event              `json:"events"`
+	Tasks               []Task                `json:"tasks"`
+	Workers             []Worker              `json:"workers"`
+	ExecutionNodes      []ExecutionNode       `json:"executionNodes"`
+	WorkItems           []WorkItem            `json:"workItems,omitempty"`
+	Artifacts           []Artifact            `json:"artifacts,omitempty"`
+	MemoryEntries       []MemoryEntry         `json:"memoryEntries,omitempty"`
+	Questions           []Question            `json:"questions,omitempty"`
+	Sessions            []Session             `json:"sessions,omitempty"`
+	Targets             []TargetState         `json:"targets,omitempty"`
+	Plugins             []Plugin              `json:"plugins,omitempty"`
+	PromptSets          []PromptSet           `json:"promptSets,omitempty"`
+	Projects            []Project             `json:"projects,omitempty"`
+	PullRequests        []PullRequest         `json:"pullRequests,omitempty"`
+	PullRequestFeedback []PullRequestFeedback `json:"pullRequestFeedback,omitempty"`
+	Steering            []SteeringItem        `json:"steering,omitempty"`
+	LastEventID         int64                 `json:"lastEventId,omitempty"`
+	Events              []Event               `json:"events"`
 }
 
 func MustJSON(v any) json.RawMessage {

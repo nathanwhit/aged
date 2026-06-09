@@ -496,42 +496,7 @@ func githubIssueExternalIDsWithMergedPullRequests(snapshot core.Snapshot) map[st
 }
 
 func (d *GitHubDriver) publishCompletedIssueTasks(ctx context.Context) error {
-	if !boolDefault(d.config.PullRequests.AutoPublish, true) {
-		return nil
-	}
-	snapshot, err := d.service.Snapshot(ctx)
-	if err != nil {
-		return err
-	}
-	publishedByTask := map[string]bool{}
-	for _, pr := range snapshot.PullRequests {
-		publishedByTask[pr.TaskID] = true
-	}
-	var errs []string
-	for _, task := range snapshot.Tasks {
-		if task.Status != core.TaskSucceeded || publishedByTask[task.ID] {
-			continue
-		}
-		if taskCompletionModeFromTask(task) != "github" {
-			continue
-		}
-		source, _ := taskExternalRef(task)
-		if source != "github-issue" {
-			continue
-		}
-		repo := taskMetadataString(task, "repo")
-		if !d.monitorsPullRequestRepo(repo) {
-			continue
-		}
-		_, err := d.service.PublishTaskPullRequest(ctx, task.ID, core.PublishPullRequestRequest{
-			Repo:  repo,
-			Draft: d.config.PullRequests.Draft,
-		})
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s publish pr: %v", task.ID, err))
-		}
-	}
-	return collectedStringErrors(errs)
+	return nil
 }
 
 func (d *GitHubDriver) monitorPullRequests(ctx context.Context) error {
@@ -592,11 +557,6 @@ func githubIssueTaskRequest(issue GitHubIssue, projectID string, githubCompletio
 		"labels":    labels,
 		"updatedAt": issue.UpdatedAt,
 	}
-	if githubCompletion {
-		metadata["completionMode"] = "github"
-	} else {
-		metadata["completionMode"] = "local"
-	}
 	return core.CreateTaskRequest{
 		ProjectID:  projectID,
 		Title:      title,
@@ -621,7 +581,7 @@ Labels: %s
 Issue body:
 %s
 
-Implement the requested change in the current repository. Do not open the pull request yourself; the orchestrator will publish the PR after the task succeeds. Report changed files, commands run, and any blockers.
+Implement the requested change in the current repository. Do not open the pull request yourself; report changed files, commands run, and any blockers so the scheduler can decide whether to publish an explicit PR artifact.
 `, issue.Repo, issue.Number, issue.URL, issue.Title, strings.Join(issue.Labels, ", "), body)
 }
 
@@ -631,13 +591,12 @@ func githubMentionTaskRequest(mention GitHubMention, projectID string) core.Crea
 		title = fmt.Sprintf("GitHub mention %s: %s", mention.Repo, strings.TrimSpace(mention.Title))
 	}
 	metadata := map[string]any{
-		"repo":           mention.Repo,
-		"number":         mention.Number,
-		"url":            mention.URL,
-		"reason":         mention.Reason,
-		"subjectType":    mention.SubjectType,
-		"updatedAt":      mention.UpdatedAt,
-		"completionMode": "local",
+		"repo":        mention.Repo,
+		"number":      mention.Number,
+		"url":         mention.URL,
+		"reason":      mention.Reason,
+		"subjectType": mention.SubjectType,
+		"updatedAt":   mention.UpdatedAt,
 	}
 	if mention.CommentURL != "" {
 		metadata["commentUrl"] = mention.CommentURL

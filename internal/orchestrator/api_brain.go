@@ -239,16 +239,8 @@ func planResponseFormat() map[string]any {
 			"schema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"reasoningEffort", "rationale", "workPlan", "steps", "requiredApprovals", "actions", "workers", "spawns"},
+				"required":             []string{"reasoningEffort", "rationale", "workPlan", "steps", "requiredApprovals", "actions", "workItems"},
 				"properties": map[string]any{
-					"workerKind": map[string]any{
-						"type":        "string",
-						"description": "Legacy fallback worker kind. Prefer workers[].workerKind for new plans.",
-					},
-					"workerPrompt": map[string]any{
-						"type":        "string",
-						"description": "Legacy fallback worker prompt. Prefer workers[].workerPrompt for new plans.",
-					},
 					"reasoningEffort": map[string]any{
 						"type": "string",
 						"enum": []string{"default", "low", "medium", "high", "xhigh", "max"},
@@ -288,7 +280,7 @@ func planResponseFormat() map[string]any {
 							"additionalProperties": false,
 							"required":             []string{"kind", "when", "reason", "workerId", "inputs"},
 							"properties": map[string]any{
-								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "create_tasks"}},
+								"kind":     map[string]any{"type": "string", "enum": []string{"publish_pull_request", "update_pull_request", "watch_pull_requests", "wait_external", "ask_user", "spawn_work", "create_tasks", "finish_objective"}},
 								"when":     map[string]any{"type": "string", "enum": []string{"immediate", "after_success"}},
 								"reason":   map[string]any{"type": "string"},
 								"workerId": map[string]any{"type": "string"},
@@ -303,41 +295,28 @@ func planResponseFormat() map[string]any {
 						"type":                 "object",
 						"additionalProperties": true,
 					},
-					"workers": map[string]any{
+					"workItems": map[string]any{
 						"type": "array",
 						"items": map[string]any{
 							"type":                 "object",
 							"additionalProperties": false,
-							"required":             []string{"id", "role", "reason", "workerKind", "workerPrompt", "reasoningEffort", "dependsOn"},
+							"required":             []string{"id", "kind", "reason", "prompt", "targetKind", "targetId", "workerKind", "reasoningEffort", "dependsOn", "metadata"},
 							"properties": map[string]any{
 								"id":              map[string]any{"type": "string"},
-								"role":            map[string]any{"type": "string"},
+								"kind":            map[string]any{"type": "string", "enum": []string{"objective.plan", "objective.implement", "objective.slice", "objective.compose", "objective.validate", "pr.followup", "pr.ci_repair", "pr.review_reply", "user.steering", "user.question_answered", "session.recover"}},
 								"reason":          map[string]any{"type": "string"},
+								"prompt":          map[string]any{"type": "string", "minLength": 1},
+								"targetKind":      map[string]any{"type": "string", "enum": []string{"objective", "pull_request", "session", "worker", ""}},
+								"targetId":        map[string]any{"type": "string"},
 								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
-								"workerPrompt":    map[string]any{"type": "string", "minLength": 1},
 								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
 								"dependsOn": map[string]any{
 									"type":  "array",
 									"items": map[string]any{"type": "string"},
 								},
-							},
-						},
-					},
-					"spawns": map[string]any{
-						"type": "array",
-						"items": map[string]any{
-							"type":                 "object",
-							"additionalProperties": false,
-							"required":             []string{"role", "reason"},
-							"properties": map[string]any{
-								"id":              map[string]any{"type": "string"},
-								"role":            map[string]any{"type": "string"},
-								"reason":          map[string]any{"type": "string"},
-								"workerKind":      map[string]any{"type": "string", "description": "Configured worker kind, including enabled aged-runner-v1 plugin kinds."},
-								"reasoningEffort": map[string]any{"type": "string", "enum": []string{"default", "low", "medium", "high", "xhigh", "max"}},
-								"dependsOn": map[string]any{
-									"type":  "array",
-									"items": map[string]any{"type": "string"},
+								"metadata": map[string]any{
+									"type":                 "object",
+									"additionalProperties": true,
 								},
 							},
 						},

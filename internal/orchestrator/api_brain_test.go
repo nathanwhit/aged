@@ -25,15 +25,22 @@ func TestAPIBrainPlansFromStructuredResponse(t *testing.T) {
 			t.Fatalf("response_format.type = %v", req.ResponseFormat["type"])
 		}
 		writeChatResponse(t, w, Plan{
-			WorkerKind: "claude",
-			Prompt:     "Review the design and report blockers.",
-			Rationale:  "This is a review task.",
+			Rationale: "This is a review task.",
 			Steps: []PlanStep{{
 				Title:       "Review",
 				Description: "Inspect the request.",
 			}},
 			RequiredApprovals: []ApprovalRequest{},
-			Spawns:            []SpawnRequest{},
+			WorkItems: []WorkItemRequest{{
+				ID:              "review",
+				Kind:            "objective.validate",
+				Reason:          "Review the design.",
+				Prompt:          "Review the design and report blockers.",
+				TargetKind:      "objective",
+				TargetID:        "task-1",
+				WorkerKind:      "claude",
+				ReasoningEffort: "medium",
+			}},
 		})
 	}))
 	defer server.Close()
@@ -47,8 +54,8 @@ func TestAPIBrainPlansFromStructuredResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "claude" {
-		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "claude" {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
 	if plan.Metadata["brain"] != "api" {
 		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])
@@ -70,8 +77,8 @@ func TestAPIBrainFallsBackOnInvalidPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "mock" {
-		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "mock" {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
 	if plan.Metadata["brain"] != "api-fallback" {
 		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])

@@ -177,7 +177,6 @@ CREATE TABLE IF NOT EXISTS task_read_models (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	metadata TEXT NOT NULL DEFAULT '',
-	final_candidate_worker_id TEXT NOT NULL DEFAULT '',
 	applied_worker_id TEXT NOT NULL DEFAULT '',
 	milestones TEXT NOT NULL DEFAULT '[]',
 	work_plan TEXT NOT NULL DEFAULT '',
@@ -224,10 +223,122 @@ CREATE TABLE IF NOT EXISTS execution_node_read_models (
 	metadata TEXT NOT NULL DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS execution_node_read_models_task_idx ON execution_node_read_models(task_id);
-CREATE INDEX IF NOT EXISTS execution_node_read_models_worker_idx ON execution_node_read_models(worker_id);
+	CREATE INDEX IF NOT EXISTS execution_node_read_models_task_idx ON execution_node_read_models(task_id);
+	CREATE INDEX IF NOT EXISTS execution_node_read_models_worker_idx ON execution_node_read_models(worker_id);
 
-CREATE TABLE IF NOT EXISTS pull_request_read_models (
+	CREATE TABLE IF NOT EXISTS work_item_read_models (
+		id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT '',
+		target_kind TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		prompt TEXT NOT NULL DEFAULT '',
+		worker_id TEXT NOT NULL DEFAULT '',
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_until TEXT NOT NULL DEFAULT '',
+		attempt INTEGER NOT NULL DEFAULT 0,
+		error TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS work_item_read_models_task_idx ON work_item_read_models(task_id);
+	CREATE INDEX IF NOT EXISTS work_item_read_models_target_idx ON work_item_read_models(target_kind, target_id, status);
+	CREATE INDEX IF NOT EXISTS work_item_read_models_lease_idx ON work_item_read_models(status, lease_owner, lease_until);
+
+	CREATE TABLE IF NOT EXISTS artifact_read_models (
+		id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		kind TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		ref TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS artifact_read_models_task_idx ON artifact_read_models(task_id, updated_at);
+	CREATE INDEX IF NOT EXISTS artifact_read_models_kind_idx ON artifact_read_models(kind, updated_at);
+
+	CREATE TABLE IF NOT EXISTS memory_entry_read_models (
+		id TEXT PRIMARY KEY,
+		project_id TEXT NOT NULL DEFAULT '',
+		task_id TEXT NOT NULL DEFAULT '',
+		kind TEXT NOT NULL DEFAULT '',
+		source_event_id INTEGER NOT NULL DEFAULT 0,
+		source_event TEXT NOT NULL DEFAULT '',
+		worker_id TEXT NOT NULL DEFAULT '',
+		summary TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS memory_entry_read_models_task_idx ON memory_entry_read_models(task_id, updated_at);
+	CREATE INDEX IF NOT EXISTS memory_entry_read_models_project_idx ON memory_entry_read_models(project_id, updated_at);
+	CREATE INDEX IF NOT EXISTS memory_entry_read_models_source_idx ON memory_entry_read_models(source_event_id);
+
+	CREATE TABLE IF NOT EXISTS question_read_models (
+		id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		worker_id TEXT NOT NULL DEFAULT '',
+		reason TEXT NOT NULL DEFAULT '',
+		question TEXT NOT NULL DEFAULT '',
+		answer TEXT NOT NULL DEFAULT '',
+		decided INTEGER NOT NULL DEFAULT 0,
+		approved TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS question_read_models_task_idx ON question_read_models(task_id);
+	CREATE INDEX IF NOT EXISTS question_read_models_decided_idx ON question_read_models(decided, updated_at);
+
+	CREATE TABLE IF NOT EXISTS session_read_models (
+		id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		worker_id TEXT NOT NULL DEFAULT '',
+		node_id TEXT NOT NULL DEFAULT '',
+		worker_kind TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL DEFAULT '',
+		spawn_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL DEFAULT '',
+		target_kind TEXT NOT NULL DEFAULT '',
+		remote_session TEXT NOT NULL DEFAULT '',
+		remote_run_dir TEXT NOT NULL DEFAULT '',
+		remote_work_dir TEXT NOT NULL DEFAULT '',
+		workspace_root TEXT NOT NULL DEFAULT '',
+		workspace_cwd TEXT NOT NULL DEFAULT '',
+		source_root TEXT NOT NULL DEFAULT '',
+		workspace_name TEXT NOT NULL DEFAULT '',
+		workspace_mode TEXT NOT NULL DEFAULT '',
+		vcs_type TEXT NOT NULL DEFAULT '',
+		shared_root TEXT NOT NULL DEFAULT '',
+		shared_artifacts_dir TEXT NOT NULL DEFAULT '',
+		shared_worker_dir TEXT NOT NULL DEFAULT '',
+		provider_session_id TEXT NOT NULL DEFAULT '',
+		current_action_label TEXT NOT NULL DEFAULT '',
+		current_action TEXT NOT NULL DEFAULT '',
+		current_action_at TEXT NOT NULL DEFAULT '',
+		current_action_event INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL,
+		started_at TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL,
+		completed_at TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS session_read_models_task_idx ON session_read_models(task_id);
+	CREATE INDEX IF NOT EXISTS session_read_models_worker_idx ON session_read_models(worker_id);
+	CREATE INDEX IF NOT EXISTS session_read_models_status_idx ON session_read_models(status, updated_at);
+
+	CREATE TABLE IF NOT EXISTS pull_request_read_models (
 	id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL,
 	repo TEXT NOT NULL DEFAULT '',
@@ -244,12 +355,71 @@ CREATE TABLE IF NOT EXISTS pull_request_read_models (
 	mergeable TEXT NOT NULL DEFAULT '',
 	review_status TEXT NOT NULL DEFAULT '',
 	babysitter_task_id TEXT NOT NULL DEFAULT '',
+	branch_owner TEXT NOT NULL DEFAULT '',
+	branch_owner_dir TEXT NOT NULL DEFAULT '',
+	branch_head TEXT NOT NULL DEFAULT '',
+	update_lease_owner TEXT NOT NULL DEFAULT '',
+	update_lease_dir TEXT NOT NULL DEFAULT '',
+	update_base_head TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	metadata TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS pull_request_read_models_task_idx ON pull_request_read_models(task_id);
+
+CREATE TABLE IF NOT EXISTS pull_request_feedback_read_models (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	pull_request_id TEXT NOT NULL,
+	event_id INTEGER NOT NULL DEFAULT 0,
+	attempt INTEGER NOT NULL DEFAULT 0,
+	status TEXT NOT NULL DEFAULT '',
+	reason TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	number INTEGER NOT NULL DEFAULT 0,
+	url TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL DEFAULT '',
+	base TEXT NOT NULL DEFAULT '',
+	state TEXT NOT NULL DEFAULT '',
+	checks_status TEXT NOT NULL DEFAULT '',
+	merge_status TEXT NOT NULL DEFAULT '',
+	review_status TEXT NOT NULL DEFAULT '',
+	feedback_signature TEXT NOT NULL DEFAULT '',
+	feedback_body TEXT NOT NULL DEFAULT '',
+	prompt TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	handled_at TEXT NOT NULL DEFAULT '',
+	metadata TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS pull_request_feedback_read_models_task_idx ON pull_request_feedback_read_models(task_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS pull_request_feedback_read_models_pr_idx ON pull_request_feedback_read_models(pull_request_id, status);
+
+CREATE TABLE IF NOT EXISTS steering_read_models (
+	id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	worker_id TEXT NOT NULL DEFAULT '',
+	node_id TEXT NOT NULL DEFAULT '',
+	worker_kind TEXT NOT NULL DEFAULT '',
+	role TEXT NOT NULL DEFAULT '',
+	spawn_id TEXT NOT NULL DEFAULT '',
+	candidate_worker_id TEXT NOT NULL DEFAULT '',
+	review_phase TEXT NOT NULL DEFAULT '',
+	target_kind TEXT NOT NULL DEFAULT '',
+	target_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT '',
+	reason TEXT NOT NULL DEFAULT '',
+	message TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	applied_at TEXT NOT NULL DEFAULT '',
+	metadata TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS steering_read_models_task_idx ON steering_read_models(task_id, status, updated_at);
+CREATE INDEX IF NOT EXISTS steering_read_models_target_idx ON steering_read_models(target_kind, target_id, status);
 
 CREATE TABLE IF NOT EXISTS pull_request_aliases (
 	alias TEXT PRIMARY KEY,
@@ -275,101 +445,13 @@ CREATE TABLE IF NOT EXISTS worker_workspace_metadata (
 	data TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS task_card_meta (
-	id INTEGER PRIMARY KEY CHECK (id = 1),
-	last_event_id INTEGER NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS task_cards (
-	id TEXT PRIMARY KEY,
-	project_id TEXT NOT NULL DEFAULT '',
-	workstream_id TEXT NOT NULL DEFAULT '',
-	title TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL DEFAULT '',
-	error TEXT NOT NULL DEFAULT '',
-	objective_status TEXT NOT NULL DEFAULT '',
-	objective_phase TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	metadata TEXT NOT NULL DEFAULT '',
-	final_candidate_worker_id TEXT NOT NULL DEFAULT '',
-	applied_worker_id TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS task_cards_status_idx ON task_cards(status, updated_at);
-
-CREATE TABLE IF NOT EXISTS task_card_workers (
-	id TEXT PRIMARY KEY,
-	task_id TEXT NOT NULL,
-	kind TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL DEFAULT '',
-	command TEXT NOT NULL DEFAULT '[]',
-	prompt_path TEXT NOT NULL DEFAULT '',
-	prompt_error TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS task_card_workers_task_idx ON task_card_workers(task_id);
-
-CREATE TABLE IF NOT EXISTS task_card_execution_nodes (
-	id TEXT PRIMARY KEY,
-	task_id TEXT NOT NULL,
-	worker_id TEXT NOT NULL DEFAULT '',
-	worker_kind TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL DEFAULT '',
-	plan_id TEXT NOT NULL DEFAULT '',
-	parent_node_id TEXT NOT NULL DEFAULT '',
-	spawn_id TEXT NOT NULL DEFAULT '',
-	role TEXT NOT NULL DEFAULT '',
-	reason TEXT NOT NULL DEFAULT '',
-	target_id TEXT NOT NULL DEFAULT '',
-	target_kind TEXT NOT NULL DEFAULT '',
-	remote_session TEXT NOT NULL DEFAULT '',
-	remote_run_dir TEXT NOT NULL DEFAULT '',
-	remote_work_dir TEXT NOT NULL DEFAULT '',
-	depends_on TEXT NOT NULL DEFAULT '[]',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS task_card_execution_nodes_task_idx ON task_card_execution_nodes(task_id);
-CREATE INDEX IF NOT EXISTS task_card_execution_nodes_worker_idx ON task_card_execution_nodes(worker_id);
-
-CREATE TABLE IF NOT EXISTS task_card_pull_requests (
-	id TEXT PRIMARY KEY,
-	task_id TEXT NOT NULL,
-	repo TEXT NOT NULL DEFAULT '',
-	number INTEGER NOT NULL DEFAULT 0,
-	url TEXT NOT NULL DEFAULT '',
-	branch TEXT NOT NULL DEFAULT '',
-	base TEXT NOT NULL DEFAULT '',
-	title TEXT NOT NULL DEFAULT '',
-	state TEXT NOT NULL DEFAULT '',
-	draft INTEGER NOT NULL DEFAULT 0,
-	checks_status TEXT NOT NULL DEFAULT '',
-	checks_conclusion TEXT NOT NULL DEFAULT '',
-	merge_status TEXT NOT NULL DEFAULT '',
-	mergeable TEXT NOT NULL DEFAULT '',
-	review_status TEXT NOT NULL DEFAULT '',
-	babysitter_task_id TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS task_card_pull_requests_task_idx ON task_card_pull_requests(task_id);
-
-CREATE TABLE IF NOT EXISTS task_card_worker_nodes (
-	worker_id TEXT PRIMARY KEY,
-	node_id TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS worker_output_watermarks (
 	worker_id TEXT PRIMARY KEY,
 	task_id TEXT NOT NULL DEFAULT '',
 	event_id INTEGER NOT NULL,
-	at TEXT NOT NULL
+	at TEXT NOT NULL,
+	label TEXT NOT NULL DEFAULT '',
+	current_action TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -463,6 +545,60 @@ CREATE TABLE IF NOT EXISTS targets (
 	}
 	if err := s.ensureColumn(ctx, "targets", "checkout_root", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"lease_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"lease_until", "TEXT NOT NULL DEFAULT ''"},
+		{"attempt", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.ensureColumn(ctx, "work_item_read_models", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"shared_root", "TEXT NOT NULL DEFAULT ''"},
+		{"shared_artifacts_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"shared_worker_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_label", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_at", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_event", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.ensureColumn(ctx, "session_read_models", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"branch_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"branch_owner_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"branch_head", "TEXT NOT NULL DEFAULT ''"},
+		{"update_lease_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"update_lease_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"update_base_head", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "pull_request_read_models", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"label", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "worker_output_watermarks", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1100,7 +1236,19 @@ func (s *SQLiteStore) PullRequestMonitorSnapshot(ctx context.Context) (core.Snap
 	if err := loadActiveProjectionExecutionNodes(ctx, s.db, state.Nodes); err != nil {
 		return core.Snapshot{}, err
 	}
+	if err := loadActiveProjectionWorkItems(ctx, s.db, state.WorkItems); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadActiveProjectionSessions(ctx, s.db, state.Sessions); err != nil {
+		return core.Snapshot{}, err
+	}
 	if err := loadProjectionPullRequests(ctx, s.db, state.PullRequests); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionPullRequestFeedback(ctx, s.db, state.PullRequestFeedback); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadPendingProjectionSteering(ctx, s.db, state.Steering); err != nil {
 		return core.Snapshot{}, err
 	}
 	if err := loadClearedTasks(ctx, s.db, `cleared_tasks`, state.ClearedTasks); err != nil {
@@ -1122,12 +1270,16 @@ func (s *SQLiteStore) PullRequestMonitorSnapshot(ctx context.Context) (core.Snap
 		taskIDs[id] = true
 	}
 	return core.Snapshot{
-		Tasks:          orderedTasks(tasks),
-		Workers:        orderedWorkers(filterTasks(state.Workers, state.ClearedTasks, taskIDs, func(worker core.Worker) string { return worker.TaskID })),
-		ExecutionNodes: orderedExecutionNodes(filterTasks(state.Nodes, state.ClearedTasks, taskIDs, func(node core.ExecutionNode) string { return node.TaskID })),
-		PullRequests:   orderedPullRequests(filterClearedPullRequests(state.PullRequests, state.ClearedTasks)),
-		LastEventID:    lastEventID,
-		Events:         events,
+		Tasks:               orderedTasks(tasks),
+		Workers:             orderedWorkers(filterTasks(state.Workers, state.ClearedTasks, taskIDs, func(worker core.Worker) string { return worker.TaskID })),
+		ExecutionNodes:      orderedExecutionNodes(filterTasks(state.Nodes, state.ClearedTasks, taskIDs, func(node core.ExecutionNode) string { return node.TaskID })),
+		WorkItems:           orderedWorkItems(filterTasks(state.WorkItems, state.ClearedTasks, taskIDs, func(item core.WorkItem) string { return item.TaskID })),
+		Sessions:            orderedSessions(filterTasks(state.Sessions, state.ClearedTasks, taskIDs, func(session core.Session) string { return session.TaskID })),
+		PullRequests:        orderedPullRequests(filterClearedPullRequests(state.PullRequests, state.ClearedTasks)),
+		PullRequestFeedback: orderedPullRequestFeedback(filterTasks(state.PullRequestFeedback, state.ClearedTasks, taskIDs, func(feedback core.PullRequestFeedback) string { return feedback.TaskID })),
+		Steering:            orderedSteering(filterTasks(state.Steering, state.ClearedTasks, taskIDs, func(item core.SteeringItem) string { return item.TaskID })),
+		LastEventID:         lastEventID,
+		Events:              events,
 	}, nil
 }
 
@@ -1148,6 +1300,9 @@ func (s *SQLiteStore) pullRequestMonitorEvents(ctx context.Context, taskIDs map[
 		core.EventTaskAction,
 		core.EventPRStatusChecked,
 		core.EventPRFollowUp,
+		core.EventWorkItemQueued,
+		core.EventWorkItemStarted,
+		core.EventWorkItemCompleted,
 	}
 	args := make([]any, 0, len(ids)+len(eventTypes))
 	taskPlaceholders := make([]string, 0, len(ids))
@@ -1256,467 +1411,6 @@ ORDER BY 1`, taskID, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCancele
 	return workerIDs, nil
 }
 
-func (s *SQLiteStore) snapshotFromEvents(ctx context.Context, events []core.Event, includeEvents bool) (core.Snapshot, error) {
-	lastEventID, err := s.latestEventID(ctx)
-	if err != nil {
-		return core.Snapshot{}, err
-	}
-	if lastEventID == 0 {
-		lastEventID = maxEventID(events)
-	}
-
-	tasks := map[string]core.Task{}
-	workers := map[string]core.Worker{}
-	nodes := map[string]core.ExecutionNode{}
-	pullRequests := map[string]core.PullRequest{}
-	pullRequestAliases := map[string]string{}
-	pullRequestIdentities := map[string]string{}
-	clearedTasks := map[string]bool{}
-	workerNodes := map[string]string{}
-	workspaceMetadata := map[string]json.RawMessage{}
-
-	for _, event := range events {
-		switch event.Type {
-		case core.EventTaskCreated:
-			var payload struct {
-				ProjectID string          `json:"projectId,omitempty"`
-				Title     string          `json:"title"`
-				Prompt    string          `json:"prompt"`
-				Metadata  json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.created: %w", err)
-			}
-			projectID := payload.ProjectID
-			if projectID == "" {
-				projectID = projectIDFromMetadata(payload.Metadata)
-			}
-			tasks[event.TaskID] = core.Task{
-				ID:              event.TaskID,
-				ProjectID:       projectID,
-				WorkstreamID:    workstreamIDFromMetadata(payload.Metadata),
-				Title:           payload.Title,
-				Prompt:          payload.Prompt,
-				Status:          core.TaskQueued,
-				ObjectiveStatus: core.ObjectiveActive,
-				ObjectivePhase:  "queued",
-				CreatedAt:       event.At,
-				UpdatedAt:       event.At,
-				Metadata:        payload.Metadata,
-			}
-		case core.EventTaskUpdated:
-			var payload struct {
-				Title         string          `json:"title,omitempty"`
-				Prompt        string          `json:"prompt,omitempty"`
-				MetadataPatch json.RawMessage `json:"metadataPatch,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.updated: %w", err)
-			}
-			task, ok := tasks[event.TaskID]
-			if !ok {
-				continue
-			}
-			if payload.Title != "" {
-				task.Title = payload.Title
-			}
-			if payload.Prompt != "" {
-				task.Prompt = payload.Prompt
-			}
-			task.Metadata = mergeMetadataPatch(task.Metadata, payload.MetadataPatch)
-			task.WorkstreamID = workstreamIDFromMetadata(task.Metadata)
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskStatus:
-			var payload struct {
-				Status core.TaskStatus `json:"status"`
-				Error  string          `json:"error,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.status: %w", err)
-			}
-			task := tasks[event.TaskID]
-			task.Status = payload.Status
-			task.Error = payload.Error
-			switch payload.Status {
-			case core.TaskSucceeded, core.TaskFailed, core.TaskCanceled:
-				nextObjective := objectiveStatusForTaskStatus(payload.Status)
-				if task.ObjectiveStatus == "" || task.ObjectiveStatus == core.ObjectiveActive || task.ObjectiveStatus != nextObjective {
-					task.ObjectiveStatus = nextObjective
-					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
-				}
-			case core.TaskWaiting:
-				if task.ObjectiveStatus == "" || task.ObjectiveStatus == core.ObjectiveActive {
-					task.ObjectiveStatus = core.ObjectiveWaitingUser
-					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
-				}
-			default:
-				if task.ObjectiveStatus == "" {
-					task.ObjectiveStatus = objectiveStatusForTaskStatus(payload.Status)
-					task.ObjectivePhase = objectivePhaseForTaskStatus(payload.Status)
-				}
-			}
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskCandidate:
-			var payload struct {
-				WorkerID string `json:"workerId"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.final_candidate_selected: %w", err)
-			}
-			task := tasks[event.TaskID]
-			task.FinalCandidateWorkerID = payload.WorkerID
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskObjective:
-			var payload struct {
-				Status core.ObjectiveStatus `json:"status"`
-				Phase  string               `json:"phase,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.objective_updated: %w", err)
-			}
-			task := tasks[event.TaskID]
-			if payload.Status != "" {
-				task.ObjectiveStatus = payload.Status
-			}
-			if payload.Phase != "" {
-				task.ObjectivePhase = payload.Phase
-			}
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskMilestone:
-			var payload struct {
-				Name     string          `json:"name"`
-				Phase    string          `json:"phase,omitempty"`
-				Summary  string          `json:"summary,omitempty"`
-				Metadata json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.milestone_reached: %w", err)
-			}
-			task := tasks[event.TaskID]
-			task.Milestones = append(task.Milestones, core.TaskMilestone{
-				Name:     payload.Name,
-				Phase:    payload.Phase,
-				Summary:  payload.Summary,
-				At:       event.At,
-				Metadata: payload.Metadata,
-			})
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskWorkPlan:
-			var payload core.WorkPlan
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.work_plan_updated: %w", err)
-			}
-			task := tasks[event.TaskID]
-			task.WorkPlan = &payload
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskArtifact:
-			var payload struct {
-				ID       string          `json:"id"`
-				Kind     string          `json:"kind"`
-				Name     string          `json:"name,omitempty"`
-				URL      string          `json:"url,omitempty"`
-				Ref      string          `json:"ref,omitempty"`
-				Metadata json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode task.artifact_recorded: %w", err)
-			}
-			task := tasks[event.TaskID]
-			task.Artifacts = upsertTaskArtifact(task.Artifacts, core.TaskArtifact{
-				ID:        payload.ID,
-				Kind:      payload.Kind,
-				Name:      payload.Name,
-				URL:       payload.URL,
-				Ref:       payload.Ref,
-				CreatedAt: event.At,
-				UpdatedAt: event.At,
-				Metadata:  payload.Metadata,
-			})
-			task.UpdatedAt = event.At
-			tasks[event.TaskID] = task
-		case core.EventTaskCleared:
-			clearedTasks[event.TaskID] = true
-		case core.EventExecutionPlanned:
-			var payload struct {
-				NodeID        string          `json:"nodeId"`
-				WorkerID      string          `json:"workerId,omitempty"`
-				WorkerKind    string          `json:"workerKind"`
-				PlanID        string          `json:"planId,omitempty"`
-				ParentNodeID  string          `json:"parentNodeId,omitempty"`
-				SpawnID       string          `json:"spawnId,omitempty"`
-				Role          string          `json:"role,omitempty"`
-				Reason        string          `json:"reason,omitempty"`
-				TargetID      string          `json:"targetId,omitempty"`
-				TargetKind    string          `json:"targetKind,omitempty"`
-				RemoteSession string          `json:"remoteSession,omitempty"`
-				RemoteRunDir  string          `json:"remoteRunDir,omitempty"`
-				RemoteWorkDir string          `json:"remoteWorkDir,omitempty"`
-				DependsOn     []string        `json:"dependsOn,omitempty"`
-				Metadata      json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode execution.node_planned: %w", err)
-			}
-			node := core.ExecutionNode{
-				ID:            payload.NodeID,
-				TaskID:        event.TaskID,
-				WorkerID:      payload.WorkerID,
-				WorkerKind:    payload.WorkerKind,
-				Status:        core.WorkerQueued,
-				PlanID:        payload.PlanID,
-				ParentNodeID:  payload.ParentNodeID,
-				SpawnID:       payload.SpawnID,
-				Role:          payload.Role,
-				Reason:        payload.Reason,
-				TargetID:      payload.TargetID,
-				TargetKind:    payload.TargetKind,
-				RemoteSession: payload.RemoteSession,
-				RemoteRunDir:  payload.RemoteRunDir,
-				RemoteWorkDir: payload.RemoteWorkDir,
-				DependsOn:     payload.DependsOn,
-				CreatedAt:     event.At,
-				UpdatedAt:     event.At,
-				Metadata:      payload.Metadata,
-			}
-			nodes[payload.NodeID] = node
-			if payload.WorkerID != "" {
-				workerNodes[payload.WorkerID] = payload.NodeID
-			}
-		case core.EventExecutionStatus:
-			var payload struct {
-				NodeID string            `json:"nodeId"`
-				Status core.WorkerStatus `json:"status"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode execution.node_status: %w", err)
-			}
-			node := nodes[payload.NodeID]
-			if node.ID != "" {
-				node.Status = payload.Status
-				node.UpdatedAt = event.At
-				nodes[payload.NodeID] = node
-			}
-		case core.EventWorkerCreated:
-			var payload struct {
-				Kind        string          `json:"kind"`
-				Command     []string        `json:"command,omitempty"`
-				Prompt      string          `json:"prompt,omitempty"`
-				PromptPath  string          `json:"promptPath,omitempty"`
-				PromptError string          `json:"promptError,omitempty"`
-				Metadata    json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode worker.created: %w", err)
-			}
-			metadata := mergeMetadata(payload.Metadata, workspaceMetadata[event.WorkerID])
-			workers[event.WorkerID] = core.Worker{
-				ID:          event.WorkerID,
-				TaskID:      event.TaskID,
-				Kind:        payload.Kind,
-				Status:      core.WorkerQueued,
-				Command:     payload.Command,
-				Prompt:      payload.Prompt,
-				PromptPath:  payload.PromptPath,
-				PromptError: payload.PromptError,
-				CreatedAt:   event.At,
-				UpdatedAt:   event.At,
-				Metadata:    metadata,
-			}
-			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
-				node := nodes[nodeID]
-				node.WorkerKind = payload.Kind
-				node.UpdatedAt = event.At
-				nodes[nodeID] = node
-			}
-		case core.EventWorkerWorkspace:
-			workspaceMetadata[event.WorkerID] = event.Payload
-			worker := workers[event.WorkerID]
-			if worker.ID != "" {
-				worker.Metadata = mergeMetadata(worker.Metadata, event.Payload)
-				worker.UpdatedAt = event.At
-				workers[event.WorkerID] = worker
-			}
-		case core.EventWorkerStarted:
-			worker := workers[event.WorkerID]
-			worker.Status = core.WorkerRunning
-			worker.UpdatedAt = event.At
-			workers[event.WorkerID] = worker
-			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
-				node := nodes[nodeID]
-				node.Status = core.WorkerRunning
-				node.UpdatedAt = event.At
-				nodes[nodeID] = node
-			}
-		case core.EventWorkerOutput:
-			worker := workers[event.WorkerID]
-			if worker.ID != "" && !isTerminalWorkerStatus(worker.Status) {
-				worker.UpdatedAt = event.At
-				workers[event.WorkerID] = worker
-			}
-			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
-				node := nodes[nodeID]
-				if node.ID != "" && !isTerminalWorkerStatus(node.Status) {
-					node.UpdatedAt = event.At
-					nodes[nodeID] = node
-				}
-			}
-		case core.EventWorkerCompleted:
-			var payload struct {
-				Status core.WorkerStatus `json:"status"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode worker.completed: %w", err)
-			}
-			worker := workers[event.WorkerID]
-			worker.Status = payload.Status
-			worker.UpdatedAt = event.At
-			workers[event.WorkerID] = worker
-			if nodeID := workerNodes[event.WorkerID]; nodeID != "" {
-				node := nodes[nodeID]
-				node.Status = payload.Status
-				node.UpdatedAt = event.At
-				nodes[nodeID] = node
-			}
-		case core.EventWorkerApplied:
-			task := tasks[event.TaskID]
-			if task.ID != "" {
-				task.AppliedWorkerID = event.WorkerID
-				task.UpdatedAt = event.At
-				tasks[event.TaskID] = task
-			}
-		case core.EventPRPublished, core.EventPRUpdated:
-			var payload struct {
-				ID               string          `json:"id"`
-				Repo             string          `json:"repo"`
-				Number           int             `json:"number,omitempty"`
-				URL              string          `json:"url"`
-				Branch           string          `json:"branch"`
-				Base             string          `json:"base"`
-				Title            string          `json:"title"`
-				State            string          `json:"state,omitempty"`
-				Draft            bool            `json:"draft,omitempty"`
-				ChecksStatus     string          `json:"checksStatus,omitempty"`
-				ChecksConclusion string          `json:"checksConclusion,omitempty"`
-				MergeStatus      string          `json:"mergeStatus,omitempty"`
-				Mergeable        string          `json:"mergeable,omitempty"`
-				ReviewStatus     string          `json:"reviewStatus,omitempty"`
-				Metadata         json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode %s: %w", event.Type, err)
-			}
-			id := payload.ID
-			if id == "" {
-				id = fmt.Sprintf("%s#%d", payload.Repo, payload.Number)
-			}
-			next := core.PullRequest{
-				ID:               id,
-				TaskID:           event.TaskID,
-				Repo:             payload.Repo,
-				Number:           payload.Number,
-				URL:              payload.URL,
-				Branch:           payload.Branch,
-				Base:             payload.Base,
-				Title:            payload.Title,
-				State:            payload.State,
-				Draft:            payload.Draft,
-				ChecksStatus:     payload.ChecksStatus,
-				ChecksConclusion: payload.ChecksConclusion,
-				MergeStatus:      payload.MergeStatus,
-				Mergeable:        payload.Mergeable,
-				ReviewStatus:     payload.ReviewStatus,
-				CreatedAt:        event.At,
-				UpdatedAt:        event.At,
-				Metadata:         payload.Metadata,
-			}
-			id = resolvePullRequestSnapshotID(id, next, pullRequests, pullRequestAliases, pullRequestIdentities)
-			next.ID = id
-			if previous := pullRequests[id]; previous.ID != "" {
-				next = mergePublishedPullRequest(previous, next)
-			}
-			pullRequests[id] = next
-		case core.EventPRStatusChecked:
-			var payload struct {
-				ID               string          `json:"id"`
-				State            string          `json:"state,omitempty"`
-				Draft            bool            `json:"draft,omitempty"`
-				ChecksStatus     string          `json:"checksStatus,omitempty"`
-				ChecksConclusion string          `json:"checksConclusion,omitempty"`
-				MergeStatus      string          `json:"mergeStatus,omitempty"`
-				Mergeable        string          `json:"mergeable,omitempty"`
-				ReviewStatus     string          `json:"reviewStatus,omitempty"`
-				Metadata         json.RawMessage `json:"metadata,omitempty"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode pull_request.status_checked: %w", err)
-			}
-			id := payload.ID
-			if alias := pullRequestAliases[id]; alias != "" {
-				id = alias
-			}
-			pr := pullRequests[id]
-			if pr.ID != "" {
-				if payload.State != "" {
-					pr.State = payload.State
-				}
-				pr.Draft = payload.Draft
-				if payload.ChecksStatus != "" {
-					pr.ChecksStatus = payload.ChecksStatus
-				}
-				if payload.ChecksConclusion != "" {
-					pr.ChecksConclusion = payload.ChecksConclusion
-				}
-				if payload.MergeStatus != "" {
-					pr.MergeStatus = payload.MergeStatus
-				}
-				if payload.Mergeable != "" {
-					pr.Mergeable = payload.Mergeable
-				}
-				if payload.ReviewStatus != "" {
-					pr.ReviewStatus = payload.ReviewStatus
-				}
-				pr.UpdatedAt = event.At
-				if len(payload.Metadata) > 0 {
-					pr.Metadata = mergePullRequestMetadata(pr.Metadata, payload.Metadata)
-				}
-				pullRequests[id] = pr
-			}
-		case core.EventPRBabysitter:
-			var payload struct {
-				ID               string `json:"id"`
-				BabysitterTaskID string `json:"babysitterTaskId"`
-			}
-			if err := json.Unmarshal(event.Payload, &payload); err != nil {
-				return core.Snapshot{}, fmt.Errorf("decode pull_request.babysitter_started: %w", err)
-			}
-			pr := pullRequests[payload.ID]
-			if pr.ID != "" {
-				pr.BabysitterTaskID = payload.BabysitterTaskID
-				pr.UpdatedAt = event.At
-				pullRequests[payload.ID] = pr
-			}
-		}
-	}
-
-	filteredTasks := filterClearedTasks(tasks, clearedTasks)
-	filteredNodes := filterClearedExecutionNodes(nodes, clearedTasks)
-	return core.Snapshot{
-		Tasks:               orderedTasks(filteredTasks),
-		Workers:             orderedWorkers(filterClearedWorkers(workers, clearedTasks)),
-		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
-		PullRequests:        orderedPullRequests(filterClearedPullRequests(pullRequests, clearedTasks)),
-		OrchestrationGraphs: orchestrationGraphs(filteredTasks, filteredNodes),
-		LastEventID:         lastEventID,
-		Events:              snapshotResponseEvents(events, includeEvents),
-	}, nil
-}
-
 func filterClearedTasks(values map[string]core.Task, cleared map[string]bool) map[string]core.Task {
 	out := map[string]core.Task{}
 	for id, task := range values {
@@ -1789,6 +1483,16 @@ func upsertTaskArtifact(items []core.TaskArtifact, next core.TaskArtifact) []cor
 		return items
 	}
 	return append(items, next)
+}
+
+func taskArtifactSnapshotID(id string, eventID int64) string {
+	if id != "" {
+		return id
+	}
+	if eventID > 0 {
+		return fmt.Sprintf("event-%d", eventID)
+	}
+	return ""
 }
 
 func resolvePullRequestSnapshotID(id string, next core.PullRequest, pullRequests map[string]core.PullRequest, aliases map[string]string, identities map[string]string) string {
@@ -1899,8 +1603,53 @@ func mergePublishedPullRequest(previous core.PullRequest, next core.PullRequest)
 	if next.ReviewStatus == "" {
 		next.ReviewStatus = previous.ReviewStatus
 	}
+	if next.BranchOwner == "" {
+		next.BranchOwner = previous.BranchOwner
+	}
+	if next.BranchOwnerDir == "" {
+		next.BranchOwnerDir = previous.BranchOwnerDir
+	}
+	if next.BranchHead == "" {
+		next.BranchHead = previous.BranchHead
+	}
+	if next.UpdateLeaseOwner == "" {
+		next.UpdateLeaseOwner = previous.UpdateLeaseOwner
+	}
+	if next.UpdateLeaseDir == "" {
+		next.UpdateLeaseDir = previous.UpdateLeaseDir
+	}
+	if next.UpdateBaseHead == "" {
+		next.UpdateBaseHead = previous.UpdateBaseHead
+	}
 	next.Metadata = mergePullRequestMetadata(previous.Metadata, next.Metadata)
+	next = hydratePullRequestLeaseFields(next)
 	return next
+}
+
+func hydratePullRequestLeaseFields(pr core.PullRequest) core.PullRequest {
+	metadata := map[string]any{}
+	if len(pr.Metadata) > 0 {
+		_ = json.Unmarshal(pr.Metadata, &metadata)
+	}
+	if pr.BranchOwner == "" {
+		pr.BranchOwner = projectionStringMetadataValue(metadata["ownerWorkerId"])
+	}
+	if pr.BranchOwnerDir == "" {
+		pr.BranchOwnerDir = projectionStringMetadataValue(metadata["ownerWorkDir"])
+	}
+	if pr.BranchHead == "" {
+		pr.BranchHead = projectionStringMetadataValue(metadata["headRefOid"])
+	}
+	if pr.UpdateLeaseOwner == "" {
+		pr.UpdateLeaseOwner = projectionStringMetadataValue(metadata["lastUpdateWorkerId"])
+	}
+	if pr.UpdateLeaseDir == "" {
+		pr.UpdateLeaseDir = projectionStringMetadataValue(metadata["lastUpdateWorkDir"])
+	}
+	if pr.UpdateBaseHead == "" {
+		pr.UpdateBaseHead = projectionStringMetadataValue(metadata["lastUpdateBaseChange"])
+	}
+	return pr
 }
 
 func mergePullRequestMetadata(previous json.RawMessage, next json.RawMessage) json.RawMessage {
@@ -1938,6 +1687,488 @@ func clearMissingTriggeredFeedback(merged map[string]any, incoming map[string]an
 	delete(merged, triggeredKey)
 }
 
+func applyPullRequestFeedbackQueued(feedbackRows map[string]core.PullRequestFeedback, pullRequests map[string]core.PullRequest, aliases map[string]string, event core.Event) error {
+	var payload struct {
+		ID                string `json:"id"`
+		Attempt           int    `json:"attempt"`
+		Reason            string `json:"reason"`
+		Repo              string `json:"repo"`
+		Number            int    `json:"number"`
+		URL               string `json:"url"`
+		Branch            string `json:"branch"`
+		Base              string `json:"base"`
+		State             string `json:"state"`
+		ChecksStatus      string `json:"checksStatus"`
+		MergeStatus       string `json:"mergeStatus"`
+		ReviewStatus      string `json:"reviewStatus"`
+		FeedbackSignature string `json:"feedbackSignature"`
+		Prompt            string `json:"prompt"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return fmt.Errorf("decode pull_request.followup_started: %w", err)
+	}
+	if strings.TrimSpace(payload.ID) == "" {
+		return nil
+	}
+	pr, ok := projectionPullRequestForFeedback(pullRequests, aliases, event.TaskID, payload.ID, payload.Repo, payload.Number, payload.URL, payload.Branch)
+	if ok {
+		payload.ID = pr.ID
+		payload.Repo = nonEmptyString(payload.Repo, pr.Repo)
+		payload.Number = firstNonZeroInt(payload.Number, pr.Number)
+		payload.URL = nonEmptyString(payload.URL, pr.URL)
+		payload.Branch = nonEmptyString(payload.Branch, pr.Branch)
+		payload.Base = nonEmptyString(payload.Base, pr.Base)
+		payload.State = nonEmptyString(payload.State, pr.State)
+		payload.ChecksStatus = nonEmptyString(payload.ChecksStatus, pr.ChecksStatus)
+		payload.MergeStatus = nonEmptyString(payload.MergeStatus, pr.MergeStatus)
+		payload.ReviewStatus = nonEmptyString(payload.ReviewStatus, pr.ReviewStatus)
+		payload.FeedbackSignature = projectionUnhandledFeedbackSignature(pr, payload.FeedbackSignature)
+	}
+	feedback := core.PullRequestFeedback{
+		ID:                projectionPullRequestFeedbackID(event.TaskID, payload.ID, payload.FeedbackSignature, event.ID),
+		TaskID:            event.TaskID,
+		PullRequestID:     payload.ID,
+		EventID:           event.ID,
+		Attempt:           payload.Attempt,
+		Status:            "pending",
+		Reason:            payload.Reason,
+		Repo:              payload.Repo,
+		Number:            payload.Number,
+		URL:               payload.URL,
+		Branch:            payload.Branch,
+		Base:              payload.Base,
+		State:             payload.State,
+		ChecksStatus:      payload.ChecksStatus,
+		MergeStatus:       payload.MergeStatus,
+		ReviewStatus:      payload.ReviewStatus,
+		FeedbackSignature: payload.FeedbackSignature,
+		Prompt:            payload.Prompt,
+		CreatedAt:         event.At,
+		UpdatedAt:         event.At,
+	}
+	if ok && feedback.FeedbackSignature != "" {
+		feedback.FeedbackBody = projectionPullRequestLatestFeedbackBody(pr.Metadata)
+	}
+	if ok {
+		feedback = refreshPullRequestFeedbackFromPullRequest(feedback, pr, event.At)
+	}
+	if previous := feedbackRows[feedback.ID]; previous.ID != "" {
+		feedback.CreatedAt = previous.CreatedAt
+		if previous.Status != "" && previous.Status != "pending" {
+			feedback.Status = previous.Status
+			feedback.HandledAt = previous.HandledAt
+		}
+	}
+	feedbackRows[feedback.ID] = feedback
+	return nil
+}
+
+func applyPullRequestFeedbackAction(feedbackRows map[string]core.PullRequestFeedback, event core.Event) error {
+	var payload struct {
+		Kind          string         `json:"kind"`
+		Status        string         `json:"status"`
+		PullRequestID string         `json:"pullRequestId"`
+		Inputs        map[string]any `json:"inputs"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return fmt.Errorf("decode task.action_executed: %w", err)
+	}
+	status := strings.TrimSpace(payload.Status)
+	if strings.EqualFold(status, "started") || strings.EqualFold(status, "waiting") || strings.EqualFold(status, "continued") {
+		return nil
+	}
+	for id, feedback := range feedbackRows {
+		if feedback.TaskID != event.TaskID || feedback.Status != "pending" {
+			continue
+		}
+		handled := false
+		switch strings.TrimSpace(payload.Kind) {
+		case "watch_pull_requests":
+			handled = strings.TrimSpace(feedback.FeedbackSignature) == "" && projectionPullRequestFeedbackActionMatches(feedback, payload.PullRequestID, payload.Inputs)
+		case "update_pull_request":
+			handled = status == "" && projectionPullRequestFeedbackActionMatches(feedback, payload.PullRequestID, payload.Inputs)
+			if handled && projectionPullRequestFeedbackRequiresMetadataUpdate(feedback) && !projectionUpdatePullRequestActionHasMetadata(payload.Inputs) {
+				handled = false
+			}
+		}
+		if handled {
+			feedback.Status = "handled"
+			feedback.UpdatedAt = event.At
+			feedback.HandledAt = &event.At
+			feedbackRows[id] = feedback
+		}
+	}
+	return nil
+}
+
+func refreshPullRequestFeedbackForPullRequest(feedbackRows map[string]core.PullRequestFeedback, pr core.PullRequest, at time.Time) {
+	for id, feedback := range feedbackRows {
+		if feedback.TaskID != pr.TaskID || feedback.PullRequestID != pr.ID || feedback.Status != "pending" {
+			continue
+		}
+		feedbackRows[id] = refreshPullRequestFeedbackFromPullRequest(feedback, pr, at)
+	}
+}
+
+func refreshPullRequestFeedbackFromPullRequest(feedback core.PullRequestFeedback, pr core.PullRequest, at time.Time) core.PullRequestFeedback {
+	feedback.Repo = nonEmptyString(feedback.Repo, pr.Repo)
+	feedback.Number = firstNonZeroInt(feedback.Number, pr.Number)
+	feedback.URL = nonEmptyString(feedback.URL, pr.URL)
+	feedback.Branch = nonEmptyString(feedback.Branch, pr.Branch)
+	feedback.Base = nonEmptyString(feedback.Base, pr.Base)
+	feedback.State = nonEmptyString(pr.State, feedback.State)
+	feedback.ChecksStatus = nonEmptyString(pr.ChecksStatus, feedback.ChecksStatus)
+	feedback.MergeStatus = nonEmptyString(pr.MergeStatus, feedback.MergeStatus)
+	feedback.ReviewStatus = nonEmptyString(pr.ReviewStatus, feedback.ReviewStatus)
+	if feedback.FeedbackSignature != "" {
+		feedback.FeedbackBody = projectionPullRequestLatestFeedbackBody(pr.Metadata)
+	}
+	if projectionTerminalPullRequestState(pr.State) || (feedback.FeedbackSignature != "" && projectionUnhandledFeedbackSignature(pr, feedback.FeedbackSignature) == "") {
+		feedback.Status = "handled"
+		feedback.HandledAt = &at
+	}
+	feedback.UpdatedAt = at
+	return feedback
+}
+
+func projectionPullRequestForFeedback(pullRequests map[string]core.PullRequest, aliases map[string]string, taskID string, id string, repo string, number int, url string, branch string) (core.PullRequest, bool) {
+	if alias := aliases[id]; alias != "" {
+		id = alias
+	}
+	if pr := pullRequests[id]; pr.ID != "" && pr.TaskID == taskID {
+		return pr, true
+	}
+	repo = strings.ToLower(strings.TrimSpace(repo))
+	url = strings.TrimSpace(url)
+	branch = strings.TrimSpace(branch)
+	for _, pr := range pullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		if id != "" && pr.ID == id {
+			return pr, true
+		}
+		if repo != "" && number > 0 && strings.EqualFold(pr.Repo, repo) && pr.Number == number {
+			return pr, true
+		}
+		if url != "" && strings.EqualFold(pr.URL, url) {
+			return pr, true
+		}
+		if branch != "" && pr.Branch == branch && (repo == "" || strings.EqualFold(pr.Repo, repo)) {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
+}
+
+func projectionPullRequestFeedbackID(taskID string, prID string, signature string, eventID int64) string {
+	if strings.TrimSpace(signature) != "" {
+		return taskID + "\x00" + prID + "\x00" + strings.TrimSpace(signature)
+	}
+	return taskID + "\x00" + prID + "\x00" + fmt.Sprint(eventID)
+}
+
+func projectionUnhandledFeedbackSignature(pr core.PullRequest, signature string) string {
+	signature = strings.TrimSpace(signature)
+	if signature == "" || !projectionPullRequestHasUntriggeredFeedback(pr) || signature != projectionPullRequestFeedbackSignature(pr.Metadata) {
+		return ""
+	}
+	return signature
+}
+
+func projectionPullRequestHasUntriggeredFeedback(pr core.PullRequest) bool {
+	signature := projectionPullRequestFeedbackSignature(pr.Metadata)
+	if signature == "" {
+		return false
+	}
+	return projectionPullRequestTriggeredFeedbackSignature(pr.Metadata) != signature
+}
+
+func projectionPullRequestFeedbackSignature(raw json.RawMessage) string {
+	metadata := projectionMetadataMap(raw)
+	signature := strings.TrimSpace(projectionStringMetadataValue(metadata["latestPullRequestFeedbackSignature"]))
+	if signature == "" {
+		signature = strings.TrimSpace(projectionStringMetadataValue(metadata["latestConversationCommentSignature"]))
+	}
+	return signature
+}
+
+func projectionPullRequestTriggeredFeedbackSignature(raw json.RawMessage) string {
+	metadata := projectionMetadataMap(raw)
+	signature := strings.TrimSpace(projectionStringMetadataValue(metadata["latestPullRequestFeedbackTriggeredSignature"]))
+	if signature == "" {
+		signature = strings.TrimSpace(projectionStringMetadataValue(metadata["latestConversationCommentTriggeredSignature"]))
+	}
+	return signature
+}
+
+func projectionPullRequestLatestFeedbackBody(raw json.RawMessage) string {
+	metadata := projectionMetadataMap(raw)
+	body := strings.TrimSpace(projectionStringMetadataValue(metadata["latestPullRequestFeedbackBody"]))
+	if body == "" {
+		body = strings.TrimSpace(projectionStringMetadataValue(metadata["latestConversationCommentBody"]))
+	}
+	return body
+}
+
+func projectionMetadataMap(raw json.RawMessage) map[string]any {
+	metadata := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	return metadata
+}
+
+func projectionPullRequestFeedbackActionMatches(feedback core.PullRequestFeedback, pullRequestID string, inputs map[string]any) bool {
+	if strings.TrimSpace(pullRequestID) != "" && pullRequestID == feedback.PullRequestID {
+		return true
+	}
+	id := projectionStringMetadata(inputs, "id")
+	if id != "" && id == feedback.PullRequestID {
+		return true
+	}
+	url := projectionStringMetadata(inputs, "url")
+	if url != "" && strings.EqualFold(url, feedback.URL) {
+		return true
+	}
+	repo := projectionStringMetadata(inputs, "repo")
+	number := projectionIntMetadata(inputs, "number")
+	if repo != "" && number > 0 && strings.EqualFold(repo, feedback.Repo) && number == feedback.Number {
+		return true
+	}
+	branch := projectionStringMetadata(inputs, "branch")
+	if branch == "" {
+		branch = projectionStringMetadata(inputs, "headBranch")
+	}
+	return branch != "" && branch == feedback.Branch && (repo == "" || strings.EqualFold(repo, feedback.Repo))
+}
+
+func projectionPullRequestFeedbackRequiresMetadataUpdate(feedback core.PullRequestFeedback) bool {
+	body := strings.ToLower(strings.TrimSpace(feedback.FeedbackBody))
+	return strings.Contains(body, "title") ||
+		strings.Contains(body, "description") ||
+		strings.Contains(body, "pr body") ||
+		strings.Contains(body, "pull request body")
+}
+
+func projectionUpdatePullRequestActionHasMetadata(inputs map[string]any) bool {
+	return strings.TrimSpace(projectionStringMetadata(inputs, "title")) != "" ||
+		strings.TrimSpace(projectionStringMetadata(inputs, "body")) != ""
+}
+
+func projectionTerminalPullRequestState(state string) bool {
+	return strings.EqualFold(state, "MERGED") || strings.EqualFold(state, "CLOSED")
+}
+
+func projectionStringMetadata(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	return strings.TrimSpace(projectionStringMetadataValue(metadata[key]))
+}
+
+func projectionStringMetadataValue(value any) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(value)
+	}
+}
+
+func projectionIntMetadata(metadata map[string]any, key string) int {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := value.Int64()
+		return int(parsed)
+	case string:
+		var parsed int
+		_, _ = fmt.Sscanf(value, "%d", &parsed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func nonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func applySteeringTaskSteered(steering map[string]core.SteeringItem, event core.Event) error {
+	var payload struct {
+		Message    string          `json:"message"`
+		Reason     string          `json:"reason,omitempty"`
+		TargetKind string          `json:"targetKind,omitempty"`
+		TargetID   string          `json:"targetId,omitempty"`
+		Metadata   json.RawMessage `json:"metadata,omitempty"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return fmt.Errorf("decode task.steered: %w", err)
+	}
+	message := strings.TrimSpace(payload.Message)
+	if message == "" {
+		return nil
+	}
+	id := "task_steering_" + fmt.Sprint(event.ID)
+	targetKind := strings.TrimSpace(payload.TargetKind)
+	targetID := strings.TrimSpace(payload.TargetID)
+	if targetKind == "" {
+		targetKind = "task"
+	}
+	if targetID == "" {
+		targetID = event.TaskID
+	}
+	steering[id] = core.SteeringItem{
+		ID:         id,
+		TaskID:     event.TaskID,
+		TargetKind: targetKind,
+		TargetID:   targetID,
+		Status:     "pending",
+		Reason:     nonEmptyString(payload.Reason, "user_task_steering"),
+		Message:    message,
+		CreatedAt:  event.At,
+		UpdatedAt:  event.At,
+		Metadata:   payload.Metadata,
+	}
+	return nil
+}
+
+func applySteeringWorkerSteered(steering map[string]core.SteeringItem, workers map[string]core.Worker, nodes map[string]core.ExecutionNode, event core.Event) error {
+	var payload struct {
+		WorkerID   string          `json:"workerId"`
+		NodeID     string          `json:"nodeId"`
+		WorkerKind string          `json:"workerKind"`
+		Role       string          `json:"role"`
+		SpawnID    string          `json:"spawnId"`
+		Status     string          `json:"status"`
+		Reason     string          `json:"reason"`
+		Message    string          `json:"message"`
+		Metadata   json.RawMessage `json:"metadata,omitempty"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return fmt.Errorf("decode worker.steering_queued: %w", err)
+	}
+	payload.WorkerID = nonEmptyString(payload.WorkerID, event.WorkerID)
+	payload.Message = strings.TrimSpace(payload.Message)
+	if payload.WorkerID == "" || payload.Message == "" {
+		return nil
+	}
+	if worker, ok := workers[payload.WorkerID]; ok {
+		payload.WorkerKind = nonEmptyString(payload.WorkerKind, worker.Kind)
+	}
+	candidateWorkerID := ""
+	reviewPhase := ""
+	for _, node := range nodes {
+		if node.WorkerID != payload.WorkerID {
+			continue
+		}
+		payload.NodeID = nonEmptyString(payload.NodeID, node.ID)
+		payload.WorkerKind = nonEmptyString(payload.WorkerKind, node.WorkerKind)
+		payload.Role = nonEmptyString(payload.Role, node.Role)
+		payload.SpawnID = nonEmptyString(payload.SpawnID, node.SpawnID)
+		metadata := projectionMetadataMap(node.Metadata)
+		candidateWorkerID = projectionStringMetadata(metadata, "candidateWorkerID")
+		reviewPhase = projectionStringMetadata(metadata, "reviewPhase")
+		payload.WorkerKind = nonEmptyString(payload.WorkerKind, projectionStringMetadata(metadata, "workerKind"))
+		break
+	}
+	id := "worker_steering_" + fmt.Sprint(event.ID)
+	status := strings.TrimSpace(payload.Status)
+	if status == "" {
+		status = "pending"
+	}
+	steering[id] = core.SteeringItem{
+		ID:                id,
+		TaskID:            event.TaskID,
+		WorkerID:          payload.WorkerID,
+		NodeID:            payload.NodeID,
+		WorkerKind:        payload.WorkerKind,
+		Role:              payload.Role,
+		SpawnID:           payload.SpawnID,
+		CandidateWorkerID: candidateWorkerID,
+		ReviewPhase:       reviewPhase,
+		TargetKind:        "worker",
+		TargetID:          payload.WorkerID,
+		Status:            status,
+		Reason:            nonEmptyString(payload.Reason, "user_worker_steering"),
+		Message:           payload.Message,
+		CreatedAt:         event.At,
+		UpdatedAt:         event.At,
+		Metadata:          payload.Metadata,
+	}
+	return nil
+}
+
+func applyTaskSteeringApplied(steering map[string]core.SteeringItem, taskID string, eventID int64, at time.Time) {
+	for id, item := range steering {
+		if item.TaskID != taskID || item.TargetKind != "task" || item.Status != "pending" || !strings.HasPrefix(item.ID, "task_steering_") {
+			continue
+		}
+		if steeringEventID(item.ID) >= eventID {
+			continue
+		}
+		item.Status = "applied"
+		item.AppliedAt = &at
+		item.UpdatedAt = at
+		steering[id] = item
+	}
+}
+
+func applySteeringWorkItemCompleted(steering map[string]core.SteeringItem, workItem core.WorkItem, at time.Time) {
+	if workItem.Kind != "user.worker_steering" || !strings.HasPrefix(workItem.ID, "worker_steering_") {
+		return
+	}
+	item := steering[workItem.ID]
+	if item.ID == "" {
+		return
+	}
+	item.Status = string(workItem.Status)
+	item.WorkerID = nonEmptyString(workItem.WorkerID, item.WorkerID)
+	item.AppliedAt = &at
+	item.UpdatedAt = at
+	steering[workItem.ID] = item
+}
+
+func steeringEventID(id string) int64 {
+	parts := strings.Split(id, "_")
+	if len(parts) == 0 {
+		return 0
+	}
+	var eventID int64
+	_, _ = fmt.Sscanf(parts[len(parts)-1], "%d", &eventID)
+	return eventID
+}
+
 func filterClearedWorkers(values map[string]core.Worker, cleared map[string]bool) map[string]core.Worker {
 	out := map[string]core.Worker{}
 	for id, worker := range values {
@@ -1958,6 +2189,56 @@ func filterClearedExecutionNodes(values map[string]core.ExecutionNode, cleared m
 	return out
 }
 
+func filterClearedWorkItems(values map[string]core.WorkItem, cleared map[string]bool) map[string]core.WorkItem {
+	out := map[string]core.WorkItem{}
+	for id, item := range values {
+		if !cleared[item.TaskID] {
+			out[id] = item
+		}
+	}
+	return out
+}
+
+func filterClearedArtifacts(values map[string]core.Artifact, cleared map[string]bool) map[string]core.Artifact {
+	out := map[string]core.Artifact{}
+	for id, artifact := range values {
+		if !cleared[artifact.TaskID] {
+			out[id] = artifact
+		}
+	}
+	return out
+}
+
+func filterClearedMemoryEntries(values map[string]core.MemoryEntry, cleared map[string]bool) map[string]core.MemoryEntry {
+	out := map[string]core.MemoryEntry{}
+	for id, entry := range values {
+		if !cleared[entry.TaskID] {
+			out[id] = entry
+		}
+	}
+	return out
+}
+
+func filterClearedQuestions(values map[string]core.Question, cleared map[string]bool) map[string]core.Question {
+	out := map[string]core.Question{}
+	for id, question := range values {
+		if !cleared[question.TaskID] {
+			out[id] = question
+		}
+	}
+	return out
+}
+
+func filterClearedSessions(values map[string]core.Session, cleared map[string]bool) map[string]core.Session {
+	out := map[string]core.Session{}
+	for id, session := range values {
+		if !cleared[session.TaskID] {
+			out[id] = session
+		}
+	}
+	return out
+}
+
 func filterClearedPullRequests(values map[string]core.PullRequest, cleared map[string]bool) map[string]core.PullRequest {
 	out := map[string]core.PullRequest{}
 	for id, pr := range values {
@@ -1968,76 +2249,24 @@ func filterClearedPullRequests(values map[string]core.PullRequest, cleared map[s
 	return out
 }
 
-func orchestrationGraphs(tasks map[string]core.Task, nodes map[string]core.ExecutionNode) []core.OrchestrationGraph {
-	byTask := map[string][]core.ExecutionNode{}
-	for _, node := range nodes {
-		byTask[node.TaskID] = append(byTask[node.TaskID], node)
-	}
-	graphs := make([]core.OrchestrationGraph, 0, len(byTask))
-	for taskID, taskNodes := range byTask {
-		sort.Slice(taskNodes, func(i, j int) bool {
-			return taskNodes[i].CreatedAt.Before(taskNodes[j].CreatedAt)
-		})
-		spawnToNode := map[string]string{}
-		for _, node := range taskNodes {
-			if node.SpawnID != "" {
-				spawnToNode[node.SpawnID] = node.ID
-			}
+func filterClearedPullRequestFeedback(values map[string]core.PullRequestFeedback, cleared map[string]bool) map[string]core.PullRequestFeedback {
+	out := map[string]core.PullRequestFeedback{}
+	for id, feedback := range values {
+		if !cleared[feedback.TaskID] {
+			out[id] = feedback
 		}
-		graphNodes := make([]core.OrchestrationGraphNode, 0, len(taskNodes))
-		edges := []core.OrchestrationGraphEdge{}
-		summary := core.OrchestrationGraphSummary{Total: len(taskNodes)}
-		var updatedAt time.Time
-		for _, node := range taskNodes {
-			graphNodes = append(graphNodes, core.OrchestrationGraphNode{
-				ID:         node.ID,
-				WorkerID:   node.WorkerID,
-				WorkerKind: node.WorkerKind,
-				Status:     node.Status,
-				Role:       node.Role,
-				Reason:     node.Reason,
-				SpawnID:    node.SpawnID,
-				TargetID:   node.TargetID,
-				TargetKind: node.TargetKind,
-			})
-			if node.ParentNodeID != "" {
-				edges = append(edges, core.OrchestrationGraphEdge{From: node.ParentNodeID, To: node.ID, Reason: "parent"})
-			}
-			for _, dep := range node.DependsOn {
-				if from := spawnToNode[dep]; from != "" {
-					edges = append(edges, core.OrchestrationGraphEdge{From: from, To: node.ID, Reason: "depends_on:" + dep})
-				}
-			}
-			switch node.Status {
-			case core.WorkerRunning:
-				summary.Running++
-			case core.WorkerWaiting, core.WorkerQueued:
-				summary.Waiting++
-			case core.WorkerSucceeded:
-				summary.Done++
-			case core.WorkerFailed:
-				summary.Failed++
-			case core.WorkerCanceled:
-				summary.Canceled++
-			}
-			if node.UpdatedAt.After(updatedAt) {
-				updatedAt = node.UpdatedAt
-			}
-		}
-		task := tasks[taskID]
-		graphs = append(graphs, core.OrchestrationGraph{
-			TaskID:    taskID,
-			Status:    task.Status,
-			Nodes:     graphNodes,
-			Edges:     edges,
-			Summary:   summary,
-			UpdatedAt: updatedAt,
-		})
 	}
-	sort.Slice(graphs, func(i, j int) bool {
-		return graphs[i].UpdatedAt.Before(graphs[j].UpdatedAt)
-	})
-	return graphs
+	return out
+}
+
+func filterClearedSteering(values map[string]core.SteeringItem, cleared map[string]bool) map[string]core.SteeringItem {
+	out := map[string]core.SteeringItem{}
+	for id, item := range values {
+		if !cleared[item.TaskID] {
+			out[id] = item
+		}
+	}
+	return out
 }
 
 func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {
@@ -2079,15 +2308,17 @@ WHERE type IN (
 	'task.created',
 	'task.updated',
 	'task.status',
-	'task.final_candidate_selected',
 	'task.objective_updated',
 	'task.milestone_reached',
 	'task.work_plan_updated',
 	'task.artifact_recorded',
 	'task.cleared',
-	'execution.node_planned',
-	'execution.node_status',
-	'worker.workspace_prepared',
+		'execution.node_planned',
+		'execution.node_status',
+		'work_item.queued',
+		'work_item.started',
+		'work_item.completed',
+		'worker.workspace_prepared',
 	'worker.created',
 	'worker.started',
 	'worker.completed',
@@ -2104,7 +2335,7 @@ SELECT
 	type,
 	task_id,
 	worker_id,
-	'{}' AS payload
+	payload
 FROM events
 WHERE id IN (SELECT id FROM latest_worker_output)
 ORDER BY id ASC`)
@@ -2124,16 +2355,6 @@ func (s *SQLiteStore) latestEventID(ctx context.Context) (int64, error) {
 		return 0, nil
 	}
 	return id.Int64, nil
-}
-
-func maxEventID(events []core.Event) int64 {
-	var max int64
-	for _, event := range events {
-		if event.ID > max {
-			max = event.ID
-		}
-	}
-	return max
 }
 
 func snapshotResponseEvents(events []core.Event, includeEvents bool) []core.Event {
@@ -2451,8 +2672,36 @@ func orderedExecutionNodes(values map[string]core.ExecutionNode) []core.Executio
 	return orderedSnapshotValues(values, func(node core.ExecutionNode) string { return node.ID }, func(node core.ExecutionNode) time.Time { return node.CreatedAt })
 }
 
+func orderedWorkItems(values map[string]core.WorkItem) []core.WorkItem {
+	return orderedSnapshotValues(values, func(item core.WorkItem) string { return item.ID }, func(item core.WorkItem) time.Time { return item.CreatedAt })
+}
+
+func orderedArtifacts(values map[string]core.Artifact) []core.Artifact {
+	return orderedSnapshotValues(values, func(artifact core.Artifact) string { return artifact.ID }, func(artifact core.Artifact) time.Time { return artifact.CreatedAt })
+}
+
+func orderedMemoryEntries(values map[string]core.MemoryEntry) []core.MemoryEntry {
+	return orderedSnapshotValues(values, func(entry core.MemoryEntry) string { return entry.ID }, func(entry core.MemoryEntry) time.Time { return entry.CreatedAt })
+}
+
+func orderedQuestions(values map[string]core.Question) []core.Question {
+	return orderedSnapshotValues(values, func(question core.Question) string { return question.ID }, func(question core.Question) time.Time { return question.CreatedAt })
+}
+
+func orderedSessions(values map[string]core.Session) []core.Session {
+	return orderedSnapshotValues(values, func(session core.Session) string { return session.ID }, func(session core.Session) time.Time { return session.CreatedAt })
+}
+
 func orderedPullRequests(values map[string]core.PullRequest) []core.PullRequest {
 	return orderedSnapshotValues(values, func(pr core.PullRequest) string { return pr.ID }, func(pr core.PullRequest) time.Time { return pr.CreatedAt })
+}
+
+func orderedPullRequestFeedback(values map[string]core.PullRequestFeedback) []core.PullRequestFeedback {
+	return orderedSnapshotValues(values, func(feedback core.PullRequestFeedback) string { return feedback.ID }, func(feedback core.PullRequestFeedback) time.Time { return feedback.CreatedAt })
+}
+
+func orderedSteering(values map[string]core.SteeringItem) []core.SteeringItem {
+	return orderedSnapshotValues(values, func(item core.SteeringItem) string { return item.ID }, func(item core.SteeringItem) time.Time { return item.CreatedAt })
 }
 
 func orderedSnapshotValues[T any](values map[string]T, id func(T) string, createdAt func(T) time.Time) []T {

@@ -158,8 +158,12 @@ export async function askAssistant(input: {
   return requestJSON("/api/assistant", jsonInit("POST", input));
 }
 
-export async function steerTask(taskId: string, message: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/steer`, jsonInit("POST", { message }));
+export async function steerTask(taskId: string, message: string, target?: { targetKind?: string; targetId?: string }): Promise<void> {
+  return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/steer`, jsonInit("POST", { message, ...target }));
+}
+
+export async function answerTaskQuestion(taskId: string, questionId: string, answer: string): Promise<void> {
+  return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(questionId)}/answer`, jsonInit("POST", { answer }));
 }
 
 export async function retryTask(taskId: string) {
@@ -167,11 +171,15 @@ export async function retryTask(taskId: string) {
 }
 
 export async function cancelTask(taskId: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+	return requestVoid(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+}
+
+export async function cancelWorkItem(taskId: string, itemId: string): Promise<void> {
+	return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/work-items/${encodeURIComponent(itemId)}/cancel`, { method: "POST" });
 }
 
 export async function clearTask(taskId: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
+	return requestVoid(`/api/tasks/${taskId}/clear`, { method: "POST" });
 }
 
 export async function clearFinishedTasks() {
@@ -195,10 +203,6 @@ export async function getWorkerChanges(workerId: string): Promise<WorkerChangesR
 
 export async function applyWorkerChanges(workerId: string) {
   return requestJSON(`/api/workers/${workerId}/apply`, { method: "POST" });
-}
-
-export async function applyTaskResult(taskId: string) {
-  return requestJSON(`/api/tasks/${taskId}/apply`, { method: "POST" });
 }
 
 export async function publishTaskPullRequest(taskId: string, input: {

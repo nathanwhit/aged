@@ -351,7 +351,7 @@ func writePullRequestBodyFile(body string) (string, error) {
 
 func (p LocalPullRequestPublisher) findExistingPullRequest(ctx context.Context, exec commandExecutor, dir string, repo string, branch string) (core.PullRequest, error) {
 	headOwner, headBranch, hasHeadOwner := strings.Cut(branch, ":")
-	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,headRepositoryOwner"
+	jsonFields := "number,url,state,title,isDraft,headRefName,headRefOid,baseRefName,headRepositoryOwner"
 	args := []string{"pr", "list", "--repo", repo, "--state", "all", "--json", jsonFields}
 	if hasHeadOwner {
 		args = append(args, "--search", "head:"+headOwner+":"+headBranch)
@@ -671,7 +671,7 @@ func (p LocalPullRequestPublisher) Inspect(ctx context.Context, pr core.PullRequ
 	if ref == "" {
 		return core.PullRequest{}, errors.New("inspect requires pull request url or number")
 	}
-	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments,reviews")
+	out, err := exec(ctx, "", "gh", "pr", "view", ref, "--repo", pr.Repo, "--json", "number,url,state,title,isDraft,headRefName,headRefOid,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision,comments,reviews")
 	if err != nil {
 		return core.PullRequest{}, wrapGitHubCommandError("inspect GitHub pull request", err)
 	}
@@ -791,7 +791,7 @@ func (p LocalPullRequestPublisher) List(ctx context.Context, spec PullRequestLis
 	if state == "" {
 		state = "open"
 	}
-	jsonFields := "number,url,state,title,isDraft,headRefName,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision"
+	jsonFields := "number,url,state,title,isDraft,headRefName,headRefOid,baseRefName,mergeStateStatus,mergeable,statusCheckRollup,reviewDecision"
 	args := []string{"pr", "list", "--repo", repo, "--state", state, "--limit", strconv.Itoa(limit), "--json", jsonFields}
 	if strings.TrimSpace(spec.Author) != "" {
 		args = append(args, "--author", strings.TrimSpace(spec.Author))
@@ -826,6 +826,7 @@ type githubPullRequestPayload struct {
 	Title               string          `json:"title"`
 	IsDraft             bool            `json:"isDraft"`
 	HeadRefName         string          `json:"headRefName"`
+	HeadRefOid          string          `json:"headRefOid"`
 	BaseRefName         string          `json:"baseRefName"`
 	MergeStateStatus    string          `json:"mergeStateStatus"`
 	Mergeable           string          `json:"mergeable"`
@@ -850,6 +851,11 @@ func (payload githubPullRequestPayload) pullRequest(pr core.PullRequest) core.Pu
 	checks := summarizeStatusCheckRollup(payload.StatusCheckRollup)
 	pr.ChecksStatus = checks.Status
 	pr.ChecksConclusion = checks.Conclusion
+	if strings.TrimSpace(payload.HeadRefOid) != "" {
+		pr.Metadata = mergePullRequestMetadataMap(pr.Metadata, map[string]any{
+			"headRefOid": payload.HeadRefOid,
+		})
+	}
 	pr.Metadata = pullRequestMetadataWithFailingChecks(pr.Metadata, checks.FailingChecks)
 	return pr
 }

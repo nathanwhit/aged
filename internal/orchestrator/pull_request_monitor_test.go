@@ -552,6 +552,9 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	if followUp.Status != "queued" || followUp.ID != "pr-1" {
 		t.Fatalf("follow-up payload = %+v", followUp)
 	}
+	if item, ok := pullRequestFollowUpWorkItem(snapshot, "task-1", "pr-1", "2026-05-11T22:01:05Z:conversation:IC_1"); !ok || item.Status != core.WorkItemQueued || item.Kind != "pr.followup" {
+		t.Fatalf("work item = %+v, ok=%v; want queued pr.followup", item, ok)
+	}
 	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -561,6 +564,9 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	}
 	if got := countEvents(snapshot.Events, core.EventPRFollowUp, "task-1"); got != 1 {
 		t.Fatalf("pull request follow-up events = %d, want 1", got)
+	}
+	if got := countEvents(snapshot.Events, core.EventWorkItemQueued, "task-1"); got != 1 {
+		t.Fatalf("work item queued events = %d, want 1", got)
 	}
 }
 
@@ -583,9 +589,11 @@ func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRu
 	}
 
 	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
-		return hasTaskAction(snapshot.Events, "task-1", "pull_request_background_followup", "completed")
+		item, ok := pullRequestFollowUpWorkItemByTarget(snapshot, "task-1", "pr-1")
+		return hasTaskAction(snapshot.Events, "task-1", "pull_request_background_followup", "completed") &&
+			ok && item.Status == core.WorkItemSucceeded
 	}, func(snapshot core.Snapshot) string {
-		return fmt.Sprintf("task did not complete background follow-up; events = %+v", snapshot.Events)
+		return fmt.Sprintf("task did not complete background follow-up; events = %+v workItems = %+v", snapshot.Events, snapshot.WorkItems)
 	})
 	pending := pendingPullRequestFeedback(snapshot, "task-1")
 	if len(pending) != 1 || pending[0].PullRequestID != "pr-1" || pending[0].FeedbackSignature != "2026-05-11T22:01:05Z:conversation:IC_1" {
@@ -616,6 +624,9 @@ func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRu
 	}
 	if backgroundWorkers != 1 {
 		t.Fatalf("background follow-up workers = %d, want 1; nodes = %+v", backgroundWorkers, snapshot.ExecutionNodes)
+	}
+	if item, ok := pullRequestFollowUpWorkItemByTarget(snapshot, "task-1", "pr-1"); !ok || item.Status != core.WorkItemSucceeded {
+		t.Fatalf("work item = %+v, ok=%v; want succeeded", item, ok)
 	}
 }
 
@@ -1269,7 +1280,7 @@ func (p *mergeTrackingPullRequestPublisher) Merge(_ context.Context, pr core.Pul
 
 func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStore, publisher PullRequestPublisher) *Service {
 	t.Helper()
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "continue"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "continue")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	service.SetPullRequestPublisher(publisher)
@@ -1371,6 +1382,15 @@ func workerActive(snapshot core.Snapshot, workerID string) bool {
 		}
 	}
 	return false
+}
+
+func pullRequestFollowUpWorkItemByTarget(snapshot core.Snapshot, taskID string, prID string) (core.WorkItem, bool) {
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID == taskID && item.Kind == "pr.followup" && item.TargetKind == "pull_request" && item.TargetID == prID {
+			return item, true
+		}
+	}
+	return core.WorkItem{}, false
 }
 
 type testPullRequestFollowUpPayload struct {

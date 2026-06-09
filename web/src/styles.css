@@ -371,7 +371,7 @@ button {
   min-height: 108px;
 }
 
-.run-mode-control {
+.task-mode-control {
   border: 0;
   display: grid;
   gap: 8px;
@@ -381,14 +381,14 @@ button {
   padding: 0;
 }
 
-.run-mode-control legend {
+.task-mode-control legend {
   color: #4b4f58;
   font-size: 13px;
   grid-column: 1 / -1;
   padding: 0;
 }
 
-.run-mode-option {
+.task-mode-option {
   align-items: center;
   background: #ffffff;
   border: 1px solid #c9c5ba;
@@ -402,7 +402,7 @@ button {
   padding: 8px 10px;
 }
 
-.run-mode-option input {
+.task-mode-option input {
   height: 1px;
   opacity: 0;
   pointer-events: none;
@@ -410,13 +410,13 @@ button {
   width: 1px;
 }
 
-.run-mode-option.selected {
+.task-mode-option.selected {
   background: #eef5ff;
   border-color: #789fd6;
   color: #243b53;
 }
 
-.run-mode-option:focus-within {
+.task-mode-option:focus-within {
   outline: 2px solid #6d3fc7;
   outline-offset: 2px;
 }
@@ -657,6 +657,17 @@ textarea {
   background: #ffffff;
   border-color: #d5d1c8;
   color: #4b4f58;
+}
+
+.icon-button.danger {
+  background: #ffffff;
+  border-color: #e1b5af;
+  color: #9a2d25;
+}
+
+.icon-button.small {
+  min-height: 26px;
+  width: 26px;
 }
 
 .icon-button.danger-text {
@@ -1038,6 +1049,233 @@ small {
   color: #9a2d25;
 }
 
+.work-item-queue,
+.scratch-panel,
+.wide-work,
+.session-queue {
+  background: #f8fafc;
+  border: 1px solid #dfe5ee;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.work-item-title,
+.work-item-card > div:first-child,
+.work-item-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.work-item-title {
+  justify-content: space-between;
+}
+
+.work-item-title span,
+.work-item-card small {
+  color: #687384;
+  font-size: 12px;
+}
+
+.work-item-list,
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.wide-work-lanes {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.work-item-card,
+.wide-work-card,
+.session-card {
+  background: #ffffff;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.work-item-card > div:first-child {
+  justify-content: space-between;
+}
+
+.wide-work-card {
+  align-content: start;
+  border-left: 4px solid #8aa7d6;
+}
+
+.wide-work-card.objective-compose {
+  border-left-color: #b28bd6;
+}
+
+.wide-work-card.objective-validate {
+  border-left-color: #8fae7a;
+}
+
+.wide-work-card-heading,
+.wide-work-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wide-work-card-heading {
+  justify-content: space-between;
+}
+
+.wide-work-card-heading strong,
+.wide-work-card p {
+  overflow-wrap: anywhere;
+}
+
+.wide-work-meta {
+  color: #687384;
+  font-size: 12px;
+}
+
+.wide-work-meta span {
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.wide-work-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.wide-work-scope code {
+  background: #f8fafc;
+  border: 1px solid #edf1f6;
+  border-radius: 5px;
+  color: #3e4652;
+  font-size: 11px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 3px 5px;
+}
+
+.wide-work-card p {
+  color: #3e4652;
+  margin: 0;
+}
+
+.work-item-card-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.work-item-card strong,
+.work-item-card p {
+  overflow-wrap: anywhere;
+}
+
+.work-item-card p {
+  color: #3e4652;
+  margin: 0;
+}
+
+.session-main,
+.session-meta {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-main {
+  justify-content: space-between;
+}
+
+.session-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.session-main > div {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-main small,
+.session-meta {
+  color: #687384;
+  font-size: 12px;
+}
+
+.session-meta span {
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.session-path {
+  background: #f8fafc;
+  border: 1px solid #edf1f6;
+  border-radius: 6px;
+  color: #3e4652;
+  display: block;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  padding: 6px 8px;
+}
+
+.session-path.muted {
+  background: #fbfcfe;
+  color: #687384;
+}
+
+.session-current-action {
+  background: #f8fafc;
+  border-left: 3px solid #97a6ba;
+  color: #3e4652;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.session-current-action span,
+.session-current-action small {
+  color: #687384;
+  font-size: 12px;
+}
+
+.session-current-action p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.session-steer {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.session-steer input {
+  min-width: 0;
+}
+
 .approval-panel {
   background: #fff8e8;
   border: 1px solid #ead49a;
@@ -1076,6 +1314,18 @@ small {
 .approval-card p {
   color: #27292d;
   margin: 4px 0;
+}
+
+.approval-response {
+  align-self: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  min-width: min(360px, 100%);
+}
+
+.approval-response input {
+  min-width: 0;
 }
 
 .approval-commands {
@@ -1263,6 +1513,17 @@ small {
   grid-template-columns: minmax(130px, 1fr) minmax(72px, 0.35fr) minmax(160px, 1.4fr) auto;
 }
 
+.inline-steer-form {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.pr-card .inline-steer-form {
+  grid-column: 1 / -1;
+}
+
 .pr-card {
   align-items: center;
   background: #fbfcfe;
@@ -1294,6 +1555,41 @@ small {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: end;
+}
+
+.pr-lease-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.pr-feedback-list {
+  display: grid;
+  gap: 6px;
+  grid-column: 1 / -1;
+}
+
+.pr-feedback-item {
+  background: #f4f7fb;
+  border: 1px solid #dbe4ef;
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+}
+
+.pr-feedback-item small {
+  color: #5d6b7d;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.pr-feedback-item span {
+  color: #263445;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .orchestration-panel {
@@ -2698,7 +2994,7 @@ small {
 
   .loop-config,
   .loop-settings,
-  .run-mode-control {
+  .task-mode-control {
     grid-template-columns: 1fr;
   }
 

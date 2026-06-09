@@ -30,9 +30,7 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 				"projectId": "project-1",
 				"title":     "Stabilize durable loop",
 				"prompt":    "Run a long-lived implementation, publish a PR, and wait for checks.",
-				"metadata": map[string]any{
-					"completionMode": "github",
-				},
+				"metadata":  map[string]any{},
 			}),
 		},
 		{
@@ -162,14 +160,6 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 			}),
 		},
 		{
-			At:     base.Add(13 * time.Second),
-			Type:   core.EventTaskCandidate,
-			TaskID: taskID,
-			Payload: core.MustJSON(map[string]any{
-				"workerId": "worker-repair",
-			}),
-		},
-		{
 			At:     base.Add(14 * time.Second),
 			Type:   core.EventTaskMilestone,
 			TaskID: taskID,
@@ -270,9 +260,6 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 	if detail.Task.Status != core.TaskWaiting || detail.Task.ObjectiveStatus != core.ObjectiveWaitingExternal || detail.Task.ObjectivePhase != "pr_opened" {
 		t.Fatalf("task state = status %q objective %q phase %q", detail.Task.Status, detail.Task.ObjectiveStatus, detail.Task.ObjectivePhase)
 	}
-	if detail.Task.FinalCandidateWorkerID != "worker-repair" {
-		t.Fatalf("final candidate = %q, want worker-repair", detail.Task.FinalCandidateWorkerID)
-	}
 	if len(detail.Task.Milestones) != 1 || detail.Task.Milestones[0].Name != "candidate_selected" {
 		t.Fatalf("milestones = %+v", detail.Task.Milestones)
 	}
@@ -295,11 +282,8 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 	if len(detail.ExecutionNodes) != 2 {
 		t.Fatalf("execution nodes = %+v", detail.ExecutionNodes)
 	}
-	if detail.OrchestrationGraph == nil || detail.OrchestrationGraph.Summary.Total != 2 || detail.OrchestrationGraph.Summary.Done != 2 {
-		t.Fatalf("orchestration graph = %+v", detail.OrchestrationGraph)
-	}
-	if len(detail.OrchestrationGraph.Edges) != 2 {
-		t.Fatalf("graph edges = %+v, want parent and dependency edges", detail.OrchestrationGraph.Edges)
+	if detail.ExecutionNodes[1].ParentNodeID != "node-impl" || len(detail.ExecutionNodes[1].DependsOn) != 1 || detail.ExecutionNodes[1].DependsOn[0] != "implementation" {
+		t.Fatalf("repair execution dependencies = %+v, want parent node-impl and implementation dependency", detail.ExecutionNodes[1])
 	}
 	if len(detail.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", detail.PullRequests)

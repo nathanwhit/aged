@@ -95,8 +95,8 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata["completionMode"] != "local" {
-		t.Fatalf("metadata = %+v", metadata)
+	if _, ok := metadata["completionMode"]; ok {
+		t.Fatalf("metadata = %+v, want no completionMode", metadata)
 	}
 	_ = waitForTaskStatus(t, fixture.store, task.ID, core.TaskSucceeded)
 	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
@@ -111,54 +111,7 @@ func TestGitHubDriverCreatesIssueTasksIdempotently(t *testing.T) {
 	}
 }
 
-func TestGitHubDriverIssueTaskUsesGitHubCompletionWhenAutoPublishEnabled(t *testing.T) {
-	publisher := &fakePullRequestPublisher{}
-	fixture := newGitHubDriverTestFixture(t, GitHubDriverConfig{
-		Enabled: true,
-		Issues:  []GitHubIssueSourceConfig{{Repo: "owner/repo", Labels: []string{"aged"}}},
-	}, &fakeGitHubClient{issues: []GitHubIssue{{
-		Repo:   "owner/repo",
-		Number: 12,
-		Title:  "Add feature",
-		Body:   "Please add the feature.",
-		URL:    "https://github.com/owner/repo/issues/12",
-		Labels: []string{"aged"},
-	}}}, githubDriverTestOptions{
-		workspace: fakeWorkspaceManager{
-			sourceRoot: t.TempDir(),
-			changes: WorkspaceChanges{
-				Dirty:        true,
-				ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
-			},
-		},
-		publisher: publisher,
-	})
-
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-issue", "owner/repo#12")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("missing github issue task")
-	}
-	waitForPullRequests(t, fixture.store, task.ID, 1)
-	snapshot := waitForTaskStatus(t, fixture.store, task.ID, core.TaskWaiting)
-	task, ok = findTask(snapshot, task.ID)
-	if !ok {
-		t.Fatal("missing task")
-	}
-	if task.Status != core.TaskWaiting || task.ObjectiveStatus != core.ObjectiveWaitingExternal {
-		t.Fatalf("task status = %q objective = %q", task.Status, task.ObjectiveStatus)
-	}
-	if publisher.published.Repo != "owner/repo" {
-		t.Fatalf("published repo = %q", publisher.published.Repo)
-	}
-}
-
-func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
+func TestGitHubDriverDoesNotAutoPublishSucceededIssueTask(t *testing.T) {
 	publisher := &fakePullRequestPublisher{}
 	fixture := newGitHubDriverTestFixture(t, GitHubDriverConfig{
 		Enabled: true,
@@ -178,11 +131,10 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 			"title":  "GitHub issue owner/repo#12",
 			"prompt": "Fix it.",
 			"metadata": map[string]any{
-				"source":         "github-issue",
-				"externalId":     "owner/repo#12",
-				"repo":           "owner/repo",
-				"number":         12,
-				"completionMode": "github",
+				"source":     "github-issue",
+				"externalId": "owner/repo#12",
+				"repo":       "owner/repo",
+				"number":     12,
 			},
 		}),
 	}); err != nil {
@@ -201,19 +153,19 @@ func TestGitHubDriverPublishesSucceededIssueTask(t *testing.T) {
 	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if publisher.published.Repo != "owner/repo" {
-		t.Fatalf("published repo = %q, want owner/repo", publisher.published.Repo)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
 	}
 	snapshot, err := fixture.store.Snapshot(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.PullRequests) != 1 || snapshot.PullRequests[0].TaskID != taskID {
+	if len(snapshot.PullRequests) != 0 {
 		t.Fatalf("pull requests = %+v", snapshot.PullRequests)
 	}
 }
 
-func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T) {
+func TestGitHubDriverDoesNotAutoPublishSucceededIssueTaskThroughForkProject(t *testing.T) {
 	projectRoot := t.TempDir()
 	projects, err := NewProjectRegistry([]core.Project{{
 		ID:            "fork",
@@ -250,11 +202,10 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 			"prompt":    "Fix it.",
 			"projectId": "fork",
 			"metadata": map[string]any{
-				"source":         "github-issue",
-				"externalId":     "owner/repo#12",
-				"repo":           "owner/repo",
-				"number":         12,
-				"completionMode": "github",
+				"source":     "github-issue",
+				"externalId": "owner/repo#12",
+				"repo":       "owner/repo",
+				"number":     12,
 			},
 		}),
 	}); err != nil {
@@ -273,17 +224,8 @@ func TestGitHubDriverPublishesSucceededIssueTaskThroughForkProject(t *testing.T)
 	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if publisher.published.Repo != "owner/repo" {
-		t.Fatalf("published repo = %q, want owner/repo", publisher.published.Repo)
-	}
-	if publisher.published.HeadRepoOwner != "fork-owner" {
-		t.Fatalf("published head owner = %q, want fork-owner", publisher.published.HeadRepoOwner)
-	}
-	if publisher.published.PushRemote != "fork" {
-		t.Fatalf("published push remote = %q, want fork", publisher.published.PushRemote)
-	}
-	if publisher.published.Base != "trunk" {
-		t.Fatalf("published base = %q, want trunk", publisher.published.Base)
+	if publisher.publishCalls != 0 {
+		t.Fatalf("publish calls = %d, want 0", publisher.publishCalls)
 	}
 }
 
@@ -554,11 +496,10 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 			"title":  "GitHub issue owner/repo#12: Add feature",
 			"prompt": "Fix it.",
 			"metadata": map[string]any{
-				"source":         "github-issue",
-				"externalId":     "owner/repo#12",
-				"repo":           "owner/repo",
-				"number":         12,
-				"completionMode": "github",
+				"source":     "github-issue",
+				"externalId": "owner/repo#12",
+				"repo":       "owner/repo",
+				"number":     12,
 			},
 		}),
 	}); err != nil {
@@ -618,68 +559,6 @@ func TestGitHubDriverDoesNotRecreateIssueTaskAfterPullRequestMergedAndCleared(t 
 	}
 	if createdForFollowUp != 1 {
 		t.Fatalf("task.created events for owner/repo#13 = %d, want 1 (still-open unrelated issue must spawn a task)", createdForFollowUp)
-	}
-}
-
-func TestGitHubDriverCreatesMentionTasksWithLocalCompletion(t *testing.T) {
-	fixture := newGitHubDriverTestFixture(t, GitHubDriverConfig{
-		Enabled: true,
-		Mentions: GitHubMentionDriverConfig{
-			Enabled: boolPtr(true),
-			Repos:   []string{"owner/repo"},
-		},
-		PullRequests: GitHubPullRequestDriverConfig{
-			AutoPublish: boolPtr(false),
-		},
-	}, &fakeGitHubClient{mentions: []GitHubMention{{
-		ID:          "thread-1",
-		Repo:        "owner/repo",
-		SubjectType: "PullRequest",
-		Number:      12,
-		Title:       "Add feature",
-		URL:         "https://github.com/owner/repo/pull/12",
-		Reason:      "review_requested",
-		Body:        "@aged can you review this?",
-		Author:      "octocat",
-		CommentURL:  "https://github.com/owner/repo/pull/12#issuecomment-1",
-	}}}, githubDriverTestOptions{
-		planPrompt: "review it",
-		runnerText: "commented",
-	})
-
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	task, ok, err := fixture.service.FindTaskByExternalID(fixture.ctx, "github-mention", "thread-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok {
-		t.Fatal("missing github mention task")
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(task.Metadata, &metadata); err != nil {
-		t.Fatal(err)
-	}
-	if metadata["completionMode"] != "local" {
-		t.Fatalf("metadata completionMode = %v, want local", metadata["completionMode"])
-	}
-	if metadata["reason"] != "review_requested" || metadata["subjectType"] != "PullRequest" {
-		t.Fatalf("metadata = %+v", metadata)
-	}
-	_ = waitForTaskStatus(t, fixture.store, task.ID, core.TaskSucceeded)
-	if err := fixture.driver.RunOnce(fixture.ctx); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := fixture.store.Snapshot(fixture.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if countEvents(snapshot.Events, core.EventTaskCreated, task.ID) != 1 {
-		t.Fatalf("task.created count = %d, want 1", countEvents(snapshot.Events, core.EventTaskCreated, task.ID))
-	}
-	if len(snapshot.PullRequests) != 0 {
-		t.Fatalf("pull requests = %+v, want none for review-comment-only mention task", snapshot.PullRequests)
 	}
 }
 
@@ -778,7 +657,7 @@ func TestGitHubDriverMentionsIncludeReadAndAdvanceCursor(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "review it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	client := &fakeGitHubClient{mentions: []GitHubMention{{

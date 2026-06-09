@@ -17,21 +17,17 @@ func resolvePullRequestWorkerID(snapshot core.Snapshot, task core.Task, requeste
 		return "", fmt.Errorf("provide workerId when publishing before task completion")
 	}
 	if workerID == "" {
-		if task.FinalCandidateWorkerID != "" {
-			workerID = task.FinalCandidateWorkerID
-		} else {
-			candidates := applyCandidates(snapshot, task.ID)
-			unapplied := unappliedCandidates(candidates)
-			switch len(unapplied) {
-			case 0:
-				if latest := latestAppliedWorker(snapshot, task.ID); latest != "" {
-					workerID = latest
-				}
-			case 1:
-				workerID = unapplied[0].WorkerID
-			default:
-				return "", fmt.Errorf("multiple unapplied worker changes exist; provide workerId")
+		candidates := applyCandidates(snapshot, task.ID)
+		unapplied := unappliedCandidates(candidates)
+		switch len(unapplied) {
+		case 0:
+			if latest := latestAppliedWorker(snapshot, task.ID); latest != "" {
+				workerID = latest
 			}
+		case 1:
+			workerID = unapplied[0].WorkerID
+		default:
+			return "", fmt.Errorf("multiple unapplied worker changes exist; provide workerId")
 		}
 	}
 	if workerID == "" {
@@ -158,68 +154,6 @@ func workerIsPublishableCandidate(snapshot core.Snapshot, workerID string) bool 
 	return false
 }
 
-func resolveFinalCandidate(results []WorkerTurnResult, selectedWorkerID string) (string, string, error) {
-	candidates := candidateResults(results)
-	selectedWorkerID = strings.TrimSpace(selectedWorkerID)
-	if selectedWorkerID != "" {
-		for _, candidate := range candidates {
-			if candidate.WorkerID == selectedWorkerID {
-				return selectedWorkerID, "orchestrator selected final candidate explicitly", nil
-			}
-		}
-		if result, ok := workerResultByID(results, selectedWorkerID); ok && result.Status == core.WorkerSucceeded {
-			return "", fmt.Sprintf("orchestrator selected worker %s with no candidate changes", selectedWorkerID), nil
-		}
-		if fallbackID, fallbackReason, err := resolveFinalCandidate(results, ""); err == nil && fallbackID != "" {
-			return fallbackID, fmt.Sprintf("selected final candidate %q was not applyable; fallback selected %s", selectedWorkerID, fallbackReason), nil
-		}
-		return "", "", fmt.Errorf("selected final candidate %q is not a successful worker with candidate changes", selectedWorkerID)
-	}
-	switch len(candidates) {
-	case 0:
-		return "", "", nil
-	case 1:
-		return candidates[0].WorkerID, "only successful worker with candidate changes", nil
-	}
-	leaves := candidateLeaves(candidates)
-	if len(leaves) == 1 {
-		return leaves[0].WorkerID, "only remaining candidate leaf after dependency lineage", nil
-	}
-	ids := make([]string, 0, len(leaves))
-	for _, leaf := range leaves {
-		ids = append(ids, leaf.WorkerID)
-	}
-	return "", "", fmt.Errorf("multiple competing final candidates remain (%s); the orchestrator must select finalCandidateWorkerId or schedule a consolidation/validation worker", strings.Join(ids, ", "))
-}
-
-func selectedCandidateAncestor(results []WorkerTurnResult, selectedWorkerID string) string {
-	byID := map[string]WorkerTurnResult{}
-	for _, result := range results {
-		byID[result.WorkerID] = result
-	}
-	current, ok := byID[selectedWorkerID]
-	if !ok || current.Status != core.WorkerSucceeded {
-		return ""
-	}
-	seen := map[string]bool{selectedWorkerID: true}
-	for strings.TrimSpace(current.BaseWorkerID) != "" {
-		parentID := current.BaseWorkerID
-		if seen[parentID] {
-			return ""
-		}
-		seen[parentID] = true
-		parent, ok := byID[parentID]
-		if !ok {
-			return ""
-		}
-		if parent.Status == core.WorkerSucceeded && resultHasCandidateChanges(parent) {
-			return parent.WorkerID
-		}
-		current = parent
-	}
-	return ""
-}
-
 func candidateResults(results []WorkerTurnResult) []WorkerTurnResult {
 	candidates := []WorkerTurnResult{}
 	for _, result := range results {
@@ -230,26 +164,6 @@ func candidateResults(results []WorkerTurnResult) []WorkerTurnResult {
 	return candidates
 }
 
-func candidateLeaves(candidates []WorkerTurnResult) []WorkerTurnResult {
-	candidateIDs := map[string]bool{}
-	for _, candidate := range candidates {
-		candidateIDs[candidate.WorkerID] = true
-	}
-	hasCandidateChild := map[string]bool{}
-	for _, candidate := range candidates {
-		if candidateIDs[candidate.BaseWorkerID] {
-			hasCandidateChild[candidate.BaseWorkerID] = true
-		}
-	}
-	leaves := []WorkerTurnResult{}
-	for _, candidate := range candidates {
-		if !hasCandidateChild[candidate.WorkerID] {
-			leaves = append(leaves, candidate)
-		}
-	}
-	return leaves
-}
-
 func latestCandidateWorkerID(results []WorkerTurnResult) string {
 	for i := len(results) - 1; i >= 0; i-- {
 		result := results[i]
@@ -258,28 +172,6 @@ func latestCandidateWorkerID(results []WorkerTurnResult) string {
 		}
 	}
 	return ""
-}
-
-func latestCandidateLeaf(results []WorkerTurnResult) (string, string) {
-	return latestCandidateLeafExcluding(results, nil)
-}
-
-func latestCandidateLeafExcluding(results []WorkerTurnResult, blocked map[string]string) (string, string) {
-	leaves := candidateLeaves(candidateResults(results))
-	if len(leaves) == 0 {
-		return "", ""
-	}
-	for i := len(results) - 1; i >= 0; i-- {
-		for _, leaf := range leaves {
-			if _, isBlocked := blocked[leaf.WorkerID]; isBlocked {
-				continue
-			}
-			if results[i].WorkerID == leaf.WorkerID {
-				return leaf.WorkerID, "selected latest successful candidate leaf after ambiguous deterministic fallback"
-			}
-		}
-	}
-	return "", ""
 }
 
 func resultHasCandidateChanges(result WorkerTurnResult) bool {
