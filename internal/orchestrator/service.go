@@ -1167,6 +1167,9 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 		if !taskPlanningStatusIsLatest(snapshot, task.ID) {
 			continue
 		}
+		if err := s.completeInterruptedObjectiveRoutines(ctx, snapshot, task.ID, "superseded by startup planning recovery"); err != nil {
+			return err
+		}
 		if resumingPullRequestFollowUp(snapshot, task.ID) {
 			_, err := s.append(ctx, core.Event{
 				Type:   core.EventTaskAction,
@@ -1261,6 +1264,28 @@ func (s *Service) recoverOrphanedPlanningTasks(ctx context.Context, snapshot cor
 		if err := s.startObjectiveRoutine(ctx, task, "objective.plan", "Restart initial planning after daemon restart.", func(taskCtx context.Context) {
 			s.runTask(taskCtx, task)
 		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) completeInterruptedObjectiveRoutines(ctx context.Context, snapshot core.Snapshot, taskID string, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "superseded by startup recovery"
+	}
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID != taskID || isTerminalWorkItemStatus(item.Status) {
+			continue
+		}
+		if strings.TrimSpace(item.TargetKind) != "objective" || strings.TrimSpace(item.TargetID) != taskID {
+			continue
+		}
+		if strings.TrimSpace(item.WorkerID) != "" {
+			continue
+		}
+		if err := s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemFailed, "", reason); err != nil {
 			return err
 		}
 	}

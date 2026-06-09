@@ -1205,6 +1205,36 @@ func TestSSHRunnerPrepareCheckoutPrefersExistingUpstreamRemote(t *testing.T) {
 	}
 }
 
+func TestSSHRunnerPrepareCheckoutSerializesSharedCheckoutMutation(t *testing.T) {
+	executor := &fakeRemoteExecutor{}
+	runner := SSHRunner{Executor: executor}
+	if _, err := runner.PrepareCheckout(context.Background(), TargetConfig{ID: "vm", Kind: TargetKindSSH, Host: "vm"}, RemoteCheckoutSpec{
+		RepoURL:     "https://github.com/denoland/deno.git",
+		WorkDir:     "/srv/aged/repos/deno",
+		DefaultBase: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.commands) == 0 {
+		t.Fatal("missing prepare command")
+	}
+	joined := strings.Join(executor.commands[0], " ")
+	for _, want := range []string{
+		`lock_path="$lock_parent/.aged-${lock_name}.checkout.lock"`,
+		`flock -w 300 9`,
+		`while ! mkdir "$lock_dir"`,
+		`rmdir "$lock_dir"`,
+		`git fetch "$fetch_remote" --prune`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("prepare command missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Index(joined, `lock_path="$lock_parent/.aged-${lock_name}.checkout.lock"`) > strings.Index(joined, `git fetch "$fetch_remote" --prune`) {
+		t.Fatalf("checkout lock must be acquired before fetch:\n%s", joined)
+	}
+}
+
 func TestSSHRunnerPrepareCheckoutFetchesPullRequestHeadRef(t *testing.T) {
 	executor := &fakeRemoteExecutor{}
 	runner := SSHRunner{Executor: executor}

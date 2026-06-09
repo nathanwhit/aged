@@ -8109,6 +8109,7 @@ func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 	defer store.Close()
 
 	taskID := "task-orphan-planning"
+	oldWorkItemID := "old-objective-plan"
 	if _, err := store.Append(ctx, core.Event{
 		Type:   core.EventTaskCreated,
 		TaskID: taskID,
@@ -8124,6 +8125,30 @@ func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
 			"status": core.TaskPlanning,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventWorkItemQueued,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":         oldWorkItemID,
+			"kind":       "objective.plan",
+			"targetKind": "objective",
+			"targetId":   taskID,
+			"reason":     "interrupted initial planning",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventWorkItemStarted,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":         oldWorkItemID,
+			"leaseOwner": "daemon:local",
+			"leaseUntil": time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
 		}),
 	}); err != nil {
 		t.Fatal(err)
@@ -8150,6 +8175,16 @@ func TestRecoverRemoteWorkersRestartsGenericOrphanedPlanningTask(t *testing.T) {
 	}
 	if hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
 		t.Fatalf("planning recovery should not ask for user input")
+	}
+	oldWorkItem, ok := workItemByIDFromSnapshot(snapshot, taskID, oldWorkItemID)
+	if !ok {
+		t.Fatalf("missing old planning work item")
+	}
+	if oldWorkItem.Status != core.WorkItemFailed {
+		t.Fatalf("old planning work item status = %q, want failed", oldWorkItem.Status)
+	}
+	if !strings.Contains(oldWorkItem.Error, "superseded by startup planning recovery") {
+		t.Fatalf("old planning work item error = %q", oldWorkItem.Error)
 	}
 }
 
