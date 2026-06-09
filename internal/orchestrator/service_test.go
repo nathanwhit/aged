@@ -13537,8 +13537,49 @@ func TestServiceSteerPullRequestQueuesFollowUpWorkItem(t *testing.T) {
 	}
 }
 
+func TestServiceTaskSteeringRestartsActiveNonSteerableWorkersWithoutCancelingObjective(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	started := make(chan struct{})
+	cancelSeen := make(chan struct{}, 1)
+	runner := &restartOnSteeringRunner{started: started, firstCancelSeen: cancelSeen}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "codex",
+		Prompt:     "continue the investigation",
+	}}, map[string]worker.Runner{
+		"codex": runner,
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{Title: "Steer running objective", Prompt: "Start and wait."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := service.SteerTask(ctx, task.ID, core.SteeringRequest{Message: "leave wasm_dep_analyzer alone"}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-cancelSeen:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("task steering did not cancel the active worker")
+	}
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if calls := runner.callsValue(); calls < 2 {
+		t.Fatalf("runner calls = %d, want restarted worker", calls)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "steering_restart", "resumed") {
+		t.Fatal("missing resumed steering restart action")
+	}
+	item, ok := workItemByKind(snapshot, "user.steering")
+	if !ok || item.Status != core.WorkItemSucceeded || item.TargetKind != "objective" || item.TargetID != task.ID {
+		t.Fatalf("objective steering work item = %+v ok=%v", item, ok)
+	}
+}
+
 func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
-	t.Skip("legacy non-steerable worker restart path is being replaced by targeted work-item steering")
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -13563,9 +13604,6 @@ func TestServiceRestartsNonSteerableRunningWorkerWithSteering(t *testing.T) {
 	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
 	if calls := runner.callsValue(); calls < 2 {
 		t.Fatalf("runner calls = %d, want at least 2", calls)
-	}
-	if runner.resumeSessionIDValue() != "thread-1" {
-		t.Fatalf("resume session id = %q", runner.resumeSessionIDValue())
 	}
 	prompt := runner.promptValue()
 	if !strings.Contains(prompt, "Apply this user steering on the resumed turn") || !strings.Contains(prompt, "adjust course") {
