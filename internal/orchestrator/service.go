@@ -7048,6 +7048,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 		}
 		return false, results, nil
 	case "finish_objective":
+		if reason := s.unpublishedCandidateCompletionBlockReason(ctx, task.ID, results); reason != "" {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":   action.Kind,
+				"when":   nonEmpty(action.When, "after_success"),
+				"reason": reason,
+				"inputs": action.Inputs,
+				"status": "rejected",
+			}); err != nil {
+				return false, results, err
+			}
+			return true, results, nil
+		}
 		summary := stringMetadata(action.Inputs, "summary")
 		if summary == "" {
 			summary = action.Reason
@@ -8547,8 +8559,26 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				stalledTurns++
 				continue
 			}
+			if reason := unpublishedCandidateCompletionBlockReasonFromSnapshot(stateSnapshot, task.ID, results); reason != "" {
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", results
+				}
+				recoveryHint = reason
+				stalledTurns++
+				continue
+			}
 			return true, decision.Rationale, results
 		case "finish_objective":
+			if reason := unpublishedCandidateCompletionBlockReasonFromSnapshot(stateSnapshot, task.ID, results); reason != "" {
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", results
+				}
+				recoveryHint = reason
+				stalledTurns++
+				continue
+			}
 			if err := s.finishObjectiveFromReplan(ctx, task, decision); err != nil {
 				_ = s.failTask(ctx, task.ID, err)
 			}
@@ -8714,6 +8744,50 @@ func (s *Service) finishObjectiveFromReplan(ctx context.Context, task core.Task,
 		return err
 	}
 	return s.setTaskStatus(ctx, task.ID, core.TaskSucceeded)
+}
+
+func unpublishedCandidateCompletionBlockReasonFromSnapshot(snapshot core.Snapshot, taskID string, results []WorkerTurnResult) string {
+	task, ok := findTask(snapshot, taskID)
+	if !ok || !taskIsBroadObjective(task) {
+		return ""
+	}
+	published := map[string]bool{}
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		metadata := map[string]any{}
+		if len(pr.Metadata) > 0 {
+			_ = json.Unmarshal(pr.Metadata, &metadata)
+		}
+		if workerID := strings.TrimSpace(stringMetadata(metadata, "workerId")); workerID != "" {
+			published[workerID] = true
+		}
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if result.Status != core.WorkerSucceeded || !resultHasCandidateChanges(result) {
+			continue
+		}
+		workerID := strings.TrimSpace(result.WorkerID)
+		if workerID != "" && published[workerID] {
+			continue
+		}
+		files := workspaceChangedFilePaths(result.Changes.ChangedFiles)
+		if len(files) == 0 {
+			files = []string{"candidate diff"}
+		}
+		return fmt.Sprintf("successful worker %s has unpublished candidate changes (%s); publish, update, or explicitly continue with another work item before finishing the objective", nonEmpty(workerID, "unknown"), strings.Join(files, ", "))
+	}
+	return ""
+}
+
+func (s *Service) unpublishedCandidateCompletionBlockReason(ctx context.Context, taskID string, results []WorkerTurnResult) string {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return ""
+	}
+	return unpublishedCandidateCompletionBlockReasonFromSnapshot(snapshot, taskID, results)
 }
 
 func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, []WorkerTurnResult) {
