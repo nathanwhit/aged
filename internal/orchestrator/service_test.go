@@ -1696,6 +1696,89 @@ func TestServiceRetriesFailedPublishPullRequestAction(t *testing.T) {
 	}
 }
 
+func TestServiceContinueAfterPublishStartsIndependentWorkItemFromSource(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{
+		plan: Plan{
+			Rationale: "ship the first slice",
+			WorkItems: []WorkItemRequest{{
+				ID:         "first-slice",
+				Kind:       "objective.implement",
+				Reason:     "implement the first independent slice",
+				Prompt:     "make the first change",
+				TargetKind: "objective",
+				WorkerKind: "change",
+			}},
+			Actions: []PlanAction{{
+				Kind:     "publish_pull_request",
+				When:     "after_success",
+				Reason:   "publish the first slice and continue the broader objective",
+				WorkerID: "first-slice",
+				Inputs: map[string]any{
+					"repo":                 "owner/repo",
+					"title":                "Implement first slice",
+					"body":                 "## Summary\n- Implement the first slice.\n\n## Validation\n- Worker completed.",
+					"continueAfterPublish": true,
+				},
+			}},
+		},
+		decisions: []ReplanDecision{{
+			Action:    "continue",
+			Rationale: "start the next independent slice",
+			Plan: &Plan{
+				Rationale: "plan the next slice independently",
+				WorkItems: []WorkItemRequest{{
+					ID:         "next-slice",
+					Kind:       "objective.implement",
+					Reason:     "implement the next independent slice",
+					Prompt:     "make the next change from the current source checkout",
+					TargetKind: "objective",
+					WorkerKind: "change",
+				}},
+			},
+		}},
+	}
+	service, publisher := newPRPublishingService(t, store, prPublishingServiceOptions{
+		brain: brain,
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
+		},
+	})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Broad UI objective",
+		Prompt: "Publish independent UI slices and keep going.",
+		Metadata: core.MustJSON(map[string]any{
+			"objectiveMode": "broad",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventPayloadContains(snapshot.Events, core.EventWorkerCreated, task.ID, "next-slice")
+	}, func(snapshot core.Snapshot) string {
+		return "missing next independent slice worker:\n" + taskEventSummary(snapshot.Events, task.ID)
+	})
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want first intermediate PR only", publisher.publishCalls)
+	}
+	for _, event := range snapshot.Events {
+		if event.Type != core.EventWorkerCreated || event.TaskID != task.ID || !strings.Contains(string(event.Payload), "next-slice") {
+			continue
+		}
+		if strings.Contains(string(event.Payload), `"baseWorkerID"`) || strings.Contains(string(event.Payload), `"baseWorkspaceCWD"`) {
+			t.Fatalf("next independent slice inherited previous worker workspace: %s", event.Payload)
+		}
+		return
+	}
+	t.Fatal("missing next independent slice worker.created event")
+}
+
 func TestServicePlanActionCanPublishPullRequestAndContinue(t *testing.T) {
 	t.Skip("legacy publish-and-continue assertions were replaced by explicit durable work item actions")
 	ctx := context.Background()
@@ -12530,7 +12613,7 @@ func TestServiceDynamicReplanFollowUpHandsOffLocalBaseToRemoteTarget(t *testing.
 			Text: "local candidate ready",
 		}},
 	}
-	brain := &replanningBrain{
+	brain := &baseHandoffReplanningBrain{
 		plan: Plan{
 			WorkerKind: "codex",
 			Prompt:     "produce the local candidate",
@@ -12538,19 +12621,9 @@ func TestServiceDynamicReplanFollowUpHandsOffLocalBaseToRemoteTarget(t *testing.
 				"retryTargetID": "local",
 			},
 		},
-		decisions: []ReplanDecision{
-			{
-				Action:    "continue",
-				Rationale: "validate on top of the candidate",
-				Plan: &Plan{
-					WorkerKind: "codex",
-					Prompt:     "validate the local candidate",
-				},
-			},
-			{
-				Action:    "complete",
-				Rationale: "validation completed",
-			},
+		followUp: Plan{
+			WorkerKind: "codex",
+			Prompt:     "validate the local candidate",
 		},
 	}
 	targets := NewTargetRegistry([]TargetConfig{
@@ -16073,6 +16146,33 @@ func (b *replanningBrain) Replan(_ context.Context, _ core.Task, state Orchestra
 	decision := b.decisions[0]
 	b.decisions = b.decisions[1:]
 	return testDecisionWithImplicitWorkItem(decision), nil
+}
+
+type baseHandoffReplanningBrain struct {
+	plan     Plan
+	followUp Plan
+	states   []OrchestrationState
+}
+
+func (b *baseHandoffReplanningBrain) Plan(context.Context, core.Task, []string) (Plan, error) {
+	return testPlanWithImplicitWorkItem(b.plan), nil
+}
+
+func (b *baseHandoffReplanningBrain) Replan(_ context.Context, _ core.Task, state OrchestrationState) (ReplanDecision, error) {
+	b.states = append(b.states, state)
+	if len(b.states) > 1 {
+		return ReplanDecision{Action: "complete", Rationale: "validation completed"}, nil
+	}
+	plan := testPlanWithImplicitWorkItem(b.followUp)
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]any{}
+	}
+	plan.Metadata["baseWorkerID"] = latestCandidateWorkerID(state.Results)
+	return ReplanDecision{
+		Action:    "continue",
+		Rationale: "validate on top of the candidate",
+		Plan:      &plan,
+	}, nil
 }
 
 type completionReviewBrain struct {
