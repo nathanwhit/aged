@@ -60,6 +60,16 @@ type TaskMode = "one-shot" | "objective" | "loop";
 
 type InitialSnapshotStatus = "loading" | "ready" | "error";
 
+type AttentionTone = "good" | "info" | "warning" | "danger";
+
+type TaskAttentionItem = {
+  tone: AttentionTone;
+  icon: React.ReactNode;
+  label: string;
+  title: string;
+  detail: string;
+};
+
 const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
@@ -493,7 +503,7 @@ function App() {
       <header className="topbar">
         <div>
           <h1>aged</h1>
-          <p>Agent orchestration</p>
+          <p>Agent orchestration dashboard</p>
         </div>
         <div className="topbar-actions">
           <span className={connected ? "pill ok" : "pill"}>{connected ? "Live" : "Offline"}</span>
@@ -647,8 +657,8 @@ function DashboardOverview({
             : "Create or select a task to inspect it."}
         </small>
       </div>
-      <OverviewMetric label="Active" value={String(activeTasks.length)} />
-      <OverviewMetric label="Running" value={String(runningWorkers || progress.running)} />
+      <OverviewMetric label="Active Tasks" value={String(activeTasks.length)} />
+      <OverviewMetric label="Running Workers" value={String(runningWorkers || progress.running)} />
       <OverviewMetric label="Waiting" value={String(waitingWorkers || progress.waiting)} />
       <OverviewMetric label="Failed" value={String(failedTasks)} tone={failedTasks ? "bad" : undefined} />
     </section>
@@ -1152,6 +1162,8 @@ function TaskComposer({
   const [loopRole, setLoopRole] = useState("maintenance_pr_loop");
   const [loopIntervalSeconds, setLoopIntervalSeconds] = useState("300");
   const [busy, setBusy] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const hasAdvancedSelection = Boolean(promptSetId || requiredTargetID || taskMode !== "one-shot");
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -1185,6 +1197,7 @@ function TaskComposer({
       setLoopWorkerKind("codex");
       setLoopRole("maintenance_pr_loop");
       setLoopIntervalSeconds("300");
+      setAdvancedOpen(false);
     } catch (err) { onError(errorMessage(err)); } finally {
       setBusy(false);
       onStartSettled();
@@ -1214,60 +1227,68 @@ function TaskComposer({
         <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Auto-generated if blank" />
       </label>
       <label>
-        Prompt set
-        <select value={promptSetId} onChange={(event) => setPromptSetId(event.target.value)}>
-          <option value="">Default prompt set</option>
-          {promptSets.filter((promptSet) => !promptSet.builtIn).map((promptSet) => (
-            <option key={promptSet.id} value={promptSet.id}>
-              {promptSet.name}{promptSet.default ? " (default)" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-      <TargetPinSelect value={requiredTargetID} targets={targets} onChange={setRequiredTargetID} />
-      <label>
         Prompt
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Describe the development task..." required />
       </label>
-      <fieldset className="task-mode-control">
-        <legend>Run mode</legend>
-        <label className={taskMode === "one-shot" ? "task-mode-option selected" : "task-mode-option"}>
-          <input type="radio" name="task-mode" value="one-shot" checked={taskMode === "one-shot"} onChange={() => setTaskMode("one-shot")} />
-          <Play size={16} />
-          <span>One-shot</span>
-        </label>
-        <label className={taskMode === "objective" ? "task-mode-option selected" : "task-mode-option"}>
-          <input type="radio" name="task-mode" value="objective" checked={taskMode === "objective"} onChange={() => setTaskMode("objective")} />
-          <FolderPlus size={16} />
-          <span>Objective</span>
-        </label>
-        <label className={taskMode === "loop" ? "task-mode-option selected" : "task-mode-option"}>
-          <input type="radio" name="task-mode" value="loop" checked={taskMode === "loop"} onChange={() => setTaskMode("loop")} />
-          <RefreshCw size={16} />
-          <span>Durable loop</span>
-        </label>
-      </fieldset>
-      {taskMode === "loop" ? (
-        <div className="loop-config">
+      <details className="composer-advanced" open={advancedOpen || hasAdvancedSelection} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+        <summary>
+          <span>Advanced</span>
+          <small>{hasAdvancedSelection ? "Custom settings active" : "Defaults"}</small>
+        </summary>
+        <div className="composer-advanced-content">
           <label>
-            Worker kind
-            <input list="loop-worker-kinds" value={loopWorkerKind} onChange={(event) => setLoopWorkerKind(event.target.value)} />
-            <datalist id="loop-worker-kinds">
-              <option value="codex" />
-              <option value="claude" />
-              <option value="mock" />
-            </datalist>
+            Prompt set
+            <select value={promptSetId} onChange={(event) => setPromptSetId(event.target.value)}>
+              <option value="">Default prompt set</option>
+              {promptSets.filter((promptSet) => !promptSet.builtIn).map((promptSet) => (
+                <option key={promptSet.id} value={promptSet.id}>
+                  {promptSet.name}{promptSet.default ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
           </label>
-          <label>
-            Interval seconds
-            <input type="number" min="0" step="30" value={loopIntervalSeconds} onChange={(event) => setLoopIntervalSeconds(event.target.value)} />
-          </label>
-          <label className="loop-role-field">
-            Role
-            <input value={loopRole} onChange={(event) => setLoopRole(event.target.value)} />
-          </label>
+          <TargetPinSelect value={requiredTargetID} targets={targets} onChange={setRequiredTargetID} />
+          <fieldset className="task-mode-control">
+            <legend>Run mode</legend>
+            <label className={taskMode === "one-shot" ? "task-mode-option selected" : "task-mode-option"}>
+              <input type="radio" name="task-mode" value="one-shot" checked={taskMode === "one-shot"} onChange={() => setTaskMode("one-shot")} />
+              <Play size={16} />
+              <span>One-shot</span>
+            </label>
+            <label className={taskMode === "objective" ? "task-mode-option selected" : "task-mode-option"}>
+              <input type="radio" name="task-mode" value="objective" checked={taskMode === "objective"} onChange={() => setTaskMode("objective")} />
+              <FolderPlus size={16} />
+              <span>Objective</span>
+            </label>
+            <label className={taskMode === "loop" ? "task-mode-option selected" : "task-mode-option"}>
+              <input type="radio" name="task-mode" value="loop" checked={taskMode === "loop"} onChange={() => setTaskMode("loop")} />
+              <RefreshCw size={16} />
+              <span>Durable loop</span>
+            </label>
+          </fieldset>
+          {taskMode === "loop" ? (
+            <div className="loop-config">
+              <label>
+                Worker kind
+                <input list="loop-worker-kinds" value={loopWorkerKind} onChange={(event) => setLoopWorkerKind(event.target.value)} />
+                <datalist id="loop-worker-kinds">
+                  <option value="codex" />
+                  <option value="claude" />
+                  <option value="mock" />
+                </datalist>
+              </label>
+              <label>
+                Interval seconds
+                <input type="number" min="0" step="30" value={loopIntervalSeconds} onChange={(event) => setLoopIntervalSeconds(event.target.value)} />
+              </label>
+              <label className="loop-role-field">
+                Role
+                <input value={loopRole} onChange={(event) => setLoopRole(event.target.value)} />
+              </label>
+            </div>
+          ) : null}
         </div>
-      ) : null}
+      </details>
       <button className={busy ? "primary is-busy" : "primary"} disabled={busy} aria-busy={busy}>
         {busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
         {busy ? "Starting task" : "Start"}
@@ -1891,6 +1912,18 @@ function TaskDetail({
   const approvals = questions.length > 0 ? questionApprovalStates(questions) : approvalStates(events);
   const pendingApprovals = approvals.filter((approval) => !approval.decided).slice(0, 4);
   const taskError = task.error || latestTaskStatusError(events);
+  const pendingFeedback = pullRequestFeedback.filter((item) => item.status === "pending");
+  const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status)).length;
+  const activeNodes = nodes.filter((node) => !isTerminalWorkerStatus(node.status)).length;
+  const activeWorkItems = workItems.filter((item) => item.status === "queued" || item.status === "running").length;
+  const attentionItems = taskAttentionItems({
+    task,
+    taskError,
+    pendingApprovalCount: pendingApprovals.length,
+    pendingFeedbackCount: pendingFeedback.length,
+    workerUpdate,
+    activeCount: activeNodes || activeWorkers || activeWorkItems,
+  });
 
   useEffect(() => {
     setLoopIntervalInput(String(loopInterval));
@@ -1987,6 +2020,7 @@ function TaskDetail({
           )}
         </div>
       </details>
+      <TaskAttentionPanel items={attentionItems} />
       {(artifacts.length || task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []} />
       )}
@@ -2030,6 +2064,101 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
+    </section>
+  );
+}
+
+function taskAttentionItems({
+  task,
+  taskError,
+  pendingApprovalCount,
+  pendingFeedbackCount,
+  workerUpdate,
+  activeCount,
+}: {
+  task: Task;
+  taskError: string;
+  pendingApprovalCount: number;
+  pendingFeedbackCount: number;
+  workerUpdate: WorkerProgressUpdate | undefined;
+  activeCount: number;
+}): TaskAttentionItem[] {
+  if (taskError) {
+    return [{
+      tone: "danger",
+      icon: <CircleStop size={16} />,
+      label: "Blocked",
+      title: "Failure needs review",
+      detail: taskError,
+    }];
+  }
+  if (pendingApprovalCount > 0) {
+    return [{
+      tone: "warning",
+      icon: <MessageSquarePlus size={16} />,
+      label: "Waiting",
+      title: `${pendingApprovalCount} approval${pendingApprovalCount === 1 ? "" : "s"} pending`,
+      detail: "Answer the approval request to let orchestration continue.",
+    }];
+  }
+  if (pendingFeedbackCount > 0) {
+    return [{
+      tone: "warning",
+      icon: <GitPullRequest size={16} />,
+      label: "Review",
+      title: `${pendingFeedbackCount} PR feedback item${pendingFeedbackCount === 1 ? "" : "s"} pending`,
+      detail: "Pull request feedback is queued for follow-up work.",
+    }];
+  }
+  if (workerUpdate) {
+    return [{
+      tone: "info",
+      icon: <Bot size={16} />,
+      label: "Now",
+      title: workerUpdate.title,
+      detail: workerUpdate.text || workerUpdate.label || "Worker is active.",
+    }];
+  }
+  if (activeCount > 0) {
+    return [{
+      tone: "info",
+      icon: <Activity size={16} />,
+      label: "Active",
+      title: `${activeCount} active work item${activeCount === 1 ? "" : "s"}`,
+      detail: "Work is running or queued for this task.",
+    }];
+  }
+  if (task.status === "succeeded") {
+    return [{
+      tone: "good",
+      icon: <Check size={16} />,
+      label: "Done",
+      title: "Task completed",
+      detail: task.updatedAt ? `Last updated ${new Date(task.updatedAt).toLocaleTimeString()}` : "No action needed.",
+    }];
+  }
+  return [{
+    tone: "info",
+    icon: <Activity size={16} />,
+    label: "Status",
+    title: humanizeKey(task.status),
+    detail: task.updatedAt ? `Last updated ${new Date(task.updatedAt).toLocaleTimeString()}` : "Awaiting the next event.",
+  }];
+}
+
+function TaskAttentionPanel({ items }: { items: TaskAttentionItem[] }) {
+  return (
+    <section className="task-attention" aria-label="Task attention">
+      {items.map((item) => (
+        <article key={`${item.label}:${item.title}`} className={`task-attention-card ${item.tone}`}>
+          <span className="task-attention-icon">{item.icon}</span>
+          <div>
+            <span>{item.label}</span>
+            <strong>{item.title}</strong>
+            <p>{item.detail}</p>
+          </div>
+        </article>
+      ))}
     </section>
   );
 }
