@@ -1246,11 +1246,16 @@ small {
 
 .work-item-title,
 .work-item-card > div:first-child,
-.work-item-meta {
+.work-item-meta,
+.work-item-card-header,
+.work-item-card-heading,
+.session-card-header,
+.session-status-group {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
 .work-item-title {
@@ -1287,8 +1292,32 @@ small {
   padding: 10px;
 }
 
-.work-item-card > div:first-child {
+.work-item-card > div:first-child,
+.work-item-card-header,
+.session-card-header {
   justify-content: space-between;
+}
+
+.work-item-card-header,
+.session-card-header {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.work-item-card-heading,
+.session-main {
+  align-content: start;
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.work-item-card-heading strong,
+.session-main strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .wide-work-card {
@@ -1355,12 +1384,6 @@ small {
   margin: 0;
 }
 
-.work-item-card-actions {
-  align-items: center;
-  display: inline-flex;
-  gap: 6px;
-}
-
 .work-item-card strong,
 .work-item-card p {
   overflow-wrap: anywhere;
@@ -1371,44 +1394,58 @@ small {
   margin: 0;
 }
 
-.session-main,
-.session-meta {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-.session-main {
-  justify-content: space-between;
-}
-
+.work-item-card-actions,
 .session-actions {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  justify-content: flex-end;
-}
-
-.session-main > div {
-  align-items: baseline;
-  display: flex;
-  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
 }
 
+.work-item-card-actions {
+  background: #fbfcfe;
+  border: 1px solid #edf1f6;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.session-actions {
+  background: #fbfcfe;
+  border: 1px solid #edf1f6;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.work-item-card-actions .inline-steer-form {
+  flex: 1 1 260px;
+}
+
+.work-item-card-actions .icon-button,
+.session-actions .icon-button {
+  flex: 0 0 auto;
+}
+
+.work-item-card-actions .icon-button:focus-visible,
+.work-item-card-actions button:focus-visible,
+.session-actions .icon-button:focus-visible,
+.session-actions button:focus-visible {
+  box-shadow: 0 0 0 3px rgb(31 79 122 / 18%);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
 .session-main small,
-.session-meta {
+.session-status-group {
   color: #687384;
   font-size: 12px;
 }
 
-.session-meta span {
+.session-status-group span:not(.status) {
   background: #f1f5f9;
   border-radius: 999px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 2px 7px;
 }
 
@@ -1451,8 +1488,10 @@ small {
 
 .session-steer {
   display: grid;
+  flex: 1 1 260px;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
+  min-width: min(100%, 220px);
 }
 
 .session-steer input {

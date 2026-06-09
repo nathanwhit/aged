@@ -2230,40 +2230,46 @@ function WorkItemQueue({ taskId, items, onCancel, onSteer, onError }: { taskId: 
         <span>{activeCount} active</span>
       </div>
       <div className="work-item-list">
-        {sorted.slice(0, 8).map((item) => (
-          <article key={item.id} className="work-item-card">
-            <div>
-              <strong>{humanizeKey(item.kind)}</strong>
-              <span className="work-item-card-actions">
-                <small>{new Date(item.updatedAt || item.createdAt).toLocaleTimeString()}</small>
-                {(item.status === "queued" || item.status === "running") && (
-                  <button className="icon-button danger small" disabled={Boolean(canceling[item.id])} onClick={() => cancelItem(item)} title="Cancel work item">
-                    <CircleStop size={14} />
-                  </button>
-                )}
-              </span>
-            </div>
-            <div className="work-item-meta">
-              <Status value={item.status} />
-              {item.targetKind && <span className="pill">{humanizeKey(item.targetKind)}</span>}
-              {item.targetId && <span className="pill">{item.targetId}</span>}
-              {item.workerId && <span className="pill">Worker {item.workerId.slice(0, 8)}</span>}
-              {item.leaseOwner && <span className="pill">Lease {item.leaseOwner}</span>}
-              {item.attempt ? <span className="pill">Attempt {item.attempt}</span> : null}
-              {item.leaseUntil && <span className="pill">Until {new Date(item.leaseUntil).toLocaleTimeString()}</span>}
-            </div>
-            {item.reason && <p>{item.reason}</p>}
-            {item.error && <TruncatedBlock label="Work item error" value={item.error} className="tool-output failed" limit={900} />}
-            {(item.status === "queued" || item.status === "running" || item.status === "failed") && (
-              <form className="inline-steer-form" onSubmit={(event) => steerItem(event, item)}>
-                <input value={steering[item.id] ?? ""} onChange={(event) => setSteering((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="Steer this work item..." required />
-                <button className="secondary compact" disabled={Boolean(steeringBusy[item.id]) || !(steering[item.id] ?? "").trim()}>
-                  {steeringBusy[item.id] ? "Queued" : "Steer"}
-                </button>
-              </form>
-            )}
-          </article>
-        ))}
+        {sorted.slice(0, 8).map((item) => {
+          const isActive = item.status === "queued" || item.status === "running";
+          const canSteer = isActive || item.status === "failed";
+          return (
+            <article key={item.id} className="work-item-card">
+              <div className="work-item-card-header">
+                <div className="work-item-card-heading">
+                  <strong>{humanizeKey(item.kind)}</strong>
+                  <small>Updated {new Date(item.updatedAt || item.createdAt).toLocaleTimeString()}</small>
+                </div>
+              </div>
+              <div className="work-item-meta" role="group" aria-label={`${humanizeKey(item.kind)} status and metadata`}>
+                <Status value={item.status} />
+                {item.targetKind && <span className="pill">{humanizeKey(item.targetKind)}</span>}
+                {item.targetId && <span className="pill">{item.targetId}</span>}
+                {item.workerId && <span className="pill">Worker {item.workerId.slice(0, 8)}</span>}
+                {item.leaseOwner && <span className="pill">Lease {item.leaseOwner}</span>}
+                {item.attempt ? <span className="pill">Attempt {item.attempt}</span> : null}
+                {item.leaseUntil && <span className="pill">Until {new Date(item.leaseUntil).toLocaleTimeString()}</span>}
+              </div>
+              {item.reason && <p>{item.reason}</p>}
+              {item.error && <TruncatedBlock label="Work item error" value={item.error} className="tool-output failed" limit={900} />}
+              {canSteer && (
+                <div className="work-item-card-actions" role="group" aria-label={`${humanizeKey(item.kind)} actions`}>
+                  {isActive && (
+                    <button type="button" className="icon-button danger small" disabled={Boolean(canceling[item.id])} onClick={() => cancelItem(item)} title="Cancel work item" aria-label={`Cancel ${humanizeKey(item.kind)} work item`}>
+                      <CircleStop size={14} />
+                    </button>
+                  )}
+                  <form className="inline-steer-form" onSubmit={(event) => steerItem(event, item)}>
+                    <input aria-label={`Steer ${humanizeKey(item.kind)} work item`} value={steering[item.id] ?? ""} onChange={(event) => setSteering((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="Steer this work item..." required />
+                    <button className="secondary compact" disabled={Boolean(steeringBusy[item.id]) || !(steering[item.id] ?? "").trim()}>
+                      {steeringBusy[item.id] ? "Queued" : "Steer"}
+                    </button>
+                  </form>
+                </div>
+              )}
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -2567,23 +2573,18 @@ function SessionQueue({
           const scratchLocation = session.sharedWorkerDir || session.sharedArtifactsDir || session.sharedRoot || "";
           const updatedAt = session.updatedAt || session.startedAt || session.createdAt;
           const currentActionAt = session.currentActionAt || updatedAt;
+          const title = session.role ? humanizeKey(session.role) : session.workerKind || "Worker";
+          const isActive = !isTerminalWorkerStatus(session.status);
           return (
             <article key={session.id} className="session-card">
-              <div className="session-main">
-                <div>
-                  <strong>{session.role ? humanizeKey(session.role) : session.workerKind || "Worker"}</strong>
+              <div className="session-card-header">
+                <div className="session-main">
+                  <strong>{title}</strong>
                   <small>{session.workerId.slice(0, 8)}</small>
                 </div>
-                <div className="session-actions">
-                  <Status value={session.status} />
-                  {!isTerminalWorkerStatus(session.status) && (
-                    <button className="icon-button danger small" disabled={Boolean(canceling[session.workerId])} onClick={() => cancelSession(session.workerId)} title="Cancel session">
-                      <CircleStop size={14} />
-                    </button>
-                  )}
-                </div>
               </div>
-              <div className="session-meta">
+              <div className="session-status-group" role="group" aria-label={`${title} session status and metadata`}>
+                <Status value={session.status} />
                 {session.targetKind && <span>{humanizeKey(session.targetKind)}</span>}
                 {session.targetId && <span>{session.targetId}</span>}
                 {session.remoteSession && <span>{session.remoteSession}</span>}
@@ -2602,13 +2603,18 @@ function SessionQueue({
                   {currentActionAt && <small>{new Date(currentActionAt).toLocaleTimeString()}</small>}
                 </div>
               )}
-              {!isTerminalWorkerStatus(session.status) && (
-                <form className="session-steer" onSubmit={(event) => steer(event, session.workerId)}>
-                  <input value={steering[session.workerId] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [session.workerId]: event.target.value }))} placeholder="Steer this session..." required />
-                  <button className="icon-button" title="Send session steering">
-                    <Send size={16} />
+              {isActive && (
+                <div className="session-actions" role="group" aria-label={`${title} session actions`}>
+                  <button type="button" className="icon-button danger small" disabled={Boolean(canceling[session.workerId])} onClick={() => cancelSession(session.workerId)} title="Cancel session" aria-label={`Cancel ${title} session`}>
+                    <CircleStop size={14} />
                   </button>
-                </form>
+                  <form className="session-steer" onSubmit={(event) => steer(event, session.workerId)}>
+                    <input aria-label={`Steer ${title} session`} value={steering[session.workerId] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [session.workerId]: event.target.value }))} placeholder="Steer this session..." required />
+                    <button className="icon-button" title="Send session steering" aria-label={`Send steering to ${title} session`}>
+                      <Send size={16} />
+                    </button>
+                  </form>
+                </div>
               )}
             </article>
           );
