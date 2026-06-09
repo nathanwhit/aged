@@ -55,6 +55,14 @@ button {
   cursor: pointer;
 }
 
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible {
+  outline: 3px solid rgb(31 79 122 / 52%);
+  outline-offset: 2px;
+}
+
 .app {
   min-height: 100vh;
   padding: 20px 24px 28px;
@@ -1029,6 +1037,14 @@ small {
   overflow-wrap: anywhere;
 }
 
+.detail-toolbar {
+  align-items: flex-start;
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+  min-width: min(420px, 100%);
+}
+
 .task-detail-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1044,9 +1060,23 @@ small {
   padding: 5px 8px;
 }
 
+.detail-statuses,
 .detail-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.detail-statuses {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.detail-actions {
+  background: #f8fafc;
+  border: 1px solid #dfe5ee;
+  border-radius: 8px;
+  padding: 4px;
 }
 
 .task-prompt-block {
@@ -1242,6 +1272,25 @@ small {
   display: grid;
   gap: 10px;
   padding: 12px;
+}
+
+.task-support-grid,
+.task-work-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  min-width: 0;
+}
+
+.task-support-grid > *,
+.task-work-grid > * {
+  min-width: 0;
+}
+
+.task-work-grid > .approval-panel,
+.task-work-grid > .worker-progress-spotlight,
+.task-work-grid > .wide-work {
+  grid-column: 1 / -1;
 }
 
 .work-item-title,
@@ -1752,13 +1801,13 @@ small {
 }
 
 .pr-card {
-  align-items: center;
+  align-items: start;
   background: #fbfcfe;
   border: 1px solid #dfe5ee;
   border-radius: 8px;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 12px;
 }
 
@@ -1782,6 +1831,18 @@ small {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: end;
+}
+
+.pr-statuses {
+  max-width: min(360px, 44vw);
+}
+
+.pr-actions {
+  background: #ffffff;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  grid-column: 2;
+  padding: 4px;
 }
 
 .pr-lease-row {
@@ -1945,13 +2006,13 @@ small {
 }
 
 .worker-card {
-  align-items: center;
+  align-items: start;
   background: #ffffff;
   border: 1px solid #dfe5ee;
   border-radius: 8px;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   padding: 12px;
 }
 
@@ -1971,6 +2032,22 @@ small {
   grid-column: 1 / -1;
   min-width: 0;
   padding-top: 10px;
+}
+
+.worker-card-status,
+.worker-card-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.worker-card-actions {
+  background: #f8fafc;
+  border: 1px solid #e5eaf1;
+  border-radius: 8px;
+  padding: 4px;
 }
 
 .worker-steer {
@@ -3205,7 +3282,10 @@ small {
     font-size: 18px;
   }
 
+  .detail-toolbar,
+  .detail-statuses,
   .detail-actions {
+    justify-items: stretch;
     justify-content: flex-start;
   }
 
@@ -3268,16 +3348,20 @@ small {
 
   .pr-statuses,
   .pr-actions {
+    grid-column: 1;
+    max-width: none;
     justify-content: start;
   }
 
-  .worker-card > .icon-button {
+  .worker-card-actions {
     grid-column: 2;
+    grid-row: 1 / span 2;
   }
 
-  .worker-card > .status {
+  .worker-card-status {
     grid-column: 1;
     grid-row: 2;
+    justify-content: flex-start;
   }
 
   .worker-event-line {
