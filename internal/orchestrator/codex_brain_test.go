@@ -415,6 +415,53 @@ func TestReviewPromptPayloadsCompactLargeCandidates(t *testing.T) {
 	t.Logf("completion review payload bytes: compact=%d raw=%d reduction=%.1fx", len(completionData), len(rawData), float64(len(rawData))/float64(len(completionData)))
 }
 
+func TestPublicationReviewPayloadSummarizesPublishDiffOnlyCandidate(t *testing.T) {
+	task := core.Task{ID: "task-1", Title: "Publish UI slice", Prompt: "Open a reviewable UI PR."}
+	candidate := WorkerTurnResult{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+		Changes: WorkspaceChanges{
+			PublishDiff: strings.Join([]string{
+				"diff --git a/web/src/main.tsx b/web/src/main.tsx",
+				"index 1111111..2222222 100644",
+				"--- a/web/src/main.tsx",
+				"+++ b/web/src/main.tsx",
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+				"diff --git a/web/src/styles.css b/web/src/styles.css",
+				"index 3333333..4444444 100644",
+				"--- a/web/src/styles.css",
+				"+++ b/web/src/styles.css",
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+			}, "\n"),
+		},
+	}
+
+	payload := publicationReviewPayload(task, candidate, PlanAction{Kind: "publish_pull_request"})
+	bounded, ok := payload["candidate"].(WorkerTurnResult)
+	if !ok {
+		t.Fatalf("candidate payload type = %T", payload["candidate"])
+	}
+	if !bounded.Changes.Dirty {
+		t.Fatalf("publish-diff-only candidate should be marked dirty for publication review")
+	}
+	if bounded.Changes.PublishDiff != "" {
+		t.Fatalf("publication review payload should not include raw publish diff")
+	}
+	if len(bounded.Changes.ChangedFiles) != 2 {
+		t.Fatalf("changed files = %+v, want two files from publish diff", bounded.Changes.ChangedFiles)
+	}
+	if bounded.Changes.ChangedFiles[0].Path != "web/src/main.tsx" || bounded.Changes.ChangedFiles[1].Path != "web/src/styles.css" {
+		t.Fatalf("unexpected changed files from publish diff: %+v", bounded.Changes.ChangedFiles)
+	}
+	if !strings.Contains(bounded.Changes.DiffStat, "Cumulative publish patch touches 2 file(s)") {
+		t.Fatalf("missing publish diff summary: %q", bounded.Changes.DiffStat)
+	}
+}
+
 func TestCodeReviewPromptPayloadBoundsDiff(t *testing.T) {
 	task := core.Task{ID: "task-1", Title: "Large candidate", Prompt: "Review a large candidate."}
 	candidate := largePromptCandidate()

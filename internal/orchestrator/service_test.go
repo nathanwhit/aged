@@ -1921,6 +1921,80 @@ func TestServiceReplanPublishesReadyCandidateBeforeNextWorkers(t *testing.T) {
 	}
 }
 
+func TestServicePlanWorkItemActionRunsBeforeDependentWorkItem(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	publisher := &fakePullRequestPublisher{}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		Rationale: "publish a first slice while continuing the objective",
+		Actions: []PlanAction{{
+			Kind:     "publish_pull_request",
+			When:     "after_success",
+			Reason:   "publish the first slice before planning the next slice",
+			WorkerID: "first_slice",
+			Inputs: map[string]any{
+				"repo":                 "owner/repo",
+				"title":                "Ship first UI slice",
+				"body":                 "Ship the first UI slice.",
+				"continueAfterPublish": true,
+			},
+		}},
+		WorkItems: []WorkItemRequest{{
+			ID:         "first_slice",
+			Kind:       "objective.implement",
+			TargetKind: "objective",
+			Reason:     "Produce a reviewable first slice.",
+			WorkerKind: "change",
+			Prompt:     "implement first slice",
+		}, {
+			ID:              "next_slice_plan",
+			Kind:            "objective.compose",
+			TargetKind:      "objective",
+			Reason:          "Plan the next slice after the first slice is published.",
+			WorkerKind:      "change",
+			Prompt:          "plan next slice",
+			DependsOn:       []string{"first_slice"},
+			ReasoningEffort: "medium",
+		}},
+	}}, map[string]worker.Runner{
+		"change": eventRunner{kind: "change", events: []worker.Event{{Kind: worker.EventResult, Text: "changed code"}}},
+	}, t.TempDir(), fakeWorkspaceManager{
+		cwd:        t.TempDir(),
+		sourceRoot: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/main.tsx", Status: "modified"}},
+		},
+	})
+	service.SetPullRequestPublisher(publisher)
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Broad UI objective",
+		Prompt: "Publish the first slice and continue.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForEventCount(t, store, core.EventExecutionPlanned, task.ID, 2)
+	if publisher.publishCalls != 1 {
+		t.Fatalf("publish calls = %d, want first slice published before dependent work", publisher.publishCalls)
+	}
+	publishEventID := firstEventIDWithPayloadValue(snapshot.Events, core.EventTaskAction, task.ID, "kind", "publish_pull_request")
+	if publishEventID == 0 {
+		t.Fatalf("missing publish action; actions:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	nextWorkerEventID := firstEventIDWithPayloadValue(snapshot.Events, core.EventExecutionPlanned, task.ID, "spawnID", "next_slice_plan")
+	if nextWorkerEventID == 0 {
+		t.Fatalf("missing next_slice_plan worker; events = %s", taskEventSummary(snapshot.Events, task.ID))
+	}
+	if publishEventID > nextWorkerEventID {
+		t.Fatalf("publish action event %d happened after dependent worker event %d", publishEventID, nextWorkerEventID)
+	}
+}
+
 func TestServiceIntermediatePullRequestKeepsObjectiveRunning(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

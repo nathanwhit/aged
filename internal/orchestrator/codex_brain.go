@@ -826,7 +826,7 @@ func completionReviewPayload(task core.Task, candidate WorkerTurnResult, reason 
 func publicationReviewPayload(task core.Task, candidate WorkerTurnResult, action PlanAction) map[string]any {
 	return map[string]any{
 		"task":              taskPromptPayload(task),
-		"candidate":         compactCandidateForReviewPrompt(candidate, false),
+		"candidate":         compactCandidateForPublicationReviewPrompt(candidate),
 		"publicationAction": action,
 	}
 }
@@ -1035,6 +1035,67 @@ func compactCandidateForReviewPrompt(result WorkerTurnResult, includeDiff bool) 
 	}
 	result.Changes.PublishDiff = ""
 	return result
+}
+
+func compactCandidateForPublicationReviewPrompt(result WorkerTurnResult) WorkerTurnResult {
+	rawPublishDiff := result.Changes.PublishDiff
+	result = compactCandidateForReviewPrompt(result, false)
+	if strings.TrimSpace(rawPublishDiff) != "" {
+		result.Changes.Dirty = true
+		if len(result.Changes.ChangedFiles) == 0 {
+			result.Changes.ChangedFiles = compactPublishDiffChangedFiles(rawPublishDiff)
+		}
+		if strings.TrimSpace(result.Changes.DiffStat) == "" {
+			result.Changes.DiffStat = publishDiffReviewSummary(result.Changes.ChangedFiles, rawPublishDiff)
+		}
+	}
+	return result
+}
+
+func compactPublishDiffChangedFiles(patch string) []WorkspaceChangedFile {
+	seen := map[string]bool{}
+	files := []WorkspaceChangedFile{}
+	for _, line := range strings.Split(patch, "\n") {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		path := strings.TrimPrefix(fields[3], "b/")
+		if path == "/dev/null" {
+			path = strings.TrimPrefix(fields[2], "a/")
+		}
+		path = strings.Trim(path, "\"")
+		if path == "" || path == "/dev/null" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		files = append(files, WorkspaceChangedFile{Path: path, Status: "modified"})
+		if len(files) == maxPromptChangedFiles {
+			files = append(files, WorkspaceChangedFile{Path: "... additional files omitted from publish diff ...", Status: "omitted"})
+			return files
+		}
+	}
+	return files
+}
+
+func publishDiffReviewSummary(files []WorkspaceChangedFile, patch string) string {
+	if len(files) == 0 {
+		return "Cumulative publish patch is present, but no file headers could be summarized."
+	}
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if file.Status == "omitted" {
+			continue
+		}
+		paths = append(paths, file.Path)
+	}
+	if len(paths) == 0 {
+		return "Cumulative publish patch is present."
+	}
+	return fmt.Sprintf("Cumulative publish patch touches %d file(s): %s.", len(paths), strings.Join(paths, ", "))
 }
 
 func compactPlanForPrompt(plan Plan) Plan {
