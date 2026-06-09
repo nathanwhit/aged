@@ -39,6 +39,7 @@ var (
 
 const (
 	taskCancelReasonStartupRecovery = "startup_worker_recovery"
+	taskCancelReasonSteeringRestart = "steering_restart"
 	taskCancelReasonUser            = "user_requested"
 )
 
@@ -93,15 +94,16 @@ type Service struct {
 	prPublisher   PullRequestPublisher
 	remoteApply   func(context.Context, core.Project, PreparedWorkspace, WorkspaceChanges) (WorkerApplyResult, error)
 
-	mu          sync.Mutex
-	prCommentMu sync.Mutex
-	cancels     map[string]context.CancelFunc
-	taskCancels map[string]context.CancelFunc
-	taskRuns    map[string]string
-	tasks       map[string]string
-	steering    map[string]chan string
-	remoteRuns  map[string]remoteRun
-	workerCaps  map[string]worker.Capabilities
+	mu                  sync.Mutex
+	prCommentMu         sync.Mutex
+	cancels             map[string]context.CancelFunc
+	taskCancels         map[string]context.CancelFunc
+	taskRuns            map[string]string
+	tasks               map[string]string
+	steering            map[string]chan string
+	remoteRuns          map[string]remoteRun
+	workerCaps          map[string]worker.Capabilities
+	workerCancelReasons map[string]string
 
 	steeringRestarts map[string]struct{}
 	activeWorkItems  map[string]struct{}
@@ -457,30 +459,31 @@ func NewServiceWithWorkspaceManagerAndTargets(store eventstore.Store, brain Brai
 		}}, "default")
 	}
 	service := &Service{
-		store:            store,
-		broker:           NewBroker(),
-		brain:            brain,
-		runners:          runners,
-		baseRunners:      maps.Clone(runners),
-		pluginRunners:    map[string]struct{}{},
-		workDir:          workDir,
-		projects:         projects,
-		plugins:          NewPluginRegistry(builtinPlugins()),
-		promptSets:       NewPromptSetRegistry(nil, ""),
-		workspaces:       workspaces,
-		targets:          targets,
-		sshRunner:        sshRunner,
-		prPublisher:      NewLocalPullRequestPublisher(),
-		remoteApply:      applyRemotePatch,
-		cancels:          map[string]context.CancelFunc{},
-		taskCancels:      map[string]context.CancelFunc{},
-		taskRuns:         map[string]string{},
-		tasks:            map[string]string{},
-		steering:         map[string]chan string{},
-		remoteRuns:       map[string]remoteRun{},
-		workerCaps:       map[string]worker.Capabilities{},
-		steeringRestarts: map[string]struct{}{},
-		activeWorkItems:  map[string]struct{}{},
+		store:               store,
+		broker:              NewBroker(),
+		brain:               brain,
+		runners:             runners,
+		baseRunners:         maps.Clone(runners),
+		pluginRunners:       map[string]struct{}{},
+		workDir:             workDir,
+		projects:            projects,
+		plugins:             NewPluginRegistry(builtinPlugins()),
+		promptSets:          NewPromptSetRegistry(nil, ""),
+		workspaces:          workspaces,
+		targets:             targets,
+		sshRunner:           sshRunner,
+		prPublisher:         NewLocalPullRequestPublisher(),
+		remoteApply:         applyRemotePatch,
+		cancels:             map[string]context.CancelFunc{},
+		taskCancels:         map[string]context.CancelFunc{},
+		taskRuns:            map[string]string{},
+		tasks:               map[string]string{},
+		steering:            map[string]chan string{},
+		remoteRuns:          map[string]remoteRun{},
+		workerCaps:          map[string]worker.Capabilities{},
+		workerCancelReasons: map[string]string{},
+		steeringRestarts:    map[string]struct{}{},
+		activeWorkItems:     map[string]struct{}{},
 	}
 	service.drivers = NewDriverRegistry(service)
 	return service
@@ -1578,6 +1581,7 @@ func (s *Service) recoverRemoteWorker(ctx context.Context, node core.ExecutionNo
 		delete(s.cancels, node.WorkerID)
 		delete(s.tasks, node.WorkerID)
 		delete(s.remoteRuns, node.WorkerID)
+		delete(s.workerCancelReasons, node.WorkerID)
 		s.mu.Unlock()
 	}()
 
@@ -2162,14 +2166,23 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 	if !ok {
 		return eventstore.ErrNotFound
 	}
-	_, err = s.append(ctx, core.Event{
+	event, err := s.append(ctx, core.Event{
 		Type:   core.EventTaskSteered,
 		TaskID: taskID,
 		Payload: core.MustJSON(map[string]any{
-			"message": req.Message,
+			"message":    req.Message,
+			"targetKind": "task",
+			"targetId":   taskID,
+			"reason":     "user_task_steering",
 		}),
 	})
 	if err != nil {
+		return err
+	}
+	if err := s.recordObjectiveSteeringWorkItem(ctx, taskID, event.ID, req.Message); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveActive, "user_steering", "User steering was recorded for objective replanning."); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -2202,14 +2215,22 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 		}
 	}
 	s.mu.Unlock()
-	restartWorkers := make([]activeWorkerControl, 0)
 	restartWorkerIDs := make([]string, 0)
 	for _, active := range activeWorkers {
 		if deliveredWorkerIDs[active.ID] {
 			continue
 		}
-		restartWorkers = append(restartWorkers, active)
 		restartWorkerIDs = append(restartWorkerIDs, active.ID)
+	}
+	if len(activeWorkers) > 0 {
+		_ = s.recordTaskAction(ctx, taskID, map[string]any{
+			"kind":               "objective_steering",
+			"status":             "queued",
+			"reason":             "user steering recorded for the next objective replanning turn",
+			"message":            req.Message,
+			"deliveredWorkerIds": sortedTrueKeys(deliveredWorkerIDs),
+			"restartWorkerIds":   restartWorkerIDs,
+		})
 	}
 	if status == core.TaskWaiting {
 		if err := s.startObjectiveRoutineByID(ctx, taskID, "user.steering", "Resume waiting objective with new user steering.", func(taskCtx context.Context) {
@@ -2228,15 +2249,28 @@ func (s *Service) SteerTask(ctx context.Context, taskID string, req core.Steerin
 			})
 			return nil
 		}
-		for _, active := range restartWorkers {
-			if active.Cancel != nil {
-				active.Cancel()
-			}
-			_ = s.CancelWorker(ctx, active.ID)
-		}
 		go s.restartRunningTaskWithSteering(context.Background(), taskID, req.Message, restartWorkerIDs)
 	}
 	return err
+}
+
+func (s *Service) recordObjectiveSteeringWorkItem(ctx context.Context, taskID string, eventID int64, message string) error {
+	workItemID := "task_steering_work_" + strconv.FormatInt(eventID, 10)
+	if err := s.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         workItemID,
+		"kind":       "user.steering",
+		"targetKind": "objective",
+		"targetId":   taskID,
+		"reason":     "User steering recorded for objective replanning.",
+		"prompt":     message,
+		"metadata": map[string]any{
+			"steeringEventId": eventID,
+			"reason":          "user_task_steering",
+		},
+	}); err != nil {
+		return err
+	}
+	return s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemSucceeded, "", "")
 }
 
 func (s *Service) AnswerQuestion(ctx context.Context, taskID string, questionID string, req core.AnswerQuestionRequest) error {
@@ -2528,7 +2562,7 @@ func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID str
 		"workerIds": workerIDs,
 	})
 	for _, workerID := range workerIDs {
-		if err := s.CancelWorker(ctx, workerID); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
+		if err := s.cancelWorkerWithReason(ctx, workerID, taskCancelReasonSteeringRestart); err != nil && !errors.Is(err, eventstore.ErrNotFound) {
 			_ = s.recordTaskAction(ctx, taskID, map[string]any{
 				"kind":     "steering_restart",
 				"status":   "warning",
@@ -2538,15 +2572,14 @@ func (s *Service) restartRunningTaskWithSteering(ctx context.Context, taskID str
 			})
 		}
 	}
-	snapshot, err := s.waitForTaskWorkersStopped(ctx, taskID, 15*time.Second)
+	snapshot, err := s.waitForTaskWorkersStopped(ctx, taskID, 2*time.Minute)
 	if err != nil {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":   "steering_restart",
-			"status": "failed",
+			"status": "waiting",
 			"reason": "timed out waiting for workers to stop",
 			"error":  err.Error(),
 		})
-		_ = s.failTask(ctx, taskID, err)
 		return
 	}
 	task, ok := findTask(snapshot, taskID)
@@ -2975,10 +3008,21 @@ func (s *Service) markTaskRetryPlanning(ctx context.Context, taskID string) erro
 }
 
 func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
+	return s.cancelWorkerWithReason(ctx, workerID, taskCancelReasonUser)
+}
+
+func (s *Service) cancelWorkerWithReason(ctx context.Context, workerID string, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = taskCancelReasonUser
+	}
 	s.mu.Lock()
 	cancel := s.cancels[workerID]
 	remote := s.remoteRuns[workerID]
 	taskID := s.tasks[workerID]
+	if cancel != nil {
+		s.workerCancelReasons[workerID] = reason
+	}
 	s.mu.Unlock()
 	if cancel == nil {
 		return s.cancelPersistedWorker(ctx, workerID)
@@ -2993,14 +3037,43 @@ func (s *Service) CancelWorker(ctx context.Context, workerID string) error {
 	}
 	cancel()
 	if strings.TrimSpace(taskID) != "" {
-		_ = s.markLiveWorkerCanceled(ctx, taskID, workerID, remote)
+		_ = s.markLiveWorkerCanceled(ctx, taskID, workerID, remote, reason)
 	}
 	return nil
 }
 
-func (s *Service) markLiveWorkerCanceled(ctx context.Context, taskID string, workerID string, remote remoteRun) error {
+func (s *Service) workerCancelReason(workerID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.workerCancelReasons[workerID])
+}
+
+func workerCancelError(reason string) error {
+	if strings.TrimSpace(reason) == taskCancelReasonSteeringRestart {
+		return errors.New("worker canceled for steering restart")
+	}
+	return context.Canceled
+}
+
+func addWorkerCancelReason(payload map[string]any, reason string) map[string]any {
+	reason = strings.TrimSpace(reason)
+	if reason != "" {
+		payload["reason"] = reason
+	}
+	return payload
+}
+
+func (s *Service) markLiveWorkerCanceled(ctx context.Context, taskID string, workerID string, remote remoteRun, reason string) error {
 	if s.workerCompleted(ctx, taskID, workerID) {
 		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = taskCancelReasonUser
+	}
+	errorText := "worker canceled by user request"
+	if reason == taskCancelReasonSteeringRestart {
+		errorText = "worker canceled for steering restart"
 	}
 	changes := WorkspaceChanges{}
 	if remote.Session != "" {
@@ -3018,7 +3091,8 @@ func (s *Service) markLiveWorkerCanceled(ctx context.Context, taskID string, wor
 		Payload: core.MustJSON(map[string]any{
 			"status":           core.WorkerCanceled,
 			"summary":          "Worker was canceled from live daemon state.",
-			"error":            "worker canceled by user request",
+			"error":            errorText,
+			"reason":           reason,
 			"workspaceChanges": changes,
 		}),
 	})
@@ -4505,6 +4579,7 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		delete(s.tasks, workerID)
 		delete(s.steering, workerID)
 		delete(s.workerCaps, workerID)
+		delete(s.workerCancelReasons, workerID)
 		s.mu.Unlock()
 	}()
 
@@ -4521,15 +4596,19 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	if err != nil {
 		status := core.WorkerFailed
 		workspaceResult := WorkspaceResultFailed
+		cancelReason := ""
 		if errors.Is(workerCtx.Err(), context.Canceled) {
 			status = core.WorkerCanceled
 			workspaceResult = WorkspaceResultCanceled
+			cancelReason = s.workerCancelReason(workerID)
+			err = workerCancelError(cancelReason)
 		}
 		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 		if s.workerCompleted(context.Background(), task.ID, workerID) {
 			status = core.WorkerCanceled
-			err = context.Canceled
-		} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(status, err, changes)); completionErr != nil {
+			cancelReason = s.workerCancelReason(workerID)
+			err = workerCancelError(cancelReason)
+		} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, addWorkerCancelReason(runState.completionPayload(status, err, changes), cancelReason)); completionErr != nil {
 			return WorkerTurnResult{}, completionErr
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
@@ -5006,6 +5085,7 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		delete(s.steering, workerID)
 		delete(s.remoteRuns, workerID)
 		delete(s.workerCaps, workerID)
+		delete(s.workerCancelReasons, workerID)
 		s.mu.Unlock()
 	}()
 
@@ -5051,16 +5131,19 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		statusErr = err
 		workerStatus = core.WorkerFailed
 	}
+	cancelReason := ""
 	if errors.Is(workerCtx.Err(), context.Canceled) {
 		workerStatus = core.WorkerCanceled
-		statusErr = context.Canceled
+		cancelReason = s.workerCancelReason(workerID)
+		statusErr = workerCancelError(cancelReason)
 	}
 	changes := s.sshRunner.DescribeChanges(ctx, remoteRun)
 	workerStatus, statusErr = runState.normalizeCompletionStatus(plan, workerStatus, statusErr, changes)
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		workerStatus = core.WorkerCanceled
-		statusErr = context.Canceled
-	} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, runState.completionPayload(workerStatus, statusErr, changes)); completionErr != nil {
+		cancelReason = s.workerCancelReason(workerID)
+		statusErr = workerCancelError(cancelReason)
+	} else if completionErr := s.appendWorkerCompleted(ctx, task.ID, workerID, addWorkerCancelReason(runState.completionPayload(workerStatus, statusErr, changes), cancelReason)); completionErr != nil {
 		return WorkerTurnResult{}, completionErr
 	}
 	_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
@@ -5899,6 +5982,15 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 	case core.WorkerWaiting:
 		_ = s.setTaskStatus(ctx, taskID, core.TaskWaiting)
 	case core.WorkerCanceled:
+		if s.workerCanceledForSteeringRestart(ctx, taskID, result.WorkerID) {
+			_ = s.recordTaskAction(ctx, taskID, map[string]any{
+				"kind":     "worker_canceled",
+				"status":   "superseded",
+				"reason":   "worker was canceled for steering restart",
+				"workerId": result.WorkerID,
+			})
+			return false
+		}
 		_ = s.setTaskStatus(ctx, taskID, core.TaskCanceled)
 	default:
 		if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
@@ -7487,6 +7579,16 @@ func (s *Service) runSpawnedWorkItem(ctx context.Context, taskID string, itemID 
 	}
 	_ = s.recordWorkItemStarted(context.Background(), taskID, itemID, result.WorkerID)
 	if result.Status == core.WorkerCanceled {
+		if s.workerCanceledForSteeringRestart(context.Background(), taskID, result.WorkerID) {
+			_ = s.recordTaskAction(context.Background(), taskID, map[string]any{
+				"kind":       "spawn_work_item",
+				"status":     "superseded",
+				"reason":     "work item worker was canceled for task steering restart",
+				"workerId":   result.WorkerID,
+				"workItemId": itemID,
+			})
+			return
+		}
 		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemCanceled, result.WorkerID, result.Error)
 		_ = s.setTaskStatus(context.Background(), taskID, core.TaskCanceled)
 		return
@@ -7958,10 +8060,52 @@ func terminalDrainedWorkItemStatus(snapshot core.Snapshot, taskID string) (core.
 		}
 		switch item.Status {
 		case core.WorkItemFailed, core.WorkItemCanceled:
+			if item.Status == core.WorkItemCanceled && (workItemCanceledForSteeringRestart(item) || workerCanceledForSteeringRestartInSnapshot(snapshot, taskID, item.WorkerID)) {
+				continue
+			}
 			return item.Status, item.Error, true
 		}
 	}
 	return "", "", false
+}
+
+func workItemCanceledForSteeringRestart(item core.WorkItem) bool {
+	text := strings.ToLower(strings.TrimSpace(item.Error))
+	return strings.Contains(text, "steering restart") || strings.Contains(text, taskCancelReasonSteeringRestart)
+}
+
+func (s *Service) workerCanceledForSteeringRestart(ctx context.Context, taskID string, workerID string) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	return workerCanceledForSteeringRestartInSnapshot(snapshot, taskID, workerID)
+}
+
+func workerCanceledForSteeringRestartInSnapshot(snapshot core.Snapshot, taskID string, workerID string) bool {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return false
+	}
+	for i := len(snapshot.Events) - 1; i >= 0; i-- {
+		event := snapshot.Events[i]
+		if event.TaskID != taskID || event.WorkerID != workerID || event.Type != core.EventWorkerCompleted {
+			continue
+		}
+		var payload struct {
+			Status core.WorkerStatus `json:"status"`
+			Reason string            `json:"reason,omitempty"`
+			Error  string            `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			return false
+		}
+		if payload.Status != core.WorkerCanceled {
+			return false
+		}
+		return payload.Reason == taskCancelReasonSteeringRestart || strings.Contains(strings.ToLower(payload.Error), "steering restart")
+	}
+	return false
 }
 
 func (s *Service) claimActiveWorkItem(itemID string) bool {
@@ -9772,6 +9916,17 @@ func dedupeTrimmedStrings(values []string) []string {
 		seen[value] = true
 		out = append(out, value)
 	}
+	return out
+}
+
+func sortedTrueKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for key, ok := range values {
+		if ok {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
