@@ -17,7 +17,7 @@ The JSON object must have exactly these top-level fields:
   "plan": null
 }
 
-When continuing, the nested "plan" object must use this scheduler shape. It may either run workers directly for the next immediate execution slice, or contain only immediate actions such as `spawn_work`, `ask_user`, or `watch_pull_requests` when the next work should be queued as durable work items:
+When continuing, the nested "plan" object must use the scheduler shape: durable `workItems` plus explicit `actions`. It may contain only immediate actions when no worker turn is needed:
 
 {
   "reasoningEffort": "medium",
@@ -30,27 +30,32 @@ When continuing, the nested "plan" object must use this scheduler shape. It may 
   ],
   "requiredApprovals": [],
   "actions": [],
-  "workers": [
+  "workItems": [
     {
       "id": "inspect",
-      "role": "investigator",
+      "kind": "objective.slice",
       "reason": "Inspect the relevant code paths first.",
+      "prompt": "Inspect the relevant code paths and report findings.",
+      "targetKind": "objective",
+      "targetId": "",
       "workerKind": "claude",
-      "workerPrompt": "Inspect the relevant code paths and report findings.",
       "reasoningEffort": "medium",
-      "dependsOn": []
+      "dependsOn": [],
+      "metadata": {}
     },
     {
       "id": "implement",
-      "role": "implementer",
+      "kind": "objective.implement",
       "reason": "Make the code change after the investigation worker finishes.",
+      "prompt": "Use the investigation findings to implement the requested change and run focused tests.",
+      "targetKind": "objective",
+      "targetId": "",
       "workerKind": "codex",
-      "workerPrompt": "Use the investigation findings to implement the requested change and run focused tests.",
       "reasoningEffort": "medium",
-      "dependsOn": ["inspect"]
+      "dependsOn": ["inspect"],
+      "metadata": {}
     }
-  ],
-  "spawns": []
+  ]
 }
 
 Field rules:
@@ -65,16 +70,15 @@ Field rules:
 - For broad performance-improvement investigations, use "continue" unless there is a real product optimization with credible before/after evidence outside measured noise, or the user explicitly asked for a bounded one-shot result. Benchmark harnesses, profiler notes, noisy measurements, and small cleanup patches are intermediate artifacts.
 - Use "wait" when user input, approval, or external setup is needed. Put the exact user-facing question or setup request in "message".
 - Use "fail" when the task cannot continue.
-- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns.
-- The continue plan may use "workers" for direct next-turn execution, or it may use immediate actions with an empty workers array when the next units should be durable queued work. Each workers[] object must include id, role, reason, workerKind, workerPrompt, reasoningEffort, and dependsOn. Root workers with empty dependsOn can run in parallel immediately. Workers with dependencies wait until all dependency worker ids finish.
+- When action is "continue", "plan" must be an object with the same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workItems.
+- The continue plan must use workItems for next-turn execution, or use immediate actions with an empty workItems array when no worker turn is needed. Each workItems[] object must include id, kind, reason, prompt, targetKind, targetId, workerKind, reasoningEffort, dependsOn, and metadata. Root work items with empty dependsOn can run in parallel immediately. Work items with dependencies wait until all dependency work item ids finish.
 - The continue plan may include actions. Use action kind "publish_pull_request" to publish a worker result as a durable PR artifact. A publish_pull_request action must include inputs.body with the PR description to publish; do not rely on aged to generate one. Write inputs.body the same way a human contributor would write the PR description: describe what the code changes do and any notable behavior, API, or migration impact, and list the validation commands actually run, under "## Summary" and "## Test plan" or "## Validation" headings. Do not restate the user's task prompt, mention orchestration internals (worker ids, task ids, replan rationale, "candidate", "aged"), or include changed-file lists or diffstats; the PR diff already shows them. Use `inputs.continueAfterPublish: true` for broad, large, or long-running objectives when more slices should be pursued after opening this PR; after such an intermediate PR, the next plan should continue objective work immediately and leave the PR to the babysitter. Do not use wait_external or a standalone watch_pull_requests action merely because an intermediate PR was opened. Use action kind "create_tasks" only when a genuinely separate user-facing task should be created; do not use it for internal setup, investigation, benchmark harnesses, validation, or PR slices inside the current objective. Use action kind "update_pull_request" when a specific worker or work item should update an existing PR branch or PR metadata before returning to monitoring. Use action kind "watch_pull_requests" with when "immediate" when the user only wants to babysit existing PRs. Use "wait_external" when the task should pause for an external event that actually blocks further objective work. Use "ask_user" when the task needs user setup, credentials, permissions, VM changes, or another human-provided answer before continuing.
 - Plan actions must be objects with kind, when, reason, workerId, and inputs. Use when "after_success" for worker-result actions and "immediate" for standalone existing-PR watch tasks, user questions, or durable spawn_work fanout. For publish_pull_request and code-changing update_pull_request actions, set workerId to the specific worker or work item id that produced the coherent PR-sized diff. Use workerId "" only when the action is metadata-only or does not consume worker changes. Use inputs {} when no extra inputs are needed for non-publish actions.
-- Prefer action kind "spawn_work" over "spawns" for future objective work, broad fanout, PR slices, compose work, PR follow-up, CI repair, review replies, and work that should survive daemon restart. spawn_work items may depend on earlier item ids and will run as normal sessions when dependencies are satisfied.
-- `spawns` is only for short same-turn follow-up workers that should run immediately after this plan's direct workers. Use `[]` unless same-turn follow-up is clearly better than durable queued work.
+- Use workItems for future objective work, broad fanout, PR slices, compose work, PR follow-up, CI repair, review replies, and work that should survive daemon restart. `spawn_work` remains available only as an explicit action/tool callback for action-only fanout.
 - When action is not "continue", "plan" must be null or omitted.
 - When action is "finish_objective", put the user-facing completion summary in "message".
 - "reasoningEffort" inside plan must be one of "default", "low", "medium", "high", "xhigh", or "max".
-- "steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects, never arrays of strings.
+- "steps", "requiredApprovals", and "workItems" inside plan must be arrays of objects, never arrays of strings.
 
 Dynamic replanning input:
 

@@ -453,6 +453,12 @@ type PullRequest struct {
 	Mergeable        string          `json:"mergeable,omitempty"`
 	ReviewStatus     string          `json:"reviewStatus,omitempty"`
 	BabysitterTaskID string          `json:"babysitterTaskId,omitempty"`
+	BranchOwner      string          `json:"branchOwner,omitempty"`
+	BranchOwnerDir   string          `json:"branchOwnerDir,omitempty"`
+	BranchHead       string          `json:"branchHead,omitempty"`
+	UpdateLeaseOwner string          `json:"updateLeaseOwner,omitempty"`
+	UpdateLeaseDir   string          `json:"updateLeaseDir,omitempty"`
+	UpdateBaseHead   string          `json:"updateBaseHead,omitempty"`
 	CreatedAt        time.Time       `json:"createdAt"`
 	UpdatedAt        time.Time       `json:"updatedAt"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
@@ -503,42 +509,6 @@ type SteeringItem struct {
 	UpdatedAt         time.Time       `json:"updatedAt"`
 	AppliedAt         *time.Time      `json:"appliedAt,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
-}
-
-type OrchestrationGraph struct {
-	TaskID    string                    `json:"taskId"`
-	Status    TaskStatus                `json:"status"`
-	Nodes     []OrchestrationGraphNode  `json:"nodes"`
-	Edges     []OrchestrationGraphEdge  `json:"edges"`
-	Summary   OrchestrationGraphSummary `json:"summary"`
-	UpdatedAt time.Time                 `json:"updatedAt"`
-}
-
-type OrchestrationGraphNode struct {
-	ID         string       `json:"id"`
-	WorkerID   string       `json:"workerId,omitempty"`
-	WorkerKind string       `json:"workerKind"`
-	Status     WorkerStatus `json:"status"`
-	Role       string       `json:"role,omitempty"`
-	Reason     string       `json:"reason,omitempty"`
-	SpawnID    string       `json:"spawnId,omitempty"`
-	TargetID   string       `json:"targetId,omitempty"`
-	TargetKind string       `json:"targetKind,omitempty"`
-}
-
-type OrchestrationGraphEdge struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Reason string `json:"reason,omitempty"`
-}
-
-type OrchestrationGraphSummary struct {
-	Total    int `json:"total"`
-	Running  int `json:"running"`
-	Waiting  int `json:"waiting"`
-	Done     int `json:"done"`
-	Failed   int `json:"failed"`
-	Canceled int `json:"canceled"`
 }
 
 type CreateTaskRequest struct {
@@ -599,7 +569,13 @@ type WatchPullRequestsRequest struct {
 }
 
 type SteeringRequest struct {
-	Message string `json:"message"`
+	Message    string `json:"message"`
+	TargetKind string `json:"targetKind,omitempty"`
+	TargetID   string `json:"targetId,omitempty"`
+}
+
+type AnswerQuestionRequest struct {
+	Answer string `json:"answer"`
 }
 
 type ApprovalDecision struct {
@@ -623,7 +599,6 @@ type Snapshot struct {
 	PullRequests        []PullRequest         `json:"pullRequests,omitempty"`
 	PullRequestFeedback []PullRequestFeedback `json:"pullRequestFeedback,omitempty"`
 	Steering            []SteeringItem        `json:"steering,omitempty"`
-	OrchestrationGraphs []OrchestrationGraph  `json:"orchestrationGraphs,omitempty"`
 	LastEventID         int64                 `json:"lastEventId,omitempty"`
 	Events              []Event               `json:"events"`
 }

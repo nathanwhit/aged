@@ -18,7 +18,7 @@ func TestDiscordDriverSkipsHistoryThenCreatesTaskFromPrefix(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	client := &fakeDiscordClient{
@@ -73,7 +73,7 @@ func TestDiscordDriverDoesNotAdvanceLastSeenWhenHandlingFails(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	client := &fakeDiscordClient{
@@ -117,7 +117,7 @@ func TestDiscordDriverAnswersThenDoItCreatesSuggestedTask(t *testing.T) {
 	defer store.Close()
 
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer:     "We need a Discord driver.\n\nAGED_TASK_PROMPT:\nImplement a Discord driver for aged.",
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
@@ -167,7 +167,7 @@ func TestDiscordDriverStructuredProposalRoutesProject(t *testing.T) {
 	defer store.Close()
 
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"reply": "I can do that in the Node.js project.",
 				"proposedTask": {
@@ -232,7 +232,7 @@ func TestDiscordDriverDoItRecoversProposalFromAssistantEvents(t *testing.T) {
 	defer store.Close()
 
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer:     `{"reply":"I can do that in aged.","proposedTask":{"projectId":"aged","prompt":"Implement the project-aware Discord task."}}`,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
@@ -286,7 +286,7 @@ func TestDiscordDriverAssistantCanCreateTaskWithoutDoIt(t *testing.T) {
 	defer store.Close()
 
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "create_task",
 			"reply": "Starting that in aged.",
@@ -340,7 +340,7 @@ func TestDiscordDriverAsksAssistantInSelectedProjectWorkDir(t *testing.T) {
 	defer store.Close()
 
 	assistant := &recordingAssistant{}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	agedDir := t.TempDir()
@@ -386,7 +386,7 @@ func TestDiscordDriverListsProjects(t *testing.T) {
 	defer store.Close()
 
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer:     `{"action":"list_projects","reply":"Listing projects.","project":null,"proposedTask":null}`,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
@@ -428,7 +428,7 @@ func TestDiscordDriverShowsTaskDetail(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "detail done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -469,7 +469,7 @@ func TestDiscordDriverShowsWorkerDetail(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "worker detail done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -514,7 +514,7 @@ func TestDiscordDriverSteersTask(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "run"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "run")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock"},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	if _, err := store.Append(ctx, core.Event{
@@ -766,7 +766,7 @@ func TestDiscordDriverCreatesProject(t *testing.T) {
 
 	projectDir := t.TempDir()
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "create_project",
 			"reply": "Creating the project.",
@@ -826,7 +826,7 @@ func TestDiscordDriverUpdatesProject(t *testing.T) {
 	agedDir := t.TempDir()
 	nodeDir := t.TempDir()
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "update_project",
 			"projectId": "node",
@@ -928,7 +928,7 @@ func TestDiscordDriverShowsProjectHealth(t *testing.T) {
 
 	nodeDir := t.TempDir()
 	brain := fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer:     `{"action":"project_health","projectId":"node","reply":"Checking node.","project":null,"proposedTask":null}`,
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
@@ -964,7 +964,7 @@ func TestDiscordDriverDeleteProjectRequiresConfirmation(t *testing.T) {
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManager(store, fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer:     `{"action":"delete_project","projectId":"node","confirmed":false,"reply":"Delete node?","project":null,"proposedTask":null}`,
 	}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
@@ -1026,7 +1026,7 @@ func TestDiscordDriverContextIncludesTargetsAndPlugins(t *testing.T) {
 	defer store.Close()
 
 	assistant := &recordingAssistant{}
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	service.SetAssistant(assistant)
@@ -1095,7 +1095,7 @@ func TestDiscordDriverManagesTargets(t *testing.T) {
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManager(store, fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "create_target",
 			"target": {
@@ -1265,7 +1265,7 @@ func TestDiscordDriverUpdateTargetSyncsSSHCheckoutAliases(t *testing.T) {
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManagerAndTargets(store, fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "update_target",
 			"targetId": "ssh-aliases",
@@ -1378,7 +1378,7 @@ func TestDiscordDriverManagesPluginsWithDeleteConfirmation(t *testing.T) {
 	defer store.Close()
 
 	service := NewServiceWithWorkspaceManager(store, fixedAssistantBrain{
-		fixedBrain: fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}},
+		fixedBrain: fixedBrain{plan: testWorkItemPlan("mock", "do it")},
 		answer: `{
 			"action": "create_plugin",
 			"plugin": {
@@ -1512,7 +1512,7 @@ func TestDiscordDriverAssistantFallbackStillAllowsDoIt(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "do it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "do it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "done"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	client := &fakeDiscordClient{

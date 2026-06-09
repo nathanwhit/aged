@@ -23,11 +23,11 @@ func TestCodexBrainPlansFromAgentMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "codex" {
-		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "codex" {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
-	if plan.Prompt != "Implement the requested scheduler change." {
-		t.Fatalf("Prompt = %q", plan.Prompt)
+	if plan.WorkItems[0].Prompt != "Implement the requested scheduler change." {
+		t.Fatalf("Prompt = %q", plan.WorkItems[0].Prompt)
 	}
 	if plan.Metadata["brain"] != "codex" {
 		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])
@@ -60,11 +60,11 @@ func TestClaudeBrainPlansFromStreamResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "claude" {
-		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "claude" {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
-	if plan.Prompt != "Investigate and implement the requested scheduler change." {
-		t.Fatalf("Prompt = %q", plan.Prompt)
+	if plan.WorkItems[0].Prompt != "Investigate and implement the requested scheduler change." {
+		t.Fatalf("Prompt = %q", plan.WorkItems[0].Prompt)
 	}
 	if plan.Metadata["brain"] != "claude" {
 		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])
@@ -494,8 +494,8 @@ func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "mock" {
-		t.Fatalf("WorkerKind = %q", plan.WorkerKind)
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "mock" {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
 	if plan.Metadata["brain"] != "codex-fallback" {
 		t.Fatalf("metadata brain = %v", plan.Metadata["brain"])
@@ -505,7 +505,7 @@ func TestCodexBrainFallsBackOnInvalidPlan(t *testing.T) {
 	}
 }
 
-func TestDecodeCodexPlanAcceptsStringLists(t *testing.T) {
+func TestDecodeCodexPlanRejectsOldWorkerShape(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`{
 		"workerKind": "mock",
 		"workerPrompt": "Run a smoke test.",
@@ -517,14 +517,8 @@ func TestDecodeCodexPlanAcceptsStringLists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Steps[0] != (PlanStep{Title: "Run mock worker", Description: "Run mock worker"}) {
-		t.Fatalf("steps = %+v", plan.Steps)
-	}
-	if plan.RequiredApprovals[0] != (ApprovalRequest{Title: "Confirm external upload", Reason: "Confirm external upload"}) {
-		t.Fatalf("approvals = %+v", plan.RequiredApprovals)
-	}
-	if plan.Spawns[0].Role != "reviewer" || plan.Spawns[0].Reason != "reviewer" {
-		t.Fatalf("spawns = %+v", plan.Spawns)
+	if err := plan.Validate(); err == nil {
+		t.Fatalf("old worker/spawn shape unexpectedly validated: %+v", plan)
 	}
 }
 
@@ -535,7 +529,7 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 		"rationale": "The request asks for scheduler validation.",
 		"steps": [{"title": "Run", "description": "Run mock worker"}],
 		"requiredApprovals": [{"title": "Approval", "reason": "Needed"}],
-		"spawns": [{"id": "review", "role": "reviewer", "reason": "Check output", "workerKind": "claude", "dependsOn": ["test"]}]
+		"workItems": [{"id": "review", "kind": "objective.validate", "reason": "Check output", "prompt": "Check output", "targetKind": "objective", "targetId": "task-1", "workerKind": "claude", "reasoningEffort": "low", "dependsOn": ["test"], "metadata": {}}]
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -546,12 +540,12 @@ func TestDecodeCodexPlanAcceptsObjectLists(t *testing.T) {
 	if plan.RequiredApprovals[0] != (ApprovalRequest{Title: "Approval", Reason: "Needed"}) {
 		t.Fatalf("approvals = %+v", plan.RequiredApprovals)
 	}
-	if !reflect.DeepEqual(plan.Spawns[0], SpawnRequest{ID: "review", Role: "reviewer", Reason: "Check output", WorkerKind: "claude", DependsOn: []string{"test"}}) {
-		t.Fatalf("spawns = %+v", plan.Spawns)
+	if !reflect.DeepEqual(plan.WorkItems[0], WorkItemRequest{ID: "review", Kind: "objective.validate", Reason: "Check output", Prompt: "Check output", TargetKind: "objective", TargetID: "task-1", WorkerKind: "claude", ReasoningEffort: "low", DependsOn: []string{"test"}, Metadata: map[string]any{}}) {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
 }
 
-func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
+func TestDecodeCodexPlanAcceptsInitialWorkItems(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`{
 		"rationale": "Split independent work up front.",
 		"reasoningEffort": "medium",
@@ -564,23 +558,22 @@ func TestDecodeCodexPlanAcceptsInitialWorkers(t *testing.T) {
 		"steps": [{"title": "Audit", "description": "Run parallel audits."}],
 		"requiredApprovals": [],
 		"actions": [],
-		"workers": [
-			{"id": "api", "role": "auditor", "reason": "Inspect API paths.", "workerKind": "claude", "workerPrompt": "Inspect the API paths.", "reasoningEffort": "low", "dependsOn": []},
-			{"id": "ui", "role": "auditor", "reason": "Inspect UI paths.", "workerKind": "codex", "workerPrompt": "Inspect the UI paths.", "reasoningEffort": "low", "dependsOn": []}
-		],
-		"spawns": []
+		"workItems": [
+			{"id": "api", "kind": "objective.slice", "reason": "Inspect API paths.", "prompt": "Inspect the API paths.", "targetKind": "objective", "targetId": "task-1", "workerKind": "claude", "reasoningEffort": "low", "dependsOn": [], "metadata": {}},
+			{"id": "ui", "kind": "objective.slice", "reason": "Inspect UI paths.", "prompt": "Inspect the UI paths.", "targetKind": "objective", "targetId": "task-1", "workerKind": "codex", "reasoningEffort": "low", "dependsOn": [], "metadata": {}}
+		]
 	}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Workers) != 2 {
-		t.Fatalf("workers = %+v", plan.Workers)
+	if len(plan.WorkItems) != 2 {
+		t.Fatalf("workItems = %+v", plan.WorkItems)
 	}
 	if plan.WorkPlan == nil || plan.WorkPlan.Workstreams[0].ID != "api" {
 		t.Fatalf("workPlan = %+v", plan.WorkPlan)
 	}
-	if plan.Workers[0].ID != "api" || plan.Workers[0].Prompt != "Inspect the API paths." {
-		t.Fatalf("first worker = %+v", plan.Workers[0])
+	if plan.WorkItems[0].ID != "api" || plan.WorkItems[0].Prompt != "Inspect the API paths." {
+		t.Fatalf("first work item = %+v", plan.WorkItems[0])
 	}
 	if err := plan.Validate(); err != nil {
 		t.Fatal(err)
@@ -599,8 +592,6 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 			"risks": []
 		},
 		"plan": {
-			"workerKind": "codex",
-			"workerPrompt": "incorporate review feedback",
 			"workPlan": {
 				"summary": "Initial implementation needs a feedback incorporation turn.",
 				"workstreams": [{"id": "implement", "goal": "Incorporate reviewer feedback.", "status": "running", "doneWhen": "The missing case is fixed.", "dependsOn": []}],
@@ -610,7 +601,8 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 			"rationale": "review found a missing case",
 			"steps": [{"title": "Fix", "description": "Patch the missing case"}],
 			"requiredApprovals": [],
-			"spawns": []
+			"actions": [],
+			"workItems": [{"id": "implement", "kind": "objective.implement", "reason": "Patch the missing case", "prompt": "incorporate review feedback", "targetKind": "objective", "targetId": "task-1", "workerKind": "codex", "reasoningEffort": "medium", "dependsOn": [], "metadata": {}}]
 		}
 	}`))
 	if err != nil {
@@ -622,7 +614,7 @@ func TestDecodeReplanDecisionContinue(t *testing.T) {
 	if decision.Action != "continue" {
 		t.Fatalf("action = %q", decision.Action)
 	}
-	if decision.Plan == nil || decision.Plan.Prompt != "incorporate review feedback" {
+	if decision.Plan == nil || len(decision.Plan.WorkItems) != 1 || decision.Plan.WorkItems[0].Prompt != "incorporate review feedback" {
 		t.Fatalf("plan = %+v", decision.Plan)
 	}
 	if decision.WorkPlan == nil || decision.WorkPlan.Workstreams[0].Status != "running" {
@@ -1005,7 +997,7 @@ func TestDefaultPromptsKeepBroadObjectivesInTaskGraph(t *testing.T) {
 	}
 }
 
-func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
+func TestDefaultPromptsUseDurableWorkItemsSchema(t *testing.T) {
 	tests := []struct {
 		path      string
 		required  []string
@@ -1014,11 +1006,12 @@ func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 		{
 			path: "../../prompts/default/system.md",
 			required: []string{
-				`"workers": [`,
-				"Use `workers` for initial execution",
-				"Root workers with empty `dependsOn` can run in parallel immediately",
-				"Workers with dependencies wait until all dependency worker ids finish",
-				"Never return arrays of strings for `steps`, `requiredApprovals`, `workers`, or `spawns`",
+				`"workItems": [`,
+				"Use `workItems` for executable work",
+				"Root work items with empty `dependsOn` can run in parallel immediately",
+				"Work items with dependencies wait until all dependency work item ids finish",
+				"Never return arrays of strings for `steps`, `requiredApprovals`, or `workItems`",
+				"Never emit `workerKind`/`workerPrompt` as top-level fields. Never emit `workers` or `spawns`",
 			},
 			forbidden: []string{
 				"Choose the worker and shape the initial execution plan",
@@ -1026,23 +1019,25 @@ func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 				"legacy compatibility fallback fields",
 				"Spawns with no `dependsOn` can run in parallel after the initial worker succeeds",
 				"Never return arrays of strings for `steps`, `requiredApprovals`, or `spawns`",
+				"Use `workers` for initial execution",
 			},
 		},
 		{
 			path: "../../prompts/default/replan.md",
 			required: []string{
-				`"workers": [`,
+				`"workItems": [`,
 				`"dependsOn": []`,
 				`"dependsOn": ["inspect"]`,
-				`same exact schema as the scheduler plan: reasoningEffort, rationale, steps, requiredApprovals, actions, workers, spawns`,
-				`Root workers with empty dependsOn can run in parallel immediately`,
-				`"steps", "requiredApprovals", "workers", and "spawns" inside plan must be arrays of objects`,
+				`same exact schema as the scheduler plan: reasoningEffort, rationale, workPlan, steps, requiredApprovals, actions, workItems`,
+				`Root work items with empty dependsOn can run in parallel immediately`,
+				`"steps", "requiredApprovals", and "workItems" inside plan must be arrays of objects`,
 			},
 			forbidden: []string{
 				`same exact schema as the scheduler plan: workerKind, workerPrompt`,
 				`legacy compatibility fallback fields`,
 				`Use workerId "" to mean the latest successful candidate worker`,
 				`"steps", "requiredApprovals", and "spawns" inside plan must be arrays of objects`,
+				`"workers": [`,
 			},
 		},
 	}
@@ -1070,18 +1065,28 @@ func TestDefaultPromptsUseInitialWorkersSchema(t *testing.T) {
 func TestDecodeCodexPlanExtractsObjectFromProse(t *testing.T) {
 	plan, err := decodeCodexPlan([]byte(`Here is the plan:
 	{
-		"workerKind": "mock",
-		"workerPrompt": "Run a smoke test.",
 		"rationale": "test",
 		"steps": [],
 		"requiredApprovals": [],
-		"spawns": []
+		"actions": [],
+		"workItems": [{
+			"id": "smoke",
+			"kind": "objective.validate",
+			"reason": "Run a smoke test.",
+			"prompt": "Run a smoke test.",
+			"targetKind": "objective",
+			"targetId": "task-1",
+			"workerKind": "mock",
+			"reasoningEffort": "low",
+			"dependsOn": [],
+			"metadata": {}
+		}]
 	}
 	Thanks.`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.WorkerKind != "mock" || plan.Prompt != "Run a smoke test." {
+	if len(plan.WorkItems) != 1 || plan.WorkItems[0].WorkerKind != "mock" || plan.WorkItems[0].Prompt != "Run a smoke test." {
 		t.Fatalf("plan = %+v", plan)
 	}
 }
@@ -1143,15 +1148,24 @@ func testCodexBrainOutput(t *testing.T, mode string) string {
 	switch mode {
 	case "valid":
 		plan := Plan{
-			WorkerKind: "codex",
-			Prompt:     "Implement the requested scheduler change.",
-			Rationale:  "The task edits this Go codebase.",
+			Rationale: "The task edits this Go codebase.",
 			Steps: []PlanStep{{
 				Title:       "Implement",
 				Description: "Make the scheduler run through Codex.",
 			}},
 			RequiredApprovals: []ApprovalRequest{},
-			Spawns:            []SpawnRequest{},
+			WorkItems: []WorkItemRequest{{
+				ID:              "implement",
+				Kind:            "objective.implement",
+				Reason:          "Implement the requested scheduler change.",
+				Prompt:          "Implement the requested scheduler change.",
+				TargetKind:      "objective",
+				TargetID:        "task-1",
+				WorkerKind:      "codex",
+				ReasoningEffort: "medium",
+				DependsOn:       []string{},
+				Metadata:        map[string]any{},
+			}},
 		}
 		return codexAgentMessageLine(t, plan)
 	case "invalid":
@@ -1167,15 +1181,24 @@ func testClaudeBrainOutput(t *testing.T, mode string) string {
 	switch mode {
 	case "valid":
 		plan := Plan{
-			WorkerKind: "claude",
-			Prompt:     "Investigate and implement the requested scheduler change.",
-			Rationale:  "The task benefits from a Claude-backed scheduler.",
+			Rationale: "The task benefits from a Claude-backed scheduler.",
 			Steps: []PlanStep{{
 				Title:       "Implement",
 				Description: "Make the scheduler run through Claude.",
 			}},
 			RequiredApprovals: []ApprovalRequest{},
-			Spawns:            []SpawnRequest{},
+			WorkItems: []WorkItemRequest{{
+				ID:              "implement",
+				Kind:            "objective.implement",
+				Reason:          "Investigate and implement the requested scheduler change.",
+				Prompt:          "Investigate and implement the requested scheduler change.",
+				TargetKind:      "objective",
+				TargetID:        "task-1",
+				WorkerKind:      "claude",
+				ReasoningEffort: "medium",
+				DependsOn:       []string{},
+				Metadata:        map[string]any{},
+			}},
 		}
 		content, err := json.Marshal(plan)
 		if err != nil {

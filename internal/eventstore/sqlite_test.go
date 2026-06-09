@@ -1678,15 +1678,8 @@ func TestSnapshotProjectsExecutionNodes(t *testing.T) {
 	if session.SharedRoot != "/runs/shared/task-1" || session.SharedArtifactsDir != "/runs/shared/task-1/artifacts" || session.SharedWorkerDir != "/runs/shared/task-1/workers/worker-1" {
 		t.Fatalf("session shared scratch = root %q artifacts %q worker %q", session.SharedRoot, session.SharedArtifactsDir, session.SharedWorkerDir)
 	}
-	if len(snapshot.OrchestrationGraphs) != 1 {
-		t.Fatalf("graphs = %d, want 1", len(snapshot.OrchestrationGraphs))
-	}
-	graph := snapshot.OrchestrationGraphs[0]
-	if graph.TaskID != "task-1" || graph.Summary.Total != 2 || graph.Summary.Running != 1 {
-		t.Fatalf("graph = %+v", graph)
-	}
-	if len(graph.Edges) != 2 {
-		t.Fatalf("graph edges = %+v, want parent and dependency edges", graph.Edges)
+	if snapshot.ExecutionNodes[1].ParentNodeID != "node-0" || len(snapshot.ExecutionNodes[1].DependsOn) != 1 || snapshot.ExecutionNodes[1].DependsOn[0] != "implementation" {
+		t.Fatalf("second execution node dependencies = %+v, want parent node-0 and implementation dependency", snapshot.ExecutionNodes[1])
 	}
 }
 
@@ -1745,6 +1738,65 @@ func TestSnapshotProjectsQuestions(t *testing.T) {
 	}
 	if len(cards.Questions) != 0 {
 		t.Fatalf("card questions = %+v, want only undecided active questions", cards.Questions)
+	}
+}
+
+func TestSnapshotQuestionDecisionUsesQuestionID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-questions",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "Questions",
+				"prompt": "Ask for input.",
+			}),
+		},
+		core.Event{
+			Type:     core.EventApprovalNeeded,
+			TaskID:   "task-questions",
+			WorkerID: "worker-1",
+			Payload: core.MustJSON(map[string]any{
+				"reason":   "first",
+				"question": "First question?",
+			}),
+		},
+		core.Event{
+			Type:     core.EventApprovalNeeded,
+			TaskID:   "task-questions",
+			WorkerID: "worker-2",
+			Payload: core.MustJSON(map[string]any{
+				"reason":   "second",
+				"question": "Second question?",
+			}),
+		},
+		core.Event{
+			Type:   core.EventApprovalDecided,
+			TaskID: "task-questions",
+			Payload: core.MustJSON(map[string]any{
+				"approved":   true,
+				"answer":     "Answer the first one.",
+				"questionId": "approval_2",
+				"reason":     "user_question_answered",
+			}),
+		},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]core.Question{}
+	for _, question := range snapshot.Questions {
+		byID[question.ID] = question
+	}
+	if !byID["approval_2"].Decided || byID["approval_2"].Answer != "Answer the first one." {
+		t.Fatalf("first question = %+v, want decided with answer", byID["approval_2"])
+	}
+	if byID["approval_3"].Decided {
+		t.Fatalf("second question = %+v, want still pending", byID["approval_3"])
 	}
 }
 
@@ -1842,6 +1894,72 @@ func TestSnapshotProjectsPullRequestFeedback(t *testing.T) {
 	}
 	if len(cards.PullRequestFeedback) != 0 {
 		t.Fatalf("card feedback = %+v, want handled feedback omitted", cards.PullRequestFeedback)
+	}
+}
+
+func TestSnapshotProjectsPullRequestBranchAndUpdateLease(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{
+			Type:   core.EventTaskCreated,
+			TaskID: "task-pr-lease",
+			Payload: core.MustJSON(map[string]any{
+				"title":  "PR lease",
+				"prompt": "Publish and update a PR.",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: "task-pr-lease",
+			Payload: core.MustJSON(map[string]any{
+				"id":             "denoland/deno#51",
+				"repo":           "denoland/deno",
+				"number":         51,
+				"url":            "https://github.com/denoland/deno/pull/51",
+				"branch":         "codex/lease",
+				"base":           "main",
+				"title":          "Track PR lease",
+				"state":          "OPEN",
+				"branchOwner":    "worker-publish",
+				"branchOwnerDir": "/repo/worktrees/publish",
+				"branchHead":     "abc123",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRUpdated,
+			TaskID: "task-pr-lease",
+			Payload: core.MustJSON(map[string]any{
+				"id":               "denoland/deno#51",
+				"repo":             "denoland/deno",
+				"number":           51,
+				"url":              "https://github.com/denoland/deno/pull/51",
+				"branch":           "codex/lease",
+				"base":             "main",
+				"title":            "Track PR lease",
+				"state":            "OPEN",
+				"branchHead":       "def456",
+				"updateLeaseOwner": "worker-update",
+				"updateLeaseDir":   "/repo/worktrees/update",
+				"updateBaseHead":   "abc123",
+			}),
+		},
+	)
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v, want one", snapshot.PullRequests)
+	}
+	pr := snapshot.PullRequests[0]
+	if pr.BranchOwner != "worker-publish" || pr.BranchOwnerDir != "/repo/worktrees/publish" || pr.BranchHead != "def456" {
+		t.Fatalf("branch lease = owner %q dir %q head %q", pr.BranchOwner, pr.BranchOwnerDir, pr.BranchHead)
+	}
+	if pr.UpdateLeaseOwner != "worker-update" || pr.UpdateLeaseDir != "/repo/worktrees/update" || pr.UpdateBaseHead != "abc123" {
+		t.Fatalf("update lease = owner %q dir %q base %q", pr.UpdateLeaseOwner, pr.UpdateLeaseDir, pr.UpdateBaseHead)
 	}
 }
 

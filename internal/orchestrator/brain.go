@@ -35,55 +35,21 @@ type AssistantProvider interface {
 }
 
 type Plan struct {
-	WorkerKind        string            `json:"workerKind"`
-	Prompt            string            `json:"workerPrompt"`
+	WorkerKind        string            `json:"-"`
+	Prompt            string            `json:"-"`
 	ReasoningEffort   string            `json:"reasoningEffort,omitempty"`
 	Rationale         string            `json:"rationale,omitempty"`
 	WorkPlan          *core.WorkPlan    `json:"workPlan,omitempty"`
 	Steps             []PlanStep        `json:"steps,omitempty"`
 	RequiredApprovals []ApprovalRequest `json:"requiredApprovals,omitempty"`
 	Actions           []PlanAction      `json:"actions,omitempty"`
-	Workers           []WorkerRequest   `json:"workers,omitempty"`
-	Spawns            []SpawnRequest    `json:"spawns,omitempty"`
+	WorkItems         []WorkItemRequest `json:"workItems,omitempty"`
+	Workers           []WorkerRequest   `json:"-"`
+	Spawns            []SpawnRequest    `json:"-"`
 	Metadata          map[string]any    `json:"metadata,omitempty"`
 }
 
 func normalizePlanShape(plan *Plan) {
-	if plan == nil {
-		return
-	}
-	legacyKind := strings.TrimSpace(plan.WorkerKind)
-	legacyPrompt := strings.TrimSpace(plan.Prompt)
-	if len(plan.Workers) > 0 {
-		for index := range plan.Workers {
-			if strings.TrimSpace(plan.Workers[index].WorkerKind) == "" {
-				plan.Workers[index].WorkerKind = legacyKind
-			}
-			if strings.TrimSpace(plan.Workers[index].Prompt) == "" {
-				plan.Workers[index].Prompt = legacyPrompt
-			}
-		}
-		plan.WorkerKind = ""
-		plan.Prompt = ""
-		return
-	}
-	if legacyKind == "" || legacyPrompt == "" {
-		return
-	}
-	reason := strings.TrimSpace(plan.Rationale)
-	if reason == "" {
-		reason = "Run the planned worker turn."
-	}
-	plan.Workers = []WorkerRequest{{
-		ID:              "main",
-		Role:            "worker",
-		Reason:          reason,
-		WorkerKind:      legacyKind,
-		Prompt:          legacyPrompt,
-		ReasoningEffort: plan.ReasoningEffort,
-	}}
-	plan.WorkerKind = ""
-	plan.Prompt = ""
 }
 
 type PlanStep struct {
@@ -102,6 +68,19 @@ type PlanAction struct {
 	Reason   string         `json:"reason"`
 	WorkerID string         `json:"workerId,omitempty"`
 	Inputs   map[string]any `json:"inputs,omitempty"`
+}
+
+type WorkItemRequest struct {
+	ID              string         `json:"id,omitempty"`
+	Kind            string         `json:"kind"`
+	Reason          string         `json:"reason"`
+	Prompt          string         `json:"prompt,omitempty"`
+	TargetKind      string         `json:"targetKind,omitempty"`
+	TargetID        string         `json:"targetId,omitempty"`
+	WorkerKind      string         `json:"workerKind"`
+	ReasoningEffort string         `json:"reasoningEffort,omitempty"`
+	DependsOn       []string       `json:"dependsOn,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 type WorkerRequest struct {
@@ -212,16 +191,22 @@ type PublicationReview struct {
 
 func (p Plan) Validate() error {
 	normalizePlanShape(&p)
-	if len(p.Workers) == 0 {
+	if len(p.Workers) > 0 {
+		return errors.New("plan workers are no longer supported; use workItems")
+	}
+	if len(p.Spawns) > 0 {
+		return errors.New("plan spawns are no longer supported; use workItems")
+	}
+	if len(p.WorkItems) == 0 {
 		if len(p.Actions) == 0 {
-			return errors.New("plan workers must contain at least one worker")
+			return errors.New("plan workItems must contain at least one work item")
 		}
 		for _, action := range p.Actions {
 			if strings.TrimSpace(action.When) != "immediate" {
-				return errors.New("workerless plans may only contain immediate actions")
+				return errors.New("work-itemless plans may only contain immediate actions")
 			}
 		}
-	} else if err := validateWorkerRequests(p.Workers); err != nil {
+	} else if err := validateWorkItemRequests(p.WorkItems); err != nil {
 		return err
 	}
 	for index, action := range p.Actions {
@@ -232,44 +217,47 @@ func (p Plan) Validate() error {
 	return nil
 }
 
-func validateWorkerRequests(workers []WorkerRequest) error {
+func validateWorkItemRequests(items []WorkItemRequest) error {
 	ids := map[string]bool{}
-	for index, worker := range workers {
-		id := workerRequestID(worker, index)
+	for index, item := range items {
+		id := workItemRequestID(item, index)
 		if ids[id] {
-			return fmt.Errorf("plan workers[%d]: duplicate worker id %q", index, id)
+			return fmt.Errorf("plan workItems[%d]: duplicate work item id %q", index, id)
 		}
 		ids[id] = true
-		if strings.TrimSpace(worker.WorkerKind) == "" {
-			return fmt.Errorf("plan workers[%d]: workerKind is required", index)
+		if strings.TrimSpace(item.Kind) == "" {
+			return fmt.Errorf("plan workItems[%d]: kind is required", index)
 		}
-		if strings.TrimSpace(worker.Prompt) == "" {
-			return fmt.Errorf("plan workers[%d]: workerPrompt is required", index)
+		if strings.TrimSpace(item.WorkerKind) == "" {
+			return fmt.Errorf("plan workItems[%d]: workerKind is required", index)
+		}
+		if strings.TrimSpace(item.Prompt) == "" {
+			return fmt.Errorf("plan workItems[%d]: prompt is required", index)
 		}
 	}
-	for index, worker := range workers {
-		id := workerRequestID(worker, index)
-		for _, dep := range worker.DependsOn {
+	for index, item := range items {
+		id := workItemRequestID(item, index)
+		for _, dep := range item.DependsOn {
 			dep = strings.TrimSpace(dep)
 			if dep == "" {
 				continue
 			}
 			if dep == id {
-				return fmt.Errorf("plan workers[%d]: worker %q depends on itself", index, id)
+				return fmt.Errorf("plan workItems[%d]: work item %q depends on itself", index, id)
 			}
 			if !ids[dep] {
-				return fmt.Errorf("plan workers[%d]: worker %q depends on unknown worker %q", index, id, dep)
+				return fmt.Errorf("plan workItems[%d]: work item %q depends on unknown work item %q", index, id, dep)
 			}
 		}
 	}
 	return nil
 }
 
-func workerRequestID(worker WorkerRequest, index int) string {
-	if strings.TrimSpace(worker.ID) != "" {
-		return strings.TrimSpace(worker.ID)
+func workItemRequestID(item WorkItemRequest, index int) string {
+	if strings.TrimSpace(item.ID) != "" {
+		return strings.TrimSpace(item.ID)
 	}
-	return fmt.Sprintf("worker-%d", index+1)
+	return fmt.Sprintf("work-item-%d", index+1)
 }
 
 func (a PlanAction) Validate() error {
@@ -338,12 +326,20 @@ func (b *PromptBrain) Plan(_ context.Context, task core.Task, steering []string)
 	prompt = strings.ReplaceAll(prompt, "{{steering}}", strings.Join(steering, "\n"))
 
 	return Plan{
-		WorkerKind: b.defaultKind,
-		Prompt:     strings.TrimSpace(prompt),
-		Rationale:  "fallback prompt brain selected the configured default worker",
+		Rationale: "fallback prompt brain selected the configured default worker",
 		Steps: []PlanStep{{
 			Title:       "Execute requested work",
 			Description: "Run one worker with the user request and current steering context.",
+		}},
+		WorkItems: []WorkItemRequest{{
+			ID:              "main",
+			Kind:            "objective.implement",
+			Reason:          "Run the requested work.",
+			Prompt:          strings.TrimSpace(prompt),
+			TargetKind:      "objective",
+			TargetID:        task.ID,
+			WorkerKind:      b.defaultKind,
+			ReasoningEffort: "default",
 		}},
 		Metadata: map[string]any{
 			"brain":     "prompt",
@@ -370,12 +366,20 @@ func (b StaticBrain) Plan(_ context.Context, task core.Task, steering []string) 
 		extra = "\n\nUser steering:\n" + strings.Join(steering, "\n")
 	}
 	return Plan{
-		WorkerKind: kind,
-		Prompt:     fmt.Sprintf("%s\n\n%s%s", task.Title, task.Prompt, extra),
-		Rationale:  "static brain selected the configured default worker",
+		Rationale: "static brain selected the configured default worker",
 		Steps: []PlanStep{{
 			Title:       "Execute requested work",
 			Description: "Run one worker with the user request.",
+		}},
+		WorkItems: []WorkItemRequest{{
+			ID:              "main",
+			Kind:            "objective.implement",
+			Reason:          "Run the requested work.",
+			Prompt:          fmt.Sprintf("%s\n\n%s%s", task.Title, task.Prompt, extra),
+			TargetKind:      "objective",
+			TargetID:        task.ID,
+			WorkerKind:      kind,
+			ReasoningEffort: "default",
 		}},
 		Metadata: map[string]any{
 			"brain":     "static",

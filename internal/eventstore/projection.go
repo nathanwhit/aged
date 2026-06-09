@@ -103,7 +103,6 @@ func (p *readModelState) snapshot(lastEventID int64, events []core.Event, includ
 		PullRequests:        orderedPullRequests(filterClearedPullRequests(p.PullRequests, p.ClearedTasks)),
 		PullRequestFeedback: orderedPullRequestFeedback(filterClearedPullRequestFeedback(p.PullRequestFeedback, p.ClearedTasks)),
 		Steering:            orderedSteering(filterClearedSteering(p.Steering, p.ClearedTasks)),
-		OrchestrationGraphs: orchestrationGraphs(filteredTasks, filteredNodes),
 		LastEventID:         lastEventID,
 		Events:              snapshotResponseEvents(events, includeEvents),
 	}
@@ -142,7 +141,6 @@ func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 		PullRequests:        orderedPullRequests(pullRequests),
 		PullRequestFeedback: orderedPullRequestFeedback(compactCardPullRequestFeedback(pullRequestFeedback)),
 		Steering:            orderedSteering(compactCardSteering(steering)),
-		OrchestrationGraphs: orchestrationGraphs(taskCards, nodes),
 		LastEventID:         lastEventID,
 	}
 }
@@ -401,11 +399,12 @@ func applyQuestionNeeded(questions map[string]core.Question, event core.Event) e
 
 func applyQuestionDecided(questions map[string]core.Question, event core.Event) error {
 	var payload struct {
-		Approved *bool  `json:"approved,omitempty"`
-		Answer   string `json:"answer,omitempty"`
-		Question string `json:"question,omitempty"`
-		Reason   string `json:"reason,omitempty"`
-		WorkerID string `json:"workerId,omitempty"`
+		Approved   *bool  `json:"approved,omitempty"`
+		Answer     string `json:"answer,omitempty"`
+		Question   string `json:"question,omitempty"`
+		QuestionID string `json:"questionId,omitempty"`
+		Reason     string `json:"reason,omitempty"`
+		WorkerID   string `json:"workerId,omitempty"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return fmt.Errorf("decode approval.decided: %w", err)
@@ -413,16 +412,23 @@ func applyQuestionDecided(questions map[string]core.Question, event core.Event) 
 	workerID := firstNonEmpty(event.WorkerID, payload.WorkerID)
 	var selectedID string
 	var selectedAt time.Time
-	for id, question := range questions {
-		if question.TaskID != event.TaskID || question.Decided {
-			continue
+	if payload.QuestionID != "" {
+		if question, ok := questions[payload.QuestionID]; ok && question.TaskID == event.TaskID && !question.Decided {
+			selectedID = payload.QuestionID
 		}
-		if workerID != "" && question.WorkerID != workerID {
-			continue
-		}
-		if selectedID == "" || question.CreatedAt.After(selectedAt) {
-			selectedID = id
-			selectedAt = question.CreatedAt
+	}
+	if selectedID == "" {
+		for id, question := range questions {
+			if question.TaskID != event.TaskID || question.Decided {
+				continue
+			}
+			if workerID != "" && question.WorkerID != workerID {
+				continue
+			}
+			if selectedID == "" || question.CreatedAt.After(selectedAt) {
+				selectedID = id
+				selectedAt = question.CreatedAt
+			}
 		}
 	}
 	if selectedID == "" && workerID != "" {
@@ -1069,6 +1075,12 @@ func (p *readModelState) apply(event core.Event) error {
 			MergeStatus      string          `json:"mergeStatus,omitempty"`
 			Mergeable        string          `json:"mergeable,omitempty"`
 			ReviewStatus     string          `json:"reviewStatus,omitempty"`
+			BranchOwner      string          `json:"branchOwner,omitempty"`
+			BranchOwnerDir   string          `json:"branchOwnerDir,omitempty"`
+			BranchHead       string          `json:"branchHead,omitempty"`
+			UpdateLeaseOwner string          `json:"updateLeaseOwner,omitempty"`
+			UpdateLeaseDir   string          `json:"updateLeaseDir,omitempty"`
+			UpdateBaseHead   string          `json:"updateBaseHead,omitempty"`
 			Metadata         json.RawMessage `json:"metadata,omitempty"`
 		}
 		if err := json.Unmarshal(event.Payload, &payload); err != nil {
@@ -1094,10 +1106,17 @@ func (p *readModelState) apply(event core.Event) error {
 			MergeStatus:      payload.MergeStatus,
 			Mergeable:        payload.Mergeable,
 			ReviewStatus:     payload.ReviewStatus,
+			BranchOwner:      payload.BranchOwner,
+			BranchOwnerDir:   payload.BranchOwnerDir,
+			BranchHead:       payload.BranchHead,
+			UpdateLeaseOwner: payload.UpdateLeaseOwner,
+			UpdateLeaseDir:   payload.UpdateLeaseDir,
+			UpdateBaseHead:   payload.UpdateBaseHead,
 			CreatedAt:        event.At,
 			UpdatedAt:        event.At,
 			Metadata:         payload.Metadata,
 		}
+		next = hydratePullRequestLeaseFields(next)
 		id = resolvePullRequestSnapshotID(id, next, p.PullRequests, p.PullRequestAliases, p.PullRequestIdentities)
 		next.ID = id
 		if previous := p.PullRequests[id]; previous.ID != "" {
@@ -2125,7 +2144,8 @@ func loadProjectionSessions(ctx context.Context, q projectionQuerier, out map[st
 SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, status, target_id, target_kind,
 	remote_session, remote_run_dir, remote_work_dir, workspace_root, workspace_cwd, source_root,
 	workspace_name, workspace_mode, vcs_type, shared_root, shared_artifacts_dir, shared_worker_dir,
-	provider_session_id, created_at, started_at, updated_at,
+	provider_session_id, current_action_label, current_action, current_action_at, current_action_event,
+	created_at, started_at, updated_at,
 	completed_at, metadata
 FROM session_read_models`)
 	if err != nil {
@@ -2147,7 +2167,8 @@ func loadActiveProjectionSessions(ctx context.Context, q projectionQuerier, out 
 SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, status, target_id, target_kind,
 	remote_session, remote_run_dir, remote_work_dir, workspace_root, workspace_cwd, source_root,
 	workspace_name, workspace_mode, vcs_type, shared_root, shared_artifacts_dir, shared_worker_dir,
-	provider_session_id, created_at, started_at, updated_at,
+	provider_session_id, current_action_label, current_action, current_action_at, current_action_event,
+	created_at, started_at, updated_at,
 	completed_at, ''
 FROM session_read_models
 WHERE status NOT IN (?, ?, ?)`, core.WorkerSucceeded, core.WorkerFailed, core.WorkerCanceled)
@@ -2174,6 +2195,7 @@ func scanProjectionSession(rows interface {
 	var startedAtRaw string
 	var updatedAtRaw string
 	var completedAtRaw string
+	var currentActionAtRaw string
 	var metadata string
 	if err := rows.Scan(
 		&session.ID,
@@ -2199,6 +2221,10 @@ func scanProjectionSession(rows interface {
 		&session.SharedArtifactsDir,
 		&session.SharedWorkerDir,
 		&session.ProviderSessionID,
+		&session.CurrentActionLabel,
+		&session.CurrentAction,
+		&currentActionAtRaw,
+		&session.CurrentActionEvent,
 		&createdAtRaw,
 		&startedAtRaw,
 		&updatedAtRaw,
@@ -2223,11 +2249,16 @@ func scanProjectionSession(rows interface {
 	if err != nil {
 		return core.Session{}, err
 	}
+	currentActionAt, err := parseOptionalReadModelTime(currentActionAtRaw)
+	if err != nil {
+		return core.Session{}, err
+	}
 	session.Status = core.WorkerStatus(status)
 	session.CreatedAt = createdAt
 	session.StartedAt = startedAt
 	session.UpdatedAt = updatedAt
 	session.CompletedAt = completedAt
+	session.CurrentActionAt = currentActionAt
 	if metadata != "" {
 		session.Metadata = json.RawMessage(metadata)
 	}
@@ -2237,7 +2268,9 @@ func scanProjectionSession(rows interface {
 func loadProjectionPullRequests(ctx context.Context, q projectionQuerier, out map[string]core.PullRequest) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
-	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id, created_at, updated_at, metadata
+	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id,
+	branch_owner, branch_owner_dir, branch_head, update_lease_owner, update_lease_dir, update_base_head,
+	created_at, updated_at, metadata
 FROM pull_request_read_models`)
 	if err != nil {
 		return err
@@ -2266,6 +2299,12 @@ FROM pull_request_read_models`)
 			&pr.Mergeable,
 			&pr.ReviewStatus,
 			&pr.BabysitterTaskID,
+			&pr.BranchOwner,
+			&pr.BranchOwnerDir,
+			&pr.BranchHead,
+			&pr.UpdateLeaseOwner,
+			&pr.UpdateLeaseDir,
+			&pr.UpdateBaseHead,
 			&createdAtRaw,
 			&updatedAtRaw,
 			&metadata,
@@ -2990,10 +3029,11 @@ func saveProjectionSessions(ctx context.Context, q projectionQuerier, sessions m
 		id, task_id, worker_id, node_id, worker_kind, role, spawn_id, status, target_id, target_kind,
 		remote_session, remote_run_dir, remote_work_dir, workspace_root, workspace_cwd, source_root,
 		workspace_name, workspace_mode, vcs_type, shared_root, shared_artifacts_dir, shared_worker_dir,
-		provider_session_id, created_at, started_at, updated_at,
+		provider_session_id, current_action_label, current_action, current_action_at, current_action_event,
+		created_at, started_at, updated_at,
 		completed_at, metadata
 	)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		task_id = excluded.task_id,
 		worker_id = excluded.worker_id,
@@ -3017,6 +3057,10 @@ func saveProjectionSessions(ctx context.Context, q projectionQuerier, sessions m
 		shared_artifacts_dir = excluded.shared_artifacts_dir,
 		shared_worker_dir = excluded.shared_worker_dir,
 		provider_session_id = excluded.provider_session_id,
+		current_action_label = excluded.current_action_label,
+		current_action = excluded.current_action,
+		current_action_at = excluded.current_action_at,
+		current_action_event = excluded.current_action_event,
 		created_at = excluded.created_at,
 		started_at = excluded.started_at,
 		updated_at = excluded.updated_at,
@@ -3045,6 +3089,10 @@ func saveProjectionSessions(ctx context.Context, q projectionQuerier, sessions m
 			session.SharedArtifactsDir,
 			session.SharedWorkerDir,
 			session.ProviderSessionID,
+			session.CurrentActionLabel,
+			session.CurrentAction,
+			formatOptionalReadModelTime(session.CurrentActionAt),
+			session.CurrentActionEvent,
 			session.CreatedAt.Format(time.RFC3339Nano),
 			formatOptionalReadModelTime(session.StartedAt),
 			session.UpdatedAt.Format(time.RFC3339Nano),
@@ -3071,9 +3119,11 @@ func saveProjectionPullRequests(ctx context.Context, q projectionQuerier, pullRe
 		if _, err := q.ExecContext(ctx, `
 INSERT INTO pull_request_read_models (
 	id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
-	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id, created_at, updated_at, metadata
+	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id,
+	branch_owner, branch_owner_dir, branch_head, update_lease_owner, update_lease_dir, update_base_head,
+	created_at, updated_at, metadata
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	task_id = excluded.task_id,
 	repo = excluded.repo,
@@ -3090,6 +3140,12 @@ ON CONFLICT(id) DO UPDATE SET
 	mergeable = excluded.mergeable,
 	review_status = excluded.review_status,
 	babysitter_task_id = excluded.babysitter_task_id,
+	branch_owner = excluded.branch_owner,
+	branch_owner_dir = excluded.branch_owner_dir,
+	branch_head = excluded.branch_head,
+	update_lease_owner = excluded.update_lease_owner,
+	update_lease_dir = excluded.update_lease_dir,
+	update_base_head = excluded.update_base_head,
 	created_at = excluded.created_at,
 	updated_at = excluded.updated_at,
 	metadata = excluded.metadata`,
@@ -3109,6 +3165,12 @@ ON CONFLICT(id) DO UPDATE SET
 			pr.Mergeable,
 			pr.ReviewStatus,
 			pr.BabysitterTaskID,
+			pr.BranchOwner,
+			pr.BranchOwnerDir,
+			pr.BranchHead,
+			pr.UpdateLeaseOwner,
+			pr.UpdateLeaseDir,
+			pr.UpdateBaseHead,
 			pr.CreatedAt.Format(time.RFC3339Nano),
 			pr.UpdatedAt.Format(time.RFC3339Nano),
 			string(pr.Metadata),
@@ -3335,6 +3397,7 @@ WHERE id = 1`,
 
 func saveWorkerOutputWatermark(ctx context.Context, q projectionQuerier, event core.Event) error {
 	label, currentAction := compactWorkerOutputActivity(event.Payload)
+	at := event.At.Format(time.RFC3339Nano)
 	_, err := q.ExecContext(ctx, `
 INSERT INTO worker_output_watermarks (worker_id, task_id, event_id, at, label, current_action)
 VALUES (?, ?, ?, ?, ?, ?)
@@ -3348,9 +3411,31 @@ WHERE excluded.event_id > worker_output_watermarks.event_id`,
 		event.WorkerID,
 		event.TaskID,
 		event.ID,
-		event.At.Format(time.RFC3339Nano),
+		at,
 		label,
 		currentAction,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = q.ExecContext(ctx, `
+UPDATE session_read_models
+SET current_action_label = ?,
+	current_action = ?,
+	current_action_at = ?,
+	current_action_event = ?,
+	updated_at = CASE WHEN status NOT IN (?, ?, ?) THEN ? ELSE updated_at END
+WHERE worker_id = ? AND current_action_event < ?`,
+		label,
+		currentAction,
+		at,
+		event.ID,
+		core.WorkerSucceeded,
+		core.WorkerFailed,
+		core.WorkerCanceled,
+		at,
+		event.WorkerID,
+		event.ID,
 	)
 	return err
 }
@@ -3432,7 +3517,7 @@ func truncateSessionAction(value string, limit int) string {
 
 func applyWorkerOutputWatermarks(ctx context.Context, q projectionQuerier, state *readModelState, taskIDs map[string]bool) error {
 	rows, err := q.QueryContext(ctx, `
-SELECT worker_id, task_id, event_id, at, label, current_action
+SELECT worker_id, task_id, event_id, at
 FROM worker_output_watermarks
 ORDER BY event_id ASC`)
 	if err != nil {
@@ -3444,9 +3529,7 @@ ORDER BY event_id ASC`)
 		var taskID string
 		var eventID int64
 		var atRaw string
-		var label string
-		var currentAction string
-		if err := rows.Scan(&workerID, &taskID, &eventID, &atRaw, &label, &currentAction); err != nil {
+		if err := rows.Scan(&workerID, &taskID, &eventID, &atRaw); err != nil {
 			return err
 		}
 		if taskIDs != nil && !taskIDs[taskID] {
@@ -3467,17 +3550,6 @@ ORDER BY event_id ASC`)
 				node.UpdatedAt = at
 				state.Nodes[nodeID] = node
 			}
-		}
-		session := state.Sessions[workerID]
-		if session.ID != "" && !isTerminalWorkerStatus(session.Status) && at.After(session.UpdatedAt) {
-			session.UpdatedAt = at
-		}
-		if session.ID != "" {
-			session.CurrentActionLabel = label
-			session.CurrentAction = currentAction
-			session.CurrentActionAt = &at
-			session.CurrentActionEvent = eventID
-			state.Sessions[workerID] = session
 		}
 	}
 	return rows.Err()

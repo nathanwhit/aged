@@ -323,6 +323,10 @@ CREATE TABLE IF NOT EXISTS execution_node_read_models (
 		shared_artifacts_dir TEXT NOT NULL DEFAULT '',
 		shared_worker_dir TEXT NOT NULL DEFAULT '',
 		provider_session_id TEXT NOT NULL DEFAULT '',
+		current_action_label TEXT NOT NULL DEFAULT '',
+		current_action TEXT NOT NULL DEFAULT '',
+		current_action_at TEXT NOT NULL DEFAULT '',
+		current_action_event INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL,
 		started_at TEXT NOT NULL DEFAULT '',
 		updated_at TEXT NOT NULL,
@@ -351,6 +355,12 @@ CREATE TABLE IF NOT EXISTS execution_node_read_models (
 	mergeable TEXT NOT NULL DEFAULT '',
 	review_status TEXT NOT NULL DEFAULT '',
 	babysitter_task_id TEXT NOT NULL DEFAULT '',
+	branch_owner TEXT NOT NULL DEFAULT '',
+	branch_owner_dir TEXT NOT NULL DEFAULT '',
+	branch_head TEXT NOT NULL DEFAULT '',
+	update_lease_owner TEXT NOT NULL DEFAULT '',
+	update_lease_dir TEXT NOT NULL DEFAULT '',
+	update_base_head TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	metadata TEXT NOT NULL DEFAULT ''
@@ -555,8 +565,27 @@ CREATE TABLE IF NOT EXISTS targets (
 		{"shared_root", "TEXT NOT NULL DEFAULT ''"},
 		{"shared_artifacts_dir", "TEXT NOT NULL DEFAULT ''"},
 		{"shared_worker_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_label", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_at", "TEXT NOT NULL DEFAULT ''"},
+		{"current_action_event", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.ensureColumn(ctx, "session_read_models", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"branch_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"branch_owner_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"branch_head", "TEXT NOT NULL DEFAULT ''"},
+		{"update_lease_owner", "TEXT NOT NULL DEFAULT ''"},
+		{"update_lease_dir", "TEXT NOT NULL DEFAULT ''"},
+		{"update_base_head", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(ctx, "pull_request_read_models", column.name, column.definition); err != nil {
 			return err
 		}
 	}
@@ -1574,8 +1603,53 @@ func mergePublishedPullRequest(previous core.PullRequest, next core.PullRequest)
 	if next.ReviewStatus == "" {
 		next.ReviewStatus = previous.ReviewStatus
 	}
+	if next.BranchOwner == "" {
+		next.BranchOwner = previous.BranchOwner
+	}
+	if next.BranchOwnerDir == "" {
+		next.BranchOwnerDir = previous.BranchOwnerDir
+	}
+	if next.BranchHead == "" {
+		next.BranchHead = previous.BranchHead
+	}
+	if next.UpdateLeaseOwner == "" {
+		next.UpdateLeaseOwner = previous.UpdateLeaseOwner
+	}
+	if next.UpdateLeaseDir == "" {
+		next.UpdateLeaseDir = previous.UpdateLeaseDir
+	}
+	if next.UpdateBaseHead == "" {
+		next.UpdateBaseHead = previous.UpdateBaseHead
+	}
 	next.Metadata = mergePullRequestMetadata(previous.Metadata, next.Metadata)
+	next = hydratePullRequestLeaseFields(next)
 	return next
+}
+
+func hydratePullRequestLeaseFields(pr core.PullRequest) core.PullRequest {
+	metadata := map[string]any{}
+	if len(pr.Metadata) > 0 {
+		_ = json.Unmarshal(pr.Metadata, &metadata)
+	}
+	if pr.BranchOwner == "" {
+		pr.BranchOwner = projectionStringMetadataValue(metadata["ownerWorkerId"])
+	}
+	if pr.BranchOwnerDir == "" {
+		pr.BranchOwnerDir = projectionStringMetadataValue(metadata["ownerWorkDir"])
+	}
+	if pr.BranchHead == "" {
+		pr.BranchHead = projectionStringMetadataValue(metadata["headRefOid"])
+	}
+	if pr.UpdateLeaseOwner == "" {
+		pr.UpdateLeaseOwner = projectionStringMetadataValue(metadata["lastUpdateWorkerId"])
+	}
+	if pr.UpdateLeaseDir == "" {
+		pr.UpdateLeaseDir = projectionStringMetadataValue(metadata["lastUpdateWorkDir"])
+	}
+	if pr.UpdateBaseHead == "" {
+		pr.UpdateBaseHead = projectionStringMetadataValue(metadata["lastUpdateBaseChange"])
+	}
+	return pr
 }
 
 func mergePullRequestMetadata(previous json.RawMessage, next json.RawMessage) json.RawMessage {
@@ -1952,9 +2026,11 @@ func firstNonZeroInt(values ...int) int {
 
 func applySteeringTaskSteered(steering map[string]core.SteeringItem, event core.Event) error {
 	var payload struct {
-		Message  string          `json:"message"`
-		Reason   string          `json:"reason,omitempty"`
-		Metadata json.RawMessage `json:"metadata,omitempty"`
+		Message    string          `json:"message"`
+		Reason     string          `json:"reason,omitempty"`
+		TargetKind string          `json:"targetKind,omitempty"`
+		TargetID   string          `json:"targetId,omitempty"`
+		Metadata   json.RawMessage `json:"metadata,omitempty"`
 	}
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return fmt.Errorf("decode task.steered: %w", err)
@@ -1964,11 +2040,19 @@ func applySteeringTaskSteered(steering map[string]core.SteeringItem, event core.
 		return nil
 	}
 	id := "task_steering_" + fmt.Sprint(event.ID)
+	targetKind := strings.TrimSpace(payload.TargetKind)
+	targetID := strings.TrimSpace(payload.TargetID)
+	if targetKind == "" {
+		targetKind = "task"
+	}
+	if targetID == "" {
+		targetID = event.TaskID
+	}
 	steering[id] = core.SteeringItem{
 		ID:         id,
 		TaskID:     event.TaskID,
-		TargetKind: "task",
-		TargetID:   event.TaskID,
+		TargetKind: targetKind,
+		TargetID:   targetID,
 		Status:     "pending",
 		Reason:     nonEmptyString(payload.Reason, "user_task_steering"),
 		Message:    message,
@@ -2183,78 +2267,6 @@ func filterClearedSteering(values map[string]core.SteeringItem, cleared map[stri
 		}
 	}
 	return out
-}
-
-func orchestrationGraphs(tasks map[string]core.Task, nodes map[string]core.ExecutionNode) []core.OrchestrationGraph {
-	byTask := map[string][]core.ExecutionNode{}
-	for _, node := range nodes {
-		byTask[node.TaskID] = append(byTask[node.TaskID], node)
-	}
-	graphs := make([]core.OrchestrationGraph, 0, len(byTask))
-	for taskID, taskNodes := range byTask {
-		sort.Slice(taskNodes, func(i, j int) bool {
-			return taskNodes[i].CreatedAt.Before(taskNodes[j].CreatedAt)
-		})
-		spawnToNode := map[string]string{}
-		for _, node := range taskNodes {
-			if node.SpawnID != "" {
-				spawnToNode[node.SpawnID] = node.ID
-			}
-		}
-		graphNodes := make([]core.OrchestrationGraphNode, 0, len(taskNodes))
-		edges := []core.OrchestrationGraphEdge{}
-		summary := core.OrchestrationGraphSummary{Total: len(taskNodes)}
-		var updatedAt time.Time
-		for _, node := range taskNodes {
-			graphNodes = append(graphNodes, core.OrchestrationGraphNode{
-				ID:         node.ID,
-				WorkerID:   node.WorkerID,
-				WorkerKind: node.WorkerKind,
-				Status:     node.Status,
-				Role:       node.Role,
-				Reason:     node.Reason,
-				SpawnID:    node.SpawnID,
-				TargetID:   node.TargetID,
-				TargetKind: node.TargetKind,
-			})
-			if node.ParentNodeID != "" {
-				edges = append(edges, core.OrchestrationGraphEdge{From: node.ParentNodeID, To: node.ID, Reason: "parent"})
-			}
-			for _, dep := range node.DependsOn {
-				if from := spawnToNode[dep]; from != "" {
-					edges = append(edges, core.OrchestrationGraphEdge{From: from, To: node.ID, Reason: "depends_on:" + dep})
-				}
-			}
-			switch node.Status {
-			case core.WorkerRunning:
-				summary.Running++
-			case core.WorkerWaiting, core.WorkerQueued:
-				summary.Waiting++
-			case core.WorkerSucceeded:
-				summary.Done++
-			case core.WorkerFailed:
-				summary.Failed++
-			case core.WorkerCanceled:
-				summary.Canceled++
-			}
-			if node.UpdatedAt.After(updatedAt) {
-				updatedAt = node.UpdatedAt
-			}
-		}
-		task := tasks[taskID]
-		graphs = append(graphs, core.OrchestrationGraph{
-			TaskID:    taskID,
-			Status:    task.Status,
-			Nodes:     graphNodes,
-			Edges:     edges,
-			Summary:   summary,
-			UpdatedAt: updatedAt,
-		})
-	}
-	sort.Slice(graphs, func(i, j int) bool {
-		return graphs[i].UpdatedAt.Before(graphs[j].UpdatedAt)
-	})
-	return graphs
 }
 
 func (s *SQLiteStore) allEvents(ctx context.Context) ([]core.Event, error) {

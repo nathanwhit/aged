@@ -22,9 +22,9 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, OrchestrationGraph, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -43,7 +43,6 @@ type AppSnapshot = {
   pullRequests: PullRequestState[];
   pullRequestFeedback: PullRequestFeedback[];
   steering: SteeringItem[];
-  orchestrationGraphs: OrchestrationGraph[];
   lastEventId: number;
   snapshotEventId: number;
   events: EventRecord[];
@@ -77,7 +76,6 @@ const emptySnapshot: AppSnapshot = {
   pullRequests: [],
   pullRequestFeedback: [],
   steering: [],
-  orchestrationGraphs: [],
   lastEventId: 0,
   snapshotEventId: 0,
   events: [],
@@ -160,6 +158,19 @@ function groupByTask<T>(items: T[], taskId: (item: T) => string | undefined): Ma
   return groups;
 }
 
+function memoryEntriesForTask(task: Task, byTask: Map<string, MemoryEntry[]>, byProject: Map<string, MemoryEntry[]>): MemoryEntry[] {
+  const entries = new Map<string, MemoryEntry>();
+  for (const entry of byTask.get(task.id) ?? EMPTY_MEMORY_ENTRIES) {
+    entries.set(entry.id, entry);
+  }
+  if (task.projectId) {
+    for (const entry of byProject.get(task.projectId) ?? EMPTY_MEMORY_ENTRIES) {
+      entries.set(entry.id, entry);
+    }
+  }
+  return entries.size > 0 ? [...entries.values()] : EMPTY_MEMORY_ENTRIES;
+}
+
 function mapByTask<T>(items: T[], taskId: (item: T) => string | undefined): Map<string, T> {
   const byTask = new Map<string, T>();
   for (const item of items) {
@@ -231,13 +242,13 @@ function App() {
   const workItemsByTask = useMemo(() => groupByTask(snapshot.workItems, (item) => item.taskId), [snapshot.workItems]);
   const artifactsByTask = useMemo(() => groupByTask(snapshot.artifacts, (artifact) => artifact.taskId), [snapshot.artifacts]);
   const memoryEntriesByTask = useMemo(() => groupByTask(snapshot.memoryEntries, (entry) => entry.taskId), [snapshot.memoryEntries]);
+  const memoryEntriesByProject = useMemo(() => groupByTask(snapshot.memoryEntries, (entry) => entry.projectId), [snapshot.memoryEntries]);
   const questionsByTask = useMemo(() => groupByTask(snapshot.questions, (question) => question.taskId), [snapshot.questions]);
   const sessionsByTask = useMemo(() => groupByTask(snapshot.sessions, (session) => session.taskId), [snapshot.sessions]);
   const eventsByTask = useMemo(() => groupByTask(snapshot.events, (event) => event.taskId), [snapshot.events]);
   const pullRequestsByTask = useMemo(() => groupByTask(snapshot.pullRequests, (pr) => pr.taskId), [snapshot.pullRequests]);
   const pullRequestFeedbackByTask = useMemo(() => groupByTask(snapshot.pullRequestFeedback, (feedback) => feedback.taskId), [snapshot.pullRequestFeedback]);
   const steeringByTask = useMemo(() => groupByTask(snapshot.steering, (item) => item.taskId), [snapshot.steering]);
-  const graphByTask = useMemo(() => mapByTask(snapshot.orchestrationGraphs, (graph) => graph.taskId), [snapshot.orchestrationGraphs]);
   const selectedTask = taskById.get(selectedTaskId) ?? preferredTask(snapshot.tasks);
 
   useEffect(() => {
@@ -275,10 +286,9 @@ function App() {
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
   const selectedWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
   const selectedArtifacts = selectedTask ? artifactsByTask.get(selectedTask.id) ?? selectedTask.artifacts?.map((artifact) => ({ ...artifact, taskId: selectedTask.id })) ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
-  const selectedMemoryEntries = selectedTask ? memoryEntriesByTask.get(selectedTask.id) ?? EMPTY_MEMORY_ENTRIES : EMPTY_MEMORY_ENTRIES;
+  const selectedMemoryEntries = selectedTask ? memoryEntriesForTask(selectedTask, memoryEntriesByTask, memoryEntriesByProject) : EMPTY_MEMORY_ENTRIES;
   const selectedQuestions = selectedTask ? questionsByTask.get(selectedTask.id) ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS;
   const selectedSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
-  const selectedGraph = selectedTask ? graphByTask.get(selectedTask.id) : undefined;
   const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const selectedEventsByWorker = useMemo(() => groupByWorker(selectedEvents), [selectedEvents]);
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
@@ -414,7 +424,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -428,6 +438,7 @@ function App() {
               onWatch={watchTaskPullRequests}
               onRefresh={refreshPullRequest}
               onBabysit={babysitPullRequest}
+              onSteer={steerTask}
               onDone={refresh}
               onError={setError}
             />
@@ -445,7 +456,6 @@ function App() {
             <WorkerList
               workers={selectedWorkers}
               nodes={selectedNodes}
-              graph={selectedGraph}
               progress={progress}
               task={selectedTask}
               eventsByWorker={selectedEventsByWorker}
@@ -1830,9 +1840,11 @@ function TaskDetail({
   targets,
   events,
   onCancel,
+  onCancelWorker,
   onRetry,
   onSteer,
   onSteerWorker,
+  onAnswerQuestion,
   onCancelWorkItem,
   onUpdateLoopConfig,
   onLoopConfigUpdated,
@@ -1852,9 +1864,11 @@ function TaskDetail({
   targets: TargetState[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
+  onCancelWorker: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
-  onSteer: (id: string, message: string) => Promise<void>;
+  onSteer: (id: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
   onSteerWorker: (id: string, message: string) => Promise<void>;
+  onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
   onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
   onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
@@ -1976,17 +1990,19 @@ function TaskDetail({
       {(artifacts.length || task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []} />
       )}
-      <MemoryEntryPanel entries={memoryEntries} />
+      <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
+      <SharedScratchPanel sessions={sessions} />
       {taskError && (
         <div className="task-failure">
           <strong>Failure details</strong>
           <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
         </div>
       )}
-      {pendingApprovals.length > 0 && <ApprovalPanel approvals={pendingApprovals} onUseMessage={setMessage} />}
+      {pendingApprovals.length > 0 && <ApprovalPanel taskId={task.id} approvals={pendingApprovals} onAnswer={onAnswerQuestion} onDone={onLoopConfigUpdated} onError={onError} />}
       <WorkerProgressSpotlight update={workerUpdate} />
-      <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onError={onError} />
-      <SessionQueue sessions={sessions} onSteer={onSteerWorker} onError={onError} />
+      <WideWorkProgress items={workItems} />
+      <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
+      <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
       <SteeringQueue items={steering} />
       <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
       {durableLoop && (
@@ -2047,8 +2063,10 @@ function TaskObjectiveStrip({ task, artifacts }: { task: Task; artifacts: Artifa
   );
 }
 
-function WorkItemQueue({ taskId, items, onCancel, onError }: { taskId: string; items: WorkItem[]; onCancel: (taskId: string, itemId: string) => Promise<void>; onError: (message: string) => void }) {
+function WorkItemQueue({ taskId, items, onCancel, onSteer, onError }: { taskId: string; items: WorkItem[]; onCancel: (taskId: string, itemId: string) => Promise<void>; onSteer: (taskId: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>; onError: (message: string) => void }) {
   const [canceling, setCanceling] = useState<Record<string, boolean>>({});
+  const [steering, setSteering] = useState<Record<string, string>>({});
+  const [steeringBusy, setSteeringBusy] = useState<Record<string, boolean>>({});
   const sorted = [...items].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
   const activeCount = sorted.filter((item) => item.status === "queued" || item.status === "running").length;
   if (sorted.length === 0) return null;
@@ -2060,6 +2078,20 @@ function WorkItemQueue({ taskId, items, onCancel, onError }: { taskId: string; i
       onError(errorMessage(err));
     } finally {
       setCanceling((current) => ({ ...current, [item.id]: false }));
+    }
+  }
+  async function steerItem(event: React.FormEvent, item: WorkItem) {
+    event.preventDefault();
+    const message = (steering[item.id] ?? "").trim();
+    if (!message) return;
+    setSteeringBusy((current) => ({ ...current, [item.id]: true }));
+    try {
+      await onSteer(taskId, message, { targetKind: "work_item", targetId: item.id });
+      setSteering((current) => ({ ...current, [item.id]: "" }));
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setSteeringBusy((current) => ({ ...current, [item.id]: false }));
     }
   }
   return (
@@ -2093,6 +2125,14 @@ function WorkItemQueue({ taskId, items, onCancel, onError }: { taskId: string; i
             </div>
             {item.reason && <p>{item.reason}</p>}
             {item.error && <TruncatedBlock label="Work item error" value={item.error} className="tool-output failed" limit={900} />}
+            {(item.status === "queued" || item.status === "running" || item.status === "failed") && (
+              <form className="inline-steer-form" onSubmit={(event) => steerItem(event, item)}>
+                <input value={steering[item.id] ?? ""} onChange={(event) => setSteering((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="Steer this work item..." required />
+                <button className="secondary compact" disabled={Boolean(steeringBusy[item.id]) || !(steering[item.id] ?? "").trim()}>
+                  {steeringBusy[item.id] ? "Queued" : "Steer"}
+                </button>
+              </form>
+            )}
           </article>
         ))}
       </div>
@@ -2100,14 +2140,93 @@ function WorkItemQueue({ taskId, items, onCancel, onError }: { taskId: string; i
   );
 }
 
-function MemoryEntryPanel({ entries }: { entries: MemoryEntry[] }) {
+function WideWorkProgress({ items }: { items: WorkItem[] }) {
+  const wideItems = items
+    .filter((item) => item.kind === "objective.slice" || item.kind === "objective.compose" || item.kind === "objective.validate")
+    .sort((left, right) => {
+      const leftRank = wideWorkRank(left.kind);
+      const rightRank = wideWorkRank(right.kind);
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return Date.parse(left.createdAt) - Date.parse(right.createdAt);
+    });
+  if (wideItems.length === 0) return null;
+  const counts = wideItems.reduce<Record<string, number>>((out, item) => {
+    out[item.status] = (out[item.status] ?? 0) + 1;
+    return out;
+  }, {});
+  const active = (counts.queued ?? 0) + (counts.running ?? 0);
+  const done = counts.succeeded ?? 0;
+  return (
+    <section className="wide-work">
+      <div className="work-item-title">
+        <strong>Wide Work</strong>
+        <span>{done}/{wideItems.length} done · {active} active</span>
+      </div>
+      <div className="wide-work-lanes">
+        {wideItems.map((item) => (
+          <article key={item.id} className={`wide-work-card ${item.kind.replace(".", "-")}`}>
+            <div className="wide-work-card-heading">
+              <strong>{wideWorkTitle(item)}</strong>
+              <Status value={item.status} />
+            </div>
+            <div className="wide-work-meta">
+              <span>{humanizeKey(item.kind.replace("objective.", ""))}</span>
+              {item.workerId && <span>Worker {item.workerId.slice(0, 8)}</span>}
+              {item.targetId && <span>{item.targetId}</span>}
+            </div>
+            {wideWorkScope(item).length > 0 && (
+              <div className="wide-work-scope">
+                {wideWorkScope(item).slice(0, 4).map((scope) => <code key={scope}>{scope}</code>)}
+              </div>
+            )}
+            {item.reason && <p>{item.reason}</p>}
+            {item.error && <TruncatedBlock label="Slice error" value={item.error} className="tool-output failed" limit={700} />}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function wideWorkRank(kind: string): number {
+  switch (kind) {
+    case "objective.slice":
+      return 0;
+    case "objective.compose":
+      return 1;
+    case "objective.validate":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+function wideWorkTitle(item: WorkItem): string {
+  const metadata = item.metadata ?? {};
+  const explicit = payloadValue(metadata.title) || payloadValue(metadata.name) || payloadValue(metadata.slice) || payloadValue(metadata.subsystem);
+  if (explicit) return explicit;
+  return item.id || humanizeKey(item.kind);
+}
+
+function wideWorkScope(item: WorkItem): string[] {
+  const metadata = item.metadata ?? {};
+  return [
+    ...payloadStringArray(metadata.files),
+    ...payloadStringArray(metadata.paths),
+    ...payloadStringArray(metadata.fileSet),
+    ...payloadStringArray(metadata.subsystems),
+  ].filter(Boolean);
+}
+
+function MemoryEntryPanel({ taskId, entries }: { taskId: string; entries: MemoryEntry[] }) {
   const sorted = [...entries].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
   if (sorted.length === 0) return null;
+  const projectEntries = sorted.filter((entry) => entry.taskId && entry.taskId !== taskId).length;
   return (
     <section className="work-item-queue">
       <div className="work-item-title">
         <strong>Memory</strong>
-        <span>{sorted.length} entries</span>
+        <span>{sorted.length} entries{projectEntries ? ` · ${projectEntries} project` : ""}</span>
       </div>
       <div className="work-item-list">
         {sorted.slice(0, 8).map((entry) => (
@@ -2117,6 +2236,7 @@ function MemoryEntryPanel({ entries }: { entries: MemoryEntry[] }) {
               <small>{new Date(entry.updatedAt || entry.createdAt).toLocaleTimeString()}</small>
             </div>
             <div className="work-item-meta">
+              <span className="pill">{entry.taskId && entry.taskId !== taskId ? "Project memory" : "Task memory"}</span>
               {entry.workerId && <span className="pill">Worker {entry.workerId.slice(0, 8)}</span>}
               {entry.sourceEvent && <span className="pill">{entry.sourceEvent}</span>}
             </div>
@@ -2126,6 +2246,67 @@ function MemoryEntryPanel({ entries }: { entries: MemoryEntry[] }) {
       </div>
     </section>
   );
+}
+
+type SharedScratchSummary = {
+  root: string;
+  artifactsDir?: string;
+  workerDirs: string[];
+};
+
+function SharedScratchPanel({ sessions }: { sessions: Session[] }) {
+  const items = sharedScratchSummaries(sessions);
+  if (items.length === 0) return null;
+  return (
+    <section className="scratch-panel">
+      <div className="work-item-title">
+        <strong>Scratch</strong>
+        <span>{items.length} shared {items.length === 1 ? "workspace" : "workspaces"}</span>
+      </div>
+      <div className="work-item-list">
+        {items.map((item) => (
+          <article key={item.root} className="work-item-card">
+            <div>
+              <strong>{scratchName(item.root)}</strong>
+              <small>{item.workerDirs.length} workers</small>
+            </div>
+            <code className="session-path">{item.root}</code>
+            {item.artifactsDir && <code className="session-path muted">{item.artifactsDir}</code>}
+            {item.workerDirs.length > 0 && (
+              <div className="work-item-meta">
+                {item.workerDirs.slice(0, 4).map((dir) => (
+                  <span key={dir} className="pill">{scratchName(dir)}</span>
+                ))}
+                {item.workerDirs.length > 4 && <span className="pill">+{item.workerDirs.length - 4}</span>}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function sharedScratchSummaries(sessions: Session[]): SharedScratchSummary[] {
+  const byRoot = new Map<string, SharedScratchSummary>();
+  for (const session of sessions) {
+    const root = session.sharedRoot?.trim();
+    if (!root) continue;
+    const summary = byRoot.get(root) ?? { root, workerDirs: [] };
+    if (!summary.artifactsDir && session.sharedArtifactsDir) {
+      summary.artifactsDir = session.sharedArtifactsDir;
+    }
+    if (session.sharedWorkerDir && !summary.workerDirs.includes(session.sharedWorkerDir)) {
+      summary.workerDirs.push(session.sharedWorkerDir);
+    }
+    byRoot.set(root, summary);
+  }
+  return [...byRoot.values()].sort((left, right) => left.root.localeCompare(right.root));
+}
+
+function scratchName(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.at(-1) ?? path;
 }
 
 function PullRequestFeedbackQueue({ feedback }: { feedback: PullRequestFeedback[] }) {
@@ -2209,11 +2390,32 @@ function steeringTitle(item: SteeringItem): string {
   return item.reason ? humanizeKey(item.reason) : "Steering";
 }
 
-function SessionQueue({ sessions, onSteer, onError }: { sessions: Session[]; onSteer: (id: string, message: string) => Promise<void>; onError: (message: string) => void }) {
+function SessionQueue({
+  sessions,
+  onCancel,
+  onSteer,
+  onError,
+}: {
+  sessions: Session[];
+  onCancel: (id: string) => Promise<void>;
+  onSteer: (id: string, message: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
   const [steering, setSteering] = useState<Record<string, string>>({});
+  const [canceling, setCanceling] = useState<Record<string, boolean>>({});
   const sorted = [...sessions].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
   const activeCount = sorted.filter((session) => session.status === "queued" || session.status === "running" || session.status === "waiting").length;
   if (sorted.length === 0) return null;
+  async function cancelSession(workerID: string) {
+    setCanceling((items) => ({ ...items, [workerID]: true }));
+    try {
+      await onCancel(workerID);
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setCanceling((items) => ({ ...items, [workerID]: false }));
+    }
+  }
   async function steer(event: React.FormEvent, workerID: string) {
     event.preventDefault();
     const message = steering[workerID] ?? "";
@@ -2243,7 +2445,14 @@ function SessionQueue({ sessions, onSteer, onError }: { sessions: Session[]; onS
                   <strong>{session.role ? humanizeKey(session.role) : session.workerKind || "Worker"}</strong>
                   <small>{session.workerId.slice(0, 8)}</small>
                 </div>
-                <Status value={session.status} />
+                <div className="session-actions">
+                  <Status value={session.status} />
+                  {!isTerminalWorkerStatus(session.status) && (
+                    <button className="icon-button danger small" disabled={Boolean(canceling[session.workerId])} onClick={() => cancelSession(session.workerId)} title="Cancel session">
+                      <CircleStop size={14} />
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="session-meta">
                 {session.targetKind && <span>{humanizeKey(session.targetKind)}</span>}
@@ -2309,7 +2518,19 @@ function questionApprovalStates(questions: Question[]): ApprovalState[] {
     }));
 }
 
-function ApprovalPanel({ approvals, onUseMessage }: { approvals: ApprovalState[]; onUseMessage: (message: string) => void }) {
+function ApprovalPanel({
+  taskId,
+  approvals,
+  onAnswer,
+  onDone,
+  onError,
+}: {
+  taskId: string;
+  approvals: ApprovalState[];
+  onAnswer: (taskId: string, questionId: string, answer: string) => Promise<void>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
   return (
     <section className="approval-panel">
       <div className="approval-title">
@@ -2334,13 +2555,62 @@ function ApprovalPanel({ approvals, onUseMessage }: { approvals: ApprovalState[]
             {approval.answer && <span>Answer: {approval.answer}</span>}
           </div>
           {!approval.decided && (
-            <button className="secondary compact" type="button" onClick={() => onUseMessage(`I handled this setup blocker: ${approval.question}\n\n`)}>
-              Respond
-            </button>
+            <ApprovalResponseForm
+              taskId={taskId}
+              approval={approval}
+              onAnswer={onAnswer}
+              onDone={onDone}
+              onError={onError}
+            />
           )}
         </div>
       ))}
     </section>
+  );
+}
+
+function ApprovalResponseForm({
+  taskId,
+  approval,
+  onAnswer,
+  onDone,
+  onError,
+}: {
+  taskId: string;
+  approval: ApprovalState;
+  onAnswer: (taskId: string, questionId: string, answer: string) => Promise<void>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [answer, setAnswer] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmed = answer.trim();
+    if (!trimmed) {
+      onError("Answer is required.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onAnswer(taskId, approval.id, trimmed);
+      setAnswer("");
+      await onDone();
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form className="approval-response" onSubmit={submit}>
+      <input value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Answer this question..." required />
+      <button className="icon-button" disabled={submitting} title="Send answer">
+        <Send size={16} />
+      </button>
+    </form>
   );
 }
 
@@ -2391,6 +2661,7 @@ function PullRequestPanel({
   onWatch,
   onRefresh,
   onBabysit,
+  onSteer,
   onDone,
   onError,
 }: {
@@ -2401,10 +2672,12 @@ function PullRequestPanel({
   onWatch: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
   onRefresh: (id: string) => Promise<PullRequestState>;
   onBabysit: (id: string) => Promise<unknown>;
+  onSteer: (taskId: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
   onDone: () => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState("");
+  const [steering, setSteering] = useState<Record<string, string>>({});
   const [watchRepo, setWatchRepo] = useState("");
   const [watchNumber, setWatchNumber] = useState("");
   const [watchUrl, setWatchUrl] = useState("");
@@ -2426,6 +2699,15 @@ function PullRequestPanel({
     } catch (err) { onError(errorMessage(err)); } finally {
       setBusy("");
     }
+  }
+  async function steerPullRequest(event: React.FormEvent, pr: PullRequestState) {
+    event.preventDefault();
+    const message = (steering[pr.id] ?? "").trim();
+    if (!message) return;
+    await run(`steer:${pr.id}`, async () => {
+      await onSteer(task.id, message, { targetKind: "pull_request", targetId: pr.id });
+      setSteering((current) => ({ ...current, [pr.id]: "" }));
+    });
   }
 
   return (
@@ -2482,6 +2764,14 @@ function PullRequestPanel({
                   {pr.reviewStatus && <span className="pill">{pr.reviewStatus.toLowerCase()}</span>}
                   {pendingFeedback.length > 0 && <span className="pill">{pendingFeedback.length} feedback</span>}
                 </div>
+                {(pr.branchOwner || pr.updateLeaseOwner || pr.branchHead) && (
+                  <div className="pr-lease-row">
+                    {pr.branchOwner && <span className="pill">Owner {shortID(pr.branchOwner)}</span>}
+                    {pr.branchHead && <span className="pill">Head {shortID(pr.branchHead)}</span>}
+                    {pr.updateLeaseOwner && <span className="pill">Lease {shortID(pr.updateLeaseOwner)}</span>}
+                    {pr.updateBaseHead && <span className="pill">Base {shortID(pr.updateBaseHead)}</span>}
+                  </div>
+                )}
                 {pendingFeedback.length > 0 && (
                   <div className="pr-feedback-list">
                     {pendingFeedback.slice(0, 3).map((item) => (
@@ -2492,6 +2782,12 @@ function PullRequestPanel({
                     ))}
                   </div>
                 )}
+                <form className="inline-steer-form" onSubmit={(event) => steerPullRequest(event, pr)}>
+                  <input value={steering[pr.id] ?? ""} onChange={(event) => setSteering((current) => ({ ...current, [pr.id]: event.target.value }))} placeholder="Steer this PR..." required />
+                  <button className="secondary compact" disabled={busy === `steer:${pr.id}` || !(steering[pr.id] ?? "").trim()}>
+                    {busy === `steer:${pr.id}` ? "Queued" : "Steer"}
+                  </button>
+                </form>
                 <div className="pr-actions">
                   <button className="secondary compact" disabled={busy === `refresh:${pr.id}`} onClick={() => run(`refresh:${pr.id}`, () => onRefresh(pr.id))}>
                     <RefreshCw size={16} />
@@ -2511,11 +2807,16 @@ function PullRequestPanel({
   );
 }
 
+function shortID(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 12) return trimmed;
+  return trimmed.slice(0, 8);
+}
+
 function WorkerList({
   task,
   workers,
   nodes,
-  graph,
   progress,
   eventsByWorker,
   selectedWorkerId,
@@ -2530,7 +2831,6 @@ function WorkerList({
   task: Task;
   workers: Worker[];
   nodes: ExecutionNode[];
-  graph: OrchestrationGraph | undefined;
   progress: WorkProgress;
   eventsByWorker: Map<string, EventRecord[]>;
   selectedWorkerId: string;
@@ -2600,7 +2900,7 @@ function WorkerList({
     }
   }
 
-  const rows = orchestrationRows(workers, nodes, graph);
+  const rows = orchestrationRows(workers, nodes);
 
   function selectWorker(workerId: string) {
     if (!workerId) return;
@@ -2617,27 +2917,27 @@ function WorkerList({
         </span>
         <span className="pill">{workers.length || nodes.length} workers</span>
       </div>
-      <OrchestrationOverview progress={progress} graph={graph} nodes={nodes} workers={workers} />
+      <OrchestrationOverview progress={progress} nodes={nodes} workers={workers} />
       {workers.length === 0 && nodes.length === 0 ? (
         <p className="empty">No workers have been spawned.</p>
       ) : (
         <>
           <WorkerNavigator rows={rows} progress={progress} selectedWorkerId={selectedWorkerId} onSelect={selectWorker} />
           <div className="worker-grid">
-            {rows.map(({ worker, node, graphNode }) => {
-              const rowId = worker?.id ?? node?.id ?? graphNode?.id ?? "";
-              const status = worker?.status ?? node?.status ?? graphNode?.status ?? "queued";
-              const workerId = worker?.id ?? node?.workerId ?? graphNode?.workerId ?? "";
+            {rows.map(({ worker, node }) => {
+              const rowId = worker?.id ?? node?.id ?? "";
+              const status = worker?.status ?? node?.status ?? "queued";
+              const workerId = worker?.id ?? node?.workerId ?? "";
               const workerEvents = workerId ? eventsByWorker.get(workerId) ?? EMPTY_EVENTS : EMPTY_EVENTS;
-              const kind = worker?.kind ?? node?.workerKind ?? graphNode?.workerKind ?? "worker";
+              const kind = worker?.kind ?? node?.workerKind ?? "worker";
               const completion = workerId ? latestWorkerCompletion(workerEvents, workerId) : {};
               const changes = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
               const applied = workerId ? workerChangesApplied(workerEvents, workerId) : false;
               const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
             const diff = workerId ? diffs[workerId] : undefined;
-            const dependencies = node?.dependsOn ?? graph?.edges.filter((edge) => edge.to === (graphNode?.id ?? node?.id)).map((edge) => edge.from) ?? [];
+            const dependencies = node?.dependsOn ?? [];
             const blockers = dependencies.filter((dependencyId) => {
-              const dependency = nodes.find((candidate) => candidate.id === dependencyId) ?? graph?.nodes.find((candidate) => candidate.id === dependencyId);
+              const dependency = nodes.find((candidate) => candidate.id === dependencyId || candidate.spawnId === dependencyId);
               return dependency && dependency.status !== "succeeded";
             });
             const duration = worker ? formatDuration(worker.createdAt, worker.updatedAt) : node ? formatDuration(node.createdAt, node.updatedAt) : "";
@@ -2645,7 +2945,7 @@ function WorkerList({
             return (
               <article id={workerId ? workerCardDomId(workerId) : undefined} key={rowId} className={workerId === selectedWorkerId ? "worker-card selected" : "worker-card"}>
                 <div>
-                  <strong>{node?.role || graphNode?.role || kind}</strong>
+                  <strong>{node?.role || kind}</strong>
                   <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
                 </div>
                 <Status value={status} />
@@ -2657,18 +2957,18 @@ function WorkerList({
                 </button>
                 <div className="worker-context">
                   <WorkerContextItem label="Kind" value={kind} />
-                  <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? graphNode?.id.slice(0, 8) ?? "none"} />
-                  <WorkerContextItem label="Target" value={targetLabel(node, graphNode)} />
+                  <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
+                  <WorkerContextItem label="Target" value={targetLabel(node)} />
                   <WorkerContextItem label="Updated" value={worker ? new Date(worker.updatedAt).toLocaleTimeString() : node ? new Date(node.updatedAt).toLocaleTimeString() : ""} />
                   {duration && <WorkerContextItem label="Duration" value={duration} />}
                   {idle && <WorkerContextItem label="Idle" value={idle} />}
-                  {node?.spawnId || graphNode?.spawnId ? <WorkerContextItem label="Spawn" value={node?.spawnId ?? graphNode?.spawnId ?? ""} /> : null}
+                  {node?.spawnId ? <WorkerContextItem label="Spawn" value={node.spawnId} /> : null}
                 </div>
-                {(dependencies.length > 0 || blockers.length > 0 || node?.reason || graphNode?.reason) && (
+                {(dependencies.length > 0 || blockers.length > 0 || node?.reason) && (
                   <div className="worker-graph-context">
                     {dependencies.length > 0 && <span>Depends on {dependencies.map((id) => id.slice(0, 8)).join(", ")}</span>}
                     {blockers.length > 0 && <span className="warning">Blocked by {blockers.map((id) => id.slice(0, 8)).join(", ")}</span>}
-                    {(node?.reason || graphNode?.reason) && <p>{node?.reason ?? graphNode?.reason}</p>}
+                    {node?.reason && <p>{node.reason}</p>}
                   </div>
                 )}
                 <div className="worker-current">
@@ -2732,10 +3032,10 @@ function WorkerNavigator({
   onSelect: (id: string) => void;
 }) {
   const items = rows.map((row, index) => {
-    const workerId = row.worker?.id ?? row.node?.workerId ?? row.graphNode?.workerId ?? "";
-    const rowId = workerId || row.node?.id || row.graphNode?.id || String(index + 1);
-    const status = row.worker?.status ?? row.node?.status ?? row.graphNode?.status ?? "queued";
-    const label = row.node?.role || row.graphNode?.role || row.worker?.kind || row.node?.workerKind || row.graphNode?.workerKind || "worker";
+    const workerId = row.worker?.id ?? row.node?.workerId ?? "";
+    const rowId = workerId || row.node?.id || String(index + 1);
+    const status = row.worker?.status ?? row.node?.status ?? "queued";
+    const label = row.node?.role || row.worker?.kind || row.node?.workerKind || "worker";
     return { rowId, workerId, status, label };
   });
   const activeCount = items.filter((item) => item.status === "running" || item.status === "waiting" || item.status === "queued").length;
@@ -2771,27 +3071,22 @@ function WorkerNavigator({
 
 function OrchestrationOverview({
   progress,
-  graph,
   nodes,
   workers,
 }: {
   progress: WorkProgress;
-  graph: OrchestrationGraph | undefined;
   nodes: ExecutionNode[];
   workers: Worker[];
 }) {
-  const edgeCount = graph?.edges.length ?? nodes.reduce((total, node) => total + (node.dependsOn?.length ?? 0), 0);
-  const failed = graph ? graph.summary.failed + graph.summary.canceled : progress.failed;
-  const waiting = graph ? graph.summary.waiting : progress.waiting;
-  const running = graph ? graph.summary.running : progress.running;
+  const edgeCount = nodes.reduce((total, node) => total + (node.parentNodeId ? 1 : 0) + (node.dependsOn?.length ?? 0), 0);
   return (
     <div className="orchestration-overview">
       <div className="summary-grid compact">
         <Metric label="Progress" value={`${progress.percent}%`} />
         <Metric label="Done" value={`${progress.done}/${progress.total}`} />
-        <Metric label="Running" value={String(running)} />
-        <Metric label="Waiting" value={String(waiting)} />
-        <Metric label="Failed/Canceled" value={String(failed)} />
+        <Metric label="Running" value={String(progress.running)} />
+        <Metric label="Waiting" value={String(progress.waiting)} />
+        <Metric label="Failed/Canceled" value={String(progress.failed)} />
       </div>
       <div className="progress-track" aria-label={`Progress ${progress.percent}%`}>
         <div style={{ width: `${progress.percent}%` }} />
@@ -2799,7 +3094,6 @@ function OrchestrationOverview({
       <div className="orchestration-meta">
         <span>{nodes.length || workers.length} execution nodes</span>
         <span>{edgeCount} dependencies</span>
-        {graph?.updatedAt && <span>Updated {new Date(graph.updatedAt).toLocaleTimeString()}</span>}
       </div>
     </div>
   );
@@ -2808,17 +3102,12 @@ function OrchestrationOverview({
 type OrchestrationRow = {
   worker?: Worker;
   node?: ExecutionNode;
-  graphNode?: OrchestrationGraph["nodes"][number];
 };
 
-function orchestrationRows(workers: Worker[], nodes: ExecutionNode[], graph: OrchestrationGraph | undefined): OrchestrationRow[] {
+function orchestrationRows(workers: Worker[], nodes: ExecutionNode[]): OrchestrationRow[] {
   const rows = new Map<string, OrchestrationRow>();
   for (const node of nodes) {
     rows.set(node.workerId ?? node.id, { node });
-  }
-  for (const graphNode of graph?.nodes ?? []) {
-    const key = graphNode.workerId ?? graphNode.id;
-    rows.set(key, { ...rows.get(key), graphNode });
   }
   for (const worker of workers) {
     rows.set(worker.id, { ...rows.get(worker.id), worker });
@@ -2840,10 +3129,10 @@ function WorkerContextItem({ label, value }: { label: string; value: string }) {
   );
 }
 
-function targetLabel(node: ExecutionNode | undefined, graphNode: OrchestrationGraph["nodes"][number] | undefined): string {
-  const targetId = node?.targetId ?? graphNode?.targetId;
+function targetLabel(node: ExecutionNode | undefined): string {
+  const targetId = node?.targetId;
   if (!targetId) return "local";
-  return `${node?.targetKind ?? graphNode?.targetKind ?? "target"}:${targetId}`;
+  return `${node?.targetKind ?? "target"}:${targetId}`;
 }
 
 function isTerminalWorkerStatus(status: Worker["status"]): boolean {
@@ -5104,14 +5393,13 @@ function Status({ value }: { value: string }) {
 }
 
 function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
-  const executionNodes = snapshot.executionNodes ?? [];
   const tasks = snapshot.tasks ?? [];
   const artifacts = snapshot.artifacts ?? tasks.flatMap((task) => (task.artifacts ?? []).map((artifact) => ({ ...artifact, taskId: task.id })));
   const lastEventId = snapshot.lastEventId ?? snapshot.events?.at(-1)?.id ?? 0;
   return {
     tasks,
     workers: snapshot.workers ?? [],
-    executionNodes,
+    executionNodes: snapshot.executionNodes ?? [],
     workItems: snapshot.workItems ?? [],
     artifacts,
     memoryEntries: snapshot.memoryEntries ?? [],
@@ -5124,7 +5412,6 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     pullRequests: snapshot.pullRequests ?? [],
     pullRequestFeedback: snapshot.pullRequestFeedback ?? [],
     steering: snapshot.steering ?? [],
-    orchestrationGraphs: snapshot.orchestrationGraphs ?? deriveOrchestrationGraphs(tasks, executionNodes),
     lastEventId,
     snapshotEventId: lastEventId,
     events: snapshot.events ?? [],
@@ -5201,10 +5488,6 @@ function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): Ap
     steering: [
       ...snapshot.steering.filter((item) => !taskIds.has(item.taskId)),
       ...taskSnapshot.steering,
-    ],
-    orchestrationGraphs: [
-      ...snapshot.orchestrationGraphs.filter((graph) => !taskIds.has(graph.taskId)),
-      ...taskSnapshot.orchestrationGraphs,
     ],
     lastEventId: Math.max(snapshot.lastEventId, taskSnapshot.lastEventId),
   };
@@ -5345,11 +5628,7 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       objectivePhase: objective.phase,
       updatedAt: event.at,
     });
-    return {
-      ...snapshot,
-      tasks,
-      orchestrationGraphs: deriveOrchestrationGraphs(tasks, snapshot.executionNodes),
-    };
+    return { ...snapshot, tasks };
   }
   if (event.type === "task.objective_updated" && event.taskId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
@@ -5420,7 +5699,6 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       pullRequests: snapshot.pullRequests.filter((pr) => pr.taskId !== event.taskId),
       pullRequestFeedback: snapshot.pullRequestFeedback.filter((feedback) => feedback.taskId !== event.taskId),
       steering: snapshot.steering.filter((item) => item.taskId !== event.taskId),
-      orchestrationGraphs: snapshot.orchestrationGraphs.filter((graph) => graph.taskId !== event.taskId),
     };
   }
   if (event.type === "execution.node_planned" && event.taskId) {
@@ -5446,12 +5724,12 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       createdAt: event.at,
       updatedAt: event.at,
     });
-    return { ...snapshot, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
+    return { ...snapshot, executionNodes };
   }
   if (event.type === "execution.node_status") {
     const nodeId = String(payload.nodeId ?? "");
     const executionNodes = snapshot.executionNodes.map((node) => node.id === nodeId ? { ...node, status: String(payload.status) as WorkerStatus, updatedAt: event.at } : node);
-    return { ...snapshot, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
+    return { ...snapshot, executionNodes };
   }
   if (event.type === "worker.created" && event.workerId && event.taskId) {
     const existing = snapshot.workers.find((worker) => worker.id === event.workerId);
@@ -5474,12 +5752,12 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
     const status = event.type === "worker.started" ? "running" : String(payload.status) as WorkerStatus;
     const workers = snapshot.workers.map((worker) => worker.id === event.workerId ? { ...worker, status, updatedAt: event.at } : worker);
     const executionNodes = snapshot.executionNodes.map((node) => node.workerId === event.workerId ? { ...node, status, updatedAt: event.at } : node);
-    return { ...snapshot, workers, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
+    return { ...snapshot, workers, executionNodes };
   }
   if (event.type === "worker.output" && event.workerId) {
     const workers = snapshot.workers.map((worker) => worker.id === event.workerId && !isTerminalWorkerStatus(worker.status) ? { ...worker, updatedAt: event.at } : worker);
     const executionNodes = snapshot.executionNodes.map((node) => node.workerId === event.workerId && !isTerminalWorkerStatus(node.status) ? { ...node, updatedAt: event.at } : node);
-    return { ...snapshot, workers, executionNodes, orchestrationGraphs: deriveOrchestrationGraphs(snapshot.tasks, executionNodes) };
+    return { ...snapshot, workers, executionNodes };
   }
   if (event.type === "worker.changes_applied" && event.taskId && event.workerId) {
     const task = snapshot.tasks.find((candidate) => candidate.id === event.taskId);
@@ -5506,6 +5784,12 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       mergeStatus: String(payload.mergeStatus ?? "") || existing?.mergeStatus,
       mergeable: String(payload.mergeable ?? "") || existing?.mergeable,
       reviewStatus: String(payload.reviewStatus ?? "") || existing?.reviewStatus,
+      branchOwner: String(payload.branchOwner ?? "") || existing?.branchOwner,
+      branchOwnerDir: String(payload.branchOwnerDir ?? "") || existing?.branchOwnerDir,
+      branchHead: String(payload.branchHead ?? "") || existing?.branchHead,
+      updateLeaseOwner: String(payload.updateLeaseOwner ?? "") || existing?.updateLeaseOwner,
+      updateLeaseDir: String(payload.updateLeaseDir ?? "") || existing?.updateLeaseDir,
+      updateBaseHead: String(payload.updateBaseHead ?? "") || existing?.updateBaseHead,
       createdAt: existing?.createdAt || event.at,
       updatedAt: event.at,
       metadata: isRecord(payload.metadata) ? payload.metadata : existing?.metadata,
@@ -5557,8 +5841,8 @@ function applySteeringProjection(items: SteeringItem[], workers: Worker[], nodes
     return upsertById(items, {
       id: `task_steering_${event.id}`,
       taskId: event.taskId,
-      targetKind: "task",
-      targetId: event.taskId,
+      targetKind: payloadValue(payload.targetKind) || "task",
+      targetId: payloadValue(payload.targetId) || event.taskId,
       status: "pending",
       reason: payloadValue(payload.reason) || "user_task_steering",
       message,
@@ -5842,6 +6126,19 @@ function applyQuestionProjection(questions: Question[], event: EventRecord, payl
   if (event.type !== "approval.decided") {
     return questions;
   }
+  const questionId = payloadValue(payload.questionId);
+  if (questionId) {
+    const selected = questions.find((question) => question.id === questionId && question.taskId === event.taskId && !question.decided);
+    if (selected) {
+      return upsertById(questions, {
+        ...selected,
+        decided: true,
+        answer: payloadValue(payload.answer || payload.message) || selected.answer,
+        approved: typeof payload.approved === "boolean" ? payload.approved : selected.approved,
+        updatedAt: event.at,
+      });
+    }
+  }
   const workerId = event.workerId || payloadValue(payload.workerId);
   let selected: Question | undefined;
   for (const question of questions) {
@@ -6060,52 +6357,6 @@ function memoryEntryFromTaskAction(tasks: Task[], event: EventRecord, payload: R
 function highValueMemoryText(text: string): boolean {
   const lower = text.toLowerCase();
   return ["decision:", "decided", "blocked", "blocker", "root cause", "baseline", "benchmark", "regression", "invariant"].some((marker) => lower.includes(marker));
-}
-
-function deriveOrchestrationGraphs(tasks: Task[], nodes: ExecutionNode[]): OrchestrationGraph[] {
-  const tasksById = new Map(tasks.map((task) => [task.id, task]));
-  const byTask = new Map<string, ExecutionNode[]>();
-  for (const node of nodes) {
-    byTask.set(node.taskId, [...(byTask.get(node.taskId) ?? []), node]);
-  }
-  return [...byTask.entries()].map(([taskId, taskNodes]) => {
-    const spawnToNode = new Map(taskNodes.filter((node) => node.spawnId).map((node) => [node.spawnId!, node.id]));
-    const edges = taskNodes.flatMap((node) => {
-      const items = [];
-      if (node.parentNodeId) items.push({ from: node.parentNodeId, to: node.id, reason: "parent" });
-      for (const dep of node.dependsOn ?? []) {
-        const from = spawnToNode.get(dep);
-        if (from) items.push({ from, to: node.id, reason: `depends_on:${dep}` });
-      }
-      return items;
-    });
-    const summary = {
-      total: taskNodes.length,
-      running: taskNodes.filter((node) => node.status === "running").length,
-      waiting: taskNodes.filter((node) => node.status === "waiting" || node.status === "queued").length,
-      done: taskNodes.filter((node) => node.status === "succeeded").length,
-      failed: taskNodes.filter((node) => node.status === "failed").length,
-      canceled: taskNodes.filter((node) => node.status === "canceled").length,
-    };
-    return {
-      taskId,
-      status: tasksById.get(taskId)?.status ?? "queued",
-      nodes: taskNodes.map((node) => ({
-        id: node.id,
-        workerId: node.workerId,
-        workerKind: node.workerKind,
-        status: node.status,
-        role: node.role,
-        reason: node.reason,
-        spawnId: node.spawnId,
-        targetId: node.targetId,
-        targetKind: node.targetKind,
-      })),
-      edges,
-      summary,
-      updatedAt: taskNodes.map((node) => node.updatedAt).sort().at(-1) ?? "",
-    };
-  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

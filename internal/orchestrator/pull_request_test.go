@@ -1165,6 +1165,27 @@ func TestPullRequestPublishPatchPrefersPublishDiffForSSHWorkspace(t *testing.T) 
 	}
 }
 
+func TestValidatePullRequestUpdateLeaseRejectsMismatchedWorkerBase(t *testing.T) {
+	pr := core.PullRequest{
+		ID:       "pr-1",
+		Metadata: core.MustJSON(map[string]any{"headRefOid": "abcdef123456"}),
+	}
+	err := validatePullRequestUpdateLease(pr, PreparedWorkspace{BaseChange: "123456abcdef"}, WorkspaceChanges{})
+	if !errors.Is(err, errPullRequestHeadMismatch) {
+		t.Fatalf("error = %v, want PR head mismatch", err)
+	}
+}
+
+func TestValidatePullRequestUpdateLeaseAllowsMatchingWorkerBasePrefix(t *testing.T) {
+	pr := core.PullRequest{
+		ID:       "pr-1",
+		Metadata: core.MustJSON(map[string]any{"headRefOid": "abcdef123456"}),
+	}
+	if err := validatePullRequestUpdateLease(pr, PreparedWorkspace{BaseChange: "abcdef1"}, WorkspaceChanges{}); err != nil {
+		t.Fatalf("validate lease error = %v", err)
+	}
+}
+
 func TestPullRequestPublishPatchFallsBackToPerWorkerDiffWhenPublishDiffMissing(t *testing.T) {
 	workspace := PreparedWorkspace{VCSType: "ssh"}
 	changes := WorkspaceChanges{Diff: "per-worker delta\n"}

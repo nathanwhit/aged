@@ -69,6 +69,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
 	mux.HandleFunc("PUT /api/tasks/{id}/loop-config", s.updateTaskLoopConfig)
 	mux.HandleFunc("POST /api/tasks/{id}/steer", s.steerTask)
+	mux.HandleFunc("POST /api/tasks/{id}/questions/{questionID}/answer", s.answerQuestion)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.retryTask)
 	mux.HandleFunc("POST /api/tasks/{id}/cancel", s.cancelTask)
 	mux.HandleFunc("POST /api/tasks/{id}/work-items/{itemID}/cancel", s.cancelWorkItem)
@@ -131,15 +132,27 @@ func taskScopedSnapshot(snapshot core.Snapshot, taskID string) (core.Snapshot, b
 	snapshot.ExecutionNodes = filterTaskScoped(snapshot.ExecutionNodes, keptTasks, func(node core.ExecutionNode) string { return node.TaskID })
 	snapshot.WorkItems = filterTaskScoped(snapshot.WorkItems, keptTasks, func(item core.WorkItem) string { return item.TaskID })
 	snapshot.Artifacts = filterTaskScoped(snapshot.Artifacts, keptTasks, func(artifact core.Artifact) string { return artifact.TaskID })
-	snapshot.MemoryEntries = filterTaskScoped(snapshot.MemoryEntries, keptTasks, func(entry core.MemoryEntry) string { return entry.TaskID })
+	snapshot.MemoryEntries = filterTaskMemoryEntries(snapshot.MemoryEntries, task)
 	snapshot.Questions = filterTaskScoped(snapshot.Questions, keptTasks, func(question core.Question) string { return question.TaskID })
 	snapshot.Sessions = filterTaskScoped(snapshot.Sessions, keptTasks, func(session core.Session) string { return session.TaskID })
 	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, keptTasks, func(pr core.PullRequest) string { return pr.TaskID })
 	snapshot.PullRequestFeedback = filterTaskScoped(snapshot.PullRequestFeedback, keptTasks, func(feedback core.PullRequestFeedback) string { return feedback.TaskID })
 	snapshot.Steering = filterTaskScoped(snapshot.Steering, keptTasks, func(item core.SteeringItem) string { return item.TaskID })
-	snapshot.OrchestrationGraphs = filterTaskScoped(snapshot.OrchestrationGraphs, keptTasks, func(graph core.OrchestrationGraph) string { return graph.TaskID })
 	snapshot.Events = filterTaskScoped(snapshot.Events, keptTasks, func(event core.Event) string { return event.TaskID })
 	return snapshot, true
+}
+
+func filterTaskMemoryEntries(items []core.MemoryEntry, task core.Task) []core.MemoryEntry {
+	if len(items) == 0 {
+		return items
+	}
+	out := items[:0]
+	for _, item := range items {
+		if item.TaskID == task.ID || item.TaskID == "" || (task.ProjectID != "" && item.ProjectID == task.ProjectID) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func filterTaskScoped[T any](items []T, keptTasks map[string]bool, taskID func(T) string) []T {
@@ -420,6 +433,14 @@ func (s *Server) steerTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeNoContent(w, s.service.SteerTask(r.Context(), r.PathValue("id"), req))
+}
+
+func (s *Server) answerQuestion(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeRequest[core.AnswerQuestionRequest](w, r)
+	if !ok {
+		return
+	}
+	writeNoContent(w, s.service.AnswerQuestion(r.Context(), r.PathValue("id"), r.PathValue("questionID"), req))
 }
 
 func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {

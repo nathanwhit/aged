@@ -14,15 +14,14 @@ import (
 const defaultTaskDetailEventLimit = 30
 
 type TaskDetail struct {
-	Task               core.Task                 `json:"task"`
-	Project            *core.Project             `json:"project,omitempty"`
-	Workers            []TaskDetailWorker        `json:"workers"`
-	ExecutionNodes     []core.ExecutionNode      `json:"executionNodes"`
-	OrchestrationGraph *core.OrchestrationGraph  `json:"orchestrationGraph,omitempty"`
-	PullRequests       []core.PullRequest        `json:"pullRequests"`
-	RecentEvents       []core.Event              `json:"recentEvents"`
-	ApplyPolicy        ApplyPolicyRecommendation `json:"applyPolicy"`
-	AvailableActions   []AvailableAction         `json:"availableActions"`
+	Task             core.Task                 `json:"task"`
+	Project          *core.Project             `json:"project,omitempty"`
+	Workers          []TaskDetailWorker        `json:"workers"`
+	ExecutionNodes   []core.ExecutionNode      `json:"executionNodes"`
+	PullRequests     []core.PullRequest        `json:"pullRequests"`
+	RecentEvents     []core.Event              `json:"recentEvents"`
+	ApplyPolicy      ApplyPolicyRecommendation `json:"applyPolicy"`
+	AvailableActions []AvailableAction         `json:"availableActions"`
 }
 
 type TaskDetailWorker struct {
@@ -89,14 +88,13 @@ func BuildTaskDetailAt(snapshot core.Snapshot, taskID string, eventLimit int, no
 		}
 	}
 	detail := TaskDetail{
-		Task:               task,
-		Workers:            taskDetailWorkersAt(snapshot, taskID, now, staleAfter),
-		ExecutionNodes:     executionNodes,
-		PullRequests:       pullRequests,
-		RecentEvents:       recentTaskEvents(snapshot.Events, taskID, eventLimit),
-		ApplyPolicy:        taskApplyPolicy(snapshot, taskID),
-		AvailableActions:   taskAvailableActions(snapshot, task, pullRequests),
-		OrchestrationGraph: taskOrchestrationGraph(snapshot, taskID),
+		Task:             task,
+		Workers:          taskDetailWorkersAt(snapshot, taskID, now, staleAfter),
+		ExecutionNodes:   executionNodes,
+		PullRequests:     pullRequests,
+		RecentEvents:     recentTaskEvents(snapshot.Events, taskID, eventLimit),
+		ApplyPolicy:      taskApplyPolicy(snapshot, taskID),
+		AvailableActions: taskAvailableActions(snapshot, task, pullRequests),
 	}
 	if project, ok := projectByID(snapshot.Projects, task.ProjectID); ok {
 		detail.Project = &project
@@ -176,15 +174,6 @@ func taskDetailWorkersAt(snapshot core.Snapshot, taskID string, now time.Time, s
 		workers = append(workers, item)
 	}
 	return workers
-}
-
-func taskOrchestrationGraph(snapshot core.Snapshot, taskID string) *core.OrchestrationGraph {
-	for _, graph := range snapshot.OrchestrationGraphs {
-		if graph.TaskID == taskID {
-			return &graph
-		}
-	}
-	return nil
 }
 
 func recentTaskEvents(events []core.Event, taskID string, limit int) []core.Event {

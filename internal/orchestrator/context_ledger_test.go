@@ -122,13 +122,15 @@ func TestContextLedgerFromMemoryEntriesCarriesMetadata(t *testing.T) {
 	entries := contextLedgerFromMemoryEntries([]core.MemoryEntry{
 		{
 			Kind:          "worker_result_digest",
+			ProjectID:     "project-1",
+			TaskID:        "task-1",
 			SourceEventID: 42,
 			SourceEvent:   string(core.EventTaskAction),
 			WorkerID:      "worker-1",
 			Summary:       "decision: keep the validator harness local to the objective",
 			Metadata:      core.MustJSON(map[string]any{"nodeId": "node-1"}),
 		},
-	})
+	}, "task-2")
 
 	if len(entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(entries))
@@ -141,6 +143,9 @@ func TestContextLedgerFromMemoryEntriesCarriesMetadata(t *testing.T) {
 	}
 	if entries[0].Metadata["sourceEventId"] != float64(42) {
 		t.Fatalf("source event metadata = %#v", entries[0].Metadata["sourceEventId"])
+	}
+	if entries[0].Metadata["scope"] != "project" || entries[0].Metadata["sourceTaskId"] != "task-1" || entries[0].Metadata["projectId"] != "project-1" {
+		t.Fatalf("missing project memory metadata: %+v", entries[0].Metadata)
 	}
 }
 

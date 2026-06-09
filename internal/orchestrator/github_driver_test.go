@@ -657,7 +657,7 @@ func TestGitHubDriverMentionsIncludeReadAndAdvanceCursor(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()
 
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "review it"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "review it")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "commented"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	client := &fakeGitHubClient{mentions: []GitHubMention{{

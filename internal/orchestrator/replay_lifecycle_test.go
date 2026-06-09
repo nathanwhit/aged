@@ -282,11 +282,8 @@ func TestReplayLongRunningTaskLifecycleReconstructsTaskDetail(t *testing.T) {
 	if len(detail.ExecutionNodes) != 2 {
 		t.Fatalf("execution nodes = %+v", detail.ExecutionNodes)
 	}
-	if detail.OrchestrationGraph == nil || detail.OrchestrationGraph.Summary.Total != 2 || detail.OrchestrationGraph.Summary.Done != 2 {
-		t.Fatalf("orchestration graph = %+v", detail.OrchestrationGraph)
-	}
-	if len(detail.OrchestrationGraph.Edges) != 2 {
-		t.Fatalf("graph edges = %+v, want parent and dependency edges", detail.OrchestrationGraph.Edges)
+	if detail.ExecutionNodes[1].ParentNodeID != "node-impl" || len(detail.ExecutionNodes[1].DependsOn) != 1 || detail.ExecutionNodes[1].DependsOn[0] != "implementation" {
+		t.Fatalf("repair execution dependencies = %+v, want parent node-impl and implementation dependency", detail.ExecutionNodes[1])
 	}
 	if len(detail.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v", detail.PullRequests)

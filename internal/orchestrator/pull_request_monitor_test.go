@@ -1280,7 +1280,7 @@ func (p *mergeTrackingPullRequestPublisher) Merge(_ context.Context, pr core.Pul
 
 func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStore, publisher PullRequestPublisher) *Service {
 	t.Helper()
-	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{WorkerKind: "mock", Prompt: "continue"}}, map[string]worker.Runner{
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "continue")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
 	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
 	service.SetPullRequestPublisher(publisher)

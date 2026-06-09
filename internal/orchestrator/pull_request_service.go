@@ -31,6 +31,7 @@ var (
 	prMetadataFeedbackRE         = regexp.MustCompile(`(?i)\b(?:title|description)\b|\b(?:pr|pull\s+request)\s+body\b`)
 	errTerminalPullRequest       = errors.New("pull request is already terminal")
 	errPullRequestTargetMismatch = errors.New("pull request update target does not match tracked pull request")
+	errPullRequestHeadMismatch   = errors.New("pull request update worker is not based on current pull request head")
 	errNoPullRequestsToWatch     = errors.New("no task-owned pull requests to watch")
 )
 
@@ -260,6 +261,7 @@ func (s *Service) publishTaskPullRequest(ctx context.Context, taskID string, req
 	pr.TaskID = taskID
 	pr = normalizePullRequestStatusFields(pr)
 	pr.Metadata = mergePullRequestMetadataMap(pr.Metadata, metadata)
+	pr = annotatePullRequestBranchLease(pr, workerID, sourceRoot)
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_opened", "pr_opened", "Pull request opened.", map[string]any{
 		"pullRequestId": pr.ID,
 		"url":           pr.URL,
@@ -354,6 +356,9 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	changes := WorkspaceChanges{}
 	if !req.MetadataOnly {
 		changes = s.pullRequestWorkspaceChanges(ctx, workerID)
+		if err := validatePullRequestUpdateLease(pr, publishWorkspace, changes); err != nil {
+			return core.PullRequest{}, err
+		}
 	}
 	publishPatch, patchFromBase, patchBaseRef := pullRequestPublishPatch(publishWorkspace, changes)
 	summary := workerCompletionSummaryFromSnapshot(snapshot, workerID)
@@ -411,6 +416,8 @@ func (s *Service) UpdateTaskPullRequest(ctx context.Context, taskID string, pr c
 	updated.TaskID = taskID
 	updated = normalizePullRequestStatusFields(updated)
 	updated.Metadata = mergePullRequestMetadataMap(updated.Metadata, metadata)
+	updated = annotatePullRequestBranchLease(updated, nonEmpty(pr.BranchOwner, pullRequestMetadataString(pr, "ownerWorkerId")), nonEmpty(pr.BranchOwnerDir, pullRequestMetadataString(pr, "ownerWorkDir")))
+	updated = annotatePullRequestUpdateLease(updated, workerID, sourceRoot, publishWorkspace, changes)
 	if err := s.recordTaskMilestone(ctx, taskID, "pr_updated", "pr_updated", "Pull request branch updated.", map[string]any{
 		"pullRequestId": updated.ID,
 		"url":           updated.URL,
@@ -616,6 +623,30 @@ func validatePullRequestUpdateTarget(pr core.PullRequest, req core.PublishPullRe
 	return nil
 }
 
+func validatePullRequestUpdateLease(pr core.PullRequest, workspace PreparedWorkspace, changes WorkspaceChanges) error {
+	currentHead := nonEmpty(pr.BranchHead, pullRequestMetadataString(pr, "headRefOid"))
+	if currentHead == "" {
+		return nil
+	}
+	workerBase := strings.TrimSpace(changes.PublishBase)
+	if workerBase == "" {
+		workerBase = strings.TrimSpace(workspace.BaseChange)
+	}
+	if workerBase == "" || gitRevisionMatches(currentHead, workerBase) {
+		return nil
+	}
+	return fmt.Errorf("%w: worker base %q does not match current PR head %q", errPullRequestHeadMismatch, workerBase, currentHead)
+}
+
+func gitRevisionMatches(left string, right string) bool {
+	left = strings.ToLower(strings.TrimSpace(left))
+	right = strings.ToLower(strings.TrimSpace(right))
+	if left == "" || right == "" {
+		return false
+	}
+	return left == right || strings.HasPrefix(left, right) || strings.HasPrefix(right, left)
+}
+
 func annotatePullRequestOwnerMetadata(metadata map[string]any, workerID string, workspace PreparedWorkspace, sourceRoot string) {
 	if metadata == nil {
 		return
@@ -657,6 +688,8 @@ func annotatePullRequestWorkspaceMetadata(metadata map[string]any, prefix string
 	set("WorkspaceName", workspace.WorkspaceName)
 	set("WorkspaceMode", workspace.Mode)
 	set("VcsType", workspace.VCSType)
+	set("Change", workspace.Change)
+	set("BaseChange", workspace.BaseChange)
 	set("TargetId", workspace.TargetID)
 	set("TargetKind", workspace.TargetKind)
 	set("SharedRoot", workspace.SharedRoot)
@@ -676,6 +709,35 @@ func mergePullRequestMetadataMap(raw json.RawMessage, values map[string]any) jso
 		out[key] = value
 	}
 	return core.MustJSON(out)
+}
+
+func annotatePullRequestBranchLease(pr core.PullRequest, workerID string, sourceRoot string) core.PullRequest {
+	workerID = strings.TrimSpace(workerID)
+	if workerID != "" {
+		pr.BranchOwner = workerID
+		pr.BranchOwnerDir = strings.TrimSpace(sourceRoot)
+	}
+	if head := pullRequestMetadataString(pr, "headRefOid"); head != "" {
+		pr.BranchHead = head
+	}
+	return pr
+}
+
+func annotatePullRequestUpdateLease(pr core.PullRequest, workerID string, sourceRoot string, workspace PreparedWorkspace, changes WorkspaceChanges) core.PullRequest {
+	workerID = strings.TrimSpace(workerID)
+	if workerID != "" {
+		pr.UpdateLeaseOwner = workerID
+		pr.UpdateLeaseDir = strings.TrimSpace(sourceRoot)
+	}
+	if head := pullRequestMetadataString(pr, "headRefOid"); head != "" {
+		pr.BranchHead = head
+	}
+	base := strings.TrimSpace(changes.PublishBase)
+	if base == "" {
+		base = strings.TrimSpace(workspace.BaseChange)
+	}
+	pr.UpdateBaseHead = base
+	return pr
 }
 
 func shouldResetPullRequestWorkDirAfterPublish(workspace PreparedWorkspace) bool {
@@ -1370,7 +1432,7 @@ func (s *Service) continueTaskAfterIntermediatePullRequest(ctx context.Context, 
 	if taskHasActiveWorkers(snapshot, pr.TaskID) || intermediatePullRequestContinuationRecorded(snapshot, pr) {
 		return nil
 	}
-	initial, results, err := retryGraphStateForTask(snapshot, pr.TaskID)
+	initial, results, err := objectiveReplanStateForTask(snapshot, pr.TaskID)
 	if err != nil {
 		return nil
 	}
@@ -1398,7 +1460,7 @@ func (s *Service) continueTaskAfterIntermediatePullRequest(ctx context.Context, 
 	task.ObjectiveStatus = core.ObjectiveActive
 	task.ObjectivePhase = phase
 	s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
-		s.retryGraphTask(taskCtx, task, initial, results)
+		s.resumeObjectiveReplan(taskCtx, task, initial, results)
 	})
 	return nil
 }
@@ -1858,6 +1920,76 @@ func (s *Service) ContinueTaskForPullRequest(ctx context.Context, prID string) e
 	return nil
 }
 
+func (s *Service) SteerPullRequest(ctx context.Context, taskID string, prID string, req core.SteeringRequest) error {
+	message := strings.TrimSpace(req.Message)
+	prID = strings.TrimSpace(prID)
+	if message == "" {
+		return errors.New("message is required")
+	}
+	if prID == "" {
+		return errors.New("pull request id is required")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	pr, ok := pullRequestByID(snapshot, prID)
+	if !ok || pr.TaskID != taskID {
+		return eventstore.ErrNotFound
+	}
+	task, ok := findTask(snapshot, pr.TaskID)
+	if !ok {
+		return eventstore.ErrNotFound
+	}
+	if isTerminalTaskStatus(task.Status) || isTerminalPullRequestState(pr.State) {
+		return nil
+	}
+	event, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskSteered,
+		TaskID: pr.TaskID,
+		Payload: core.MustJSON(map[string]any{
+			"message":    message,
+			"targetKind": "pull_request",
+			"targetId":   pr.ID,
+			"reason":     "user_pull_request_steering",
+			"metadata": map[string]any{
+				"repo":   pr.Repo,
+				"number": pr.Number,
+				"url":    pr.URL,
+				"branch": pr.Branch,
+			},
+		}),
+	})
+	if err != nil {
+		return err
+	}
+	prompt := strings.TrimSpace(message)
+	prompt = appendPullRequestFollowUpWorkerInstruction(prompt, pr)
+	feedbackSignature := "user_steering:" + strconv.FormatInt(event.ID, 10)
+	if err := s.recordPullRequestFollowUpWorkItem(ctx, pr, prompt, feedbackSignature); err != nil {
+		return err
+	}
+	if err := s.recordTaskMilestone(ctx, pr.TaskID, "pr_steering_"+strconv.FormatInt(event.ID, 10), "pr_user_steering", "User steering queued pull request follow-up work.", map[string]any{
+		"pullRequestId": pr.ID,
+		"url":           pr.URL,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+	}); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, pr.TaskID, core.ObjectiveActive, "pr_user_steering", "User steering queued pull request follow-up work."); err != nil {
+		return err
+	}
+	if task.Status == core.TaskWaiting {
+		s.startTaskRoutine(pr.TaskID, func(taskCtx context.Context) {
+			s.resumePullRequestFeedbackQueue(taskCtx, pr.TaskID)
+		})
+	} else if task.Status == core.TaskRunning || task.Status == core.TaskPlanning {
+		s.startPullRequestFollowUpWorker(pr.TaskID, pr.ID)
+	}
+	return nil
+}
+
 func (s *Service) startPullRequestFollowUpWorker(taskID string, prID string) {
 	go s.runPullRequestFollowUpWorker(context.Background(), taskID, prID)
 }
@@ -1879,40 +2011,8 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		return
 	}
 	feedbackSignature := pullRequestFollowUpFeedbackSignature(pr)
-	workItemID := pullRequestFollowUpWorkItemID(pr, feedbackSignature)
-	if item, ok := pullRequestFollowUpWorkItem(snapshot, taskID, prID, feedbackSignature); ok {
-		workItemID = item.ID
-	} else {
-		_ = s.recordPullRequestFollowUpWorkItem(ctx, pr, pullRequestFollowUpPrompt(pr), feedbackSignature)
-	}
-	if err := s.recordWorkItemStarted(ctx, taskID, workItemID, ""); err != nil {
-		return
-	}
-	plan := canonicalizePullRequestFollowUpPlan(Plan{
-		WorkerKind: s.pullRequestFollowUpWorkerKind(),
-		Prompt:     pullRequestFollowUpPrompt(pr),
-		Rationale:  "Handle queued GitHub pull request feedback without blocking the broader objective worker.",
-		Actions: []PlanAction{{
-			Kind:   "update_pull_request",
-			When:   "after_success",
-			Reason: "Apply successful follow-up worker changes to the existing pull request.",
-			Inputs: pullRequestUpdateInputs(pr),
-		}, {
-			Kind:   "watch_pull_requests",
-			When:   "after_success",
-			Reason: "Return the pull request to GitHub monitoring after the bounded follow-up.",
-			Inputs: pullRequestWatchInputs(pr),
-		}},
-		Metadata: map[string]any{
-			"backgroundPullRequestFollowUp": true,
-			"scheduler":                     "pull_request_monitor",
-			"spawnID":                       pullRequestFollowUpSpawnID(pr),
-			"spawnRole":                     "github_pr_followup",
-			"spawnReason":                   "Handle queued GitHub pull request feedback in parallel with objective work.",
-		},
-	}, pr)
-	if strings.TrimSpace(plan.WorkerKind) == "" {
-		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", "no worker runner is configured for pull request follow-up")
+	workerKind := s.pullRequestFollowUpWorkerKind()
+	if strings.TrimSpace(workerKind) == "" {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "skipped",
@@ -1922,127 +2022,32 @@ func (s *Service) runPullRequestFollowUpWorker(ctx context.Context, taskID strin
 		})
 		return
 	}
-	normalizePlanShape(&plan)
-	if err := plan.Validate(); err != nil {
-		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":          "pull_request_background_followup",
-			"status":        "skipped",
-			"reason":        "generated pull request follow-up plan is invalid",
-			"pullRequestId": pr.ID,
-			"url":           pr.URL,
-			"error":         err.Error(),
-		})
-		return
+	if _, ok := pullRequestFollowUpWorkItem(snapshot, taskID, prID, feedbackSignature); !ok {
+		if err := s.recordPullRequestFollowUpWorkItem(ctx, pr, pullRequestFollowUpPrompt(pr), feedbackSignature); err != nil {
+			return
+		}
 	}
 	if err := s.recordTaskAction(ctx, taskID, map[string]any{
 		"kind":          "pull_request_background_followup",
-		"status":        "started",
-		"reason":        "queued pull request feedback is being handled without waiting for the active objective worker",
+		"status":        "queued",
+		"reason":        "queued pull request feedback as a durable work item without waiting for the active objective worker",
 		"pullRequestId": pr.ID,
 		"url":           pr.URL,
 		"repo":          pr.Repo,
 		"number":        pr.Number,
+		"workerKind":    workerKind,
 	}); err != nil {
 		return
 	}
-	if _, err := s.append(ctx, core.Event{
-		Type:    core.EventTaskPlanned,
-		TaskID:  taskID,
-		Payload: core.MustJSON(plan),
-	}); err != nil {
-		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
+	if _, err := s.startRunnableSpawnWorkItems(ctx, taskID); err != nil {
 		_ = s.recordTaskAction(ctx, taskID, map[string]any{
 			"kind":          "pull_request_background_followup",
 			"status":        "failed",
-			"reason":        "could not record background pull request follow-up plan",
+			"reason":        "failed to start queued pull request follow-up work item",
 			"pullRequestId": pr.ID,
 			"url":           pr.URL,
 			"error":         err.Error(),
 		})
-		return
-	}
-	results, ok, err := s.runPullRequestFollowUpPlanWorkers(ctx, task, plan)
-	if err != nil {
-		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, "", err.Error())
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":          "pull_request_background_followup",
-			"status":        "continued",
-			"reason":        "background pull request follow-up worker could not start or finish; queued feedback remains for the next objective replan",
-			"pullRequestId": pr.ID,
-			"url":           pr.URL,
-			"error":         err.Error(),
-		})
-		return
-	}
-	if !ok {
-		return
-	}
-	if result := firstNonSucceededWorkerResult(results); result.WorkerID != "" {
-		_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, result.WorkerID, nonEmpty(result.Error, result.Summary))
-		_ = s.recordTaskAction(ctx, taskID, map[string]any{
-			"kind":          "pull_request_background_followup",
-			"status":        "continued",
-			"reason":        "background pull request follow-up worker did not complete successfully; queued feedback remains for the next objective replan",
-			"pullRequestId": pr.ID,
-			"url":           pr.URL,
-			"workerId":      result.WorkerID,
-			"error":         nonEmpty(result.Error, result.Summary),
-		})
-		return
-	}
-	result := latestWorkerResult(results)
-	for _, action := range plan.Actions {
-		if strings.TrimSpace(action.When) != "after_success" {
-			continue
-		}
-		if err := s.executeBackgroundPullRequestFollowUpAction(ctx, task, pr, action, results); err != nil {
-			_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemFailed, result.WorkerID, err.Error())
-			_ = s.recordTaskAction(ctx, taskID, map[string]any{
-				"kind":          "pull_request_background_followup",
-				"status":        "continued",
-				"reason":        "background pull request follow-up action failed; queued feedback remains for the next objective replan",
-				"pullRequestId": pr.ID,
-				"url":           pr.URL,
-				"workerId":      result.WorkerID,
-				"error":         err.Error(),
-			})
-			return
-		}
-	}
-	_ = s.recordTaskAction(ctx, taskID, map[string]any{
-		"kind":          "pull_request_background_followup",
-		"status":        "completed",
-		"reason":        "background pull request follow-up completed while objective work continued",
-		"pullRequestId": pr.ID,
-		"url":           pr.URL,
-		"workerId":      result.WorkerID,
-	})
-	_ = s.recordWorkItemCompleted(ctx, taskID, workItemID, core.WorkItemSucceeded, result.WorkerID, "")
-}
-
-func (s *Service) executeBackgroundPullRequestFollowUpAction(ctx context.Context, task core.Task, pr core.PullRequest, action PlanAction, results []WorkerTurnResult) error {
-	switch strings.TrimSpace(action.Kind) {
-	case "update_pull_request":
-		keepGoing, _, err := s.executePlanAction(ctx, task, action, results)
-		if err != nil {
-			return err
-		}
-		_ = keepGoing
-		return nil
-	case "watch_pull_requests":
-		return s.recordTaskAction(ctx, task.ID, map[string]any{
-			"kind":             action.Kind,
-			"when":             nonEmpty(action.When, "after_success"),
-			"reason":           action.Reason,
-			"inputs":           action.Inputs,
-			"pullRequestCount": 1,
-			"pullRequestId":    pr.ID,
-			"url":              pr.URL,
-			"status":           "background",
-		})
-	default:
-		return nil
 	}
 }
 
@@ -2108,13 +2113,35 @@ func pullRequestFollowUpWorkItem(snapshot core.Snapshot, taskID string, prID str
 }
 
 func (s *Service) recordPullRequestFollowUpWorkItem(ctx context.Context, pr core.PullRequest, prompt string, feedbackSignature string) error {
+	workerKind := s.pullRequestFollowUpWorkerKind()
 	metadata := map[string]any{
-		"pullRequestId":     pr.ID,
-		"repo":              pr.Repo,
-		"number":            pr.Number,
-		"url":               pr.URL,
-		"branch":            pr.Branch,
-		"feedbackSignature": feedbackSignature,
+		"backgroundPullRequestFollowUp": true,
+		"executeActionsOnSuccess":       true,
+		"sourceAction":                  "plan",
+		"scheduler":                     "pull_request_monitor",
+		"pullRequestID":                 pr.ID,
+		"pullRequestId":                 pr.ID,
+		"repo":                          pr.Repo,
+		"number":                        pr.Number,
+		"url":                           pr.URL,
+		"branch":                        pr.Branch,
+		"feedbackSignature":             feedbackSignature,
+		"workerKind":                    workerKind,
+		"role":                          "github_pr_followup",
+		"spawnID":                       pullRequestFollowUpSpawnID(pr),
+		"spawnRole":                     "github_pr_followup",
+		"spawnReason":                   "Handle queued GitHub pull request feedback in parallel with objective work.",
+		"planActions": []PlanAction{{
+			Kind:   "update_pull_request",
+			When:   "after_success",
+			Reason: "Apply successful follow-up worker changes to the existing pull request.",
+			Inputs: pullRequestUpdateInputs(pr),
+		}, {
+			Kind:   "watch_pull_requests",
+			When:   "after_success",
+			Reason: "Return the pull request to GitHub monitoring after the bounded follow-up.",
+			Inputs: pullRequestWatchInputs(pr),
+		}},
 	}
 	return s.recordWorkItemQueued(ctx, pr.TaskID, map[string]any{
 		"id":         pullRequestFollowUpWorkItemID(pr, feedbackSignature),
@@ -2562,6 +2589,12 @@ func (s *Service) recordPullRequestPublished(ctx context.Context, pr core.PullRe
 			"mergeStatus":      pr.MergeStatus,
 			"mergeable":        pr.Mergeable,
 			"reviewStatus":     pr.ReviewStatus,
+			"branchOwner":      pr.BranchOwner,
+			"branchOwnerDir":   pr.BranchOwnerDir,
+			"branchHead":       pr.BranchHead,
+			"updateLeaseOwner": pr.UpdateLeaseOwner,
+			"updateLeaseDir":   pr.UpdateLeaseDir,
+			"updateBaseHead":   pr.UpdateBaseHead,
 			"metadata":         pr.Metadata,
 		}),
 	})
@@ -2587,6 +2620,12 @@ func (s *Service) recordPullRequestUpdated(ctx context.Context, pr core.PullRequ
 			"mergeStatus":      pr.MergeStatus,
 			"mergeable":        pr.Mergeable,
 			"reviewStatus":     pr.ReviewStatus,
+			"branchOwner":      pr.BranchOwner,
+			"branchOwnerDir":   pr.BranchOwnerDir,
+			"branchHead":       pr.BranchHead,
+			"updateLeaseOwner": pr.UpdateLeaseOwner,
+			"updateLeaseDir":   pr.UpdateLeaseDir,
+			"updateBaseHead":   pr.UpdateBaseHead,
 			"metadata":         pr.Metadata,
 		}),
 	})
@@ -3298,7 +3337,18 @@ func annotatePullRequestFollowUpPlan(plan Plan, pr core.PullRequest) Plan {
 	if plan.Metadata == nil {
 		plan.Metadata = map[string]any{}
 	}
-	plan.Prompt = appendPullRequestFollowUpWorkerInstruction(plan.Prompt, pr)
+	for index := range plan.WorkItems {
+		plan.WorkItems[index].Prompt = appendPullRequestFollowUpWorkerInstruction(plan.WorkItems[index].Prompt, pr)
+		if plan.WorkItems[index].TargetKind == "" {
+			plan.WorkItems[index].TargetKind = "pull_request"
+		}
+		if plan.WorkItems[index].TargetID == "" {
+			plan.WorkItems[index].TargetID = pr.ID
+		}
+		if plan.WorkItems[index].Kind == "" {
+			plan.WorkItems[index].Kind = "pr.followup"
+		}
+	}
 	plan.Metadata["pullRequestID"] = pr.ID
 	plan.Metadata["pullRequestRepo"] = pr.Repo
 	if pr.Number > 0 {
@@ -3402,9 +3452,6 @@ func pullRequestFollowUpWorkerInstruction(pr core.PullRequest) string {
 }
 
 func normalizePullRequestFollowUpPlan(plan Plan) Plan {
-	if len(plan.Spawns) == 0 {
-		return ensurePullRequestFollowUpUpdateAction(plan)
-	}
 	plan = bindImplicitPullRequestFollowUpUpdateWorkers(plan)
 	if !planReturnsToPullRequestWatch(plan) {
 		return plan
@@ -3412,17 +3459,11 @@ func normalizePullRequestFollowUpPlan(plan Plan) Plan {
 	if planHasPullRequestMutation(plan) {
 		return plan
 	}
-	if plan.Metadata == nil {
-		plan.Metadata = map[string]any{}
-	}
-	plan.Metadata["suppressedSpawns"] = plan.Spawns
-	plan.Metadata["spawnsSuppressedReason"] = "pull_request_followup_returns_to_github_monitor"
-	plan.Spawns = nil
 	return ensurePullRequestFollowUpUpdateAction(plan)
 }
 
 func bindImplicitPullRequestFollowUpUpdateWorkers(plan Plan) Plan {
-	workerRef := implicitPullRequestFollowUpUpdateWorkerRef(plan.Spawns)
+	workerRef := implicitPullRequestFollowUpUpdateWorkerRef(plan.WorkItems)
 	if workerRef == "" {
 		return plan
 	}
@@ -3459,7 +3500,7 @@ func ensurePullRequestFollowUpUpdateAction(plan Plan) Plan {
 		Kind:     "update_pull_request",
 		When:     "after_success",
 		Reason:   "Apply successful follow-up worker changes to the existing pull request before returning it to GitHub monitoring.",
-		WorkerID: implicitPullRequestFollowUpUpdateWorkerRef(plan.Spawns),
+		WorkerID: implicitPullRequestFollowUpUpdateWorkerRef(plan.WorkItems),
 		Inputs:   pullRequestUpdateInputsFromPlan(plan),
 	}
 	actions := make([]PlanAction, 0, len(plan.Actions)+1)
@@ -3478,11 +3519,11 @@ func ensurePullRequestFollowUpUpdateAction(plan Plan) Plan {
 	return plan
 }
 
-func implicitPullRequestFollowUpUpdateWorkerRef(spawns []SpawnRequest) string {
-	if len(spawns) != 1 {
+func implicitPullRequestFollowUpUpdateWorkerRef(items []WorkItemRequest) string {
+	if len(items) != 1 {
 		return ""
 	}
-	return spawnID(spawns[0], 0)
+	return workItemRequestID(items[0], 0)
 }
 
 func planHasPullRequestMutation(plan Plan) bool {

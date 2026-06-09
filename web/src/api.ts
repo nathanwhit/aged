@@ -158,8 +158,12 @@ export async function askAssistant(input: {
   return requestJSON("/api/assistant", jsonInit("POST", input));
 }
 
-export async function steerTask(taskId: string, message: string): Promise<void> {
-  return requestVoid(`/api/tasks/${taskId}/steer`, jsonInit("POST", { message }));
+export async function steerTask(taskId: string, message: string, target?: { targetKind?: string; targetId?: string }): Promise<void> {
+  return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/steer`, jsonInit("POST", { message, ...target }));
+}
+
+export async function answerTaskQuestion(taskId: string, questionId: string, answer: string): Promise<void> {
+  return requestVoid(`/api/tasks/${encodeURIComponent(taskId)}/questions/${encodeURIComponent(questionId)}/answer`, jsonInit("POST", { answer }));
 }
 
 export async function retryTask(taskId: string) {

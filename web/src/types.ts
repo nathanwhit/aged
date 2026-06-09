@@ -357,40 +357,6 @@ export type ExecutionNode = {
   updatedAt: string;
 };
 
-export type OrchestrationGraph = {
-  taskId: string;
-  status: TaskStatus;
-  nodes: OrchestrationGraphNode[];
-  edges: OrchestrationGraphEdge[];
-  summary: {
-    total: number;
-    running: number;
-    waiting: number;
-    done: number;
-    failed: number;
-    canceled: number;
-  };
-  updatedAt: string;
-};
-
-export type OrchestrationGraphNode = {
-  id: string;
-  workerId?: string;
-  workerKind: string;
-  status: WorkerStatus;
-  role?: string;
-  reason?: string;
-  spawnId?: string;
-  targetId?: string;
-  targetKind?: string;
-};
-
-export type OrchestrationGraphEdge = {
-  from: string;
-  to: string;
-  reason?: string;
-};
-
 export type TargetState = {
   id: string;
   kind: string;
@@ -446,6 +412,12 @@ export type PullRequestState = {
   mergeable?: string;
   reviewStatus?: string;
   babysitterTaskId?: string;
+  branchOwner?: string;
+  branchOwnerDir?: string;
+  branchHead?: string;
+  updateLeaseOwner?: string;
+  updateLeaseDir?: string;
+  updateBaseHead?: string;
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
@@ -592,7 +564,6 @@ export type Snapshot = {
   pullRequests?: PullRequestState[] | null;
   pullRequestFeedback?: PullRequestFeedback[] | null;
   steering?: SteeringItem[] | null;
-  orchestrationGraphs?: OrchestrationGraph[] | null;
   lastEventId?: number;
   events: EventRecord[] | null;
 };

@@ -413,6 +413,19 @@ func (s *Service) runDurableLoopIteration(ctx context.Context, task core.Task, c
 			"loopWorkerKind": config.WorkerKind,
 		},
 	}
+	plan.WorkItems = []WorkItemRequest{{
+		ID:              fmt.Sprintf("loop-%d", iteration),
+		Kind:            "session.loop",
+		Reason:          "Run the next durable loop iteration.",
+		Prompt:          plan.Prompt,
+		TargetKind:      "objective",
+		TargetID:        task.ID,
+		WorkerKind:      config.WorkerKind,
+		ReasoningEffort: config.Reasoning,
+		Metadata: map[string]any{
+			"loopIteration": iteration,
+		},
+	}}
 	if config.FreshWorkspace {
 		plan.Metadata["workspaceReusePolicy"] = "fresh"
 	} else if strings.TrimSpace(previousWorkerID) != "" {

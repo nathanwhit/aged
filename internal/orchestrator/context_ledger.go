@@ -36,20 +36,27 @@ type contextLedgerWorkerInfo struct {
 func (s *Service) taskContextLedger(ctx context.Context, taskID string) []ContextLedgerEntry {
 	var memoryEntries []core.MemoryEntry
 	if snapshot, err := s.store.SnapshotSummary(ctx); err == nil {
+		projectID := ""
+		for _, task := range snapshot.Tasks {
+			if task.ID == taskID {
+				projectID = task.ProjectID
+				break
+			}
+		}
 		for _, entry := range snapshot.MemoryEntries {
-			if entry.TaskID == taskID {
+			if entry.TaskID == taskID || (projectID != "" && entry.ProjectID == projectID) {
 				memoryEntries = append(memoryEntries, entry)
 			}
 		}
 	}
 	events, err := s.store.ListTaskLedgerEvents(ctx, taskID)
 	if err != nil {
-		return contextLedgerFromMemoryEntries(memoryEntries)
+		return contextLedgerFromMemoryEntries(memoryEntries, taskID)
 	}
-	return mergeContextLedgerEntries(contextLedgerFromMemoryEntries(memoryEntries), projectTaskContextLedger(events, taskID))
+	return mergeContextLedgerEntries(contextLedgerFromMemoryEntries(memoryEntries, taskID), projectTaskContextLedger(events, taskID))
 }
 
-func contextLedgerFromMemoryEntries(entries []core.MemoryEntry) []ContextLedgerEntry {
+func contextLedgerFromMemoryEntries(entries []core.MemoryEntry, taskID string) []ContextLedgerEntry {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -60,6 +67,15 @@ func contextLedgerFromMemoryEntries(entries []core.MemoryEntry) []ContextLedgerE
 			_ = json.Unmarshal(entry.Metadata, &metadata)
 		}
 		metadata["sourceEventId"] = float64(entry.SourceEventID)
+		if entry.ProjectID != "" {
+			metadata["projectId"] = entry.ProjectID
+		}
+		if entry.TaskID != "" && entry.TaskID != taskID {
+			metadata["scope"] = "project"
+			metadata["sourceTaskId"] = entry.TaskID
+		} else {
+			metadata["scope"] = "task"
+		}
 		out = append(out, compactContextLedgerEntry(ContextLedgerEntry{
 			Kind:        entry.Kind,
 			SourceEvent: entry.SourceEvent,

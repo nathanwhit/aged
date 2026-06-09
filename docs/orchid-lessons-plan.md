@@ -150,6 +150,29 @@ Move active UI/scheduler paths toward tables:
 
 The event log remains append-only audit. Tables are authoritative read/write state for scheduler and UI.
 
+## Current Implementation Status
+
+PR #396 is intentionally breaking and has moved the core model substantially toward this document:
+
+- durable `workItems` are now the scheduler surface for objective work, PR follow-up, steering, and user questions
+- PR follow-up is queued as background work and does not block broad objective work
+- steering can target the objective, a session/worker, a work item, or a pull request
+- user questions can be answered directly by question id and are recorded as `user.question_answered` work items
+- intermediate PRs are explicit artifacts/actions; task completion no longer implicitly publishes a final candidate
+- the legacy `OrchestrationGraph` read/UI surface has been removed
+- objective scratch paths are surfaced in task detail from recorded shared workspace metadata
+- GitHub PR `headRefOid` is retained in metadata, and code-changing PR updates fail before push when the worker base revision is stale or from the wrong PR head
+- the planner contract is now work-item/action oriented: legacy `workers` and `spawns` plan shapes are no longer normalized by production code and fail validation instead
+- pull request branch ownership and update leases are explicit read-model fields, projected from PR publish/update events and shown in the PR UI instead of only being buried in metadata
+- session panes show current action, target/worktree/scratch context, targeted steering, and direct session cancellation controls
+- `objective.slice`, `objective.compose`, and `objective.validate` work items are first-class planner outputs and the task detail UI shows horizontal wide-work progress by slice/compose/validation lane
+- project-scoped memory entries are retrieved into replanning context and browsable in task detail alongside task memory, with scope metadata distinct from objective scratch
+- scheduler/UI state now reads from normalized tables for tasks, workers, work items, sessions, PRs, feedback, artifacts, questions, steering, targets, memory, and session current-action state instead of requiring full event replay or JSON-row projection blobs on active paths
+
+Remaining high-value gaps:
+
+- none tracked in this document
+
 ## Migration Plan
 
 1. Add durable `work_items`, initially mirrored from existing task/worker events.
