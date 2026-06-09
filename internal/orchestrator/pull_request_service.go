@@ -2178,6 +2178,9 @@ func (s *Service) recordWorkItemStarted(ctx context.Context, taskID string, item
 	if itemID == "" {
 		return nil
 	}
+	if s.workItemIsTerminal(ctx, taskID, itemID) {
+		return nil
+	}
 	workerID = strings.TrimSpace(workerID)
 	_, err := s.append(ctx, core.Event{
 		Type:   core.EventWorkItemStarted,
@@ -2200,6 +2203,9 @@ func (s *Service) recordWorkItemCompleted(ctx context.Context, taskID string, it
 	if status == "" {
 		status = core.WorkItemSucceeded
 	}
+	if s.workItemIsTerminal(ctx, taskID, itemID) {
+		return nil
+	}
 	_, err := s.append(ctx, core.Event{
 		Type:   core.EventWorkItemCompleted,
 		TaskID: taskID,
@@ -2211,6 +2217,27 @@ func (s *Service) recordWorkItemCompleted(ctx context.Context, taskID string, it
 		}),
 	})
 	return err
+}
+
+func (s *Service) workItemIsTerminal(ctx context.Context, taskID string, itemID string) bool {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return false
+	}
+	item, ok := workItemByIDFromSnapshot(snapshot, taskID, itemID)
+	if !ok {
+		return false
+	}
+	return isTerminalWorkItemStatus(item.Status)
+}
+
+func isTerminalWorkItemStatus(status core.WorkItemStatus) bool {
+	switch status {
+	case core.WorkItemSucceeded, core.WorkItemFailed, core.WorkItemCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 func pullRequestFollowUpWorkItemID(pr core.PullRequest, feedbackSignature string) string {

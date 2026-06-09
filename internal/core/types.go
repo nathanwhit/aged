@@ -2,6 +2,8 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -164,6 +166,189 @@ type WorkPlanItem struct {
 	Status    string   `json:"status,omitempty"`
 	DoneWhen  string   `json:"doneWhen,omitempty"`
 	DependsOn []string `json:"dependsOn,omitempty"`
+}
+
+func (p *WorkPlan) UnmarshalJSON(data []byte) error {
+	type rawWorkPlan struct {
+		Summary     string          `json:"summary,omitempty"`
+		Workstreams json.RawMessage `json:"workstreams,omitempty"`
+		Validation  json.RawMessage `json:"validation,omitempty"`
+		Risks       json.RawMessage `json:"risks,omitempty"`
+	}
+	var raw rawWorkPlan
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	workstreams, err := decodeWorkPlanItems(raw.Workstreams, "workstream")
+	if err != nil {
+		return fmt.Errorf("decode workstreams: %w", err)
+	}
+	validation, err := decodeWorkPlanItems(raw.Validation, "validation")
+	if err != nil {
+		return fmt.Errorf("decode validation: %w", err)
+	}
+	risks, err := decodeWorkPlanRisks(raw.Risks)
+	if err != nil {
+		return fmt.Errorf("decode risks: %w", err)
+	}
+	p.Summary = raw.Summary
+	p.Workstreams = workstreams
+	p.Validation = validation
+	p.Risks = risks
+	return nil
+}
+
+func decodeWorkPlanItems(data json.RawMessage, prefix string) ([]WorkPlanItem, error) {
+	if len(data) == 0 || string(data) == "null" {
+		return nil, nil
+	}
+	var items []WorkPlanItem
+	if err := json.Unmarshal(data, &items); err == nil {
+		return normalizeWorkPlanItems(items, prefix), nil
+	}
+	var labels []string
+	if err := json.Unmarshal(data, &labels); err == nil {
+		return workPlanItemsFromLabels(labels, prefix), nil
+	}
+	var label string
+	if err := json.Unmarshal(data, &label); err == nil {
+		return workPlanItemsFromLabels([]string{label}, prefix), nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err == nil {
+		item := workPlanItemFromObject(object, prefix, 1)
+		if strings.TrimSpace(item.Goal) == "" {
+			return nil, nil
+		}
+		return []WorkPlanItem{item}, nil
+	}
+	return nil, fmt.Errorf("expected object, array, string array, string, or null")
+}
+
+func normalizeWorkPlanItems(items []WorkPlanItem, prefix string) []WorkPlanItem {
+	out := make([]WorkPlanItem, 0, len(items))
+	for index, item := range items {
+		item.Goal = strings.TrimSpace(item.Goal)
+		if item.Goal == "" {
+			continue
+		}
+		if strings.TrimSpace(item.ID) == "" {
+			item.ID = fmt.Sprintf("%s-%d", prefix, index+1)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func workPlanItemsFromLabels(labels []string, prefix string) []WorkPlanItem {
+	items := make([]WorkPlanItem, 0, len(labels))
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		items = append(items, WorkPlanItem{
+			ID:   fmt.Sprintf("%s-%d", prefix, len(items)+1),
+			Goal: label,
+		})
+	}
+	return items
+}
+
+func workPlanItemFromObject(object map[string]any, prefix string, index int) WorkPlanItem {
+	item := WorkPlanItem{
+		ID:       stringFromAny(object["id"]),
+		Goal:     firstStringFromAny(object, "goal", "summary", "title", "description", "task"),
+		Status:   stringFromAny(object["status"]),
+		DoneWhen: firstStringFromAny(object, "doneWhen", "done_when", "acceptance", "successCriteria"),
+	}
+	item.DependsOn = stringSliceFromAny(object["dependsOn"])
+	if len(item.DependsOn) == 0 {
+		item.DependsOn = stringSliceFromAny(object["depends_on"])
+	}
+	if strings.TrimSpace(item.ID) == "" {
+		item.ID = fmt.Sprintf("%s-%d", prefix, index)
+	}
+	return item
+}
+
+func decodeWorkPlanRisks(data json.RawMessage) ([]string, error) {
+	if len(data) == 0 || string(data) == "null" {
+		return nil, nil
+	}
+	var risks []string
+	if err := json.Unmarshal(data, &risks); err == nil {
+		return compactNonEmptyStrings(risks), nil
+	}
+	var risk string
+	if err := json.Unmarshal(data, &risk); err == nil {
+		return compactNonEmptyStrings([]string{risk}), nil
+	}
+	var values []any
+	if err := json.Unmarshal(data, &values); err == nil {
+		risks = make([]string, 0, len(values))
+		for _, value := range values {
+			if risk := stringFromAny(value); strings.TrimSpace(risk) != "" {
+				risks = append(risks, strings.TrimSpace(risk))
+			}
+		}
+		return risks, nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err == nil {
+		return compactNonEmptyStrings([]string{firstStringFromAny(object, "risk", "summary", "description", "message")}), nil
+	}
+	return nil, fmt.Errorf("expected object, array, string, or null")
+}
+
+func firstStringFromAny(object map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := stringFromAny(object[key]); strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func stringSliceFromAny(value any) []string {
+	switch typed := value.(type) {
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value := stringFromAny(item); strings.TrimSpace(value) != "" {
+				values = append(values, strings.TrimSpace(value))
+			}
+		}
+		return values
+	case []string:
+		return compactNonEmptyStrings(typed)
+	case string:
+		return compactNonEmptyStrings([]string{typed})
+	default:
+		return nil
+	}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case map[string]any:
+		return firstStringFromAny(typed, "text", "value", "summary", "description", "message", "risk", "goal", "title")
+	default:
+		return ""
+	}
+}
+
+func compactNonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 type Worker struct {

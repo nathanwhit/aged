@@ -1037,6 +1037,7 @@ func TestSSHRunnerStartUploadsPromptForStdinCommand(t *testing.T) {
 	for _, want := range []string{
 		"< '/tmp/aged-workers/worker-stdin/prompt.txt'",
 		".local/share/mise/shims",
+		"mise trust mise.toml",
 		"AGED_REMOTE_CALLBACK_ENV='/tmp/aged-workers/worker-stdin/callback.env'",
 		"AGED_REMOTE_HELPER_BIN='/tmp/aged-workers/worker-stdin/bin'",
 	} {
