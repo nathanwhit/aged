@@ -716,7 +716,7 @@ function TaskRow({
           {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
         </span>
       </button>
-      <div className="task-row-actions">
+      <div className="task-row-actions" role="group" aria-label={`Actions for ${task.title}`}>
         {isRetryableTask(task) && (
           <button className="icon-button ghost task-action" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
             <RefreshCw size={16} />
@@ -1916,6 +1916,8 @@ function TaskDetail({
   const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status)).length;
   const activeNodes = nodes.filter((node) => !isTerminalWorkerStatus(node.status)).length;
   const activeWorkItems = workItems.filter((item) => item.status === "queued" || item.status === "running").length;
+  const hasSupportPanels = memoryEntries.length > 0 || sharedScratchSummaries(sessions).length > 0;
+  const hasWorkPanels = pendingApprovals.length > 0 || Boolean(workerUpdate) || workItems.length > 0 || sessions.length > 0 || steering.length > 0 || pendingFeedback.length > 0;
   const attentionItems = taskAttentionItems({
     task,
     taskError,
@@ -1987,21 +1989,25 @@ function TaskDetail({
             {task.updatedAt && <span>Updated {new Date(task.updatedAt).toLocaleTimeString()}</span>}
           </div>
         </div>
-        <div className="detail-actions">
-          <Status value={task.status} />
-          {task.objectiveStatus && <Status value={task.objectiveStatus} />}
-          {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
-          {broadObjective && <span className="pill">Objective mode</span>}
-          {durableLoop && <span className="pill">Loop mode</span>}
-          {task.appliedWorkerId && <span className="pill">Applied worker {task.appliedWorkerId.slice(0, 8)}</span>}
-          {isRetryableTask(task) && (
-            <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
-              <RefreshCw size={18} />
+        <div className="detail-toolbar">
+          <div className="detail-statuses" role="group" aria-label="Task status">
+            <Status value={task.status} />
+            {task.objectiveStatus && <Status value={task.objectiveStatus} />}
+            {task.objectivePhase && <span className="pill">{humanizeKey(task.objectivePhase)}</span>}
+            {broadObjective && <span className="pill">Objective mode</span>}
+            {durableLoop && <span className="pill">Loop mode</span>}
+            {task.appliedWorkerId && <span className="pill">Applied worker {task.appliedWorkerId.slice(0, 8)}</span>}
+          </div>
+          <div className="detail-actions" role="group" aria-label="Task actions">
+            {isRetryableTask(task) && (
+              <button className="icon-button ghost" disabled={retrying} onClick={() => onRetry(task.id)} title="Retry task">
+                <RefreshCw size={18} />
+              </button>
+            )}
+            <button className="icon-button danger" onClick={() => onCancel(task.id).catch((err) => onError(errorMessage(err)))} title="Cancel task">
+              <CircleStop size={18} />
             </button>
-          )}
-          <button className="icon-button danger" onClick={() => onCancel(task.id).catch((err) => onError(errorMessage(err)))} title="Cancel task">
-            <CircleStop size={18} />
-          </button>
+          </div>
         </div>
       </div>
       <details className="task-prompt-block" open={task.prompt.length < 520 && !hasCustomLoopPrompt}>
@@ -2024,21 +2030,29 @@ function TaskDetail({
       {(artifacts.length || task.artifacts?.length || task.milestones?.length) && (
         <TaskObjectiveStrip task={task} artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []} />
       )}
-      <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
-      <SharedScratchPanel sessions={sessions} />
+      {hasSupportPanels && (
+        <div className="task-support-grid" role="group" aria-label="Task support context">
+          <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
+          <SharedScratchPanel sessions={sessions} />
+        </div>
+      )}
       {taskError && (
         <div className="task-failure">
           <strong>Failure details</strong>
           <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
         </div>
       )}
-      {pendingApprovals.length > 0 && <ApprovalPanel taskId={task.id} approvals={pendingApprovals} onAnswer={onAnswerQuestion} onDone={onLoopConfigUpdated} onError={onError} />}
-      <WorkerProgressSpotlight update={workerUpdate} />
-      <WideWorkProgress items={workItems} />
-      <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
-      <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
-      <SteeringQueue items={steering} />
-      <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
+      {hasWorkPanels && (
+        <div className="task-work-grid" role="group" aria-label="Task work queues">
+          {pendingApprovals.length > 0 && <ApprovalPanel taskId={task.id} approvals={pendingApprovals} onAnswer={onAnswerQuestion} onDone={onLoopConfigUpdated} onError={onError} />}
+          <WorkerProgressSpotlight update={workerUpdate} />
+          <WideWorkProgress items={workItems} />
+          <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
+          <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
+          <SteeringQueue items={steering} />
+          <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
+        </div>
+      )}
       {durableLoop && (
         <form className="loop-settings" onSubmit={updateLoopConfig}>
           <label>
@@ -2887,7 +2901,7 @@ function PullRequestPanel({
                   </a>
                   <small>{pr.title}</small>
                 </div>
-                <div className="pr-statuses">
+                <div className="pr-statuses" role="group" aria-label="Pull request status">
                   <Status value={pr.state?.toLowerCase() || "waiting"} />
                   {pr.checksStatus && <span className="pill">{pr.checksStatus}</span>}
                   {pr.reviewStatus && <span className="pill">{pr.reviewStatus.toLowerCase()}</span>}
@@ -2917,7 +2931,7 @@ function PullRequestPanel({
                     {busy === `steer:${pr.id}` ? "Queued" : "Steer"}
                   </button>
                 </form>
-                <div className="pr-actions">
+                <div className="pr-actions" role="group" aria-label={`Actions for ${pr.repo}${pr.number ? `#${pr.number}` : ""}`}>
                   <button className="secondary compact" disabled={busy === `refresh:${pr.id}`} onClick={() => run(`refresh:${pr.id}`, () => onRefresh(pr.id))}>
                     <RefreshCw size={16} />
                     Refresh
@@ -3077,13 +3091,17 @@ function WorkerList({
                   <strong>{node?.role || kind}</strong>
                   <small>{workerId ? workerId.slice(0, 8) : rowId.slice(0, 8)}</small>
                 </div>
-                <Status value={status} />
-                <button className="icon-button ghost" disabled={!workerId} onClick={() => selectWorker(workerId)} title="Inspect worker">
-                  <Eye size={16} />
-                </button>
-                <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err) => onError(errorMessage(err)))} title="Cancel worker">
-                  <CircleStop size={16} />
-                </button>
+                <div className="worker-card-status" role="group" aria-label="Worker status">
+                  <Status value={status} />
+                </div>
+                <div className="worker-card-actions" role="group" aria-label={workerId ? `Actions for worker ${workerId.slice(0, 8)}` : "Worker actions"}>
+                  <button className="icon-button ghost" disabled={!workerId} onClick={() => selectWorker(workerId)} title="Inspect worker">
+                    <Eye size={16} />
+                  </button>
+                  <button className="icon-button danger" disabled={!workerId || isTerminalWorkerStatus(status)} onClick={() => onCancel(workerId).catch((err) => onError(errorMessage(err)))} title="Cancel worker">
+                    <CircleStop size={16} />
+                  </button>
+                </div>
                 <div className="worker-context">
                   <WorkerContextItem label="Kind" value={kind} />
                   <WorkerContextItem label="Node" value={node?.id.slice(0, 8) ?? "none"} />
