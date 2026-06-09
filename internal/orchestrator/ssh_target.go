@@ -993,6 +993,7 @@ if [ "$code" -ne 0 ]; then
   printf '{"status":"failed","exit":%%s,"error":"failed to enter remote worker directory"}' "$code" > %s/status.json
   exit "$code"
 fi
+%s
 (%s)%s > %s/stdout.log 2> %s/stderr.log
 code=$?
 %s
@@ -1002,6 +1003,7 @@ if [ "$code" -eq 0 ]; then printf '{"status":"succeeded","exit":0}' > %s/status.
 		remoteWorkerEnvScript(),
 		shellQuote(run.WorkDir),
 		shellQuote(run.RunDir),
+		remoteMiseTrustScript(),
 		remoteBaselineScript(run)+"\n"+command,
 		stdinRedirect,
 		shellQuote(run.RunDir),
@@ -1427,6 +1429,12 @@ for dir in "$HOME"/.local/share/fnm/node-versions/*/installation/bin "$HOME"/.lo
   if [ -d "$dir" ]; then PATH="$dir:$PATH"; fi
 done
 export PATH`
+}
+
+func remoteMiseTrustScript() string {
+	return `if command -v mise >/dev/null 2>&1 && [ -f mise.toml ]; then
+  mise trust mise.toml >/dev/null 2>&1 || true
+fi`
 }
 
 func remoteGitSnapshotTreeFunction() string {

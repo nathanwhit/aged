@@ -361,6 +361,60 @@ func TestRecoverRemoteWorkersStartsQueuedSpawnWorkItems(t *testing.T) {
 	}
 }
 
+func TestRecordWorkItemLifecycleIgnoresDuplicateTerminalTransitions(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-work-item-idempotence"
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Work item idempotence",
+			"prompt": "Do not restart terminal work items.",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         "slice",
+		"kind":       "objective.slice",
+		"targetKind": "objective",
+		"targetId":   taskID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemStarted(ctx, taskID, "slice", "worker-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemCompleted(ctx, taskID, "slice", core.WorkItemFailed, "worker-1", "failed once"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemStarted(ctx, taskID, "slice", "worker-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemCompleted(ctx, taskID, "slice", core.WorkItemSucceeded, "worker-2", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, ok := workItemByID(snapshot, "slice")
+	if !ok || item.Status != core.WorkItemFailed || item.WorkerID != "worker-1" {
+		t.Fatalf("work item = %+v ok=%v, want original failed terminal state", item, ok)
+	}
+	if got := countEvents(snapshot.Events, core.EventWorkItemStarted, taskID); got != 1 {
+		t.Fatalf("work_item.started events = %d, want 1", got)
+	}
+	if got := countEvents(snapshot.Events, core.EventWorkItemCompleted, taskID); got != 1 {
+		t.Fatalf("work_item.completed events = %d, want 1", got)
+	}
+}
+
 func TestProjectHealthCatchesGitHubGraphQLBadCredentials(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

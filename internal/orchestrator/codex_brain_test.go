@@ -580,6 +580,42 @@ func TestDecodeCodexPlanAcceptsInitialWorkItems(t *testing.T) {
 	}
 }
 
+func TestDecodeCodexPlanAcceptsLooseWorkPlanShapes(t *testing.T) {
+	plan, err := decodeCodexPlan([]byte(`{
+		"rationale": "Recover after worker failure.",
+		"workPlan": {
+			"summary": "Retry the implementation with a fixed environment.",
+			"workstreams": "Retry the UI modernization worker.",
+			"validation": "Run the frontend checks after the retry.",
+			"risks": "The remote target may still need environment setup."
+		},
+		"steps": ["Retry worker"],
+		"requiredApprovals": [],
+		"actions": [],
+		"workItems": [
+			{"id": "retry", "kind": "objective.implement", "reason": "Retry after fixing target setup", "prompt": "retry the UI modernization", "targetKind": "objective", "targetId": "task-1", "workerKind": "codex", "reasoningEffort": "medium", "dependsOn": [], "metadata": {}}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.WorkPlan == nil {
+		t.Fatal("workPlan is nil")
+	}
+	if len(plan.WorkPlan.Workstreams) != 1 || plan.WorkPlan.Workstreams[0].Goal != "Retry the UI modernization worker." {
+		t.Fatalf("workstreams = %+v", plan.WorkPlan.Workstreams)
+	}
+	if len(plan.WorkPlan.Validation) != 1 || plan.WorkPlan.Validation[0].Goal != "Run the frontend checks after the retry." {
+		t.Fatalf("validation = %+v", plan.WorkPlan.Validation)
+	}
+	if len(plan.WorkPlan.Risks) != 1 || plan.WorkPlan.Risks[0] != "The remote target may still need environment setup." {
+		t.Fatalf("risks = %+v", plan.WorkPlan.Risks)
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecodeReplanDecisionContinue(t *testing.T) {
 	decision, err := decodeReplanDecision([]byte(`{
 		"action": "continue",
