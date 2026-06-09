@@ -1494,6 +1494,29 @@ work_dir=%[1]s
 repo_url=%[2]s
 base=%[3]s
 base_ref=%[4]s
+lock_parent=$(dirname "$work_dir")
+lock_name=$(basename "$work_dir")
+mkdir -p "$lock_parent"
+lock_path="$lock_parent/.aged-${lock_name}.checkout.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock_path"
+  if ! flock -w 300 9; then
+    echo "timed out waiting for remote checkout lock: $lock_path"
+    exit 23
+  fi
+else
+  lock_dir="$lock_path.dir"
+  lock_wait=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    lock_wait=$((lock_wait + 1))
+    if [ "$lock_wait" -ge 300 ]; then
+      echo "timed out waiting for remote checkout lock: $lock_dir"
+      exit 23
+    fi
+    sleep 1
+  done
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT INT TERM
+fi
 if [ -d "$work_dir/.git" ]; then
   cd "$work_dir"
   if [ -n "$(git status --porcelain)" ]; then
