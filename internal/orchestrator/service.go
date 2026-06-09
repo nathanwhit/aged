@@ -3678,7 +3678,7 @@ func (s *Service) handleWorkerQuestion(ctx context.Context, task core.Task, init
 		}
 		decision.Plan.Metadata["parentNodeID"] = waiting.NodeID
 		decision.Plan.Metadata["questionWorkerID"] = waiting.WorkerID
-		if shouldInheritLatestCandidate(decision.Plan.Metadata) {
+		if shouldInheritLatestCandidateForPlan(*decision.Plan) {
 			if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 				decision.Plan.Metadata["baseWorkerID"] = baseWorkerID
 			}
@@ -8690,7 +8690,7 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				next.Metadata = map[string]any{}
 			}
 			next.Metadata["dynamicReplanTurn"] = turn
-			if shouldInheritLatestCandidate(next.Metadata) {
+			if shouldInheritLatestCandidateForPlan(next) {
 				if baseWorkerID := latestCandidateWorkerID(results); baseWorkerID != "" {
 					next.Metadata["baseWorkerID"] = baseWorkerID
 				}
@@ -11237,6 +11237,13 @@ func candidateBaseWorkerID(metadata map[string]any) string {
 
 func shouldInheritLatestCandidate(metadata map[string]any) bool {
 	return candidateBaseWorkerID(metadata) == "" && !strings.EqualFold(stringMetadata(metadata, "baseWorkerID"), "source")
+}
+
+func shouldInheritLatestCandidateForPlan(plan Plan) bool {
+	if len(plan.WorkItems) > 0 {
+		return false
+	}
+	return shouldInheritLatestCandidate(plan.Metadata)
 }
 
 func intMetadata(metadata map[string]any, key string) int {
