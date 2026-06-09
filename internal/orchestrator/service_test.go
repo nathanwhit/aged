@@ -74,6 +74,81 @@ func TestServiceUsesBrainSelectedWorker(t *testing.T) {
 	}
 }
 
+func TestPlanNormalizeFillsMissingActionReason(t *testing.T) {
+	plan := Plan{
+		Actions: []PlanAction{{
+			Kind:   "watch_pull_requests",
+			When:   "immediate",
+			Inputs: map[string]any{},
+		}},
+	}
+	normalizePlanShape(&plan)
+	if plan.Actions[0].Reason == "" {
+		t.Fatal("action reason was not filled")
+	}
+	if err := plan.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceRejectsBroadObjectiveFinishWithUnpublishedCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := core.Task{
+		ID:       "task-unpublished-candidate",
+		Title:    "Broad objective",
+		Prompt:   "Modernize the UI.",
+		Metadata: core.MustJSON(map[string]any{"objectiveMode": "broad"}),
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":    task.Title,
+			"prompt":   task.Prompt,
+			"metadata": task.Metadata,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	brain := &replanningBrain{decisions: []ReplanDecision{
+		{
+			Action:    "finish_objective",
+			Rationale: "worker completed the UI modernization",
+			Message:   "done",
+		},
+		{
+			Action:  "wait",
+			Message: "publish or explicitly continue",
+		},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.replanLoop(ctx, task, Plan{}, []WorkerTurnResult{{
+		WorkerID: "worker-ui",
+		Status:   core.WorkerSucceeded,
+		Kind:     "codex",
+		Summary:  "implemented UI changes",
+		Changes: WorkspaceChanges{
+			Dirty:        true,
+			ChangedFiles: []WorkspaceChangedFile{{Path: "web/src/styles.css", Status: "modified"}},
+		},
+	}})
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 2 {
+		t.Fatalf("replan states = %d, want 2", len(brain.states))
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") {
+		t.Fatalf("missing rejected completion action:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if hasTaskAction(snapshot.Events, task.ID, "finish_objective", "completed") {
+		t.Fatalf("finish_objective action should not complete with unpublished candidate:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+}
+
 func TestServiceProvidesSharedArtifactWorkspaceToLocalWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -12774,13 +12849,9 @@ func TestServiceDoesNotApplyDynamicReplanLimitToBroadObjective(t *testing.T) {
 	}
 	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{
 		"codex":  eventRunner{kind: "codex", events: []worker.Event{{Kind: worker.EventResult, Text: "initial implementation"}}},
-		"follow": failingRunner{kind: "follow", err: errors.New("no useful follow-up progress")},
+		"follow": eventRunner{kind: "follow", events: []worker.Event{{Kind: worker.EventResult, Text: "follow-up made no publishable changes"}}},
 	}, t.TempDir(), fakeWorkspaceManager{
 		cwd: t.TempDir(),
-		changes: WorkspaceChanges{
-			Dirty:        true,
-			ChangedFiles: []WorkspaceChangedFile{{Path: "main.go", Status: "modified"}},
-		},
 	})
 
 	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
@@ -12793,7 +12864,7 @@ func TestServiceDoesNotApplyDynamicReplanLimitToBroadObjective(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	snapshot := waitForTaskStatusWithin(t, store, task.ID, core.TaskSucceeded, 10*time.Second)
 	if len(brain.states) != maxConsecutiveUnproductiveReplanTurns+2 {
 		t.Fatalf("replan states = %d, want %d", len(brain.states), maxConsecutiveUnproductiveReplanTurns+2)
 	}

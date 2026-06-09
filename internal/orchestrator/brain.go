@@ -50,6 +50,51 @@ type Plan struct {
 }
 
 func normalizePlanShape(plan *Plan) {
+	if plan == nil {
+		return
+	}
+	for index := range plan.Actions {
+		action := &plan.Actions[index]
+		action.Kind = strings.TrimSpace(action.Kind)
+		action.When = strings.TrimSpace(action.When)
+		action.WorkerID = strings.TrimSpace(action.WorkerID)
+		action.Reason = strings.TrimSpace(action.Reason)
+		if action.Inputs == nil {
+			action.Inputs = map[string]any{}
+		}
+		if action.Reason == "" {
+			action.Reason = defaultPlanActionReason(*action)
+		}
+	}
+}
+
+func defaultPlanActionReason(action PlanAction) string {
+	switch strings.TrimSpace(action.Kind) {
+	case "publish_pull_request":
+		if title := strings.TrimSpace(stringMetadata(action.Inputs, "title")); title != "" {
+			return "Publish pull request: " + title
+		}
+		return "Publish pull request."
+	case "update_pull_request":
+		if title := strings.TrimSpace(stringMetadata(action.Inputs, "title")); title != "" {
+			return "Update pull request: " + title
+		}
+		return "Update pull request."
+	case "watch_pull_requests":
+		return "Watch pull requests."
+	case "wait_external":
+		return "Wait for external state."
+	case "ask_user":
+		return "Ask the user for input."
+	case "spawn_work":
+		return "Spawn objective work."
+	case "create_tasks":
+		return "Create follow-up tasks."
+	case "finish_objective":
+		return "Finish objective."
+	default:
+		return "Run planned action."
+	}
 }
 
 type PlanStep struct {
@@ -271,7 +316,11 @@ func (a PlanAction) Validate() error {
 	default:
 		return errors.New("when must be immediate or after_success")
 	}
-	if strings.TrimSpace(a.Reason) == "" {
+	reason := strings.TrimSpace(a.Reason)
+	if reason == "" {
+		reason = defaultPlanActionReason(a)
+	}
+	if reason == "" {
 		return errors.New("reason is required")
 	}
 	if strings.TrimSpace(a.Kind) == "publish_pull_request" && strings.TrimSpace(stringMetadata(a.Inputs, "body")) == "" {
