@@ -3263,6 +3263,9 @@ func (s *Service) CancelWorkItem(ctx context.Context, taskID string, itemID stri
 				return err
 			}
 		}
+		if err := s.recordUserQuestionCanceled(ctx, taskID, item, workerID, "work item canceled by user request"); err != nil {
+			return err
+		}
 		return s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemCanceled, workerID, "work item canceled by user request")
 	}
 	return eventstore.ErrNotFound
@@ -3277,11 +3280,56 @@ func (s *Service) cancelTaskWorkItems(ctx context.Context, taskID string) error 
 		if item.TaskID != taskID || (item.Status != core.WorkItemQueued && item.Status != core.WorkItemRunning) {
 			continue
 		}
+		if err := s.recordUserQuestionCanceled(ctx, taskID, item, item.WorkerID, "task canceled by user request"); err != nil {
+			return err
+		}
 		if err := s.recordWorkItemCompleted(ctx, taskID, item.ID, core.WorkItemCanceled, item.WorkerID, "task canceled by user request"); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Service) recordUserQuestionCanceled(ctx context.Context, taskID string, item core.WorkItem, workerID string, answer string) error {
+	if item.Kind != "user.question" {
+		return nil
+	}
+	questionID, ok := questionIDFromUserQuestionWorkItemID(item.ID)
+	if !ok {
+		return nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	var question core.Question
+	for _, candidate := range snapshot.Questions {
+		if candidate.ID == questionID && candidate.TaskID == taskID {
+			question = candidate
+			break
+		}
+	}
+	if question.ID == "" || question.Decided {
+		return nil
+	}
+	if strings.TrimSpace(workerID) == "" {
+		workerID = question.WorkerID
+	}
+	approved := false
+	_, err = s.append(ctx, core.Event{
+		Type:     core.EventApprovalDecided,
+		TaskID:   taskID,
+		WorkerID: strings.TrimSpace(workerID),
+		Payload: core.MustJSON(map[string]any{
+			"approved":   approved,
+			"answer":     nonEmpty(answer, "user question canceled"),
+			"question":   question.Question,
+			"questionId": question.ID,
+			"reason":     "user_question_canceled",
+			"workerId":   strings.TrimSpace(workerID),
+		}),
+	})
+	return err
 }
 
 func (s *Service) ClearTask(ctx context.Context, taskID string) error {
@@ -10205,6 +10253,17 @@ func objectiveWorkerWorkItemKind(role string, reason string) string {
 
 func userQuestionWorkItemID(eventID int64) string {
 	return "user_question_" + strconv.FormatInt(eventID, 10)
+}
+
+func questionIDFromUserQuestionWorkItemID(workItemID string) (string, bool) {
+	raw := strings.TrimPrefix(strings.TrimSpace(workItemID), "user_question_")
+	if raw == strings.TrimSpace(workItemID) || raw == "" {
+		return "", false
+	}
+	if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
+		return "", false
+	}
+	return "approval_" + raw, true
 }
 
 func approvalEventIDFromQuestionID(questionID string) (int64, bool) {
