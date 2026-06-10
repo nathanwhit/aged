@@ -3744,6 +3744,10 @@ func (s *Service) recoverWorkerFailureWithReplan(ctx context.Context, task core.
 	if failure.Status != core.WorkerFailed {
 		return false
 	}
+	if exhaustion, ok := classifyProviderUsageExhaustion(failure.Kind, failure.Error, failure.Summary); ok {
+		_ = s.waitForProviderCapacity(ctx, task.ID, failure.WorkerID, exhaustion)
+		return true
+	}
 	if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(failure.Error, failure.Summary)); ok {
 		if s.recoverableWorkerFailureCanRetryOnAlternateTarget(ctx, task, initial, failure, blocker) {
 			_ = s.recordTaskAction(ctx, task.ID, map[string]any{
@@ -4709,6 +4713,8 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 			workspaceResult = WorkspaceResultCanceled
 			cancelReason = s.workerCancelReason(workerID)
 			err = workerCancelError(cancelReason)
+		} else if exhaustion, ok := classifyProviderUsageExhaustion(plan.WorkerKind, runState.failureText(err)); ok {
+			err = errors.New(nonEmpty(exhaustion.Detail, exhaustion.Summary))
 		}
 		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 		if s.workerCompleted(context.Background(), task.ID, workerID) {
@@ -4722,16 +4728,26 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
 		_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 		s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
+		result := runState.turnResult(workerID, plan, status, err, changes)
+		if status == core.WorkerFailed {
+			if fallback, handled, fallbackErr := s.runProviderUsageFallback(ctx, task, plan, result); handled {
+				return fallback, fallbackErr
+			}
+		}
 		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, err); completeErr != nil {
 			return WorkerTurnResult{}, completeErr
 		}
-		return runState.turnResult(workerID, plan, status, err, changes), nil
+		return result, nil
 	}
 
 	if runState.isWaitingForInput() {
 		changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 		status := core.WorkerWaiting
 		var statusErr error
+		if exhaustion, ok := classifyProviderUsageExhaustion(plan.WorkerKind, runState.failureText(nil)); ok {
+			status = core.WorkerFailed
+			statusErr = errors.New(exhaustion.Summary)
+		}
 		if s.workerCompleted(context.Background(), task.ID, workerID) {
 			status = core.WorkerCanceled
 			statusErr = context.Canceled
@@ -4740,16 +4756,27 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 		}
 		_ = s.recordWorkerArtifacts(ctx, task.ID, workerID, plan.WorkerKind, runState, changes)
 		s.drainLocalWorkerCallbacks(ctx, task.ID, workerID, callbackDir)
+		result := runState.turnResult(workerID, plan, status, statusErr, changes)
+		if status == core.WorkerFailed {
+			if fallback, handled, fallbackErr := s.runProviderUsageFallback(ctx, task, plan, result); handled {
+				return fallback, fallbackErr
+			}
+		}
 		if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, statusErr); completeErr != nil {
 			return WorkerTurnResult{}, completeErr
 		}
-		return runState.turnResult(workerID, plan, status, statusErr, changes), nil
+		return result, nil
 	}
 
 	changes := s.describeWorkspaceChangesForCompletion(ctx, workspace)
 	status := core.WorkerSucceeded
 	var statusErr error
 	status, statusErr = runState.normalizeCompletionStatus(plan, status, statusErr, changes)
+	if status == core.WorkerFailed {
+		if exhaustion, ok := classifyProviderUsageExhaustion(plan.WorkerKind, runState.failureText(statusErr)); ok {
+			statusErr = errors.New(nonEmpty(exhaustion.Detail, exhaustion.Summary))
+		}
+	}
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		status = core.WorkerCanceled
 		statusErr = context.Canceled
@@ -4764,10 +4791,16 @@ func (s *Service) runPlannedWorker(ctx context.Context, task core.Task, plan Pla
 	}
 	_ = s.cleanupWorkspace(ctx, task.ID, workerID, workspace, workspaceResult)
 	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResult)
+	result := runState.turnResult(workerID, plan, status, statusErr, changes)
+	if status == core.WorkerFailed {
+		if fallback, handled, fallbackErr := s.runProviderUsageFallback(ctx, task, plan, result); handled {
+			return fallback, fallbackErr
+		}
+	}
 	if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, status, statusErr); completeErr != nil {
 		return WorkerTurnResult{}, completeErr
 	}
-	return runState.turnResult(workerID, plan, status, statusErr, changes), nil
+	return result, nil
 }
 
 func (s *Service) rebalancePlanWorkerKind(ctx context.Context, plan Plan) Plan {
@@ -4790,10 +4823,24 @@ func (s *Service) rebalancePlanWorkerKind(ctx context.Context, plan Plan) Plan {
 	alternateUsage, alternateOK := snapshot.Providers[alternate]
 	currentPressure, currentKnown := providerUsagePressure(currentUsage)
 	alternatePressure, alternateKnown := providerUsagePressure(alternateUsage)
-	if !currentOK || !alternateOK || !currentKnown || !alternateKnown {
-		return plan
+	shouldSwitch := false
+	reason := ""
+	switch {
+	case currentOK && !currentUsage.Available:
+		shouldSwitch = true
+		reason = fmt.Sprintf("%s usage monitor reports unavailable", kind)
+	case currentKnown && currentPressure >= 100:
+		shouldSwitch = true
+		if alternateKnown {
+			reason = fmt.Sprintf("%s usage pressure %d%%, %s usage pressure %d%%", kind, currentPressure, alternate, alternatePressure)
+		} else {
+			reason = fmt.Sprintf("%s usage pressure %d%%; %s usage pressure unknown", kind, currentPressure, alternate)
+		}
+	case currentOK && alternateOK && currentKnown && alternateKnown && alternatePressure+providerUsageSwitchMargin <= currentPressure:
+		shouldSwitch = true
+		reason = fmt.Sprintf("%s usage pressure %d%%, %s usage pressure %d%%", kind, currentPressure, alternate, alternatePressure)
 	}
-	if alternatePressure+providerUsageSwitchMargin > currentPressure && currentPressure < 95 {
+	if !shouldSwitch {
 		return plan
 	}
 	if plan.Metadata == nil {
@@ -4802,11 +4849,100 @@ func (s *Service) rebalancePlanWorkerKind(ctx context.Context, plan Plan) Plan {
 	plan.Metadata["usageAwareScheduling"] = true
 	plan.Metadata["usageOriginalWorkerKind"] = kind
 	plan.Metadata["usageSelectedWorkerKind"] = alternate
-	plan.Metadata["usageSelectionReason"] = fmt.Sprintf("%s usage pressure %d%%, %s usage pressure %d%%", kind, currentPressure, alternate, alternatePressure)
-	plan.Metadata["usageCurrentPressure"] = currentPressure
-	plan.Metadata["usageAlternatePressure"] = alternatePressure
+	plan.Metadata["usageSelectionReason"] = reason
+	if currentKnown {
+		plan.Metadata["usageCurrentPressure"] = currentPressure
+	}
+	if alternateKnown {
+		plan.Metadata["usageAlternatePressure"] = alternatePressure
+	}
 	plan.WorkerKind = alternate
 	return plan
+}
+
+func (s *Service) runProviderUsageFallback(ctx context.Context, task core.Task, plan Plan, result WorkerTurnResult) (WorkerTurnResult, bool, error) {
+	exhaustion, ok := classifyProviderUsageExhaustion(result.Kind, result.Error, result.Summary)
+	if !ok {
+		return WorkerTurnResult{}, false, nil
+	}
+	alternate := alternateProviderKind(result.Kind)
+	if alternate == "" || s.runners[alternate] == nil || boolMetadata(plan.Metadata, "usageFallbackAttempt") {
+		return WorkerTurnResult{}, false, nil
+	}
+	fallbackPlan := plan
+	fallbackPlan.WorkerKind = alternate
+	fallbackPlan.Metadata = copyPlanMetadata(plan.Metadata)
+	delete(fallbackPlan.Metadata, "nodeID")
+	delete(fallbackPlan.Metadata, "planID")
+	delete(fallbackPlan.Metadata, "targetID")
+	delete(fallbackPlan.Metadata, "targetKind")
+	delete(fallbackPlan.Metadata, "remoteSession")
+	delete(fallbackPlan.Metadata, "remoteRunDir")
+	delete(fallbackPlan.Metadata, "remoteWorkDir")
+	fallbackPlan.Metadata["usageFallbackAttempt"] = true
+	fallbackPlan.Metadata["usageFallbackFromProvider"] = result.Kind
+	fallbackPlan.Metadata["usageFallbackToProvider"] = alternate
+	fallbackPlan.Metadata["usageFallbackFromWorkerID"] = result.WorkerID
+	fallbackPlan.Metadata["usageFallbackReason"] = exhaustion.Summary
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":     "provider_usage_fallback",
+		"status":   "started",
+		"reason":   "Worker provider usage was exhausted; retrying the same plan on the alternate provider.",
+		"provider": nonEmpty(exhaustion.Provider, result.Kind),
+		"fromKind": result.Kind,
+		"toKind":   alternate,
+		"workerId": result.WorkerID,
+		"error":    nonEmpty(exhaustion.Detail, result.Error, result.Summary),
+	})
+	fallback, err := s.runPlannedWorker(ctx, task, fallbackPlan)
+	status := "completed"
+	if err != nil || fallback.Status != core.WorkerSucceeded {
+		status = "failed"
+	}
+	_ = s.recordTaskAction(ctx, task.ID, map[string]any{
+		"kind":       "provider_usage_fallback",
+		"status":     status,
+		"reason":     "Alternate provider usage fallback finished.",
+		"provider":   nonEmpty(exhaustion.Provider, result.Kind),
+		"fromKind":   result.Kind,
+		"toKind":     alternate,
+		"workerId":   result.WorkerID,
+		"fallbackId": fallback.WorkerID,
+		"error":      errorString(err),
+	})
+	return fallback, true, err
+}
+
+func alternateProviderKind(kind string) string {
+	switch strings.TrimSpace(kind) {
+	case "claude":
+		return "codex"
+	case "codex":
+		return "claude"
+	default:
+		return ""
+	}
+}
+
+func (s *Service) waitForProviderCapacity(ctx context.Context, taskID string, workerID string, exhaustion ProviderUsageExhaustion) error {
+	summary := exhaustion.Summary
+	if summary == "" {
+		summary = "Model provider usage is exhausted."
+	}
+	if err := s.updateTaskObjective(ctx, taskID, core.ObjectiveWaitingExternal, "provider_usage_exhausted", summary); err != nil {
+		return err
+	}
+	if err := s.setTaskStatus(ctx, taskID, core.TaskWaiting); err != nil {
+		return err
+	}
+	return s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":     "provider_usage_exhausted",
+		"status":   "waiting_external",
+		"reason":   summary,
+		"provider": exhaustion.Provider,
+		"workerId": workerID,
+		"error":    exhaustion.Detail,
+	})
 }
 
 func (s *Service) selectExecutionTarget(ctx context.Context, plan Plan) (TargetConfig, error) {
@@ -5246,6 +5382,11 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 	}
 	changes := s.sshRunner.DescribeChanges(ctx, remoteRun)
 	workerStatus, statusErr = runState.normalizeCompletionStatus(plan, workerStatus, statusErr, changes)
+	if workerStatus == core.WorkerFailed {
+		if exhaustion, ok := classifyProviderUsageExhaustion(plan.WorkerKind, runState.failureText(statusErr)); ok {
+			statusErr = errors.New(nonEmpty(exhaustion.Detail, exhaustion.Summary))
+		}
+	}
 	if s.workerCompleted(context.Background(), task.ID, workerID) {
 		workerStatus = core.WorkerCanceled
 		cancelReason = s.workerCancelReason(workerID)
@@ -5259,10 +5400,16 @@ func (s *Service) runSSHPlannedWorker(ctx context.Context, task core.Task, plan 
 		_ = sink.Event(ctx, worker.Event{Kind: worker.EventError, Stream: "stderr", Text: "failed to drain terminal remote worker callbacks: " + err.Error()})
 	}
 	s.cleanupTerminalWorkspaceArtifacts(ctx, task.ID, workerID, workspace, workspaceResultForWorkerStatus(workerStatus))
+	result := runState.turnResult(workerID, plan, workerStatus, statusErr, changes)
+	if workerStatus == core.WorkerFailed {
+		if fallback, handled, fallbackErr := s.runProviderUsageFallback(ctx, task, plan, result); handled {
+			return fallback, fallbackErr
+		}
+	}
 	if completeErr := s.recordPlanWorkItemCompletedForWorker(ctx, task.ID, workItemID, workerID, workerStatus, statusErr); completeErr != nil {
 		return WorkerTurnResult{}, completeErr
 	}
-	return runState.turnResult(workerID, plan, workerStatus, statusErr, changes), nil
+	return result, nil
 }
 
 func sshWorkerStdin(runner worker.Runner, spec worker.Spec, command []string, capabilities worker.Capabilities) (string, error) {
@@ -6100,6 +6247,10 @@ func (s *Service) finishOrContinueTask(ctx context.Context, taskID string, resul
 		}
 		_ = s.setTaskStatus(ctx, taskID, core.TaskCanceled)
 	default:
+		if exhaustion, ok := classifyProviderUsageExhaustion(result.Kind, result.Error, result.Summary); ok {
+			_ = s.waitForProviderCapacity(ctx, taskID, result.WorkerID, exhaustion)
+			return false
+		}
 		if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
 			_ = s.waitForUserAction(ctx, taskID, result.WorkerID, blocker.Reason, blocker.Question, map[string]any{
 				"summary":    blocker.Summary,
@@ -7742,6 +7893,12 @@ func (s *Service) runSpawnedWorkItem(ctx context.Context, taskID string, itemID 
 		return
 	}
 	if result.Status == core.WorkerFailed {
+		if exhaustion, ok := classifyProviderUsageExhaustion(result.Kind, result.Error, result.Summary); ok {
+			_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, result.WorkerID, result.Error)
+			s.recordWorkItemFollowUpStatus(context.Background(), taskID, item, "waiting_external", "worker provider usage is exhausted; waiting for provider capacity", result.WorkerID, nonEmpty(result.Error, result.Summary))
+			_ = s.waitForProviderCapacity(context.Background(), taskID, result.WorkerID, exhaustion)
+			return
+		}
 		if blocker, ok := classifyUserRecoverableBlocker(nonEmpty(result.Error, result.Summary)); ok {
 			_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemFailed, result.WorkerID, result.Error)
 			s.recordWorkItemFollowUpStatus(context.Background(), taskID, item, "continued", "background pull request follow-up worker did not complete successfully; queued feedback remains for the next objective replan", result.WorkerID, nonEmpty(result.Error, result.Summary))
@@ -11590,6 +11747,11 @@ func planMetadata(plan Plan) map[string]any {
 		"usageSelectionReason",
 		"usageCurrentPressure",
 		"usageAlternatePressure",
+		"usageFallbackAttempt",
+		"usageFallbackFromProvider",
+		"usageFallbackToProvider",
+		"usageFallbackFromWorkerID",
+		"usageFallbackReason",
 		"backgroundPullRequestFollowUp",
 	} {
 		if value, ok := plan.Metadata[key]; ok && value != nil && value != "" {
@@ -11814,6 +11976,16 @@ func (s *workerRunState) summaryText() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.summary
+}
+
+func (s *workerRunState) failureText(runErr error) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := []string{s.lastError, s.summary}
+	if runErr != nil {
+		parts = append(parts, runErr.Error())
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (s *workerRunState) normalizeCompletionStatus(plan Plan, status core.WorkerStatus, runErr error, changes WorkspaceChanges) (core.WorkerStatus, error) {

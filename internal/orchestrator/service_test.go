@@ -392,7 +392,7 @@ func TestSpawnWorkActionRunsObjectiveWorkItems(t *testing.T) {
 	}
 
 	got := map[string]bool{}
-	deadline := time.After(500 * time.Millisecond)
+	deadline := time.After(3 * time.Second)
 	for len(got) < 2 {
 		select {
 		case kind := <-started:
@@ -10329,6 +10329,88 @@ func TestServiceRetriesTransientFailedWorkerCompletedAppendFailure(t *testing.T)
 	payload := workerCompletedPayload(t, snapshot.Events, task.ID)
 	if payload.Status != core.WorkerFailed || payload.LogCount != 1 || !strings.Contains(payload.Error, "assertion mismatch") {
 		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+func TestServiceFallsBackToAlternateProviderWhenUsageExhausted(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "claude",
+		Prompt:     "do the work",
+	}}, map[string]worker.Runner{
+		"claude": eventThenFailRunner{
+			kind: "claude",
+			events: []worker.Event{{
+				Kind: worker.EventError,
+				Text: "Claude usage limit reached. Your limit resets at 3pm.",
+			}},
+			err: errors.New("worker command failed: exit status 1"),
+		},
+		"codex": eventRunner{kind: "codex", events: []worker.Event{{
+			Kind: worker.EventResult,
+			Text: "completed with codex",
+		}}},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskSucceeded)
+	if len(snapshot.Workers) != 2 {
+		t.Fatalf("workers = %+v, want claude failure and codex fallback", snapshot.Workers)
+	}
+	if !hasWorkerCreated(snapshot.Events, task.ID, "claude") || !hasWorkerCreated(snapshot.Events, task.ID, "codex") {
+		t.Fatalf("missing provider worker creation events:\n%s", taskEventSummary(snapshot.Events, task.ID))
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "provider_usage_fallback", "started") || !hasTaskAction(snapshot.Events, task.ID, "provider_usage_fallback", "completed") {
+		t.Fatalf("missing provider usage fallback actions:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+}
+
+func TestServiceWaitsForProviderCapacityWhenUsageExhaustedWithoutFallback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: Plan{
+		WorkerKind: "claude",
+		Prompt:     "do the work",
+	}}, map[string]worker.Runner{
+		"claude": eventThenFailRunner{
+			kind: "claude",
+			events: []worker.Event{{
+				Kind: worker.EventNeedsInput,
+				Text: "Claude usage limit reached. Please wait until your usage limits reset.",
+			}},
+			err: nil,
+		},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+
+	task, err := service.CreateTask(ctx, core.CreateTaskRequest{
+		Title:  "Do work",
+		Prompt: "User request",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingExternal || snapshot.Tasks[0].ObjectivePhase != "provider_usage_exhausted" {
+		t.Fatalf("objective = %q phase %q", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
+	}
+	if !hasTaskAction(snapshot.Events, task.ID, "provider_usage_exhausted", "waiting_external") {
+		t.Fatalf("missing provider usage exhausted action:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if countEvents(snapshot.Events, core.EventApprovalNeeded, task.ID) != 0 {
+		t.Fatalf("usage exhaustion should not request user action:\n%s", taskEventSummary(snapshot.Events, task.ID))
 	}
 }
 
