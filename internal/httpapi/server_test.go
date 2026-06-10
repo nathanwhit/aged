@@ -120,6 +120,15 @@ func hasAvailableAction(actions []orchestrator.AvailableAction, name string) boo
 	return false
 }
 
+func hasHTTPEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {
+	for _, event := range events {
+		if event.Type == eventType && event.TaskID == taskID && event.WorkerID == workerID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 	h := newHTTPAPITestHarness(t)
 	server := h.server
@@ -533,6 +542,123 @@ func TestTaskEventsEndpointLimitsTotalHistory(t *testing.T) {
 	}
 	if events[0].Type != core.EventWorkerCompleted {
 		t.Fatalf("event type = %q, want worker.completed; events = %+v", events[0].Type, events)
+	}
+}
+
+func TestSessionTailEndpointReturnsWorkerScopedEvents(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-session-tail"
+	workerID := "worker-session-tail"
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Tail", "prompt": "Tail session"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "other-worker", Payload: core.MustJSON(map[string]any{"text": "ignore"})}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"text": "session output"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(fmt.Sprintf("%s/api/sessions/%s/tail?after=%d", server.URL, workerID, started.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var tail core.SessionTail
+	if err := json.NewDecoder(res.Body).Decode(&tail); err != nil {
+		t.Fatal(err)
+	}
+	if tail.SessionID != workerID || tail.WorkerID != workerID || tail.TaskID != taskID {
+		t.Fatalf("tail identity = %+v", tail)
+	}
+	if tail.LastEventID != output.ID {
+		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, output.ID)
+	}
+	if len(tail.Events) != 1 || tail.Events[0].ID != output.ID {
+		t.Fatalf("events = %+v, want output %d", tail.Events, output.ID)
+	}
+	if tail.CurrentAction == nil || !strings.Contains(tail.CurrentAction.Text, "session output") {
+		t.Fatalf("current action = %+v", tail.CurrentAction)
+	}
+}
+
+func TestSessionControlEndpointsDelegateToWorker(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-session-control"
+	workerID := "worker-session-control"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Control", "prompt": "Control session"})},
+		{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(orchestrator.Plan{WorkerKind: "mock", Prompt: "work"})},
+		{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"nodeId": "node-session-control", "workerId": workerID, "workerKind": "mock"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	steerRes, err := http.Post(server.URL+"/api/sessions/"+workerID+"/steer", "application/json", strings.NewReader(`{"message":"focus this session"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer steerRes.Body.Close()
+	if steerRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("steer status = %d", steerRes.StatusCode)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasHTTPEvent(snapshot.Events, core.EventWorkerSteered, taskID, workerID) {
+		t.Fatalf("missing worker steering event: %+v", snapshot.Events)
+	}
+
+	cancelRes, err := http.Post(server.URL+"/api/sessions/"+workerID+"/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelRes.Body.Close()
+	if cancelRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("cancel status = %d", cancelRes.StatusCode)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasHTTPEvent(snapshot.Events, core.EventWorkerCompleted, taskID, workerID) {
+		t.Fatalf("missing worker completed event: %+v", snapshot.Events)
 	}
 }
 

@@ -465,6 +465,23 @@ type Session struct {
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 
+type SessionCurrentAction struct {
+	Label   string     `json:"label,omitempty"`
+	Text    string     `json:"text,omitempty"`
+	At      *time.Time `json:"at,omitempty"`
+	EventID int64      `json:"eventId,omitempty"`
+}
+
+type SessionTail struct {
+	SessionID     string                `json:"sessionId"`
+	WorkerID      string                `json:"workerId"`
+	TaskID        string                `json:"taskId"`
+	Status        WorkerStatus          `json:"status"`
+	LastEventID   int64                 `json:"lastEventId"`
+	Events        []Event               `json:"events"`
+	CurrentAction *SessionCurrentAction `json:"currentAction,omitempty"`
+}
+
 type TargetCapacity struct {
 	MaxWorkers int     `json:"maxWorkers"`
 	CPUWeight  float64 `json:"cpuWeight,omitempty"`

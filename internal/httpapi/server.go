@@ -79,6 +79,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/watch-pull-requests", s.watchTaskPullRequests)
 	mux.HandleFunc("POST /api/pull-requests/{id}/refresh", s.refreshPullRequest)
 	mux.HandleFunc("POST /api/pull-requests/{id}/babysit", s.startPullRequestBabysitter)
+	mux.HandleFunc("GET /api/sessions/{id}/tail", s.sessionTail)
+	mux.HandleFunc("POST /api/sessions/{id}/steer", s.steerSession)
+	mux.HandleFunc("POST /api/sessions/{id}/cancel", s.cancelSession)
 	mux.HandleFunc("GET /api/workers/{id}/changes", s.reviewWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/apply", s.applyWorkerChanges)
 	mux.HandleFunc("POST /api/workers/{id}/steer", s.steerWorker)
@@ -369,6 +372,13 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, http.StatusOK, events, err)
 }
 
+func (s *Server) sessionTail(w http.ResponseWriter, r *http.Request) {
+	afterID := parseInt64(r.URL.Query().Get("after"))
+	limit := int(parseInt64(r.URL.Query().Get("limit")))
+	tail, err := s.service.SessionTail(r.Context(), r.PathValue("id"), afterID, limit, parseEventTypes(r.URL.Query().Get("kinds"))...)
+	writeResult(w, http.StatusOK, tail, err)
+}
+
 func (s *Server) taskSnapshot(w http.ResponseWriter, r *http.Request) {
 	snapshot, err := s.service.SnapshotSummary(r.Context())
 	if err != nil {
@@ -475,12 +485,24 @@ func (s *Server) cancelWorker(w http.ResponseWriter, r *http.Request) {
 	writeNoContent(w, s.service.CancelWorker(r.Context(), r.PathValue("id")))
 }
 
+func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request) {
+	writeNoContent(w, s.service.CancelSession(r.Context(), r.PathValue("id")))
+}
+
 func (s *Server) steerWorker(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeRequest[core.SteeringRequest](w, r)
 	if !ok {
 		return
 	}
 	writeNoContent(w, s.service.SteerWorker(r.Context(), r.PathValue("id"), req))
+}
+
+func (s *Server) steerSession(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeRequest[core.SteeringRequest](w, r)
+	if !ok {
+		return
+	}
+	writeNoContent(w, s.service.SteerSession(r.Context(), r.PathValue("id"), req))
 }
 
 func (s *Server) reviewWorkerChanges(w http.ResponseWriter, r *http.Request) {
@@ -645,6 +667,21 @@ func parseInt64(value string) int64 {
 	}
 	parsed, _ := strconv.ParseInt(value, 10, 64)
 	return parsed
+}
+
+func parseEventTypes(value string) []core.EventType {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	kinds := make([]core.EventType, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			kinds = append(kinds, core.EventType(part))
+		}
+	}
+	return kinds
 }
 
 func withCORS(next http.Handler) http.Handler {

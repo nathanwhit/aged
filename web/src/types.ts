@@ -31,6 +31,23 @@ export type EventRecord = {
   payload: unknown;
 };
 
+export type SessionCurrentAction = {
+  label?: string;
+  text?: string;
+  at?: string;
+  eventId?: number;
+};
+
+export type SessionTail = {
+  sessionId: string;
+  workerId: string;
+  taskId: string;
+  status: WorkerStatus;
+  lastEventId: number;
+  events: EventRecord[];
+  currentAction?: SessionCurrentAction;
+};
+
 export type Task = {
   id: string;
   projectId?: string;

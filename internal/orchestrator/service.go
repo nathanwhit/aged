@@ -1727,6 +1727,49 @@ func (s *Service) TaskEvents(ctx context.Context, taskID string, limit int) ([]c
 	return s.store.ListTaskEvents(ctx, taskID, limit)
 }
 
+func (s *Service) SessionTail(ctx context.Context, sessionID string, afterID int64, limit int, kinds ...core.EventType) (core.SessionTail, error) {
+	session, err := s.sessionByID(ctx, sessionID)
+	if err != nil {
+		return core.SessionTail{}, err
+	}
+	if len(kinds) == 0 {
+		kinds = []core.EventType{
+			core.EventWorkerOutput,
+			core.EventWorkerStarted,
+			core.EventWorkerCompleted,
+			core.EventWorkerSteered,
+		}
+	}
+	events, err := s.store.ListWorkerEvents(ctx, session.WorkerID, afterID, limit, kinds...)
+	if err != nil {
+		return core.SessionTail{}, err
+	}
+	lastEventID := afterID
+	for _, event := range events {
+		if event.ID > lastEventID {
+			lastEventID = event.ID
+		}
+	}
+	var currentAction *core.SessionCurrentAction
+	if strings.TrimSpace(session.CurrentAction) != "" || strings.TrimSpace(session.CurrentActionLabel) != "" || session.CurrentActionAt != nil || session.CurrentActionEvent != 0 {
+		currentAction = &core.SessionCurrentAction{
+			Label:   session.CurrentActionLabel,
+			Text:    session.CurrentAction,
+			At:      session.CurrentActionAt,
+			EventID: session.CurrentActionEvent,
+		}
+	}
+	return core.SessionTail{
+		SessionID:     session.ID,
+		WorkerID:      session.WorkerID,
+		TaskID:        session.TaskID,
+		Status:        session.Status,
+		LastEventID:   lastEventID,
+		Events:        events,
+		CurrentAction: currentAction,
+	}, nil
+}
+
 func (s *Service) Subscribe() (int, <-chan core.Event) {
 	return s.broker.Subscribe()
 }
@@ -2371,23 +2414,39 @@ func normalizeSteeringTargetKind(kind string) string {
 }
 
 func (s *Service) SteerSession(ctx context.Context, sessionID string, req core.SteeringRequest) error {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return errors.New("sessionId is required")
-	}
-	snapshot, err := s.store.Snapshot(ctx)
+	session, err := s.sessionByID(ctx, sessionID)
 	if err != nil {
 		return err
 	}
+	return s.SteerWorker(ctx, session.WorkerID, req)
+}
+
+func (s *Service) CancelSession(ctx context.Context, sessionID string) error {
+	session, err := s.sessionByID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	return s.CancelWorker(ctx, session.WorkerID)
+}
+
+func (s *Service) sessionByID(ctx context.Context, sessionID string) (core.Session, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return core.Session{}, errors.New("sessionId is required")
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.Session{}, err
+	}
 	for _, session := range snapshot.Sessions {
 		if session.ID == sessionID {
-			if session.WorkerID == "" {
-				return eventstore.ErrNotFound
+			if strings.TrimSpace(session.WorkerID) == "" {
+				return core.Session{}, eventstore.ErrNotFound
 			}
-			return s.SteerWorker(ctx, session.WorkerID, req)
+			return session, nil
 		}
 	}
-	return eventstore.ErrNotFound
+	return core.Session{}, eventstore.ErrNotFound
 }
 
 func (s *Service) SteerWorkItem(ctx context.Context, taskID string, itemID string, req core.SteeringRequest) error {

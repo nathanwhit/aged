@@ -1262,6 +1262,78 @@ ORDER BY id ASC`, "task-events", 250)
 	}
 }
 
+func TestListWorkerEventsFiltersWorkerAfterLimitAndKinds(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	first, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-b", Payload: core.MustJSON(map[string]any{"text": "other worker"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskStatus, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": "first"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": "second"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCompleted, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded})}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.ListWorkerEvents(ctx, "worker-a", first.ID, 2, core.EventWorkerOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2; events = %+v", len(events), events)
+	}
+	for _, event := range events {
+		if event.WorkerID != "worker-a" || event.Type != core.EventWorkerOutput || event.ID <= first.ID {
+			t.Fatalf("unexpected event %+v", event)
+		}
+	}
+}
+
+func TestListWorkerEventsUsesWorkerIndex(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	rows, err := store.db.QueryContext(ctx, `
+EXPLAIN QUERY PLAN
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE worker_id = ?
+	AND id > ?
+ORDER BY id ASC
+LIMIT ?`, "worker-events", 0, 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "events_worker_idx") {
+		t.Fatalf("query plan did not use events_worker_idx:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
 func TestListTaskLedgerEventsIsTaskScopedAndExcludesWorkerOutput(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
