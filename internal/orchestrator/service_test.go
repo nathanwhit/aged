@@ -8513,6 +8513,58 @@ func TestCancelWorkItemCancelsQueuedItem(t *testing.T) {
 	}
 }
 
+func TestCancelWorkItemDecidesUserQuestion(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+	taskID := "task-cancel-user-question"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":  "Cancelable question",
+			"prompt": "Ask before continuing.",
+		}),
+	})
+	if err := service.waitForUserAction(ctx, taskID, "", "dynamic_replan_limit", "Provide steering.", nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Questions) != 1 {
+		t.Fatalf("questions = %+v, want one pending question", snapshot.Questions)
+	}
+	questionID := snapshot.Questions[0].ID
+	approvalEventID, ok := approvalEventIDFromQuestionID(questionID)
+	if !ok {
+		t.Fatalf("question id = %q, want approval event id", questionID)
+	}
+	workItemID := userQuestionWorkItemID(approvalEventID)
+
+	if err := service.CancelWorkItem(ctx, taskID, workItemID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := questionByID(snapshot, questionID)
+	if !question.Decided || question.Approved == nil || *question.Approved {
+		t.Fatalf("question = %+v, want decided with rejected approval", question)
+	}
+	if question.Answer != "work item canceled by user request" {
+		t.Fatalf("question answer = %q, want cancel reason", question.Answer)
+	}
+	item, ok := workItemByID(snapshot, workItemID)
+	if !ok || item.Status != core.WorkItemCanceled {
+		t.Fatalf("work item = %+v ok=%v, want canceled", item, ok)
+	}
+}
+
 func TestCancelWorkItemCancelsRunningWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -15897,6 +15949,15 @@ func workItemByID(snapshot core.Snapshot, id string) (core.WorkItem, bool) {
 		}
 	}
 	return core.WorkItem{}, false
+}
+
+func questionByID(snapshot core.Snapshot, id string) core.Question {
+	for _, question := range snapshot.Questions {
+		if question.ID == id {
+			return question
+		}
+	}
+	return core.Question{}
 }
 
 func workItemByKind(snapshot core.Snapshot, kind string) (core.WorkItem, bool) {
