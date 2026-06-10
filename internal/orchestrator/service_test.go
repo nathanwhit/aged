@@ -149,6 +149,82 @@ func TestServiceRejectsBroadObjectiveFinishWithUnpublishedCandidate(t *testing.T
 	}
 }
 
+func TestServiceRejectsBroadObjectiveCompletionWithIncompleteWorkPlan(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	task := core.Task{
+		ID:       "task-incomplete-work-plan",
+		Title:    "Broad objective",
+		Prompt:   "Implement the full supervision UI spec.",
+		Metadata: core.MustJSON(map[string]any{"objectiveMode": "broad"}),
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"title":    task.Title,
+			"prompt":   task.Prompt,
+			"metadata": task.Metadata,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	workPlan := &core.WorkPlan{
+		Summary: "Implement the full monitor UI spec.",
+		Workstreams: []core.WorkPlanItem{{
+			ID:       "manager-summary",
+			Goal:     "Expose manager summaries.",
+			Status:   "done",
+			DoneWhen: "Manager summaries are visible.",
+		}, {
+			ID:       "monitor-ui",
+			Goal:     "Build the actual monitor UI.",
+			Status:   "pending",
+			DoneWhen: "The user can inspect live sessions and guide workers.",
+		}},
+		Validation: []core.WorkPlanItem{{
+			ID:       "ui-validation",
+			Goal:     "Validate the monitor UI end to end.",
+			DoneWhen: "Browser checks cover the monitor surface.",
+		}},
+	}
+	brain := &replanningBrain{decisions: []ReplanDecision{
+		{
+			Action:    "complete",
+			Rationale: "manager summary slice is done",
+		},
+		{
+			Action:    "finish_objective",
+			Rationale: "manager summary slice is enough",
+			Message:   "done",
+		},
+		{
+			Action:  "wait",
+			Message: "continue implementing the remaining monitor UI spec",
+		},
+	}}
+	service := NewServiceWithWorkspaceManager(store, brain, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	service.replanLoop(ctx, task, Plan{WorkPlan: workPlan}, nil)
+
+	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	if len(brain.states) != 3 {
+		t.Fatalf("replan states = %d, want 3", len(brain.states))
+	}
+	if countTaskActions(snapshot.Events, task.ID, "replan_completion_rejected", "rejected") != 2 {
+		t.Fatalf("rejected completion count = %d, want 2:\n%s", countTaskActions(snapshot.Events, task.ID, "replan_completion_rejected", "rejected"), taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskAction, task.ID, "monitor-ui") ||
+		!eventPayloadContains(snapshot.Events, core.EventTaskAction, task.ID, "ui-validation") {
+		t.Fatalf("rejection did not name incomplete work plan items:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	}
+	if taskStatus(snapshot, task.ID) == core.TaskSucceeded {
+		t.Fatalf("task succeeded despite incomplete work plan")
+	}
+}
+
 func TestServiceProvidesSharedArtifactWorkspaceToLocalWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -12970,6 +13046,98 @@ func TestServiceBroadGitHubObjectiveWaitsOnReplanErrorInsteadOfFallbackCompletio
 	}
 }
 
+func TestServiceReplanErrorWaitsForCoveredPullRequestFeedback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+	taskID := "task-covered-pr-feedback-error"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":         "Covered PR feedback",
+			"prompt":        "Keep working while PR feedback is handled.",
+			"objectiveMode": "broad",
+		}),
+	})
+	seedRunningPullRequestFollowUp(t, ctx, service, store, taskID)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+
+	service.recoverReplanError(ctx, task, 1, nil, errors.New("custom codex replan prompt failed"), replanLoopOptions{})
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventPayloadContains(snapshot.Events, core.EventTaskReplanned, taskID, `"internalQueueWait":true`)
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("missing internal queue wait; events = %+v", snapshot.Events)
+	})
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
+		t.Fatalf("unexpected approval needed while PR follow-up is already running")
+	}
+	task, ok = findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	if task.Status != core.TaskRunning || task.ObjectiveStatus != core.ObjectiveActive || task.ObjectivePhase != "waiting_followup" {
+		t.Fatalf("task = status %q objective %q/%q, want running active/waiting_followup", task.Status, task.ObjectiveStatus, task.ObjectivePhase)
+	}
+}
+
+func TestServiceReplanCompleteWaitsForCoveredPullRequestFeedback(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	brain := &replanningBrain{}
+	service := NewServiceWithWorkspaceManager(store, brain, nil, t.TempDir(), fakeWorkspaceManager{})
+	taskID := "task-covered-pr-feedback-complete"
+	appendTestEvents(t, store, core.Event{
+		Type:   core.EventTaskCreated,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"title":         "Covered PR feedback",
+			"prompt":        "Keep working while PR feedback is handled.",
+			"objectiveMode": "broad",
+		}),
+	})
+	seedRunningPullRequestFollowUp(t, ctx, service, store, taskID)
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+
+	ok, completionReason, _ := service.replanLoop(ctx, task, Plan{}, nil)
+	if ok {
+		t.Fatalf("replanLoop ok = true, want wait for covered PR feedback")
+	}
+	if completionReason != "" {
+		t.Fatalf("completion reason = %q, want empty", completionReason)
+	}
+	snapshot = waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return eventPayloadContains(snapshot.Events, core.EventTaskAction, taskID, `"kind":"replan_completion_rejected"`) &&
+			eventPayloadContains(snapshot.Events, core.EventTaskReplanned, taskID, `"internalQueueWait":true`)
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("missing completion rejection/internal wait; events = %+v", snapshot.Events)
+	})
+	if hasEvent(snapshot.Events, core.EventApprovalNeeded, taskID, "") {
+		t.Fatalf("unexpected approval needed while PR follow-up is already running")
+	}
+	if len(brain.states) != 1 {
+		t.Fatalf("replan calls = %d, want one before internal wait", len(brain.states))
+	}
+}
+
 func TestServiceRetryBroadGitHubTaskWithNewSteeringIgnoresStaleCompletionState(t *testing.T) {
 	t.Skip("legacy stale final-candidate retry path was removed")
 	ctx := context.Background()
@@ -16046,6 +16214,54 @@ func questionByID(snapshot core.Snapshot, id string) core.Question {
 		}
 	}
 	return core.Question{}
+}
+
+func seedRunningPullRequestFollowUp(t *testing.T, ctx context.Context, service *Service, store eventstore.Store, taskID string) {
+	t.Helper()
+	appendTestEvents(t, store,
+		core.Event{
+			Type:   core.EventPRPublished,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":     "pr-1",
+				"repo":   "owner/repo",
+				"number": 7,
+				"url":    "https://github.com/owner/repo/pull/7",
+				"branch": "codex/aged-test",
+				"base":   "main",
+				"title":  "Covered PR feedback",
+				"state":  "OPEN",
+			}),
+		},
+		core.Event{
+			Type:   core.EventPRFollowUp,
+			TaskID: taskID,
+			Payload: core.MustJSON(map[string]any{
+				"id":                "pr-1",
+				"attempt":           1,
+				"reason":            "pull_request_needs_work",
+				"feedbackSignature": "review-1",
+			}),
+		},
+	)
+	if err := service.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         "pr_followup_test",
+		"kind":       "pr.followup",
+		"targetKind": "pull_request",
+		"targetId":   "pr-1",
+		"reason":     "Handle queued PR feedback.",
+		"prompt":     "Fix the PR review feedback.",
+		"metadata": map[string]any{
+			"backgroundPullRequestFollowUp": true,
+			"pullRequestID":                 "pr-1",
+			"feedbackSignature":             "review-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.recordWorkItemStarted(ctx, taskID, "pr_followup_test", "followup-worker"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func workItemByKind(snapshot core.Snapshot, kind string) (core.WorkItem, bool) {

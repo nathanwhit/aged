@@ -8895,25 +8895,32 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 		}
 		switch decision.Action {
 		case "complete":
-			if pending := s.pendingPullRequestFeedback(ctx, task.ID); len(pending) > 0 {
-				reason := "queued pull request feedback must be handled before completing the task"
+			if block := s.pendingReplanQueueBlock(ctx, task.ID); block.UserReason != "" || block.InternalReason != "" {
+				reason := nonEmpty(block.UserReason, block.InternalReason)
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", results
 				}
-				stalledTurns++
-				continue
-			}
-			if pending := s.pendingWorkerSteering(ctx, task.ID); len(pending) > 0 {
-				reason := "queued worker steering must be handled before completing the task"
-				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+				if block.UserReason != "" {
+					stalledTurns++
+					continue
+				}
+				if err := s.waitForReplanQueueDrain(ctx, task, turn, errors.New(reason), reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", results
 				}
-				stalledTurns++
-				continue
+				return false, "", results
 			}
 			if reason := unpublishedCandidateCompletionBlockReasonFromSnapshot(stateSnapshot, task.ID, results); reason != "" {
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", results
+				}
+				recoveryHint = reason
+				stalledTurns++
+				continue
+			}
+			if reason := broadObjectiveWorkPlanCompletionBlockReason(task, currentWorkPlan); reason != "" {
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", results
@@ -8925,6 +8932,15 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 			return true, decision.Rationale, results
 		case "finish_objective":
 			if reason := unpublishedCandidateCompletionBlockReasonFromSnapshot(stateSnapshot, task.ID, results); reason != "" {
+				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
+					_ = s.failTask(ctx, task.ID, err)
+					return false, "", results
+				}
+				recoveryHint = reason
+				stalledTurns++
+				continue
+			}
+			if reason := broadObjectiveWorkPlanCompletionBlockReason(task, currentWorkPlan); reason != "" {
 				if err := s.recordRejectedReplanCompletion(ctx, task.ID, turn, decision, reason); err != nil {
 					_ = s.failTask(ctx, task.ID, err)
 					return false, "", results
@@ -9144,6 +9160,45 @@ func (s *Service) unpublishedCandidateCompletionBlockReason(ctx context.Context,
 	return unpublishedCandidateCompletionBlockReasonFromSnapshot(snapshot, taskID, results)
 }
 
+func broadObjectiveWorkPlanCompletionBlockReason(task core.Task, workPlan *core.WorkPlan) string {
+	if !taskIsBroadObjective(task) || workPlan == nil {
+		return ""
+	}
+	open := incompleteWorkPlanItems(workPlan.Workstreams)
+	open = append(open, incompleteWorkPlanItems(workPlan.Validation)...)
+	if len(open) == 0 {
+		return ""
+	}
+	if len(open) > 4 {
+		open = append(open[:4], fmt.Sprintf("%d more", len(open)-4))
+	}
+	return fmt.Sprintf("broad objective work plan still has incomplete items: %s", strings.Join(open, ", "))
+}
+
+func incompleteWorkPlanItems(items []core.WorkPlanItem) []string {
+	open := []string{}
+	for _, item := range items {
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		if status == "done" || status == "dropped" {
+			continue
+		}
+		label := strings.TrimSpace(item.ID)
+		if label == "" {
+			label = strings.TrimSpace(item.Goal)
+		}
+		if label == "" {
+			label = "unnamed"
+		}
+		if status != "" {
+			label += " (" + status + ")"
+		} else {
+			label += " (no status)"
+		}
+		open = append(open, label)
+	}
+	return open
+}
+
 func (s *Service) recoverReplanError(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions) (bool, string, []WorkerTurnResult) {
 	return s.recoverReplanFallback(ctx, task, turn, results, replanErr, options, replanFallbackConfig{
 		CompleteReasonPrefix: "fallback completion after replanner error",
@@ -9176,9 +9231,20 @@ type replanFallbackConfig struct {
 	WaitObjective        string
 }
 
+type replanQueueBlock struct {
+	UserReason     string
+	InternalReason string
+}
+
 func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, turn int, results []WorkerTurnResult, replanErr error, options replanLoopOptions, config replanFallbackConfig) (bool, string, []WorkerTurnResult) {
-	if pendingReason := s.pendingReplanQueueBlockReason(ctx, task.ID); pendingReason != "" {
-		s.waitForReplanFallback(ctx, task, turn, replanErr, config, pendingReason)
+	if block := s.pendingReplanQueueBlock(ctx, task.ID); block.UserReason != "" || block.InternalReason != "" {
+		if block.UserReason != "" {
+			s.waitForReplanFallback(ctx, task, turn, replanErr, config, block.UserReason)
+			return false, "", results
+		}
+		if err := s.waitForReplanQueueDrain(ctx, task, turn, replanErr, block.InternalReason); err != nil {
+			_ = s.failTask(ctx, task.ID, err)
+		}
 		return false, "", results
 	}
 	if isReplanContextWindowError(replanErr) {
@@ -9190,15 +9256,44 @@ func (s *Service) recoverReplanFallback(ctx context.Context, task core.Task, tur
 	return false, "", results
 }
 
-func (s *Service) pendingReplanQueueBlockReason(ctx context.Context, taskID string) string {
-	var reasons []string
-	if pending := s.pendingPullRequestFeedback(ctx, taskID); len(pending) > 0 {
-		reasons = append(reasons, "queued pull request feedback must be handled before completion")
+func (s *Service) pendingReplanQueueBlock(ctx context.Context, taskID string) replanQueueBlock {
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return replanQueueBlock{}
 	}
-	if pending := s.pendingWorkerSteering(ctx, taskID); len(pending) > 0 {
-		reasons = append(reasons, "queued worker steering must be handled before completion")
+	var userReasons []string
+	var internalReasons []string
+	if pending := pendingPullRequestFeedback(snapshot, taskID); len(pending) > 0 {
+		uncovered := 0
+		covered := 0
+		for _, item := range pending {
+			if pullRequestFeedbackCoveredByFollowUp(snapshot, taskID, item) {
+				covered++
+				continue
+			}
+			uncovered++
+		}
+		if uncovered > 0 {
+			userReasons = append(userReasons, "queued pull request feedback must be handled before completion")
+		}
+		if covered > 0 {
+			internalReasons = append(internalReasons, "queued pull request feedback is already being handled by pull request follow-up work")
+		}
 	}
-	return strings.Join(reasons, "; ")
+	if pending := pendingWorkerSteering(snapshot, taskID); len(pending) > 0 {
+		userReasons = append(userReasons, "queued worker steering must be handled before completion")
+	}
+	return replanQueueBlock{
+		UserReason:     strings.Join(userReasons, "; "),
+		InternalReason: strings.Join(internalReasons, "; "),
+	}
+}
+
+func pullRequestFeedbackCoveredByFollowUp(snapshot core.Snapshot, taskID string, item PullRequestFeedbackItem) bool {
+	if _, ok := pullRequestFollowUpWorkItem(snapshot, taskID, item.PullRequestID, item.FeedbackSignature); ok {
+		return true
+	}
+	return activePullRequestFollowUpWorker(snapshot, taskID, item.PullRequestID)
 }
 
 func (s *Service) waitForReplanFallback(ctx context.Context, task core.Task, turn int, replanErr error, config replanFallbackConfig, candidateError string) {
@@ -9227,6 +9322,41 @@ func (s *Service) waitForReplanFallback(ctx context.Context, task core.Task, tur
 	}); err != nil {
 		_ = s.failTask(ctx, task.ID, err)
 	}
+}
+
+func (s *Service) waitForReplanQueueDrain(ctx context.Context, task core.Task, turn int, replanErr error, reason string) error {
+	if _, err := s.append(ctx, core.Event{
+		Type:   core.EventTaskReplanned,
+		TaskID: task.ID,
+		Payload: core.MustJSON(map[string]any{
+			"turn": turn,
+			"decision": ReplanDecision{
+				Action:    "wait",
+				Rationale: "waiting for queued follow-up work",
+				Message:   nonEmpty(reason, "queued follow-up work is already running"),
+			},
+			"fallback":          true,
+			"internalQueueWait": true,
+			"error":             replanErr.Error(),
+			"candidateError":    reason,
+		}),
+	}); err != nil {
+		return err
+	}
+	if err := s.updateTaskObjective(ctx, task.ID, core.ObjectiveActive, "waiting_followup", nonEmpty(reason, "Waiting for queued follow-up work to finish.")); err != nil {
+		return err
+	}
+	if _, err := s.startRunnableSpawnWorkItems(ctx, task.ID); err != nil {
+		return err
+	}
+	if terminal, err := s.taskIsTerminal(ctx, task.ID); err != nil {
+		return err
+	} else if !terminal {
+		if err := s.setTaskStatus(ctx, task.ID, core.TaskRunning); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) waitForReplanContextOverflow(ctx context.Context, task core.Task, turn int, replanErr error, results []WorkerTurnResult) {
