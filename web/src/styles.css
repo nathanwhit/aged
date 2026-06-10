@@ -1085,6 +1085,13 @@ small {
   overflow-wrap: anywhere;
 }
 
+.manager-section-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 .assignment-list {
   display: grid;
   gap: 6px;
@@ -1191,6 +1198,10 @@ small {
   display: flex;
   gap: 5px;
   justify-content: flex-end;
+}
+
+.assignment-list-toggle {
+  justify-self: start;
 }
 
 .live-session-panel {

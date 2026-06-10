@@ -31,7 +31,10 @@ function rosterFixture(): AssignmentRow[] {
       owner: "Worker abc12345",
       model: "opus-4-7",
       projectContext: "vultr vm-1",
-      action: { kind: "inspect-session", sessionId: "sess-1" },
+      action: [
+        { kind: "inspect-session", sessionId: "sess-1" },
+        { kind: "cancel-session", workerId: "worker-1" },
+      ],
       ...baseRow,
     },
     {
@@ -98,6 +101,19 @@ describe("AssignmentBoard", () => {
 
     expect(props.onInspectSession).toHaveBeenCalledTimes(1);
     expect(props.onInspectSession).toHaveBeenCalledWith("sess-1");
+  });
+
+  it("dispatches cancel for an active session row", async () => {
+    const props = makeProps();
+    render(<AssignmentBoard {...props} />);
+
+    const sessionRow = screen.getByText("Implementer").closest(".assignment-row") as HTMLElement;
+    expect(sessionRow).toBeTruthy();
+    const cancel = within(sessionRow).getByRole("button", { name: /cancel implementer/i });
+    await userEvent.click(cancel);
+
+    expect(props.onCancelSession).toHaveBeenCalledWith("worker-1");
+    expect(props.onDone).toHaveBeenCalled();
   });
 
   it("renders a pull request row with the linked PR affordance", () => {
@@ -173,5 +189,29 @@ describe("AssignmentBoard", () => {
 
     expect(props.onCancelWorkItem).toHaveBeenCalledWith("task-1", "w-1");
     expect(props.onDone).toHaveBeenCalled();
+  });
+
+  it("shows overflow rows through an explicit expansion control", async () => {
+    const rows = Array.from({ length: 20 }, (_, index): AssignmentRow => ({
+      id: `session:${index}`,
+      kind: "session",
+      title: `Session ${index + 1}`,
+      subtitle: "tmux",
+      status: "running",
+      tone: "info",
+      action: { kind: "inspect-session", sessionId: `sess-${index}` },
+      ...baseRow,
+    }));
+    render(<AssignmentBoard {...makeProps({ rows })} />);
+
+    expect(screen.getByText("20 active signals")).toBeInTheDocument();
+    expect(screen.getByText("Session 18")).toBeInTheDocument();
+    expect(screen.queryByText("Session 19")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /show 2 more/i }));
+
+    expect(screen.getByText("Session 19")).toBeInTheDocument();
+    expect(screen.getByText("Session 20")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /show fewer/i })).toBeInTheDocument();
   });
 });

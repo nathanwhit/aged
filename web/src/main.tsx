@@ -78,6 +78,8 @@ type AssignmentAction =
   | { kind: "cancel-session"; workerId: string }
   | { kind: "cancel-work-item"; workItemId: string };
 
+const ASSIGNMENT_ROW_LIMIT = 18;
+
 export type AssignmentRow = {
   id: string;
   kind: AssignmentKind;
@@ -91,7 +93,7 @@ export type AssignmentRow = {
   model?: string;
   projectContext?: string;
   prContext?: string;
-  action?: AssignmentAction;
+  action?: AssignmentAction | AssignmentAction[];
 };
 
 const emptySnapshot: AppSnapshot = {
@@ -2054,6 +2056,8 @@ function TaskDetail({
         node={selectedSession ? nodes.find((node) => node.id === selectedSession.nodeId || node.workerId === selectedSession.workerId) : undefined}
         events={selectedSession ? eventsByWorker.get(selectedSession.workerId) ?? EMPTY_EVENTS : EMPTY_EVENTS}
         onSteer={onSteerWorker}
+        onCancel={onCancelWorker}
+        onDone={onLoopConfigUpdated}
         onError={onError}
       />
       <ManagerPullRequestSummary pullRequests={pullRequests} feedback={pullRequestFeedback} artifacts={pullRequestArtifacts} />
@@ -2189,7 +2193,12 @@ function deriveAssignmentRows({
       owner: `Worker ${shortID(session.workerId)}`,
       model: metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain") || metadataString(session.metadata, "model"),
       projectContext: [node?.targetKind && humanizeKey(node.targetKind), node?.targetId].filter(Boolean).join(" "),
-      action: isActive ? { kind: "inspect-session", sessionId: session.id } : { kind: "inspect-session", sessionId: session.id },
+      action: isActive
+        ? [
+            { kind: "inspect-session", sessionId: session.id },
+            { kind: "cancel-session", workerId: session.workerId },
+          ]
+        : { kind: "inspect-session", sessionId: session.id },
     });
   }
 
@@ -2301,7 +2310,10 @@ export function AssignmentBoard({
   onError: (message: string) => void;
 }) {
   const [busyAction, setBusyAction] = useState("");
+  const [showAllRows, setShowAllRows] = useState(false);
   const pendingCount = rows.filter((row) => row.tone === "warning" || row.tone === "danger").length;
+  const hiddenCount = Math.max(0, rows.length - ASSIGNMENT_ROW_LIMIT);
+  const visibleRows = showAllRows ? rows : rows.slice(0, ASSIGNMENT_ROW_LIMIT);
 
   async function run(actionId: string, action: () => Promise<void>) {
     setBusyAction(actionId);
@@ -2315,35 +2327,39 @@ export function AssignmentBoard({
     }
   }
 
-  function renderAction(row: AssignmentRow) {
-    const action = row.action;
-    if (!action) return null;
+  function renderAction(row: AssignmentRow, action: AssignmentAction, index: number) {
+    const actionId = `${row.id}:${action.kind}:${index}`;
     switch (action.kind) {
       case "inspect-session":
         return (
-          <button className="icon-button ghost small" onClick={() => onInspectSession(action.sessionId)} title="Inspect live session" aria-label={`Inspect ${row.title}`}>
+          <button key={actionId} className="icon-button ghost small" onClick={() => onInspectSession(action.sessionId)} title="Inspect live session" aria-label={`Inspect ${row.title}`}>
             <Terminal size={14} />
           </button>
         );
       case "open-pr":
         return (
-          <a className="icon-button ghost small" href={action.url} target="_blank" rel="noreferrer" title="Open pull request or artifact" aria-label={`Open ${row.title}`}>
+          <a key={actionId} className="icon-button ghost small" href={action.url} target="_blank" rel="noreferrer" title="Open pull request or artifact" aria-label={`Open ${row.title}`}>
             <GitPullRequest size={14} />
           </a>
         );
       case "cancel-session":
         return (
-          <button className="icon-button danger small" disabled={busyAction === row.id} onClick={() => run(row.id, () => onCancelSession(action.workerId))} title="Cancel worker" aria-label={`Cancel ${row.title}`}>
+          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={() => run(actionId, () => onCancelSession(action.workerId))} title="Cancel worker" aria-label={`Cancel ${row.title}`}>
             <CircleStop size={14} />
           </button>
         );
       case "cancel-work-item":
         return (
-          <button className="icon-button danger small" disabled={busyAction === row.id} onClick={() => run(row.id, () => onCancelWorkItem(taskId, action.workItemId))} title="Cancel work item" aria-label={`Cancel ${row.title}`}>
+          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={() => run(actionId, () => onCancelWorkItem(taskId, action.workItemId))} title="Cancel work item" aria-label={`Cancel ${row.title}`}>
             <CircleStop size={14} />
           </button>
         );
     }
+  }
+
+  function renderActions(row: AssignmentRow) {
+    const actions = Array.isArray(row.action) ? row.action : row.action ? [row.action] : [];
+    return actions.map((action, index) => renderAction(row, action, index));
   }
 
   return (
@@ -2360,7 +2376,7 @@ export function AssignmentBoard({
         <p className="empty">No assignments, sessions, pull requests, questions, or artifacts are attached yet.</p>
       ) : (
         <div className="assignment-list">
-          {rows.slice(0, 18).map((row) => (
+          {visibleRows.map((row) => (
             <article key={row.id} className={`assignment-row ${row.tone}`}>
               <div className="assignment-kind">{assignmentKindLabel(row.kind)}</div>
               <div className="assignment-main">
@@ -2378,9 +2394,14 @@ export function AssignmentBoard({
                 {row.prContext && <span>{row.prContext}</span>}
                 {row.updatedAt && <time>{new Date(row.updatedAt).toLocaleTimeString()}</time>}
               </div>
-              <div className="assignment-actions">{renderAction(row)}</div>
+              <div className="assignment-actions">{renderActions(row)}</div>
             </article>
           ))}
+          {hiddenCount > 0 && (
+            <button type="button" className="secondary compact assignment-list-toggle" onClick={() => setShowAllRows((value) => !value)}>
+              {showAllRows ? "Show fewer" : `Show ${hiddenCount} more`}
+            </button>
+          )}
         </div>
       )}
     </section>
@@ -2393,6 +2414,8 @@ function LiveSessionPanel({
   node,
   events,
   onSteer,
+  onCancel,
+  onDone,
   onError,
 }: {
   session: Session | undefined;
@@ -2400,10 +2423,13 @@ function LiveSessionPanel({
   node: ExecutionNode | undefined;
   events: EventRecord[];
   onSteer: (id: string, message: string) => Promise<void>;
+  onCancel: (id: string) => Promise<void>;
+  onDone: () => Promise<void>;
   onError: (message: string) => void;
 }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   if (!session) {
     return (
       <section className="manager-section live-session-panel empty-session" aria-label="Agent session details">
@@ -2442,6 +2468,20 @@ function LiveSessionPanel({
     }
   }
 
+  async function cancel() {
+    setCanceling(true);
+    try {
+      await onCancel(activeSession.workerId);
+      await onDone();
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setCanceling(false);
+    }
+  }
+
+  const canCancel = !isTerminalWorkerStatus(activeSession.status);
+
   return (
     <section className="manager-section live-session-panel" aria-label="Agent session details">
       <div className="manager-section-title">
@@ -2449,7 +2489,14 @@ function LiveSessionPanel({
           <span>Agent Session</span>
           <strong>{activeSession.role ? humanizeKey(activeSession.role) : activeSession.workerKind || worker?.kind || "Worker"}</strong>
         </div>
-        <Status value={activeSession.status} />
+        <div className="manager-section-actions">
+          <Status value={activeSession.status} />
+          {canCancel && (
+            <button type="button" className="icon-button danger small" disabled={canceling} onClick={cancel} title="Cancel session" aria-label="Cancel selected session">
+              <CircleStop size={14} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="terminal-shell">
         <div className="terminal-topline">
@@ -2478,7 +2525,7 @@ function LiveSessionPanel({
           </div>
         )}
       </div>
-      {!isTerminalWorkerStatus(activeSession.status) && (
+      {canCancel && (
         <form className="session-steer manager-session-steer" onSubmit={submit}>
           <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this exact session..." required />
           <button className="icon-button" disabled={busy || !message.trim()} title="Send session steering">
