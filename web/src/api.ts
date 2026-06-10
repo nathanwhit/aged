@@ -1,4 +1,4 @@
-import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, Snapshot, TargetState, Task, WatchPullRequestsInput, WorkerChangesReview } from "./types";
+import type { DiscordDriverConfig, DiscordDriverState, EventRecord, GitHubDriverConfig, GitHubDriverState, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestState, SessionTail, Snapshot, TargetState, Task, TaskAssignmentsResponse, WatchPullRequestsInput, WorkerChangesReview } from "./types";
 
 async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
@@ -34,9 +34,22 @@ export async function getTaskSnapshot(taskId: string): Promise<Snapshot> {
   return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}`);
 }
 
+export async function getTaskAssignments(taskId: string): Promise<TaskAssignmentsResponse> {
+  return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/assignments`);
+}
+
 export async function getTaskEvents(taskId: string, options: { limit?: number } = {}): Promise<EventRecord[]> {
   const query = options.limit ? `?limit=${encodeURIComponent(String(options.limit))}` : "";
   return requestJSON(`/api/tasks/${encodeURIComponent(taskId)}/events${query}`);
+}
+
+export async function getSessionTail(sessionId: string, options: { after?: number; limit?: number; kinds?: string[] } = {}): Promise<SessionTail> {
+  const params = new URLSearchParams();
+  if (options.after) params.set("after", String(options.after));
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.kinds?.length) params.set("kinds", options.kinds.join(","));
+  const query = params.size ? `?${params}` : "";
+  return requestJSON(`/api/sessions/${encodeURIComponent(sessionId)}/tail${query}`);
 }
 
 export async function createTask(input: {
@@ -190,11 +203,19 @@ export async function cancelWorker(workerId: string): Promise<void> {
   return requestVoid(`/api/workers/${workerId}/cancel`, { method: "POST" });
 }
 
+export async function cancelSession(sessionId: string): Promise<void> {
+  return requestVoid(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+}
+
 export async function steerWorker(workerId: string, message: string): Promise<void> {
   return requestVoid(`/api/workers/${workerId}/steer`, {
     method: "POST",
     body: JSON.stringify({ message }),
   });
+}
+
+export async function steerSession(sessionId: string, message: string): Promise<void> {
+  return requestVoid(`/api/sessions/${encodeURIComponent(sessionId)}/steer`, jsonInit("POST", { message }));
 }
 
 export async function getWorkerChanges(workerId: string): Promise<WorkerChangesReview> {

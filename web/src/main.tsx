@@ -22,9 +22,10 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelSession as cancelSessionAPI, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerSession as steerSessionAPI, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignment, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import { selectSessions, selectWorkItems } from "./assignments";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -239,6 +240,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
   const [hydratedTaskIds, setHydratedTaskIds] = useState<Set<string>>(() => new Set());
+  const [assignmentsByTask, setAssignmentsByTask] = useState<Map<string, TaskAssignment[]>>(() => new Map());
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
 
@@ -314,17 +316,38 @@ function App() {
       .catch((err) => {
         if (active) setError(errorMessage(err));
       });
+    getTaskAssignments(selectedTask.id)
+      .then((response) => {
+        if (!active) return;
+        setAssignmentsByTask((current) => {
+          const next = new Map(current);
+          next.set(response.taskId, response.assignments ?? []);
+          return next;
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+        setAssignmentsByTask((current) => {
+          if (!current.has(selectedTask.id)) return current;
+          const next = new Map(current);
+          next.delete(selectedTask.id);
+          return next;
+        });
+      });
     return () => {
       active = false;
     };
   }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
   const selectedWorkers = selectedTask ? workersByTask.get(selectedTask.id) ?? EMPTY_WORKERS : EMPTY_WORKERS;
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
-  const selectedWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
+  const selectedAssignments = selectedTask ? assignmentsByTask.get(selectedTask.id) ?? null : null;
+  const selectedSnapshotWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
+  const selectedWorkItems = useMemo(() => selectWorkItems(selectedSnapshotWorkItems, selectedAssignments), [selectedSnapshotWorkItems, selectedAssignments]);
   const selectedArtifacts = selectedTask ? artifactsByTask.get(selectedTask.id) ?? selectedTask.artifacts?.map((artifact) => ({ ...artifact, taskId: selectedTask.id })) ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
   const selectedMemoryEntries = selectedTask ? memoryEntriesForTask(selectedTask, memoryEntriesByTask, memoryEntriesByProject) : EMPTY_MEMORY_ENTRIES;
   const selectedQuestions = selectedTask ? questionsByTask.get(selectedTask.id) ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS;
-  const selectedSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
+  const selectedSnapshotSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
+  const selectedSessions = useMemo(() => selectSessions(selectedSnapshotSessions, selectedAssignments), [selectedSnapshotSessions, selectedAssignments]);
   const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const selectedEventsByWorker = useMemo(() => groupByWorker(selectedEvents), [selectedEvents]);
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
@@ -460,7 +483,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelSession={cancelSessionAPI} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -1888,10 +1911,10 @@ function TaskDetail({
   targets,
   events,
   onCancel,
-  onCancelWorker,
+  onCancelSession,
   onRetry,
   onSteer,
-  onSteerWorker,
+  onSteerSession,
   onAnswerQuestion,
   onCancelWorkItem,
   onUpdateLoopConfig,
@@ -1913,10 +1936,10 @@ function TaskDetail({
   targets: TargetState[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
-  onCancelWorker: (id: string) => Promise<void>;
+  onCancelSession: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
   onSteer: (id: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
-  onSteerWorker: (id: string, message: string) => Promise<void>;
+  onSteerSession: (id: string, message: string) => Promise<void>;
   onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
   onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
   onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
@@ -2044,7 +2067,7 @@ function TaskDetail({
         rows={assignments}
         approvals={pendingApprovals}
         onInspectSession={setSelectedSessionId}
-        onCancelSession={onCancelWorker}
+        onCancelSession={onCancelSession}
         onCancelWorkItem={onCancelWorkItem}
         onAnswerQuestion={onAnswerQuestion}
         onDone={onLoopConfigUpdated}
@@ -2055,8 +2078,8 @@ function TaskDetail({
         worker={selectedSession ? workers.find((worker) => worker.id === selectedSession.workerId) : undefined}
         node={selectedSession ? nodes.find((node) => node.id === selectedSession.nodeId || node.workerId === selectedSession.workerId) : undefined}
         events={selectedSession ? eventsByWorker.get(selectedSession.workerId) ?? EMPTY_EVENTS : EMPTY_EVENTS}
-        onSteer={onSteerWorker}
-        onCancel={onCancelWorker}
+        onSteer={onSteerSession}
+        onCancel={onCancelSession}
         onDone={onLoopConfigUpdated}
         onError={onError}
       />
@@ -2106,7 +2129,7 @@ function TaskDetail({
           <WorkerProgressSpotlight update={workerUpdate} />
           <WideWorkProgress items={workItems} />
           <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
-          <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
+          <SessionQueue sessions={sessions} onCancel={onCancelSession} onSteer={onSteerSession} onError={onError} />
           <SteeringQueue items={steering} />
           <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
         </div>
@@ -3178,22 +3201,22 @@ function SessionQueue({
   const sorted = [...sessions].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
   const activeCount = sorted.filter((session) => session.status === "queued" || session.status === "running" || session.status === "waiting").length;
   if (sorted.length === 0) return null;
-  async function cancelSession(workerID: string) {
-    setCanceling((items) => ({ ...items, [workerID]: true }));
+  async function cancelSession(sessionID: string) {
+    setCanceling((items) => ({ ...items, [sessionID]: true }));
     try {
-      await onCancel(workerID);
+      await onCancel(sessionID);
     } catch (err) {
       onError(errorMessage(err));
     } finally {
-      setCanceling((items) => ({ ...items, [workerID]: false }));
+      setCanceling((items) => ({ ...items, [sessionID]: false }));
     }
   }
-  async function steer(event: React.FormEvent, workerID: string) {
+  async function steer(event: React.FormEvent, sessionID: string) {
     event.preventDefault();
-    const message = steering[workerID] ?? "";
+    const message = steering[sessionID] ?? "";
     try {
-      await onSteer(workerID, message);
-      setSteering((items) => ({ ...items, [workerID]: "" }));
+      await onSteer(sessionID, message);
+      setSteering((items) => ({ ...items, [sessionID]: "" }));
     } catch (err) {
       onError(errorMessage(err));
     }
@@ -3242,11 +3265,11 @@ function SessionQueue({
               )}
               {isActive && (
                 <div className="session-actions" role="group" aria-label={`${title} session actions`}>
-                  <button type="button" className="icon-button danger small" disabled={Boolean(canceling[session.workerId])} onClick={() => cancelSession(session.workerId)} title="Cancel session" aria-label={`Cancel ${title} session`}>
+                  <button type="button" className="icon-button danger small" disabled={Boolean(canceling[session.id])} onClick={() => cancelSession(session.id)} title="Cancel session" aria-label={`Cancel ${title} session`}>
                     <CircleStop size={14} />
                   </button>
-                  <form className="session-steer" onSubmit={(event) => steer(event, session.workerId)}>
-                    <input aria-label={`Steer ${title} session`} value={steering[session.workerId] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [session.workerId]: event.target.value }))} placeholder="Steer this session..." required />
+                  <form className="session-steer" onSubmit={(event) => steer(event, session.id)}>
+                    <input aria-label={`Steer ${title} session`} value={steering[session.id] ?? ""} onChange={(event) => setSteering((items) => ({ ...items, [session.id]: event.target.value }))} placeholder="Steer this session..." required />
                     <button className="icon-button" title="Send session steering" aria-label={`Send steering to ${title} session`}>
                       <Send size={16} />
                     </button>

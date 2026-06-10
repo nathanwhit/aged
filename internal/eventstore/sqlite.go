@@ -968,6 +968,46 @@ ORDER BY id ASC`, taskID)
 	return scanEvents(rows)
 }
 
+func (s *SQLiteStore) ListWorkerEvents(ctx context.Context, workerID string, afterID int64, limit int, kinds ...core.EventType) ([]core.Event, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, errors.New("worker id is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	var query strings.Builder
+	query.WriteString(`
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE worker_id = ?
+	AND id > ?`)
+	args := []any{workerID, afterID}
+	if len(kinds) > 0 {
+		query.WriteString(`
+	AND type IN (`)
+		for i, kind := range kinds {
+			if i > 0 {
+				query.WriteString(", ")
+			}
+			query.WriteString("?")
+			args = append(args, string(kind))
+		}
+		query.WriteString(")")
+	}
+	query.WriteString(`
+ORDER BY id ASC
+LIMIT ?`)
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEvents(rows)
+}
+
 func (s *SQLiteStore) ListTaskLedgerEvents(ctx context.Context, taskID string) ([]core.Event, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
@@ -1219,6 +1259,10 @@ func (s *SQLiteStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error
 
 func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, error) {
 	return s.taskCardsFromReadModel(ctx)
+}
+
+func (s *SQLiteStore) TaskAssignmentsSnapshot(ctx context.Context, taskID string) (core.Snapshot, error) {
+	return s.taskAssignmentsFromReadModel(ctx, taskID)
 }
 
 func (s *SQLiteStore) PullRequestMonitorSnapshot(ctx context.Context) (core.Snapshot, error) {

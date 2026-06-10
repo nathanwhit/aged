@@ -465,6 +465,23 @@ type Session struct {
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 }
 
+type SessionCurrentAction struct {
+	Label   string     `json:"label,omitempty"`
+	Text    string     `json:"text,omitempty"`
+	At      *time.Time `json:"at,omitempty"`
+	EventID int64      `json:"eventId,omitempty"`
+}
+
+type SessionTail struct {
+	SessionID     string                `json:"sessionId"`
+	WorkerID      string                `json:"workerId"`
+	TaskID        string                `json:"taskId"`
+	Status        WorkerStatus          `json:"status"`
+	LastEventID   int64                 `json:"lastEventId"`
+	Events        []Event               `json:"events"`
+	CurrentAction *SessionCurrentAction `json:"currentAction,omitempty"`
+}
+
 type TargetCapacity struct {
 	MaxWorkers int     `json:"maxWorkers"`
 	CPUWeight  float64 `json:"cpuWeight,omitempty"`
@@ -694,6 +711,38 @@ type SteeringItem struct {
 	UpdatedAt         time.Time       `json:"updatedAt"`
 	AppliedAt         *time.Time      `json:"appliedAt,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
+}
+
+type TaskAssignment struct {
+	ID                 string     `json:"id"`
+	TaskID             string     `json:"taskId"`
+	SourceKind         string     `json:"sourceKind"`
+	SourceID           string     `json:"sourceId"`
+	Status             string     `json:"status,omitempty"`
+	Kind               string     `json:"kind,omitempty"`
+	Role               string     `json:"role,omitempty"`
+	WorkerID           string     `json:"workerId,omitempty"`
+	WorkerKind         string     `json:"workerKind,omitempty"`
+	WorkItemID         string     `json:"workItemId,omitempty"`
+	NodeID             string     `json:"nodeId,omitempty"`
+	SessionID          string     `json:"sessionId,omitempty"`
+	TargetKind         string     `json:"targetKind,omitempty"`
+	TargetID           string     `json:"targetId,omitempty"`
+	ParentNodeID       string     `json:"parentNodeId,omitempty"`
+	SpawnID            string     `json:"spawnId,omitempty"`
+	DependsOn          []string   `json:"dependsOn,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
+	CurrentAction      string     `json:"currentAction,omitempty"`
+	CurrentActionLabel string     `json:"currentActionLabel,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	StartedAt          *time.Time `json:"startedAt,omitempty"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	CompletedAt        *time.Time `json:"completedAt,omitempty"`
+}
+
+type TaskAssignmentsResponse struct {
+	TaskID      string           `json:"taskId"`
+	Assignments []TaskAssignment `json:"assignments"`
 }
 
 type CreateTaskRequest struct {

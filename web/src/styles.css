@@ -1695,6 +1695,14 @@ small {
   font-size: 12px;
 }
 
+.work-item-meta .pill {
+  line-height: 1.2;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .wide-work-meta span {
   background: #f1f5f9;
   border-radius: 999px;

@@ -120,6 +120,15 @@ func hasAvailableAction(actions []orchestrator.AvailableAction, name string) boo
 	return false
 }
 
+func hasHTTPEvent(events []core.Event, eventType core.EventType, taskID string, workerID string) bool {
+	for _, event := range events {
+		if event.Type == eventType && event.TaskID == taskID && event.WorkerID == workerID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestCreateTaskAcceptsOnlyUserWorkRequest(t *testing.T) {
 	h := newHTTPAPITestHarness(t)
 	server := h.server
@@ -335,6 +344,95 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	}
 }
 
+func TestTaskAssignmentsEndpoint(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"title": "Assignments", "prompt": "Track work"})},
+		{Type: core.EventWorkItemQueued, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{
+			"id":         "queued-work",
+			"kind":       "objective.validate",
+			"targetKind": "objective",
+			"targetId":   "task-assignments",
+			"reason":     "Validate the result.",
+			"metadata": map[string]any{
+				"workerKind": "codex",
+				"dependsOn":  []string{"implementation"},
+			},
+		})},
+		{Type: core.EventExecutionPlanned, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   "worker-1",
+			"workerKind": "codex",
+			"role":       "implementation",
+			"targetKind": "ssh",
+			"targetId":   "vm-1",
+			"dependsOn":  []string{"plan"},
+		})},
+		{Type: core.EventWorkerCreated, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "codex"})},
+		{Type: core.EventWorkItemQueued, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "running-work", "kind": "objective.implement"})},
+		{Type: core.EventWorkItemStarted, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "running-work", "workerId": "worker-1"})},
+		{Type: core.EventWorkerStarted, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{})},
+		{Type: core.EventWorkerOutput, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "tool", "text": "go test ./..."})},
+		{Type: core.EventTaskArtifact, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "artifact-1", "kind": "benchmark", "name": "Benchmark", "ref": "shared/bench.txt", "metadata": map[string]any{"workerId": "worker-1", "pullRequestID": "pr-1"}})},
+		{Type: core.EventApprovalNeeded, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"reason": "approval", "question": "Continue?"})},
+		{Type: core.EventPRPublished, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "pr-1", "repo": "owner/repo", "number": 7, "url": "https://github.com/owner/repo/pull/7", "title": "Assignments", "state": "OPEN", "metadata": map[string]any{"workerId": "worker-1", "latestPullRequestFeedbackSignature": "sig-1", "latestPullRequestFeedbackBody": "Please add tests."}})},
+		{Type: core.EventPRFollowUp, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "pr-1", "feedbackSignature": "sig-1", "reason": "review", "prompt": "Handle feedback."})},
+		{Type: core.EventTaskSteered, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"message": "Use the existing parser."})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/tasks/task-assignments/assignments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var result core.TaskAssignmentsResponse
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskID != "task-assignments" {
+		t.Fatalf("task id = %q", result.TaskID)
+	}
+	for _, sourceKind := range []string{"session", "work_item", "pull_request", "pull_request_feedback", "question", "artifact", "steering", "execution_node"} {
+		if !hasHTTPAssignmentSourceKind(result.Assignments, sourceKind) {
+			t.Fatalf("missing %s assignment in %+v", sourceKind, result.Assignments)
+		}
+	}
+	running := httpAssignmentBySource(t, result.Assignments, "work_item", "running-work")
+	if running.Status != string(core.WorkItemRunning) || running.WorkerID != "worker-1" || running.NodeID != "node-1" || running.SessionID != "worker-1" || running.CurrentAction == "" {
+		t.Fatalf("running work assignment = %+v", running)
+	}
+	artifact := httpAssignmentBySource(t, result.Assignments, "artifact", "artifact-1")
+	if artifact.TargetKind != "pull_request" || artifact.TargetID != "pr-1" || artifact.WorkerID != "worker-1" {
+		t.Fatalf("artifact assignment = %+v", artifact)
+	}
+
+	missing, err := http.Get(server.URL + "/api/tasks/missing/assignments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing status = %d", missing.StatusCode)
+	}
+}
+
 func TestEventStreamUsesLastEventIDAndWritesSSEID(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
@@ -444,6 +542,123 @@ func TestTaskEventsEndpointLimitsTotalHistory(t *testing.T) {
 	}
 	if events[0].Type != core.EventWorkerCompleted {
 		t.Fatalf("event type = %q, want worker.completed; events = %+v", events[0].Type, events)
+	}
+}
+
+func TestSessionTailEndpointReturnsWorkerScopedEvents(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-session-tail"
+	workerID := "worker-session-tail"
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Tail", "prompt": "Tail session"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "other-worker", Payload: core.MustJSON(map[string]any{"text": "ignore"})}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"text": "session output"})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(fmt.Sprintf("%s/api/sessions/%s/tail?after=%d", server.URL, workerID, started.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var tail core.SessionTail
+	if err := json.NewDecoder(res.Body).Decode(&tail); err != nil {
+		t.Fatal(err)
+	}
+	if tail.SessionID != workerID || tail.WorkerID != workerID || tail.TaskID != taskID {
+		t.Fatalf("tail identity = %+v", tail)
+	}
+	if tail.LastEventID != output.ID {
+		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, output.ID)
+	}
+	if len(tail.Events) != 1 || tail.Events[0].ID != output.ID {
+		t.Fatalf("events = %+v, want output %d", tail.Events, output.ID)
+	}
+	if tail.CurrentAction == nil || !strings.Contains(tail.CurrentAction.Text, "session output") {
+		t.Fatalf("current action = %+v", tail.CurrentAction)
+	}
+}
+
+func TestSessionControlEndpointsDelegateToWorker(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	taskID := "task-session-control"
+	workerID := "worker-session-control"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Control", "prompt": "Control session"})},
+		{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(orchestrator.Plan{WorkerKind: "mock", Prompt: "work"})},
+		{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"nodeId": "node-session-control", "workerId": workerID, "workerKind": "mock"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	steerRes, err := http.Post(server.URL+"/api/sessions/"+workerID+"/steer", "application/json", strings.NewReader(`{"message":"focus this session"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer steerRes.Body.Close()
+	if steerRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("steer status = %d", steerRes.StatusCode)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasHTTPEvent(snapshot.Events, core.EventWorkerSteered, taskID, workerID) {
+		t.Fatalf("missing worker steering event: %+v", snapshot.Events)
+	}
+
+	cancelRes, err := http.Post(server.URL+"/api/sessions/"+workerID+"/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelRes.Body.Close()
+	if cancelRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("cancel status = %d", cancelRes.StatusCode)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasHTTPEvent(snapshot.Events, core.EventWorkerCompleted, taskID, workerID) {
+		t.Fatalf("missing worker completed event: %+v", snapshot.Events)
 	}
 }
 
@@ -1888,4 +2103,24 @@ func taskByID(tasks []core.Task, id string) core.Task {
 		}
 	}
 	return core.Task{}
+}
+
+func hasHTTPAssignmentSourceKind(rows []core.TaskAssignment, sourceKind string) bool {
+	for _, row := range rows {
+		if row.SourceKind == sourceKind {
+			return true
+		}
+	}
+	return false
+}
+
+func httpAssignmentBySource(t *testing.T, rows []core.TaskAssignment, sourceKind string, sourceID string) core.TaskAssignment {
+	t.Helper()
+	for _, row := range rows {
+		if row.SourceKind == sourceKind && row.SourceID == sourceID {
+			return row
+		}
+	}
+	t.Fatalf("missing assignment %s/%s in %+v", sourceKind, sourceID, rows)
+	return core.TaskAssignment{}
 }

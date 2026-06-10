@@ -180,6 +180,81 @@ func appendSQLiteEvents(tb testing.TB, ctx context.Context, store *SQLiteStore, 
 	}
 }
 
+func TestTaskAssignmentsSnapshotLoadsRequestedTaskRows(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	appendSQLiteEvents(t, ctx, store,
+		core.Event{Type: core.EventTaskCreated, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"title": "Task 1"})},
+		core.Event{Type: core.EventTaskCreated, TaskID: "task-2", Payload: core.MustJSON(map[string]any{"title": "Task 2"})},
+		core.Event{Type: core.EventExecutionPlanned, TaskID: "task-1", Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   "worker-1",
+			"workerKind": "codex",
+			"role":       "implementation",
+			"targetKind": "ssh",
+			"targetId":   "vm-1",
+		})},
+		core.Event{Type: core.EventExecutionPlanned, TaskID: "task-2", Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-2",
+			"workerId":   "worker-2",
+			"workerKind": "codex",
+		})},
+		core.Event{Type: core.EventWorkerCreated, TaskID: "task-1", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "codex"})},
+		core.Event{Type: core.EventWorkerCreated, TaskID: "task-2", WorkerID: "worker-2", Payload: core.MustJSON(map[string]any{"kind": "codex"})},
+		core.Event{Type: core.EventWorkItemQueued, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"id": "work-1", "kind": "objective.implement"})},
+		core.Event{Type: core.EventWorkItemQueued, TaskID: "task-2", Payload: core.MustJSON(map[string]any{"id": "work-2", "kind": "objective.implement"})},
+		core.Event{Type: core.EventWorkItemStarted, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"id": "work-1", "workerId": "worker-1"})},
+		core.Event{Type: core.EventWorkerStarted, TaskID: "task-1", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{})},
+		core.Event{Type: core.EventWorkerOutput, TaskID: "task-1", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "tool", "text": "go test ./..."})},
+		core.Event{Type: core.EventTaskArtifact, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"id": "artifact-1", "kind": "log", "name": "Task 1 log"})},
+		core.Event{Type: core.EventTaskArtifact, TaskID: "task-2", Payload: core.MustJSON(map[string]any{"id": "artifact-2", "kind": "log", "name": "Task 2 log"})},
+		core.Event{Type: core.EventApprovalNeeded, TaskID: "task-1", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"reason": "approval", "question": "Continue?"})},
+		core.Event{Type: core.EventApprovalNeeded, TaskID: "task-2", WorkerID: "worker-2", Payload: core.MustJSON(map[string]any{"reason": "approval", "question": "Continue?"})},
+		core.Event{Type: core.EventPRPublished, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"id": "pr-1", "repo": "owner/repo", "number": 1, "url": "https://github.com/owner/repo/pull/1", "title": "Task 1 PR"})},
+		core.Event{Type: core.EventPRPublished, TaskID: "task-2", Payload: core.MustJSON(map[string]any{"id": "pr-2", "repo": "owner/repo", "number": 2, "url": "https://github.com/owner/repo/pull/2", "title": "Task 2 PR"})},
+		core.Event{Type: core.EventPRFollowUp, TaskID: "task-1", Payload: core.MustJSON(map[string]any{"id": "pr-1", "feedbackSignature": "sig-1", "reason": "review", "prompt": "Fix task 1"})},
+		core.Event{Type: core.EventPRFollowUp, TaskID: "task-2", Payload: core.MustJSON(map[string]any{"id": "pr-2", "feedbackSignature": "sig-2", "reason": "review", "prompt": "Fix task 2"})},
+		core.Event{Type: core.EventTaskSteered, TaskID: "task-1", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"message": "Use scoped rows."})},
+		core.Event{Type: core.EventTaskSteered, TaskID: "task-2", WorkerID: "worker-2", Payload: core.MustJSON(map[string]any{"message": "Other task."})},
+	)
+
+	snapshot, err := store.TaskAssignmentsSnapshot(ctx, "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.LastEventID == 0 {
+		t.Fatal("missing last event id")
+	}
+	if snapshot.Events != nil {
+		t.Fatalf("events = %+v, want nil", snapshot.Events)
+	}
+	if len(snapshot.Tasks) != 1 || snapshot.Tasks[0].ID != "task-1" {
+		t.Fatalf("tasks = %+v", snapshot.Tasks)
+	}
+	assertSnapshotRowsTaskScoped(t, "workers", len(snapshot.Workers), func(i int) string { return snapshot.Workers[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "execution nodes", len(snapshot.ExecutionNodes), func(i int) string { return snapshot.ExecutionNodes[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "work items", len(snapshot.WorkItems), func(i int) string { return snapshot.WorkItems[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "artifacts", len(snapshot.Artifacts), func(i int) string { return snapshot.Artifacts[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "questions", len(snapshot.Questions), func(i int) string { return snapshot.Questions[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "sessions", len(snapshot.Sessions), func(i int) string { return snapshot.Sessions[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "pull requests", len(snapshot.PullRequests), func(i int) string { return snapshot.PullRequests[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "pull request feedback", len(snapshot.PullRequestFeedback), func(i int) string { return snapshot.PullRequestFeedback[i].TaskID })
+	assertSnapshotRowsTaskScoped(t, "steering", len(snapshot.Steering), func(i int) string { return snapshot.Steering[i].TaskID })
+}
+
+func assertSnapshotRowsTaskScoped(t *testing.T, name string, count int, taskIDAt func(int) string) {
+	t.Helper()
+	if count == 0 {
+		t.Fatalf("%s: missing task-scoped rows", name)
+	}
+	for i := 0; i < count; i++ {
+		if taskID := taskIDAt(i); taskID != "task-1" {
+			t.Fatalf("%s[%d] task id = %q, want task-1", name, i, taskID)
+		}
+	}
+}
+
 func TestSnapshotReplaysMoreThanDefaultEventPage(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)
@@ -1184,6 +1259,78 @@ ORDER BY id ASC`, "task-events", 250)
 	}
 	if !strings.Contains(strings.Join(plan, "\n"), "events_task_idx") {
 		t.Fatalf("query plan did not use events_task_idx:\n%s", strings.Join(plan, "\n"))
+	}
+}
+
+func TestListWorkerEventsFiltersWorkerAfterLimitAndKinds(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	first, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-b", Payload: core.MustJSON(map[string]any{"text": "other worker"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskStatus, TaskID: "task-a", Payload: core.MustJSON(map[string]any{"status": core.TaskRunning})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": "first"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": "second"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCompleted, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"status": core.WorkerSucceeded})}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := store.ListWorkerEvents(ctx, "worker-a", first.ID, 2, core.EventWorkerOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2; events = %+v", len(events), events)
+	}
+	for _, event := range events {
+		if event.WorkerID != "worker-a" || event.Type != core.EventWorkerOutput || event.ID <= first.ID {
+			t.Fatalf("unexpected event %+v", event)
+		}
+	}
+}
+
+func TestListWorkerEventsUsesWorkerIndex(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	rows, err := store.db.QueryContext(ctx, `
+EXPLAIN QUERY PLAN
+SELECT id, at, type, task_id, worker_id, payload
+FROM events
+WHERE worker_id = ?
+	AND id > ?
+ORDER BY id ASC
+LIMIT ?`, "worker-events", 0, 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, "\n"), "events_worker_idx") {
+		t.Fatalf("query plan did not use events_worker_idx:\n%s", strings.Join(plan, "\n"))
 	}
 }
 

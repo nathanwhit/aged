@@ -31,6 +31,23 @@ export type EventRecord = {
   payload: unknown;
 };
 
+export type SessionCurrentAction = {
+  label?: string;
+  text?: string;
+  at?: string;
+  eventId?: number;
+};
+
+export type SessionTail = {
+  sessionId: string;
+  workerId: string;
+  taskId: string;
+  status: WorkerStatus;
+  lastEventId: number;
+  events: EventRecord[];
+  currentAction?: SessionCurrentAction;
+};
+
 export type Task = {
   id: string;
   projectId?: string;
@@ -566,4 +583,36 @@ export type Snapshot = {
   steering?: SteeringItem[] | null;
   lastEventId?: number;
   events: EventRecord[] | null;
+};
+
+export type TaskAssignment = {
+  id: string;
+  taskId: string;
+  sourceKind: string;
+  sourceId: string;
+  status?: string;
+  kind?: string;
+  role?: string;
+  workerId?: string;
+  workerKind?: string;
+  workItemId?: string;
+  nodeId?: string;
+  sessionId?: string;
+  targetKind?: string;
+  targetId?: string;
+  parentNodeId?: string;
+  spawnId?: string;
+  dependsOn?: string[];
+  reason?: string;
+  currentAction?: string;
+  currentActionLabel?: string;
+  createdAt: string;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type TaskAssignmentsResponse = {
+  taskId: string;
+  assignments: TaskAssignment[];
 };

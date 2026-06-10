@@ -13978,6 +13978,94 @@ func TestServiceWorkerSteeringQueuesReplanState(t *testing.T) {
 	}
 }
 
+func TestServiceSessionTailReturnsWorkerEventsAndCurrentAction(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	taskID := "task-session-tail"
+	workerID := "worker-session-tail"
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Tail", "prompt": "Tail worker output"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
+		t.Fatal(err)
+	}
+	started, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: "other-worker", Payload: core.MustJSON(map[string]any{"text": "ignore"})}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "tool", "text": "go test ./..."})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tail, err := service.SessionTail(ctx, workerID, started.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail.SessionID != workerID || tail.WorkerID != workerID || tail.TaskID != taskID {
+		t.Fatalf("tail identity = %+v", tail)
+	}
+	if tail.LastEventID != output.ID {
+		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, output.ID)
+	}
+	if len(tail.Events) != 1 || tail.Events[0].ID != output.ID {
+		t.Fatalf("events = %+v, want output event %d", tail.Events, output.ID)
+	}
+	if tail.CurrentAction == nil || !strings.Contains(tail.CurrentAction.Text, "go test") || tail.CurrentAction.EventID != output.ID {
+		t.Fatalf("current action = %+v", tail.CurrentAction)
+	}
+}
+
+func TestServiceSessionControlDelegatesToWorker(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	taskID := "task-session-control"
+	workerID := "worker-session-control"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Control", "prompt": "Control session"})},
+		{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(Plan{WorkerKind: "mock", Prompt: "work"})},
+		{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"nodeId": "node-session-control", "workerId": workerID, "workerKind": "mock"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.SteerSession(ctx, workerID, core.SteeringRequest{Message: "focus the session"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerSteered, taskID, workerID) {
+		t.Fatalf("missing worker steering event: %+v", snapshot.Events)
+	}
+
+	if err := service.CancelSession(ctx, workerID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, ok := findWorker(snapshot, workerID)
+	if !ok || worker.Status != core.WorkerCanceled {
+		t.Fatalf("worker = %+v ok=%v, want canceled", worker, ok)
+	}
+}
+
 func TestServiceTaskSteeringQueuesReplanState(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
