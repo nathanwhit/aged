@@ -18,6 +18,7 @@ function rosterFixture(): AssignmentRow[] {
       tone: "warning",
       owner: "Worker abc12345",
       projectContext: "proj-a",
+      selection: { kind: "question", questionId: "q-1" },
       ...baseRow,
     },
     {
@@ -31,9 +32,10 @@ function rosterFixture(): AssignmentRow[] {
       owner: "Worker abc12345",
       model: "opus-4-7",
       projectContext: "vultr vm-1",
+      selection: { kind: "session", sessionId: "sess-1" },
       action: [
         { kind: "inspect-session", sessionId: "sess-1" },
-        { kind: "cancel-session", workerId: "worker-1" },
+        { kind: "cancel-session", sessionId: "sess-1" },
       ],
       ...baseRow,
     },
@@ -46,7 +48,25 @@ function rosterFixture(): AssignmentRow[] {
       tone: "info",
       owner: "Owner alice",
       prContext: "base main · head feature",
-      action: { kind: "open-pr", url: "https://github.com/acme/repo/pull/42" },
+      selection: { kind: "pull_request", pullRequestId: "pr-1" },
+      action: [
+        { kind: "open-pr", url: "https://github.com/acme/repo/pull/42" },
+        { kind: "refresh-pr", pullRequestId: "pr-1" },
+        { kind: "babysit-pr", pullRequestId: "pr-1" },
+      ],
+      ...baseRow,
+    },
+    {
+      id: "feedback:fb-1",
+      kind: "feedback",
+      title: "Review feedback needs follow-up",
+      subtitle: "Changes requested",
+      status: "pending",
+      tone: "warning",
+      currentAction: "Address failing smoke test before merge.",
+      prContext: "acme/repo#42 · feature",
+      selection: { kind: "pull_request", pullRequestId: "pr-1" },
+      action: { kind: "open-pr", url: "https://github.com/acme/repo/pull/42#discussion_r1" },
       ...baseRow,
     },
     {
@@ -69,6 +89,8 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof AssignmentBoar
     approvals: [] as ApprovalState[],
     onInspectSession: vi.fn(),
     onCancelSession: vi.fn().mockResolvedValue(undefined),
+    onRefreshPullRequest: vi.fn().mockResolvedValue(undefined),
+    onBabysitPullRequest: vi.fn().mockResolvedValue(undefined),
     onCancelWorkItem: vi.fn().mockResolvedValue(undefined),
     onAnswerQuestion: vi.fn().mockResolvedValue(undefined),
     onDone: vi.fn().mockResolvedValue(undefined),
@@ -82,13 +104,14 @@ describe("AssignmentBoard", () => {
     render(<AssignmentBoard {...makeProps()} />);
 
     expect(screen.getByText("Assignments")).toBeInTheDocument();
-    expect(screen.getByText("4 active signals")).toBeInTheDocument();
-    // The 2 warning rows should bubble up as "needs attention".
-    expect(screen.getByText(/2 need attention/i)).toBeInTheDocument();
+    expect(screen.getByText("5 active signals")).toBeInTheDocument();
+    // The 3 warning rows should bubble up as "needs attention".
+    expect(screen.getByText(/3 need attention/i)).toBeInTheDocument();
 
     expect(screen.getByText("Approve destructive cleanup?")).toBeInTheDocument();
     expect(screen.getByText("Implementer")).toBeInTheDocument();
     expect(screen.getByText("Refactor manager view")).toBeInTheDocument();
+    expect(screen.getByText("Review feedback needs follow-up")).toBeInTheDocument();
     expect(screen.getByText("Plan")).toBeInTheDocument();
   });
 
@@ -103,6 +126,40 @@ describe("AssignmentBoard", () => {
     expect(props.onInspectSession).toHaveBeenCalledWith("sess-1");
   });
 
+  it("selects assignment rows with stable target metadata", async () => {
+    const onSelectAssignment = vi.fn();
+    render(<AssignmentBoard {...makeProps({ onSelectAssignment })} />);
+
+    await userEvent.click(screen.getByText("Implementer"));
+
+    expect(onSelectAssignment).toHaveBeenCalledWith(expect.objectContaining({
+      id: "session:sess-1",
+      selection: { kind: "session", sessionId: "sess-1" },
+    }));
+  });
+
+  it("routes question and pull request row selection to the selected detail target", async () => {
+    const onSelectAssignment = vi.fn();
+    render(<AssignmentBoard {...makeProps({ onSelectAssignment })} />);
+
+    await userEvent.click(screen.getByText("Approve destructive cleanup?"));
+    await userEvent.click(screen.getByText("Refactor manager view"));
+    await userEvent.click(screen.getByText("Review feedback needs follow-up"));
+
+    expect(onSelectAssignment).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      id: "question:q-1",
+      selection: { kind: "question", questionId: "q-1" },
+    }));
+    expect(onSelectAssignment).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      id: "pr:pr-1",
+      selection: { kind: "pull_request", pullRequestId: "pr-1" },
+    }));
+    expect(onSelectAssignment).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      id: "feedback:fb-1",
+      selection: { kind: "pull_request", pullRequestId: "pr-1" },
+    }));
+  });
+
   it("dispatches cancel for an active session row", async () => {
     const props = makeProps();
     render(<AssignmentBoard {...props} />);
@@ -112,7 +169,7 @@ describe("AssignmentBoard", () => {
     const cancel = within(sessionRow).getByRole("button", { name: /cancel implementer/i });
     await userEvent.click(cancel);
 
-    expect(props.onCancelSession).toHaveBeenCalledWith("worker-1");
+    expect(props.onCancelSession).toHaveBeenCalledWith("sess-1");
     expect(props.onDone).toHaveBeenCalled();
   });
 
@@ -126,6 +183,32 @@ describe("AssignmentBoard", () => {
     // PR row context (repo#number) should be visible.
     expect(screen.getByText("acme/repo#42")).toBeInTheDocument();
     expect(screen.getByText(/base main · head feature/)).toBeInTheDocument();
+  });
+
+  it("dispatches pull request refresh and babysit actions from a PR row", async () => {
+    const props = makeProps();
+    render(<AssignmentBoard {...props} />);
+
+    const prRow = screen.getByText("Refactor manager view").closest(".assignment-row") as HTMLElement;
+    expect(prRow).toBeTruthy();
+
+    await userEvent.click(within(prRow).getByRole("button", { name: /refresh refactor manager view/i }));
+    await userEvent.click(within(prRow).getByRole("button", { name: /babysit refactor manager view/i }));
+
+    expect(props.onRefreshPullRequest).toHaveBeenCalledWith("pr-1");
+    expect(props.onBabysitPullRequest).toHaveBeenCalledWith("pr-1");
+    expect(props.onDone).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders a pending PR feedback status row with its action link", () => {
+    render(<AssignmentBoard {...makeProps()} />);
+
+    expect(screen.getByText("Review feedback needs follow-up")).toBeInTheDocument();
+    expect(screen.getByText("Address failing smoke test before merge.")).toBeInTheDocument();
+    expect(screen.getByText("acme/repo#42 · feature")).toBeInTheDocument();
+
+    const feedbackLink = screen.getByRole("link", { name: /open review feedback needs follow-up/i });
+    expect(feedbackLink).toHaveAttribute("href", "https://github.com/acme/repo/pull/42#discussion_r1");
   });
 
   it("renders a pending question approval with a direct answer affordance", async () => {

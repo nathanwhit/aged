@@ -74,11 +74,23 @@ type TaskAttentionItem = {
 
 type AssignmentKind = "session" | "work" | "pull_request" | "feedback" | "question" | "artifact" | "debug";
 
+type AssignmentSelection =
+  | { kind: "session"; sessionId: string }
+  | { kind: "pull_request"; pullRequestId: string }
+  | { kind: "question"; questionId: string }
+  | { kind: "work_item"; workItemId: string }
+  | { kind: "artifact"; artifactId: string };
+
 type AssignmentAction =
   | { kind: "inspect-session"; sessionId: string }
   | { kind: "open-pr"; url: string }
-  | { kind: "cancel-session"; workerId: string }
-  | { kind: "cancel-work-item"; workItemId: string };
+  | { kind: "cancel-session"; sessionId: string }
+  | { kind: "cancel-worker"; workerId: string }
+  | { kind: "cancel-work-item"; workItemId: string }
+  | { kind: "retry-task"; taskId: string }
+  | { kind: "clear-task"; taskId: string }
+  | { kind: "refresh-pr"; pullRequestId: string }
+  | { kind: "babysit-pr"; pullRequestId: string; disabled?: boolean };
 
 const ASSIGNMENT_ROW_LIMIT = 18;
 
@@ -96,6 +108,7 @@ export type AssignmentRow = {
   projectContext?: string;
   prContext?: string;
   action?: AssignmentAction | AssignmentAction[];
+  selection?: AssignmentSelection;
 };
 
 const emptySnapshot: AppSnapshot = {
@@ -487,7 +500,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelSession={cancelSessionAPI} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onClear={handleClearTask} onCancelSession={cancelSessionAPI} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onPublishPullRequest={publishTaskPullRequest} onWatchPullRequests={watchTaskPullRequests} onRefreshPullRequest={refreshPullRequest} onBabysitPullRequest={babysitPullRequest} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -1931,11 +1944,17 @@ function TaskDetail({
   targets,
   events,
   onCancel,
+  onClear,
   onCancelSession,
+  onCancelWorker,
   onRetry,
   onSteer,
   onSteerSession,
   onAnswerQuestion,
+  onPublishPullRequest,
+  onWatchPullRequests,
+  onRefreshPullRequest,
+  onBabysitPullRequest,
   onCancelWorkItem,
   onUpdateLoopConfig,
   onLoopConfigUpdated,
@@ -1957,11 +1976,17 @@ function TaskDetail({
   targets: TargetState[];
   events: EventRecord[];
   onCancel: (id: string) => Promise<void>;
+  onClear: (id: string) => Promise<void>;
   onCancelSession: (id: string) => Promise<void>;
+  onCancelWorker: (id: string) => Promise<void>;
   onRetry: (id: string) => Promise<void>;
   onSteer: (id: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
   onSteerSession: (id: string, message: string) => Promise<void>;
   onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
+  onPublishPullRequest: (taskId: string) => Promise<PullRequestState>;
+  onWatchPullRequests: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
+  onRefreshPullRequest: (id: string) => Promise<PullRequestState>;
+  onBabysitPullRequest: (id: string) => Promise<unknown>;
   onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
   onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
@@ -1974,6 +1999,9 @@ function TaskDetail({
   const [loopTargetInput, setLoopTargetInput] = useState("");
   const [savingLoopConfig, setSavingLoopConfig] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState("");
+  const [selectedPullRequestId, setSelectedPullRequestId] = useState("");
+  const [selectedQuestionId, setSelectedQuestionId] = useState("");
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState("");
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
@@ -1994,6 +2022,7 @@ function TaskDetail({
     [artifacts, eventsByWorker, nodes, pullRequestFeedback, pullRequests, questions, sessions, steering, task, workItems, workers],
   );
   const selectedSession = useMemo(() => selectedLiveSession(sessions, selectedSessionId), [selectedSessionId, sessions]);
+  const selectedPullRequest = useMemo(() => selectedPullRequestForSummary(pullRequests, selectedPullRequestId), [pullRequests, selectedPullRequestId]);
   const pullRequestArtifacts = artifacts.filter((artifact) => artifact.kind.toLowerCase().includes("pull") || artifact.kind.toLowerCase().includes("pr"));
   const attentionItems = taskAttentionItems({
     task,
@@ -2053,6 +2082,25 @@ function TaskDetail({
     }
   }
 
+  function selectAssignment(row: AssignmentRow) {
+    setSelectedAssignmentId(row.id);
+    if (!row.selection) return;
+    switch (row.selection.kind) {
+      case "session":
+        setSelectedSessionId(row.selection.sessionId);
+        break;
+      case "pull_request":
+        setSelectedPullRequestId(row.selection.pullRequestId);
+        break;
+      case "question":
+        setSelectedQuestionId(row.selection.questionId);
+        break;
+      case "work_item":
+      case "artifact":
+        break;
+    }
+  }
+
   return (
     <section className="panel detail">
       <div className="detail-heading">
@@ -2090,8 +2138,16 @@ function TaskDetail({
         approvals={pendingApprovals}
         onInspectSession={setSelectedSessionId}
         onCancelSession={onCancelSession}
+        onCancelWorker={onCancelWorker}
         onCancelWorkItem={onCancelWorkItem}
+        onRetry={onRetry}
+        onClear={onClear}
+        onRefreshPullRequest={onRefreshPullRequest}
+        onBabysitPullRequest={onBabysitPullRequest}
         onAnswerQuestion={onAnswerQuestion}
+        selectedAssignmentId={selectedAssignmentId}
+        selectedQuestionId={selectedQuestionId}
+        onSelectAssignment={selectAssignment}
         onDone={onLoopConfigUpdated}
         onError={onError}
       />
@@ -2105,7 +2161,20 @@ function TaskDetail({
         onDone={onLoopConfigUpdated}
         onError={onError}
       />
-      <ManagerPullRequestSummary pullRequests={pullRequests} feedback={pullRequestFeedback} artifacts={pullRequestArtifacts} />
+      <ManagerPullRequestSummary
+        task={task}
+        pullRequests={pullRequests}
+        selectedPullRequest={selectedPullRequest}
+        feedback={pullRequestFeedback}
+        artifacts={pullRequestArtifacts}
+        onPublish={onPublishPullRequest}
+        onWatch={onWatchPullRequests}
+        onRefresh={onRefreshPullRequest}
+        onBabysit={onBabysitPullRequest}
+        onSteer={onSteer}
+        onDone={onLoopConfigUpdated}
+        onError={onError}
+      />
       <ObjectiveBrief
         task={task}
         artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []}
@@ -2188,6 +2257,39 @@ function deriveAssignmentRows({
   const workersById = new Map(workers.map((worker) => [worker.id, worker]));
   const nodesByWorkerId = new Map(nodes.filter((node) => node.workerId).map((node) => [node.workerId!, node]));
   const rows: AssignmentRow[] = [];
+  const taskActions: AssignmentAction[] = [];
+  if (isRetryableTask(task)) taskActions.push({ kind: "retry-task", taskId: task.id });
+  if (isTerminalTask(task)) taskActions.push({ kind: "clear-task", taskId: task.id });
+
+  if (task.error || task.status === "failed") {
+    rows.push({
+      id: `task-failure:${task.id}`,
+      kind: "debug",
+      title: "Task failure",
+      subtitle: task.objectivePhase ? humanizeKey(task.objectivePhase) : "Task status",
+      status: task.status,
+      tone: "danger",
+      updatedAt: task.updatedAt || task.createdAt,
+      currentAction: task.error || "The task failed without a detailed error.",
+      owner: task.appliedWorkerId ? `Worker ${shortID(task.appliedWorkerId)}` : "Objective",
+      projectContext: task.projectId,
+      action: taskActions.length > 0 ? taskActions : undefined,
+    });
+  } else if (isTerminalTask(task) && taskActions.length > 0) {
+    rows.push({
+      id: `task-complete:${task.id}`,
+      kind: "debug",
+      title: "Task finished",
+      subtitle: "Task lifecycle",
+      status: task.status,
+      tone: toneForStatus(task.status),
+      updatedAt: task.updatedAt || task.createdAt,
+      currentAction: task.status === "succeeded" ? "Objective output is complete." : "Task is no longer active.",
+      owner: task.appliedWorkerId ? `Worker ${shortID(task.appliedWorkerId)}` : "Objective",
+      projectContext: task.projectId,
+      action: taskActions,
+    });
+  }
 
   for (const question of questions.filter((item) => !item.decided)) {
     rows.push({
@@ -2201,6 +2303,7 @@ function deriveAssignmentRows({
       currentAction: question.answer ? `Answered: ${question.answer}` : "Waiting for a response",
       owner: question.workerId ? `Worker ${shortID(question.workerId)}` : "Objective",
       projectContext: task.projectId,
+      selection: { kind: "question", questionId: question.id },
     });
   }
 
@@ -2216,6 +2319,7 @@ function deriveAssignmentRows({
       currentAction: feedback.feedbackBody || feedback.prompt || "Follow-up work is queued.",
       owner: feedback.attempt ? `Attempt ${feedback.attempt}` : undefined,
       prContext: prContextFromParts(feedback.repo, feedback.number, feedback.branch),
+      selection: feedback.pullRequestId ? { kind: "pull_request", pullRequestId: feedback.pullRequestId } : undefined,
       action: feedback.url ? { kind: "open-pr", url: feedback.url } : undefined,
     });
   }
@@ -2238,10 +2342,11 @@ function deriveAssignmentRows({
       owner: `Worker ${shortID(session.workerId)}`,
       model: metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain") || metadataString(session.metadata, "model"),
       projectContext: [node?.targetKind && humanizeKey(node.targetKind), node?.targetId].filter(Boolean).join(" "),
+      selection: { kind: "session", sessionId: session.id },
       action: isActive
         ? [
             { kind: "inspect-session", sessionId: session.id },
-            { kind: "cancel-session", workerId: session.workerId },
+            { kind: "cancel-session", sessionId: session.id },
           ]
         : { kind: "inspect-session", sessionId: session.id },
     });
@@ -2262,7 +2367,7 @@ function deriveAssignmentRows({
       owner: `Worker ${shortID(worker.id)}`,
       model: metadataString(worker.metadata, "model") || metadataString(worker.metadata, "brain"),
       projectContext: targetLabel(node),
-      action: !isTerminalWorkerStatus(worker.status) ? { kind: "cancel-session", workerId: worker.id } : undefined,
+      action: !isTerminalWorkerStatus(worker.status) ? { kind: "cancel-worker", workerId: worker.id } : undefined,
     });
   }
 
@@ -2278,6 +2383,7 @@ function deriveAssignmentRows({
       currentAction: item.error || item.prompt,
       owner: item.workerId ? `Worker ${shortID(item.workerId)}` : item.leaseOwner ? `Lease ${shortID(item.leaseOwner)}` : undefined,
       projectContext: task.projectId,
+      selection: { kind: "work_item", workItemId: item.id },
       action: item.status === "queued" || item.status === "running" ? { kind: "cancel-work-item", workItemId: item.id } : undefined,
     });
   }
@@ -2295,13 +2401,19 @@ function deriveAssignmentRows({
       currentAction: feedbackCount > 0 ? `${feedbackCount} pending feedback item${feedbackCount === 1 ? "" : "s"}` : pr.mergeStatus || pr.checksConclusion,
       owner: pr.branchOwner ? `Owner ${shortID(pr.branchOwner)}` : undefined,
       prContext: [pr.base && `base ${pr.base}`, pr.branch && `head ${pr.branch}`].filter(Boolean).join(" · "),
-      action: pr.url ? { kind: "open-pr", url: pr.url } : undefined,
+      selection: { kind: "pull_request", pullRequestId: pr.id },
+      action: [
+        ...(pr.url ? [{ kind: "open-pr" as const, url: pr.url }] : []),
+        { kind: "refresh-pr", pullRequestId: pr.id },
+        { kind: "babysit-pr", pullRequestId: pr.id, disabled: Boolean(pr.babysitterTaskId) },
+      ],
     });
   }
 
-  for (const artifact of artifacts) {
+  for (const [index, artifact] of artifacts.entries()) {
+    const artifactKey = artifact.id || artifact.ref || artifact.url || `${humanizeKey(artifact.kind)}-${index + 1}`;
     rows.push({
-      id: `artifact:${artifact.id || artifact.ref || artifact.url}`,
+      id: `artifact:${artifactKey}`,
       kind: "artifact",
       title: artifact.name || artifact.ref || humanizeKey(artifact.kind),
       subtitle: humanizeKey(artifact.kind),
@@ -2311,6 +2423,7 @@ function deriveAssignmentRows({
       currentAction: artifact.ref || artifact.url,
       owner: artifact.metadata ? metadataString(artifact.metadata, "workerId") : undefined,
       projectContext: task.projectId,
+      selection: { kind: "artifact", artifactId: artifactKey },
       action: artifact.url ? { kind: "open-pr", url: artifact.url } : undefined,
     });
   }
@@ -2340,8 +2453,16 @@ export function AssignmentBoard({
   approvals,
   onInspectSession,
   onCancelSession,
+  onCancelWorker,
   onCancelWorkItem,
+  onRetry,
+  onClear,
+  onRefreshPullRequest,
+  onBabysitPullRequest,
   onAnswerQuestion,
+  selectedAssignmentId,
+  selectedQuestionId,
+  onSelectAssignment,
   onDone,
   onError,
 }: {
@@ -2350,9 +2471,17 @@ export function AssignmentBoard({
   managerSummary?: ManagerSummary;
   approvals: ApprovalState[];
   onInspectSession: (sessionId: string) => void;
-  onCancelSession: (workerId: string) => Promise<void>;
+  onCancelSession: (sessionId: string) => Promise<void>;
+  onCancelWorker?: (workerId: string) => Promise<void>;
   onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
+  onRetry?: (taskId: string) => Promise<void>;
+  onClear?: (taskId: string) => Promise<void>;
+  onRefreshPullRequest?: (id: string) => Promise<PullRequestState>;
+  onBabysitPullRequest?: (id: string) => Promise<unknown>;
   onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
+  selectedAssignmentId?: string;
+  selectedQuestionId?: string;
+  onSelectAssignment?: (row: AssignmentRow) => void;
   onDone: () => Promise<void>;
   onError: (message: string) => void;
 }) {
@@ -2363,7 +2492,7 @@ export function AssignmentBoard({
   const hiddenCount = Math.max(0, rows.length - ASSIGNMENT_ROW_LIMIT);
   const visibleRows = showAllRows ? rows : rows.slice(0, ASSIGNMENT_ROW_LIMIT);
 
-  async function run(actionId: string, action: () => Promise<void>) {
+  async function run(actionId: string, action: () => Promise<unknown>) {
     setBusyAction(actionId);
     try {
       await action();
@@ -2377,29 +2506,69 @@ export function AssignmentBoard({
 
   function renderAction(row: AssignmentRow, action: AssignmentAction, index: number) {
     const actionId = `${row.id}:${action.kind}:${index}`;
+    const stopAndRun = (event: React.MouseEvent, fn: () => void) => {
+      event.stopPropagation();
+      fn();
+    };
     switch (action.kind) {
       case "inspect-session":
         return (
-          <button key={actionId} className="icon-button ghost small" onClick={() => onInspectSession(action.sessionId)} title="Inspect live session" aria-label={`Inspect ${row.title}`}>
+          <button key={actionId} className="icon-button ghost small" onClick={(event) => stopAndRun(event, () => { onInspectSession(action.sessionId); onSelectAssignment?.(row); })} title="Inspect live session" aria-label={`Inspect ${row.title}`}>
             <Terminal size={14} />
           </button>
         );
       case "open-pr":
         return (
-          <a key={actionId} className="icon-button ghost small" href={action.url} target="_blank" rel="noreferrer" title="Open pull request or artifact" aria-label={`Open ${row.title}`}>
+          <a key={actionId} className="icon-button ghost small" href={action.url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()} title="Open pull request or artifact" aria-label={`Open ${row.title}`}>
             <GitPullRequest size={14} />
           </a>
         );
       case "cancel-session":
+        if (!onCancelSession) return null;
         return (
-          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={() => run(actionId, () => onCancelSession(action.workerId))} title="Cancel worker" aria-label={`Cancel ${row.title}`}>
+          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onCancelSession(action.sessionId)))} title="Cancel session" aria-label={`Cancel ${row.title}`}>
+            <CircleStop size={14} />
+          </button>
+        );
+      case "cancel-worker":
+        if (!onCancelWorker) return null;
+        return (
+          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onCancelWorker(action.workerId)))} title="Cancel worker" aria-label={`Cancel ${row.title}`}>
             <CircleStop size={14} />
           </button>
         );
       case "cancel-work-item":
         return (
-          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={() => run(actionId, () => onCancelWorkItem(taskId, action.workItemId))} title="Cancel work item" aria-label={`Cancel ${row.title}`}>
+          <button key={actionId} className="icon-button danger small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onCancelWorkItem(taskId, action.workItemId)))} title="Cancel work item" aria-label={`Cancel ${row.title}`}>
             <CircleStop size={14} />
+          </button>
+        );
+      case "retry-task":
+        if (!onRetry) return null;
+        return (
+          <button key={actionId} className="icon-button ghost small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onRetry(action.taskId)))} title="Retry task" aria-label={`Retry ${row.title}`}>
+            <RefreshCw size={14} />
+          </button>
+        );
+      case "clear-task":
+        if (!onClear) return null;
+        return (
+          <button key={actionId} className="icon-button ghost small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onClear(action.taskId)))} title="Clear task" aria-label={`Clear ${row.title}`}>
+            <Trash2 size={14} />
+          </button>
+        );
+      case "refresh-pr":
+        if (!onRefreshPullRequest) return null;
+        return (
+          <button key={actionId} className="icon-button ghost small" disabled={busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onRefreshPullRequest(action.pullRequestId)))} title="Refresh pull request" aria-label={`Refresh ${row.title}`}>
+            <RefreshCw size={14} />
+          </button>
+        );
+      case "babysit-pr":
+        if (!onBabysitPullRequest) return null;
+        return (
+          <button key={actionId} className="icon-button ghost small" disabled={action.disabled || busyAction === actionId} onClick={(event) => stopAndRun(event, () => run(actionId, () => onBabysitPullRequest(action.pullRequestId)))} title={action.disabled ? "Pull request is already babysat" : "Babysit pull request"} aria-label={`Babysit ${row.title}`}>
+            <Bot size={14} />
           </button>
         );
     }
@@ -2419,13 +2588,27 @@ export function AssignmentBoard({
         </div>
         {pendingCount > 0 && <span className="pill">{pendingCount} need attention</span>}
       </div>
-      {approvals.length > 0 && <ApprovalPanel taskId={taskId} approvals={approvals} onAnswer={onAnswerQuestion} onDone={onDone} onError={onError} />}
+      {approvals.length > 0 && <ApprovalPanel taskId={taskId} approvals={approvals} selectedQuestionId={selectedQuestionId} onAnswer={onAnswerQuestion} onDone={onDone} onError={onError} />}
       {rows.length === 0 ? (
         <p className="empty">No assignments, sessions, pull requests, questions, or artifacts are attached yet.</p>
       ) : (
         <div className="assignment-list">
           {visibleRows.map((row) => (
-            <article key={row.id} className={`assignment-row ${row.tone}`}>
+            <article
+              key={row.id}
+              className={`assignment-row ${row.tone}${selectedAssignmentId === row.id ? " selected" : ""}${row.selection ? " selectable" : ""}`}
+              role={row.selection ? "button" : undefined}
+              tabIndex={row.selection ? 0 : undefined}
+              aria-pressed={row.selection ? selectedAssignmentId === row.id : undefined}
+              onClick={() => onSelectAssignment?.(row)}
+              onKeyDown={(event) => {
+                if (!row.selection) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelectAssignment?.(row);
+                }
+              }}
+            >
               <div className="assignment-kind">{assignmentKindLabel(row.kind)}</div>
               <div className="assignment-main">
                 <div className="assignment-title-line">
@@ -2496,10 +2679,14 @@ function LiveSessionPanel({
   const completion = latestWorkerCompletion(events, activeSession.workerId);
   const changedFiles = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
   const command = worker?.command?.join(" ") || metadataString(activeSession.metadata, "command") || metadataString(worker?.metadata, "command");
+  const model = metadataString(activeSession.metadata, "model") || metadataString(activeSession.metadata, "brain") || metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain");
+  const provider = metadataString(activeSession.metadata, "provider") || metadataString(worker?.metadata, "provider");
   const branch = metadataString(activeSession.metadata, "branch") || metadataString(worker?.metadata, "branch");
   const latestOutput = activeSession.currentAction || (latestEvent ? eventDisplayText(latestEvent) : "");
   const location = activeSession.workspaceCwd || activeSession.remoteWorkDir || activeSession.workspaceRoot || node?.remoteWorkDir || "";
   const scratch = activeSession.sharedWorkerDir || activeSession.sharedArtifactsDir || activeSession.sharedRoot || "";
+  const target = [activeSession.targetKind && humanizeKey(activeSession.targetKind), activeSession.targetId].filter(Boolean).join(" ");
+  const eventTail = events.slice(-6).filter((event) => event.type !== "worker_completed" || eventDisplayText(event));
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -2507,7 +2694,7 @@ function LiveSessionPanel({
     if (!trimmed) return;
     setBusy(true);
     try {
-      await onSteer(activeSession.workerId, trimmed);
+      await onSteer(activeSession.id, trimmed);
       setMessage("");
     } catch (err) {
       onError(errorMessage(err));
@@ -2519,7 +2706,7 @@ function LiveSessionPanel({
   async function cancel() {
     setCanceling(true);
     try {
-      await onCancel(activeSession.workerId);
+      await onCancel(activeSession.id);
       await onDone();
     } catch (err) {
       onError(errorMessage(err));
@@ -2549,10 +2736,13 @@ function LiveSessionPanel({
       <div className="terminal-shell">
         <div className="terminal-topline">
           <span>{activeSession.remoteSession || activeSession.workerId.slice(0, 8)}</span>
-          {activeSession.targetId && <span>{activeSession.targetKind ? `${humanizeKey(activeSession.targetKind)} ` : ""}{activeSession.targetId}</span>}
+          {target && <span>{target}</span>}
           {branch && <span>{branch}</span>}
         </div>
         <dl className="terminal-facts">
+          {provider && <TerminalFact label="Provider" value={provider} />}
+          {model && <TerminalFact label="Model" value={model} />}
+          {target && <TerminalFact label="Target" value={target} />}
           {command && <TerminalFact label="Command" value={command} />}
           {location && <TerminalFact label="Worktree" value={location} />}
           {scratch && <TerminalFact label="Scratch" value={scratch} />}
@@ -2572,9 +2762,26 @@ function LiveSessionPanel({
             ))}
           </div>
         )}
+        {eventTail.length > 0 && (
+          <div className="terminal-event-tail">
+            {eventTail.map((event) => (
+              <div key={event.id}>
+                <time>{new Date(event.at).toLocaleTimeString()}</time>
+                <span>{event.type}</span>
+                <p>{eventDisplayText(event)}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       {canCancel && (
         <form className="session-steer manager-session-steer" onSubmit={submit}>
+          <div className="steer-target-labels">
+            <span>Session steering</span>
+            <code>{activeSession.id.slice(0, 8)}</code>
+            <code>{activeSession.workerId.slice(0, 8)}</code>
+            {target && <code>{target}</code>}
+          </div>
           <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this exact session..." required />
           <button className="icon-button" disabled={busy || !message.trim()} title="Send session steering">
             <Send size={16} />
@@ -2594,8 +2801,76 @@ function TerminalFact({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ManagerPullRequestSummary({ pullRequests, feedback, artifacts }: { pullRequests: PullRequestState[]; feedback: PullRequestFeedback[]; artifacts: Artifact[] }) {
+function ManagerPullRequestSummary({
+  task,
+  pullRequests,
+  selectedPullRequest,
+  feedback,
+  artifacts,
+  onPublish,
+  onWatch,
+  onRefresh,
+  onBabysit,
+  onSteer,
+  onDone,
+  onError,
+}: {
+  task: Task;
+  pullRequests: PullRequestState[];
+  selectedPullRequest: PullRequestState | undefined;
+  feedback: PullRequestFeedback[];
+  artifacts: Artifact[];
+  onPublish: (taskId: string) => Promise<PullRequestState>;
+  onWatch: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
+  onRefresh: (id: string) => Promise<PullRequestState>;
+  onBabysit: (id: string) => Promise<unknown>;
+  onSteer: (taskId: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState("");
+  const [watchRepo, setWatchRepo] = useState("");
+  const [watchNumber, setWatchNumber] = useState("");
+  const [watchUrl, setWatchUrl] = useState("");
+  const [steering, setSteering] = useState("");
   const pendingFeedback = feedback.filter((item) => item.status === "pending");
+  const broadObjective = isBroadObjectiveMetadata(task.metadata);
+  const canPublish = canPublishPullRequest(task) && (broadObjective || pullRequests.length === 0);
+  const selectedPR = selectedPullRequest ?? pullRequests[0];
+  const selectedFeedback = selectedPR ? feedback.filter((item) => item.pullRequestId === selectedPR.id && item.status === "pending") : [];
+
+  async function run(action: string, fn: () => Promise<unknown>) {
+    setBusy(action);
+    try {
+      await fn();
+      await onDone();
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function submitWatch(event: React.FormEvent) {
+    event.preventDefault();
+    const input: WatchPullRequestsInput = {
+      repo: watchRepo.trim() || undefined,
+      url: watchUrl.trim() || undefined,
+      number: watchNumber.trim() ? Number(watchNumber) : undefined,
+      state: "open",
+    };
+    await run("watch", () => onWatch(task.id, input));
+  }
+
+  async function submitSteering(event: React.FormEvent) {
+    event.preventDefault();
+    if (!selectedPR || !steering.trim()) return;
+    await run(`steer:${selectedPR.id}`, async () => {
+      await onSteer(task.id, steering.trim(), { targetKind: "pull_request", targetId: selectedPR.id });
+      setSteering("");
+    });
+  }
+
   return (
     <section className="manager-section manager-pr-summary">
       <div className="manager-section-title">
@@ -2603,33 +2878,82 @@ function ManagerPullRequestSummary({ pullRequests, feedback, artifacts }: { pull
           <span>Pull Requests</span>
           <strong>{pullRequests.length} tracked · {pendingFeedback.length} feedback</strong>
         </div>
+        <div className="manager-section-actions">
+          <button className="secondary compact" disabled={!canPublish || busy === "publish"} onClick={() => run("publish", () => onPublish(task.id))}>
+            <GitPullRequest size={16} />
+            {busy === "publish" ? "Opening" : broadObjective && pullRequests.length > 0 ? "Open PR Output" : "Open PR"}
+          </button>
+        </div>
       </div>
+      <form className="manager-pr-watch" onSubmit={submitWatch}>
+        <input value={watchRepo} onChange={(event) => setWatchRepo(event.target.value)} placeholder="owner/repo" />
+        <input value={watchNumber} onChange={(event) => setWatchNumber(event.target.value)} placeholder="PR #" inputMode="numeric" />
+        <input value={watchUrl} onChange={(event) => setWatchUrl(event.target.value)} placeholder="or PR URL" />
+        <button className="secondary compact" disabled={busy === "watch" || (!watchRepo.trim() && !watchUrl.trim())}>
+          <Eye size={16} />
+          {busy === "watch" ? "Watching" : "Watch"}
+        </button>
+      </form>
       {pullRequests.length === 0 && artifacts.length === 0 && pendingFeedback.length === 0 ? (
         <p className="empty">No pull request output is available yet.</p>
       ) : (
-        <div className="manager-pr-grid">
-          {pullRequests.slice(0, 4).map((pr) => (
-            <a key={pr.id} className="manager-pr-card" href={pr.url} target="_blank" rel="noreferrer">
-              <strong>{pr.repo}{pr.number ? `#${pr.number}` : ""}</strong>
-              <span>{pr.title}</span>
-              <small>{[pr.state, pr.checksStatus, pr.reviewStatus, pr.mergeStatus].filter(Boolean).join(" · ")}</small>
-            </a>
-          ))}
-          {artifacts.slice(0, 4).map((artifact) => (
-            artifact.url ? (
-              <a key={artifact.id || artifact.url} className="manager-pr-card" href={artifact.url} target="_blank" rel="noreferrer">
-                <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
-                <span>{artifact.url}</span>
-                <small>{humanizeKey(artifact.kind)}</small>
-              </a>
-            ) : (
-              <div key={artifact.id || artifact.ref} className="manager-pr-card">
-                <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
-                <span>{artifact.ref}</span>
-                <small>{humanizeKey(artifact.kind)}</small>
+        <div className="manager-pr-stack">
+          {selectedPR && (
+            <article className="manager-pr-card selected">
+              <div className="manager-pr-card-head">
+                <a href={selectedPR.url} target="_blank" rel="noreferrer">
+                  {selectedPR.repo}{selectedPR.number ? `#${selectedPR.number}` : ""}
+                </a>
+                <div className="manager-section-actions">
+                  <button className="icon-button ghost small" disabled={busy === `refresh:${selectedPR.id}`} onClick={() => run(`refresh:${selectedPR.id}`, () => onRefresh(selectedPR.id))} title="Refresh pull request" aria-label="Refresh selected pull request">
+                    <RefreshCw size={14} />
+                  </button>
+                  <button className="icon-button ghost small" disabled={Boolean(selectedPR.babysitterTaskId) || busy === `babysit:${selectedPR.id}`} onClick={() => run(`babysit:${selectedPR.id}`, () => onBabysit(selectedPR.id))} title={selectedPR.babysitterTaskId ? "Pull request is already babysat" : "Babysit pull request"} aria-label="Babysit selected pull request">
+                    <Bot size={14} />
+                  </button>
+                </div>
               </div>
-            )
-          ))}
+              <strong>{selectedPR.title}</strong>
+              <small>{[selectedPR.state, selectedPR.checksStatus, selectedPR.reviewStatus, selectedPR.mergeStatus, selectedPR.base && `base ${selectedPR.base}`, selectedPR.branch && `head ${selectedPR.branch}`].filter(Boolean).join(" · ")}</small>
+              {selectedFeedback.length > 0 && (
+                <div className="manager-pr-feedback">
+                  {selectedFeedback.slice(0, 3).map((item) => (
+                    <p key={item.id}>{item.feedbackBody || item.prompt || item.feedbackSignature || "Feedback is queued for follow-up."}</p>
+                  ))}
+                </div>
+              )}
+              <form className="inline-steer-form" onSubmit={submitSteering}>
+                <input value={steering} onChange={(event) => setSteering(event.target.value)} placeholder="Steer this PR..." required />
+                <button className="secondary compact" disabled={busy === `steer:${selectedPR.id}` || !steering.trim()}>
+                  {busy === `steer:${selectedPR.id}` ? "Queued" : "Steer"}
+                </button>
+              </form>
+            </article>
+          )}
+          <div className="manager-pr-grid">
+            {pullRequests.filter((pr) => pr.id !== selectedPR?.id).slice(0, 3).map((pr) => (
+              <a key={pr.id} className="manager-pr-card" href={pr.url} target="_blank" rel="noreferrer">
+                <strong>{pr.repo}{pr.number ? `#${pr.number}` : ""}</strong>
+                <span>{pr.title}</span>
+                <small>{[pr.state, pr.checksStatus, pr.reviewStatus, pr.mergeStatus].filter(Boolean).join(" · ")}</small>
+              </a>
+            ))}
+            {artifacts.slice(0, 4).map((artifact) => (
+              artifact.url ? (
+                <a key={artifact.id || artifact.url} className="manager-pr-card" href={artifact.url} target="_blank" rel="noreferrer">
+                  <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
+                  <span>{artifact.url}</span>
+                  <small>{humanizeKey(artifact.kind)}</small>
+                </a>
+              ) : (
+                <div key={artifact.id || artifact.ref} className="manager-pr-card">
+                  <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
+                  <span>{artifact.ref}</span>
+                  <small>{humanizeKey(artifact.kind)}</small>
+                </div>
+              )
+            ))}
+          </div>
         </div>
       )}
     </section>
@@ -2700,6 +3024,11 @@ function selectedLiveSession(sessions: Session[], selectedSessionId: string): Se
   return sorted.find((session) => session.id === selectedSessionId)
     ?? sorted.find((session) => !isTerminalWorkerStatus(session.status))
     ?? sorted[0];
+}
+
+function selectedPullRequestForSummary(pullRequests: PullRequestState[], selectedPullRequestId: string): PullRequestState | undefined {
+  const sorted = [...pullRequests].sort((left, right) => Date.parse(right.updatedAt || right.createdAt) - Date.parse(left.updatedAt || left.createdAt));
+  return sorted.find((pr) => pr.id === selectedPullRequestId) ?? sorted[0];
 }
 
 function assignmentRank(row: AssignmentRow): number {
@@ -3345,12 +3674,14 @@ function questionApprovalStates(questions: Question[]): ApprovalState[] {
 function ApprovalPanel({
   taskId,
   approvals,
+  selectedQuestionId,
   onAnswer,
   onDone,
   onError,
 }: {
   taskId: string;
   approvals: ApprovalState[];
+  selectedQuestionId?: string;
   onAnswer: (taskId: string, questionId: string, answer: string) => Promise<void>;
   onDone: () => Promise<void>;
   onError: (message: string) => void;
@@ -3362,7 +3693,7 @@ function ApprovalPanel({
         <span>{approvals.filter((approval) => !approval.decided).length} pending</span>
       </div>
       {approvals.slice(0, 4).map((approval) => (
-        <div className={approval.decided ? "approval-card decided" : "approval-card"} key={approval.id}>
+        <div className={`${approval.decided ? "approval-card decided" : "approval-card"}${selectedQuestionId === approval.id ? " selected" : ""}`} key={approval.id}>
           <div>
             <small>{new Date(approval.at).toLocaleTimeString()} · {humanizeKey(approval.reason || "approval")}</small>
             {approval.summary && <span>{approval.summary}</span>}
