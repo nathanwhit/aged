@@ -587,6 +587,18 @@ func TestSessionTailEndpointReturnsWorkerScopedEvents(t *testing.T) {
 	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{
+		"nodeId":        "node-session-tail",
+		"workerId":      workerID,
+		"workerKind":    "mock",
+		"role":          "implementation",
+		"targetId":      "vultr-vm",
+		"targetKind":    "ssh",
+		"remoteSession": "aged-worker-tail",
+		"remoteWorkDir": "/work/repo",
+	})}); err != nil {
+		t.Fatal(err)
+	}
 	started, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})})
 	if err != nil {
 		t.Fatal(err)
@@ -596,6 +608,27 @@ func TestSessionTailEndpointReturnsWorkerScopedEvents(t *testing.T) {
 	}
 	output, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"text": "session output"})})
 	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.Append(ctx, core.Event{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{
+		"status":       core.WorkerSucceeded,
+		"summary":      "session done",
+		"changedFiles": []map[string]any{{"path": "web/src/main.tsx", "status": "modified"}},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventPRPublished, TaskID: taskID, Payload: core.MustJSON(map[string]any{
+		"id":     "pr-session-tail",
+		"repo":   "owner/repo",
+		"number": 9,
+		"url":    "https://github.com/owner/repo/pull/9",
+		"branch": "session-tail",
+		"title":  "Session tail",
+		"metadata": map[string]any{
+			"workerId": workerID,
+		},
+	})}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -618,14 +651,29 @@ func TestSessionTailEndpointReturnsWorkerScopedEvents(t *testing.T) {
 	if tail.SessionID != workerID || tail.WorkerID != workerID || tail.TaskID != taskID {
 		t.Fatalf("tail identity = %+v", tail)
 	}
-	if tail.LastEventID != output.ID {
-		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, output.ID)
+	if tail.LastEventID != completed.ID {
+		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, completed.ID)
 	}
-	if len(tail.Events) != 1 || tail.Events[0].ID != output.ID {
-		t.Fatalf("events = %+v, want output %d", tail.Events, output.ID)
+	if len(tail.Events) != 2 || tail.Events[0].ID != output.ID || tail.Events[1].ID != completed.ID {
+		t.Fatalf("events = %+v, want output/completed %d/%d", tail.Events, output.ID, completed.ID)
 	}
 	if tail.CurrentAction == nil || !strings.Contains(tail.CurrentAction.Text, "session output") {
 		t.Fatalf("current action = %+v", tail.CurrentAction)
+	}
+	if tail.Session == nil || tail.Session.RemoteSession != "aged-worker-tail" {
+		t.Fatalf("session context = %+v", tail.Session)
+	}
+	if tail.Worker == nil || tail.Worker.Kind != "mock" {
+		t.Fatalf("worker context = %+v", tail.Worker)
+	}
+	if tail.Node == nil || tail.Node.ID != "node-session-tail" {
+		t.Fatalf("node context = %+v", tail.Node)
+	}
+	if len(tail.PullRequests) != 1 || tail.PullRequests[0].ID != "pr-session-tail" {
+		t.Fatalf("pull requests = %+v", tail.PullRequests)
+	}
+	if tail.Completion == nil || tail.Completion.EventID != completed.ID || len(tail.ChangedFiles) != 1 || tail.ChangedFiles[0].Path != "web/src/main.tsx" {
+		t.Fatalf("completion = %+v changedFiles = %+v", tail.Completion, tail.ChangedFiles)
 	}
 }
 
