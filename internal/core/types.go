@@ -696,6 +696,38 @@ type SteeringItem struct {
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
+type TaskAssignment struct {
+	ID                 string     `json:"id"`
+	TaskID             string     `json:"taskId"`
+	SourceKind         string     `json:"sourceKind"`
+	SourceID           string     `json:"sourceId"`
+	Status             string     `json:"status,omitempty"`
+	Kind               string     `json:"kind,omitempty"`
+	Role               string     `json:"role,omitempty"`
+	WorkerID           string     `json:"workerId,omitempty"`
+	WorkerKind         string     `json:"workerKind,omitempty"`
+	WorkItemID         string     `json:"workItemId,omitempty"`
+	NodeID             string     `json:"nodeId,omitempty"`
+	SessionID          string     `json:"sessionId,omitempty"`
+	TargetKind         string     `json:"targetKind,omitempty"`
+	TargetID           string     `json:"targetId,omitempty"`
+	ParentNodeID       string     `json:"parentNodeId,omitempty"`
+	SpawnID            string     `json:"spawnId,omitempty"`
+	DependsOn          []string   `json:"dependsOn,omitempty"`
+	Reason             string     `json:"reason,omitempty"`
+	CurrentAction      string     `json:"currentAction,omitempty"`
+	CurrentActionLabel string     `json:"currentActionLabel,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	StartedAt          *time.Time `json:"startedAt,omitempty"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	CompletedAt        *time.Time `json:"completedAt,omitempty"`
+}
+
+type TaskAssignmentsResponse struct {
+	TaskID      string           `json:"taskId"`
+	Assignments []TaskAssignment `json:"assignments"`
+}
+
 type CreateTaskRequest struct {
 	ProjectID    string          `json:"projectId,omitempty"`
 	WorkstreamID string          `json:"workstreamId,omitempty"`

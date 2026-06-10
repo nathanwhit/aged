@@ -64,6 +64,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks/lookup", s.lookupTask)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
 	mux.HandleFunc("GET /api/tasks/{id}", s.taskSnapshot)
+	mux.HandleFunc("GET /api/tasks/{id}/assignments", s.taskAssignments)
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("POST /api/tasks/clear-terminal", s.clearTerminalTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/clear", s.clearTask)
@@ -380,6 +381,11 @@ func (s *Server) taskSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, taskSnapshot)
+}
+
+func (s *Server) taskAssignments(w http.ResponseWriter, r *http.Request) {
+	result, err := s.service.TaskAssignments(r.Context(), r.PathValue("id"))
+	writeResult(w, http.StatusOK, result, err)
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {

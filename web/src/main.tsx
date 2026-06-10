@@ -22,9 +22,10 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignment, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import { selectSessions, selectWorkItems } from "./assignments";
 import "./styles.css";
 
 type AppSnapshot = {
@@ -239,6 +240,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
   const [hydratedTaskIds, setHydratedTaskIds] = useState<Set<string>>(() => new Set());
+  const [assignmentsByTask, setAssignmentsByTask] = useState<Map<string, TaskAssignment[]>>(() => new Map());
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
 
@@ -314,17 +316,38 @@ function App() {
       .catch((err) => {
         if (active) setError(errorMessage(err));
       });
+    getTaskAssignments(selectedTask.id)
+      .then((response) => {
+        if (!active) return;
+        setAssignmentsByTask((current) => {
+          const next = new Map(current);
+          next.set(response.taskId, response.assignments ?? []);
+          return next;
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+        setAssignmentsByTask((current) => {
+          if (!current.has(selectedTask.id)) return current;
+          const next = new Map(current);
+          next.delete(selectedTask.id);
+          return next;
+        });
+      });
     return () => {
       active = false;
     };
   }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
   const selectedWorkers = selectedTask ? workersByTask.get(selectedTask.id) ?? EMPTY_WORKERS : EMPTY_WORKERS;
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
-  const selectedWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
+  const selectedAssignments = selectedTask ? assignmentsByTask.get(selectedTask.id) ?? null : null;
+  const selectedSnapshotWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
+  const selectedWorkItems = useMemo(() => selectWorkItems(selectedSnapshotWorkItems, selectedAssignments), [selectedSnapshotWorkItems, selectedAssignments]);
   const selectedArtifacts = selectedTask ? artifactsByTask.get(selectedTask.id) ?? selectedTask.artifacts?.map((artifact) => ({ ...artifact, taskId: selectedTask.id })) ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
   const selectedMemoryEntries = selectedTask ? memoryEntriesForTask(selectedTask, memoryEntriesByTask, memoryEntriesByProject) : EMPTY_MEMORY_ENTRIES;
   const selectedQuestions = selectedTask ? questionsByTask.get(selectedTask.id) ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS;
-  const selectedSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
+  const selectedSnapshotSessions = selectedTask ? sessionsByTask.get(selectedTask.id) ?? EMPTY_SESSIONS : EMPTY_SESSIONS;
+  const selectedSessions = useMemo(() => selectSessions(selectedSnapshotSessions, selectedAssignments), [selectedSnapshotSessions, selectedAssignments]);
   const selectedEvents = selectedTask ? eventsByTask.get(selectedTask.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const selectedEventsByWorker = useMemo(() => groupByWorker(selectedEvents), [selectedEvents]);
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;

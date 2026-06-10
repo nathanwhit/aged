@@ -335,6 +335,95 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	}
 }
 
+func TestTaskAssignmentsEndpoint(t *testing.T) {
+	ctx := context.Background()
+	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"title": "Assignments", "prompt": "Track work"})},
+		{Type: core.EventWorkItemQueued, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{
+			"id":         "queued-work",
+			"kind":       "objective.validate",
+			"targetKind": "objective",
+			"targetId":   "task-assignments",
+			"reason":     "Validate the result.",
+			"metadata": map[string]any{
+				"workerKind": "codex",
+				"dependsOn":  []string{"implementation"},
+			},
+		})},
+		{Type: core.EventExecutionPlanned, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{
+			"nodeId":     "node-1",
+			"workerId":   "worker-1",
+			"workerKind": "codex",
+			"role":       "implementation",
+			"targetKind": "ssh",
+			"targetId":   "vm-1",
+			"dependsOn":  []string{"plan"},
+		})},
+		{Type: core.EventWorkerCreated, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "codex"})},
+		{Type: core.EventWorkItemQueued, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "running-work", "kind": "objective.implement"})},
+		{Type: core.EventWorkItemStarted, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "running-work", "workerId": "worker-1"})},
+		{Type: core.EventWorkerStarted, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{})},
+		{Type: core.EventWorkerOutput, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"kind": "tool", "text": "go test ./..."})},
+		{Type: core.EventTaskArtifact, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "artifact-1", "kind": "benchmark", "name": "Benchmark", "ref": "shared/bench.txt", "metadata": map[string]any{"workerId": "worker-1", "pullRequestID": "pr-1"}})},
+		{Type: core.EventApprovalNeeded, TaskID: "task-assignments", WorkerID: "worker-1", Payload: core.MustJSON(map[string]any{"reason": "approval", "question": "Continue?"})},
+		{Type: core.EventPRPublished, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "pr-1", "repo": "owner/repo", "number": 7, "url": "https://github.com/owner/repo/pull/7", "title": "Assignments", "state": "OPEN", "metadata": map[string]any{"workerId": "worker-1", "latestPullRequestFeedbackSignature": "sig-1", "latestPullRequestFeedbackBody": "Please add tests."}})},
+		{Type: core.EventPRFollowUp, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"id": "pr-1", "feedbackSignature": "sig-1", "reason": "review", "prompt": "Handle feedback."})},
+		{Type: core.EventTaskSteered, TaskID: "task-assignments", Payload: core.MustJSON(map[string]any{"message": "Use the existing parser."})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	service := orchestrator.NewService(store, orchestrator.StaticBrain{WorkerKind: "mock"}, worker.DefaultRunners(), t.TempDir())
+	server := httptest.NewServer(New(service, nil).Routes())
+	defer server.Close()
+
+	res, err := http.Get(server.URL + "/api/tasks/task-assignments/assignments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", res.StatusCode)
+	}
+	var result core.TaskAssignmentsResponse
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TaskID != "task-assignments" {
+		t.Fatalf("task id = %q", result.TaskID)
+	}
+	for _, sourceKind := range []string{"session", "work_item", "pull_request", "pull_request_feedback", "question", "artifact", "steering", "execution_node"} {
+		if !hasHTTPAssignmentSourceKind(result.Assignments, sourceKind) {
+			t.Fatalf("missing %s assignment in %+v", sourceKind, result.Assignments)
+		}
+	}
+	running := httpAssignmentBySource(t, result.Assignments, "work_item", "running-work")
+	if running.Status != string(core.WorkItemRunning) || running.WorkerID != "worker-1" || running.NodeID != "node-1" || running.SessionID != "worker-1" || running.CurrentAction == "" {
+		t.Fatalf("running work assignment = %+v", running)
+	}
+	artifact := httpAssignmentBySource(t, result.Assignments, "artifact", "artifact-1")
+	if artifact.TargetKind != "pull_request" || artifact.TargetID != "pr-1" || artifact.WorkerID != "worker-1" {
+		t.Fatalf("artifact assignment = %+v", artifact)
+	}
+
+	missing, err := http.Get(server.URL + "/api/tasks/missing/assignments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing status = %d", missing.StatusCode)
+	}
+}
+
 func TestEventStreamUsesLastEventIDAndWritesSSEID(t *testing.T) {
 	ctx := context.Background()
 	store, err := eventstore.OpenSQLite(ctx, filepath.Join(t.TempDir(), "aged.db"))
@@ -1888,4 +1977,24 @@ func taskByID(tasks []core.Task, id string) core.Task {
 		}
 	}
 	return core.Task{}
+}
+
+func hasHTTPAssignmentSourceKind(rows []core.TaskAssignment, sourceKind string) bool {
+	for _, row := range rows {
+		if row.SourceKind == sourceKind {
+			return true
+		}
+	}
+	return false
+}
+
+func httpAssignmentBySource(t *testing.T, rows []core.TaskAssignment, sourceKind string, sourceID string) core.TaskAssignment {
+	t.Helper()
+	for _, row := range rows {
+		if row.SourceKind == sourceKind && row.SourceID == sourceID {
+			return row
+		}
+	}
+	t.Fatalf("missing assignment %s/%s in %+v", sourceKind, sourceID, rows)
+	return core.TaskAssignment{}
 }
