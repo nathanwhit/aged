@@ -137,14 +137,6 @@ func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 	sessions := filterTasks(p.Sessions, p.ClearedTasks, activeTasks, func(session core.Session) string { return session.TaskID })
 	questions := filterTasks(p.Questions, p.ClearedTasks, activeTasks, func(question core.Question) string { return question.TaskID })
 	workItems := filterTasks(p.WorkItems, p.ClearedTasks, activeTasks, func(item core.WorkItem) string { return item.TaskID })
-	allWorkers := filterClearedWorkers(p.Workers, p.ClearedTasks)
-	allWorkItems := filterClearedWorkItems(p.WorkItems, p.ClearedTasks)
-	allArtifacts := filterClearedArtifacts(p.Artifacts, p.ClearedTasks)
-	allQuestions := filterClearedQuestions(p.Questions, p.ClearedTasks)
-	allSessions := filterClearedSessions(p.Sessions, p.ClearedTasks)
-	allPullRequests := filterClearedPullRequests(p.PullRequests, p.ClearedTasks)
-	allPullRequestFeedback := filterClearedPullRequestFeedback(p.PullRequestFeedback, p.ClearedTasks)
-	allSteering := filterClearedSteering(p.Steering, p.ClearedTasks)
 	workers = compactCardWorkers(workers)
 	nodes = compactCardExecutionNodes(nodes)
 	pullRequests = compactCardPullRequests(pullRequests)
@@ -160,7 +152,7 @@ func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 		PullRequests:        orderedPullRequests(pullRequests),
 		PullRequestFeedback: orderedPullRequestFeedback(compactCardPullRequestFeedback(pullRequestFeedback)),
 		Steering:            orderedSteering(compactCardSteering(steering)),
-		ManagerSummary:      buildManagerSummaries(filteredTasks, allWorkers, allWorkItems, allArtifacts, allQuestions, allSessions, allPullRequests, allPullRequestFeedback, allSteering),
+		ManagerSummary:      buildManagerSummaries(filteredTasks, workers, workItems, artifacts, questions, sessions, pullRequests, pullRequestFeedback, steering),
 		LastEventID:         lastEventID,
 	}
 }
@@ -397,9 +389,10 @@ func buildManagerSummaries(
 			summary.AttentionCount++
 			summary.Tone = managerSummaryTone(summary.Tone, "danger")
 		}
-		if session.CurrentAction != "" {
+		actionAt := valueTime(session.CurrentActionAt, session.UpdatedAt)
+		if managerSummaryLatestActionAfter(summary, session.CurrentAction, actionAt) {
 			summary.LatestAction = session.CurrentAction
-			summary.LatestActionAt = valueTime(session.CurrentActionAt, session.UpdatedAt)
+			summary.LatestActionAt = actionAt
 			summary.LatestActionLabel = session.CurrentActionLabel
 		}
 		summary.UpdatedAt = latestTime(summary.UpdatedAt, session.UpdatedAt)
@@ -442,7 +435,7 @@ func buildManagerSummaries(
 				summary.Tone = managerSummaryTone(summary.Tone, "warning")
 			}
 		}
-		if item.Error != "" && summary.LatestAction == "" {
+		if item.Error != "" && managerSummaryLatestActionAfter(summary, item.Error, item.UpdatedAt) {
 			summary.LatestAction = item.Error
 			summary.LatestActionAt = item.UpdatedAt
 			summary.LatestActionLabel = "Work item"
@@ -518,6 +511,22 @@ func managerSummaryTone(current string, next string) string {
 		return next
 	}
 	return current
+}
+
+func managerSummaryLatestActionAfter(summary core.ManagerSummary, action string, at time.Time) bool {
+	if action == "" {
+		return false
+	}
+	if summary.LatestAction == "" {
+		return true
+	}
+	if at.After(summary.LatestActionAt) {
+		return true
+	}
+	if at.Equal(summary.LatestActionAt) {
+		return action > summary.LatestAction
+	}
+	return false
 }
 
 func latestTime(left time.Time, right time.Time) time.Time {

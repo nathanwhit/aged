@@ -310,8 +310,8 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 		t.Fatalf("active manager summary = %+v, want pending approval and feedback attention", activeSummary)
 	}
 	doneSummary := managerSummaryByTask(snapshot.ManagerSummary, "done")
-	if doneSummary.TaskID == "" || doneSummary.Artifacts != 1 {
-		t.Fatalf("terminal manager summary = %+v, want compact summary without terminal detail payloads", doneSummary)
+	if doneSummary.TaskID == "" || doneSummary.AttentionCount != 0 || doneSummary.PendingApprovals != 0 || doneSummary.PendingFeedback != 0 || doneSummary.Artifacts != 0 {
+		t.Fatalf("terminal manager summary = %+v, want non-actionable compact summary without terminal detail payloads", doneSummary)
 	}
 
 	taskRes, err := http.Get(server.URL + "/api/tasks/done")
