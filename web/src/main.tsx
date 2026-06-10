@@ -70,6 +70,30 @@ type TaskAttentionItem = {
   detail: string;
 };
 
+type AssignmentKind = "session" | "work" | "pull_request" | "feedback" | "question" | "artifact" | "debug";
+
+type AssignmentAction =
+  | { kind: "inspect-session"; sessionId: string }
+  | { kind: "open-pr"; url: string }
+  | { kind: "cancel-session"; workerId: string }
+  | { kind: "cancel-work-item"; workItemId: string };
+
+export type AssignmentRow = {
+  id: string;
+  kind: AssignmentKind;
+  title: string;
+  subtitle: string;
+  status: string;
+  tone: AttentionTone;
+  updatedAt: string;
+  currentAction?: string;
+  owner?: string;
+  model?: string;
+  projectContext?: string;
+  prContext?: string;
+  action?: AssignmentAction;
+};
+
 const emptySnapshot: AppSnapshot = {
   tasks: [],
   workers: [],
@@ -434,7 +458,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerWorker={steerWorker} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -1856,6 +1880,7 @@ function TaskDetail({
   memoryEntries,
   questions,
   sessions,
+  pullRequests,
   pullRequestFeedback,
   steering,
   targets,
@@ -1880,6 +1905,7 @@ function TaskDetail({
   memoryEntries: MemoryEntry[];
   questions: Question[];
   sessions: Session[];
+  pullRequests: PullRequestState[];
   pullRequestFeedback: PullRequestFeedback[];
   steering: SteeringItem[];
   targets: TargetState[];
@@ -1901,6 +1927,7 @@ function TaskDetail({
   const [loopPromptInput, setLoopPromptInput] = useState("");
   const [loopTargetInput, setLoopTargetInput] = useState("");
   const [savingLoopConfig, setSavingLoopConfig] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState("");
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
@@ -1916,6 +1943,12 @@ function TaskDetail({
   const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status)).length;
   const activeNodes = nodes.filter((node) => !isTerminalWorkerStatus(node.status)).length;
   const activeWorkItems = workItems.filter((item) => item.status === "queued" || item.status === "running").length;
+  const assignments = useMemo(
+    () => deriveAssignmentRows({ task, workers, nodes, workItems, artifacts, questions, sessions, pullRequests, pullRequestFeedback, steering, eventsByWorker }),
+    [artifacts, eventsByWorker, nodes, pullRequestFeedback, pullRequests, questions, sessions, steering, task, workItems, workers],
+  );
+  const selectedSession = useMemo(() => selectedLiveSession(sessions, selectedSessionId), [selectedSessionId, sessions]);
+  const pullRequestArtifacts = artifacts.filter((artifact) => artifact.kind.toLowerCase().includes("pull") || artifact.kind.toLowerCase().includes("pr"));
   const attentionItems = taskAttentionItems({
     task,
     taskError,
@@ -2004,41 +2037,37 @@ function TaskDetail({
           </button>
         </div>
       </div>
-      <details className="task-prompt-block" open={task.prompt.length < 520 && !hasCustomLoopPrompt}>
-        <summary>
-          <span>{durableLoop ? "Task prompts" : "Task request"}</span>
-          <small>{task.prompt.length.toLocaleString()} chars</small>
-        </summary>
-        <div className="task-prompt-content">
-          <small>{durableLoop ? "Original prompt" : "Prompt"}</small>
-          <p>{task.prompt}</p>
-          {hasCustomLoopPrompt && (
-            <>
-              <small>Current loop prompt</small>
-              <p>{currentLoopPrompt}</p>
-            </>
-          )}
-        </div>
-      </details>
-      <TaskAttentionPanel items={attentionItems} />
-      {(artifacts.length || task.artifacts?.length || task.milestones?.length) && (
-        <TaskObjectiveStrip task={task} artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []} />
-      )}
-      <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
-      <SharedScratchPanel sessions={sessions} />
-      {taskError && (
-        <div className="task-failure">
-          <strong>Failure details</strong>
-          <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
-        </div>
-      )}
-      {pendingApprovals.length > 0 && <ApprovalPanel taskId={task.id} approvals={pendingApprovals} onAnswer={onAnswerQuestion} onDone={onLoopConfigUpdated} onError={onError} />}
-      <WorkerProgressSpotlight update={workerUpdate} />
-      <WideWorkProgress items={workItems} />
-      <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
-      <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
-      <SteeringQueue items={steering} />
-      <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
+      <AssignmentBoard
+        taskId={task.id}
+        rows={assignments}
+        approvals={pendingApprovals}
+        onInspectSession={setSelectedSessionId}
+        onCancelSession={onCancelWorker}
+        onCancelWorkItem={onCancelWorkItem}
+        onAnswerQuestion={onAnswerQuestion}
+        onDone={onLoopConfigUpdated}
+        onError={onError}
+      />
+      <LiveSessionPanel
+        session={selectedSession}
+        worker={selectedSession ? workers.find((worker) => worker.id === selectedSession.workerId) : undefined}
+        node={selectedSession ? nodes.find((node) => node.id === selectedSession.nodeId || node.workerId === selectedSession.workerId) : undefined}
+        events={selectedSession ? eventsByWorker.get(selectedSession.workerId) ?? EMPTY_EVENTS : EMPTY_EVENTS}
+        onSteer={onSteerWorker}
+        onError={onError}
+      />
+      <ManagerPullRequestSummary pullRequests={pullRequests} feedback={pullRequestFeedback} artifacts={pullRequestArtifacts} />
+      <ObjectiveBrief
+        task={task}
+        artifacts={artifacts.length ? artifacts : task.artifacts?.map((artifact) => ({ ...artifact, taskId: task.id })) ?? []}
+        memoryEntries={memoryEntries}
+        sessions={sessions}
+        attentionItems={attentionItems}
+        taskError={taskError}
+        currentLoopPrompt={currentLoopPrompt}
+        hasCustomLoopPrompt={hasCustomLoopPrompt}
+        durableLoop={durableLoop}
+      />
       {durableLoop && (
         <form className="loop-settings" onSubmit={updateLoopConfig}>
           <label>
@@ -2064,8 +2093,569 @@ function TaskDetail({
           <Send size={18} />
         </button>
       </form>
+      <details className="debug-pane">
+        <summary>
+          <span>Debug</span>
+          <small>{workers.length || nodes.length} workers · {workItems.length} work items · {events.length} events</small>
+        </summary>
+        <div className="debug-pane-content">
+          <WorkerProgressSpotlight update={workerUpdate} />
+          <WideWorkProgress items={workItems} />
+          <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
+          <SessionQueue sessions={sessions} onCancel={onCancelWorker} onSteer={onSteerWorker} onError={onError} />
+          <SteeringQueue items={steering} />
+          <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
+        </div>
+      </details>
     </section>
   );
+}
+
+function deriveAssignmentRows({
+  task,
+  workers,
+  nodes,
+  workItems,
+  artifacts,
+  questions,
+  sessions,
+  pullRequests,
+  pullRequestFeedback,
+  steering,
+  eventsByWorker,
+}: {
+  task: Task;
+  workers: Worker[];
+  nodes: ExecutionNode[];
+  workItems: WorkItem[];
+  artifacts: Artifact[];
+  questions: Question[];
+  sessions: Session[];
+  pullRequests: PullRequestState[];
+  pullRequestFeedback: PullRequestFeedback[];
+  steering: SteeringItem[];
+  eventsByWorker: Map<string, EventRecord[]>;
+}): AssignmentRow[] {
+  const workersById = new Map(workers.map((worker) => [worker.id, worker]));
+  const nodesByWorkerId = new Map(nodes.filter((node) => node.workerId).map((node) => [node.workerId!, node]));
+  const rows: AssignmentRow[] = [];
+
+  for (const question of questions.filter((item) => !item.decided)) {
+    rows.push({
+      id: `question:${question.id}`,
+      kind: "question",
+      title: question.question || "Question needs an answer",
+      subtitle: question.reason ? humanizeKey(question.reason) : "User input required",
+      status: "waiting_user",
+      tone: "warning",
+      updatedAt: question.updatedAt || question.createdAt,
+      currentAction: question.answer ? `Answered: ${question.answer}` : "Waiting for a response",
+      owner: question.workerId ? `Worker ${shortID(question.workerId)}` : "Objective",
+      projectContext: task.projectId,
+    });
+  }
+
+  for (const feedback of pullRequestFeedback.filter((item) => item.status === "pending")) {
+    rows.push({
+      id: `feedback:${feedback.id}`,
+      kind: "feedback",
+      title: pullRequestFeedbackTitle(feedback),
+      subtitle: feedback.reason ? humanizeKey(feedback.reason) : "Pull request feedback",
+      status: feedback.status || "pending",
+      tone: "warning",
+      updatedAt: feedback.updatedAt || feedback.createdAt,
+      currentAction: feedback.feedbackBody || feedback.prompt || "Follow-up work is queued.",
+      owner: feedback.attempt ? `Attempt ${feedback.attempt}` : undefined,
+      prContext: prContextFromParts(feedback.repo, feedback.number, feedback.branch),
+      action: feedback.url ? { kind: "open-pr", url: feedback.url } : undefined,
+    });
+  }
+
+  for (const session of sessions) {
+    const worker = workersById.get(session.workerId);
+    const node = nodesByWorkerId.get(session.workerId) ?? nodes.find((item) => item.id === session.nodeId);
+    const workerEvents = eventsByWorker.get(session.workerId) ?? EMPTY_EVENTS;
+    const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
+    const isActive = !isTerminalWorkerStatus(session.status);
+    rows.push({
+      id: `session:${session.id}`,
+      kind: "session",
+      title: session.role ? humanizeKey(session.role) : session.workerKind || worker?.kind || "Live session",
+      subtitle: [session.remoteSession, session.targetId, session.workspaceName].filter(Boolean).join(" · ") || session.workerId.slice(0, 8),
+      status: session.status,
+      tone: toneForStatus(session.status),
+      updatedAt: session.updatedAt || session.startedAt || session.createdAt,
+      currentAction: session.currentAction || (latestEvent ? eventDisplayText(latestEvent) : undefined),
+      owner: `Worker ${shortID(session.workerId)}`,
+      model: metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain") || metadataString(session.metadata, "model"),
+      projectContext: [node?.targetKind && humanizeKey(node.targetKind), node?.targetId].filter(Boolean).join(" "),
+      action: isActive ? { kind: "inspect-session", sessionId: session.id } : { kind: "inspect-session", sessionId: session.id },
+    });
+  }
+
+  const sessionWorkerIds = new Set(sessions.map((session) => session.workerId));
+  for (const worker of workers.filter((item) => !sessionWorkerIds.has(item.id))) {
+    const node = nodesByWorkerId.get(worker.id);
+    rows.push({
+      id: `debug-worker:${worker.id}`,
+      kind: "debug",
+      title: node?.role || worker.kind || "Worker",
+      subtitle: node?.reason || worker.prompt || "Worker without session details",
+      status: worker.status,
+      tone: toneForStatus(worker.status),
+      updatedAt: worker.updatedAt || worker.createdAt,
+      currentAction: latestWorkerProgressEvent(eventsByWorker.get(worker.id) ?? EMPTY_EVENTS)?.type,
+      owner: `Worker ${shortID(worker.id)}`,
+      model: metadataString(worker.metadata, "model") || metadataString(worker.metadata, "brain"),
+      projectContext: targetLabel(node),
+      action: !isTerminalWorkerStatus(worker.status) ? { kind: "cancel-session", workerId: worker.id } : undefined,
+    });
+  }
+
+  for (const item of workItems.filter((workItem) => workItem.status === "queued" || workItem.status === "running" || workItem.status === "failed")) {
+    rows.push({
+      id: `work:${item.id}`,
+      kind: "work",
+      title: humanizeKey(item.kind),
+      subtitle: item.reason || [item.targetKind && humanizeKey(item.targetKind), item.targetId].filter(Boolean).join(" · ") || "Work item",
+      status: item.status,
+      tone: toneForStatus(item.status),
+      updatedAt: item.updatedAt || item.createdAt,
+      currentAction: item.error || item.prompt,
+      owner: item.workerId ? `Worker ${shortID(item.workerId)}` : item.leaseOwner ? `Lease ${shortID(item.leaseOwner)}` : undefined,
+      projectContext: task.projectId,
+      action: item.status === "queued" || item.status === "running" ? { kind: "cancel-work-item", workItemId: item.id } : undefined,
+    });
+  }
+
+  for (const pr of pullRequests) {
+    const feedbackCount = pullRequestFeedback.filter((item) => item.pullRequestId === pr.id && item.status === "pending").length;
+    rows.push({
+      id: `pr:${pr.id}`,
+      kind: "pull_request",
+      title: pr.title || prContextFromParts(pr.repo, pr.number, pr.branch),
+      subtitle: prContextFromParts(pr.repo, pr.number, pr.branch),
+      status: pr.reviewStatus || pr.checksStatus || pr.state || "open",
+      tone: feedbackCount > 0 ? "warning" : toneForStatus(pr.state || pr.checksStatus || "open"),
+      updatedAt: pr.updatedAt || pr.createdAt,
+      currentAction: feedbackCount > 0 ? `${feedbackCount} pending feedback item${feedbackCount === 1 ? "" : "s"}` : pr.mergeStatus || pr.checksConclusion,
+      owner: pr.branchOwner ? `Owner ${shortID(pr.branchOwner)}` : undefined,
+      prContext: [pr.base && `base ${pr.base}`, pr.branch && `head ${pr.branch}`].filter(Boolean).join(" · "),
+      action: pr.url ? { kind: "open-pr", url: pr.url } : undefined,
+    });
+  }
+
+  for (const artifact of artifacts) {
+    rows.push({
+      id: `artifact:${artifact.id || artifact.ref || artifact.url}`,
+      kind: "artifact",
+      title: artifact.name || artifact.ref || humanizeKey(artifact.kind),
+      subtitle: humanizeKey(artifact.kind),
+      status: "available",
+      tone: "good",
+      updatedAt: artifact.updatedAt || artifact.createdAt,
+      currentAction: artifact.ref || artifact.url,
+      owner: artifact.metadata ? metadataString(artifact.metadata, "workerId") : undefined,
+      projectContext: task.projectId,
+      action: artifact.url ? { kind: "open-pr", url: artifact.url } : undefined,
+    });
+  }
+
+  for (const item of steering.filter((entry) => entry.status === "pending" || entry.status === "queued" || entry.status === "running")) {
+    rows.push({
+      id: `steering:${item.id}`,
+      kind: "debug",
+      title: steeringTitle(item),
+      subtitle: item.reason ? humanizeKey(item.reason) : "Steering queued",
+      status: item.status || "pending",
+      tone: "info",
+      updatedAt: item.updatedAt || item.createdAt,
+      currentAction: item.message,
+      owner: item.workerId ? `Worker ${shortID(item.workerId)}` : item.targetKind ? humanizeKey(item.targetKind) : "Objective",
+      projectContext: item.targetId,
+    });
+  }
+
+  return rows.sort((left, right) => assignmentRank(left) - assignmentRank(right) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+}
+
+export function AssignmentBoard({
+  taskId,
+  rows,
+  approvals,
+  onInspectSession,
+  onCancelSession,
+  onCancelWorkItem,
+  onAnswerQuestion,
+  onDone,
+  onError,
+}: {
+  taskId: string;
+  rows: AssignmentRow[];
+  approvals: ApprovalState[];
+  onInspectSession: (sessionId: string) => void;
+  onCancelSession: (workerId: string) => Promise<void>;
+  onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
+  onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [busyAction, setBusyAction] = useState("");
+  const pendingCount = rows.filter((row) => row.tone === "warning" || row.tone === "danger").length;
+
+  async function run(actionId: string, action: () => Promise<void>) {
+    setBusyAction(actionId);
+    try {
+      await action();
+      await onDone();
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  function renderAction(row: AssignmentRow) {
+    const action = row.action;
+    if (!action) return null;
+    switch (action.kind) {
+      case "inspect-session":
+        return (
+          <button className="icon-button ghost small" onClick={() => onInspectSession(action.sessionId)} title="Inspect live session" aria-label={`Inspect ${row.title}`}>
+            <Terminal size={14} />
+          </button>
+        );
+      case "open-pr":
+        return (
+          <a className="icon-button ghost small" href={action.url} target="_blank" rel="noreferrer" title="Open pull request or artifact" aria-label={`Open ${row.title}`}>
+            <GitPullRequest size={14} />
+          </a>
+        );
+      case "cancel-session":
+        return (
+          <button className="icon-button danger small" disabled={busyAction === row.id} onClick={() => run(row.id, () => onCancelSession(action.workerId))} title="Cancel worker" aria-label={`Cancel ${row.title}`}>
+            <CircleStop size={14} />
+          </button>
+        );
+      case "cancel-work-item":
+        return (
+          <button className="icon-button danger small" disabled={busyAction === row.id} onClick={() => run(row.id, () => onCancelWorkItem(taskId, action.workItemId))} title="Cancel work item" aria-label={`Cancel ${row.title}`}>
+            <CircleStop size={14} />
+          </button>
+        );
+    }
+  }
+
+  return (
+    <section className="manager-section assignments-panel" aria-label="Assignments">
+      <div className="manager-section-title">
+        <div>
+          <span>Assignments</span>
+          <strong>{rows.length} active signals</strong>
+        </div>
+        {pendingCount > 0 && <span className="pill">{pendingCount} need attention</span>}
+      </div>
+      {approvals.length > 0 && <ApprovalPanel taskId={taskId} approvals={approvals} onAnswer={onAnswerQuestion} onDone={onDone} onError={onError} />}
+      {rows.length === 0 ? (
+        <p className="empty">No assignments, sessions, pull requests, questions, or artifacts are attached yet.</p>
+      ) : (
+        <div className="assignment-list">
+          {rows.slice(0, 18).map((row) => (
+            <article key={row.id} className={`assignment-row ${row.tone}`}>
+              <div className="assignment-kind">{assignmentKindLabel(row.kind)}</div>
+              <div className="assignment-main">
+                <div className="assignment-title-line">
+                  <strong>{row.title}</strong>
+                  <Status value={row.status} />
+                </div>
+                <small>{row.subtitle}</small>
+                {row.currentAction && <p>{row.currentAction}</p>}
+              </div>
+              <div className="assignment-context">
+                {row.owner && <span>{row.owner}</span>}
+                {row.model && <span>{row.model}</span>}
+                {row.projectContext && <span>{row.projectContext}</span>}
+                {row.prContext && <span>{row.prContext}</span>}
+                {row.updatedAt && <time>{new Date(row.updatedAt).toLocaleTimeString()}</time>}
+              </div>
+              <div className="assignment-actions">{renderAction(row)}</div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LiveSessionPanel({
+  session,
+  worker,
+  node,
+  events,
+  onSteer,
+  onError,
+}: {
+  session: Session | undefined;
+  worker: Worker | undefined;
+  node: ExecutionNode | undefined;
+  events: EventRecord[];
+  onSteer: (id: string, message: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  if (!session) {
+    return (
+      <section className="manager-section live-session-panel empty-session" aria-label="Agent session details">
+        <div className="manager-section-title">
+          <div>
+            <span>Agent Session</span>
+            <strong>No active session selected</strong>
+          </div>
+        </div>
+        <p className="empty">Inspect an Agent Session assignment to see its live terminal context.</p>
+      </section>
+    );
+  }
+  const activeSession = session;
+  const latestEvent = latestWorkerProgressEvent(events) ?? latestInspectableWorkerEvent(events);
+  const completion = latestWorkerCompletion(events, activeSession.workerId);
+  const changedFiles = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
+  const command = worker?.command?.join(" ") || metadataString(activeSession.metadata, "command") || metadataString(worker?.metadata, "command");
+  const branch = metadataString(activeSession.metadata, "branch") || metadataString(worker?.metadata, "branch");
+  const latestOutput = activeSession.currentAction || (latestEvent ? eventDisplayText(latestEvent) : "");
+  const location = activeSession.workspaceCwd || activeSession.remoteWorkDir || activeSession.workspaceRoot || node?.remoteWorkDir || "";
+  const scratch = activeSession.sharedWorkerDir || activeSession.sharedArtifactsDir || activeSession.sharedRoot || "";
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    try {
+      await onSteer(activeSession.workerId, trimmed);
+      setMessage("");
+    } catch (err) {
+      onError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="manager-section live-session-panel" aria-label="Agent session details">
+      <div className="manager-section-title">
+        <div>
+          <span>Agent Session</span>
+          <strong>{activeSession.role ? humanizeKey(activeSession.role) : activeSession.workerKind || worker?.kind || "Worker"}</strong>
+        </div>
+        <Status value={activeSession.status} />
+      </div>
+      <div className="terminal-shell">
+        <div className="terminal-topline">
+          <span>{activeSession.remoteSession || activeSession.workerId.slice(0, 8)}</span>
+          {activeSession.targetId && <span>{activeSession.targetKind ? `${humanizeKey(activeSession.targetKind)} ` : ""}{activeSession.targetId}</span>}
+          {branch && <span>{branch}</span>}
+        </div>
+        <dl className="terminal-facts">
+          {command && <TerminalFact label="Command" value={command} />}
+          {location && <TerminalFact label="Worktree" value={location} />}
+          {scratch && <TerminalFact label="Scratch" value={scratch} />}
+          {activeSession.remoteRunDir && <TerminalFact label="Run dir" value={activeSession.remoteRunDir} />}
+          {activeSession.currentActionLabel && <TerminalFact label="Action" value={activeSession.currentActionLabel} />}
+        </dl>
+        {latestOutput ? (
+          <pre className="terminal-output">{latestOutput}</pre>
+        ) : (
+          <p className="terminal-empty">No live output has been reported yet.</p>
+        )}
+        {changedFiles.length > 0 && (
+          <div className="terminal-files">
+            <span>{changedFiles.length} changed files</span>
+            {changedFiles.slice(0, 6).map((file) => (
+              <code key={`${file.status ?? "changed"}-${file.path}`}>{file.status ?? "changed"} {file.path}</code>
+            ))}
+          </div>
+        )}
+      </div>
+      {!isTerminalWorkerStatus(activeSession.status) && (
+        <form className="session-steer manager-session-steer" onSubmit={submit}>
+          <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this exact session..." required />
+          <button className="icon-button" disabled={busy || !message.trim()} title="Send session steering">
+            <Send size={16} />
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function TerminalFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function ManagerPullRequestSummary({ pullRequests, feedback, artifacts }: { pullRequests: PullRequestState[]; feedback: PullRequestFeedback[]; artifacts: Artifact[] }) {
+  const pendingFeedback = feedback.filter((item) => item.status === "pending");
+  return (
+    <section className="manager-section manager-pr-summary">
+      <div className="manager-section-title">
+        <div>
+          <span>Pull Requests</span>
+          <strong>{pullRequests.length} tracked · {pendingFeedback.length} feedback</strong>
+        </div>
+      </div>
+      {pullRequests.length === 0 && artifacts.length === 0 && pendingFeedback.length === 0 ? (
+        <p className="empty">No pull request output is available yet.</p>
+      ) : (
+        <div className="manager-pr-grid">
+          {pullRequests.slice(0, 4).map((pr) => (
+            <a key={pr.id} className="manager-pr-card" href={pr.url} target="_blank" rel="noreferrer">
+              <strong>{pr.repo}{pr.number ? `#${pr.number}` : ""}</strong>
+              <span>{pr.title}</span>
+              <small>{[pr.state, pr.checksStatus, pr.reviewStatus, pr.mergeStatus].filter(Boolean).join(" · ")}</small>
+            </a>
+          ))}
+          {artifacts.slice(0, 4).map((artifact) => (
+            artifact.url ? (
+              <a key={artifact.id || artifact.url} className="manager-pr-card" href={artifact.url} target="_blank" rel="noreferrer">
+                <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
+                <span>{artifact.url}</span>
+                <small>{humanizeKey(artifact.kind)}</small>
+              </a>
+            ) : (
+              <div key={artifact.id || artifact.ref} className="manager-pr-card">
+                <strong>{artifact.name || artifact.ref || humanizeKey(artifact.kind)}</strong>
+                <span>{artifact.ref}</span>
+                <small>{humanizeKey(artifact.kind)}</small>
+              </div>
+            )
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ObjectiveBrief({
+  task,
+  artifacts,
+  memoryEntries,
+  sessions,
+  attentionItems,
+  taskError,
+  currentLoopPrompt,
+  hasCustomLoopPrompt,
+  durableLoop,
+}: {
+  task: Task;
+  artifacts: Artifact[];
+  memoryEntries: MemoryEntry[];
+  sessions: Session[];
+  attentionItems: TaskAttentionItem[];
+  taskError: string;
+  currentLoopPrompt: string;
+  hasCustomLoopPrompt: boolean;
+  durableLoop: boolean;
+}) {
+  return (
+    <section className="manager-section objective-brief">
+      <div className="manager-section-title">
+        <div>
+          <span>Objective Brief</span>
+          <strong>{task.objectivePhase ? humanizeKey(task.objectivePhase) : humanizeKey(task.status)}</strong>
+        </div>
+      </div>
+      <details className="task-prompt-block" open={task.prompt.length < 520 && !hasCustomLoopPrompt}>
+        <summary>
+          <span>{durableLoop ? "Task prompts" : "Task request"}</span>
+          <small>{task.prompt.length.toLocaleString()} chars</small>
+        </summary>
+        <div className="task-prompt-content">
+          <small>{durableLoop ? "Original prompt" : "Prompt"}</small>
+          <p>{task.prompt}</p>
+          {hasCustomLoopPrompt && (
+            <>
+              <small>Current loop prompt</small>
+              <p>{currentLoopPrompt}</p>
+            </>
+          )}
+        </div>
+      </details>
+      <TaskAttentionPanel items={attentionItems} />
+      {(artifacts.length || task.milestones?.length) && <TaskObjectiveStrip task={task} artifacts={artifacts} />}
+      <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
+      <SharedScratchPanel sessions={sessions} />
+      {taskError && (
+        <div className="task-failure">
+          <strong>Failure details</strong>
+          <TruncatedBlock label="Error" value={taskError} className="tool-output failed" limit={1600} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function selectedLiveSession(sessions: Session[], selectedSessionId: string): Session | undefined {
+  const sorted = [...sessions].sort((left, right) => Date.parse(right.updatedAt || right.startedAt || right.createdAt) - Date.parse(left.updatedAt || left.startedAt || left.createdAt));
+  return sorted.find((session) => session.id === selectedSessionId)
+    ?? sorted.find((session) => !isTerminalWorkerStatus(session.status))
+    ?? sorted[0];
+}
+
+function assignmentRank(row: AssignmentRow): number {
+  const toneRank = row.tone === "danger" ? 0 : row.tone === "warning" ? 1 : row.tone === "info" ? 2 : 3;
+  const kindRank: Record<AssignmentKind, number> = {
+    question: 0,
+    feedback: 1,
+    session: 2,
+    work: 3,
+    pull_request: 4,
+    artifact: 5,
+    debug: 6,
+  };
+  return toneRank * 10 + kindRank[row.kind];
+}
+
+function assignmentKindLabel(kind: AssignmentKind): string {
+  switch (kind) {
+    case "pull_request":
+      return "Pull Request";
+    case "session":
+      return "Agent Session";
+    case "work":
+      return "Assignment";
+    case "debug":
+      return "Debug";
+    default:
+      return humanizeKey(kind);
+  }
+}
+
+function toneForStatus(status: string): AttentionTone {
+  const normalized = status.toLowerCase();
+  if (normalized === "failed" || normalized === "canceled" || normalized === "abandoned" || normalized.includes("failure")) return "danger";
+  if (normalized === "waiting" || normalized === "waiting_user" || normalized === "pending" || normalized === "queued") return "warning";
+  if (normalized === "succeeded" || normalized === "satisfied" || normalized === "available" || normalized === "closed") return "good";
+  return "info";
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string {
+  if (!metadata) return "";
+  const value = metadata[key];
+  if (Array.isArray(value)) return value.map(String).join(" ");
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function prContextFromParts(repo?: string, number?: number, branch?: string): string {
+  if (repo && number) return `${repo}#${number}`;
+  return [repo, branch].filter(Boolean).join(" · ");
 }
 
 function taskAttentionItems({
@@ -2624,7 +3214,7 @@ function SessionQueue({
   );
 }
 
-type ApprovalState = {
+export type ApprovalState = {
   id: string;
   at: string;
   question: string;
@@ -6498,8 +7088,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+const rootElement = typeof document !== "undefined" ? document.getElementById("root") : null;
+if (rootElement) {
+  createRoot(rootElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+}
