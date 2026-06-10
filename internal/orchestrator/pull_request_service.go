@@ -2114,6 +2114,7 @@ func pullRequestFollowUpWorkItem(snapshot core.Snapshot, taskID string, prID str
 
 func (s *Service) recordPullRequestFollowUpWorkItem(ctx context.Context, pr core.PullRequest, prompt string, feedbackSignature string) error {
 	workerKind := s.pullRequestFollowUpWorkerKind()
+	workItemID := pullRequestFollowUpWorkItemID(pr, feedbackSignature)
 	metadata := map[string]any{
 		"backgroundPullRequestFollowUp": true,
 		"executeActionsOnSuccess":       true,
@@ -2132,10 +2133,11 @@ func (s *Service) recordPullRequestFollowUpWorkItem(ctx context.Context, pr core
 		"spawnRole":                     "github_pr_followup",
 		"spawnReason":                   "Handle queued GitHub pull request feedback in parallel with objective work.",
 		"planActions": []PlanAction{{
-			Kind:   "update_pull_request",
-			When:   "after_success",
-			Reason: "Apply successful follow-up worker changes to the existing pull request.",
-			Inputs: pullRequestUpdateInputs(pr),
+			Kind:     "update_pull_request",
+			When:     "after_success",
+			Reason:   "Apply successful follow-up worker changes to the existing pull request.",
+			WorkerID: workItemID,
+			Inputs:   pullRequestUpdateInputs(pr),
 		}, {
 			Kind:   "watch_pull_requests",
 			When:   "after_success",
@@ -2144,7 +2146,7 @@ func (s *Service) recordPullRequestFollowUpWorkItem(ctx context.Context, pr core
 		}},
 	}
 	return s.recordWorkItemQueued(ctx, pr.TaskID, map[string]any{
-		"id":         pullRequestFollowUpWorkItemID(pr, feedbackSignature),
+		"id":         workItemID,
 		"kind":       "pr.followup",
 		"targetKind": "pull_request",
 		"targetId":   pr.ID,

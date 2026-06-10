@@ -627,6 +627,81 @@ func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRu
 	}
 	if item, ok := pullRequestFollowUpWorkItemByTarget(snapshot, "task-1", "pr-1"); !ok || item.Status != core.WorkItemSucceeded {
 		t.Fatalf("work item = %+v, ok=%v; want succeeded", item, ok)
+	} else {
+		var metadata struct {
+			PlanActions []PlanAction `json:"planActions"`
+		}
+		if err := json.Unmarshal(item.Metadata, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if len(metadata.PlanActions) == 0 || metadata.PlanActions[0].Kind != "update_pull_request" {
+			t.Fatalf("work item plan actions = %+v, want update_pull_request first", metadata.PlanActions)
+		}
+		if metadata.PlanActions[0].WorkerID != item.ID {
+			t.Fatalf("update_pull_request worker id = %q, want work item id %q", metadata.PlanActions[0].WorkerID, item.ID)
+		}
+	}
+}
+
+func TestServicePullRequestMonitorBackgroundFollowUpUpdatesExistingPullRequest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	metadata := core.MustJSON(map[string]any{
+		"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+		"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+		"latestPullRequestFeedbackBody":               "Please address the review.",
+	})
+	publisher := &fakePullRequestPublisher{status: monitoredPullRequestStatusWithMetadata("success", "CLEAN", "COMMENTED", metadata)}
+	service := newTestPullRequestMonitorServiceWithWorkspace(t, store, publisher, fakeWorkspaceManager{
+		cwd: t.TempDir(),
+		changes: WorkspaceChanges{
+			Dirty: true,
+			Diff:  "diff --git a/web/src/main.tsx b/web/src/main.tsx\n",
+			ChangedFiles: []WorkspaceChangedFile{{
+				Path:   "web/src/main.tsx",
+				Status: "modified",
+			}},
+		},
+	})
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+	appendActiveWorker(t, ctx, store, "task-1", "objective-worker")
+
+	if err := service.MonitorPullRequestsOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		return publisher.updateCalls == 1 &&
+			eventPayloadContains(snapshot.Events, core.EventTaskAction, "task-1", `"kind":"update_pull_request"`)
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("background follow-up did not update PR; updateCalls=%d events=%+v workItems=%+v", publisher.updateCalls, snapshot.Events, snapshot.WorkItems)
+	})
+	item, ok := pullRequestFollowUpWorkItemByTarget(snapshot, "task-1", "pr-1")
+	if !ok {
+		t.Fatal("missing pull request follow-up work item")
+	}
+	if item.Status != core.WorkItemSucceeded {
+		t.Fatalf("work item status = %q, want succeeded; item = %+v", item.Status, item)
+	}
+	if publisher.updatedPR.ID != "pr-1" {
+		t.Fatalf("updated PR id = %q, want pr-1", publisher.updatedPR.ID)
+	}
+	if publisher.updated.WorkerID == "" {
+		t.Fatalf("missing update worker id: %+v", publisher.updated)
+	}
+	if publisher.updated.WorkerID != item.WorkerID {
+		t.Fatalf("update worker id = %q, want work item worker %q", publisher.updated.WorkerID, item.WorkerID)
+	}
+	if publisher.updated.Branch != "codex/aged-test" {
+		t.Fatalf("update branch = %q, want codex/aged-test", publisher.updated.Branch)
+	}
+	if !eventPayloadContains(snapshot.Events, core.EventTaskAction, "task-1", `"workerId":"`+publisher.updated.WorkerID+`"`) {
+		t.Fatalf("missing update action worker id %q in events", publisher.updated.WorkerID)
+	}
+	if !workerActive(snapshot, "objective-worker") {
+		t.Fatalf("objective worker was not left active; workers = %+v", snapshot.Workers)
 	}
 }
 
@@ -1280,9 +1355,17 @@ func (p *mergeTrackingPullRequestPublisher) Merge(_ context.Context, pr core.Pul
 
 func newTestPullRequestMonitorService(t *testing.T, store *eventstore.SQLiteStore, publisher PullRequestPublisher) *Service {
 	t.Helper()
+	return newTestPullRequestMonitorServiceWithWorkspace(t, store, publisher, fakeWorkspaceManager{cwd: t.TempDir()})
+}
+
+func newTestPullRequestMonitorServiceWithWorkspace(t *testing.T, store *eventstore.SQLiteStore, publisher PullRequestPublisher, workspace fakeWorkspaceManager) *Service {
+	t.Helper()
+	if workspace.cwd == "" {
+		workspace.cwd = t.TempDir()
+	}
 	service := NewServiceWithWorkspaceManager(store, fixedBrain{plan: testWorkItemPlan("mock", "continue")}, map[string]worker.Runner{
 		"mock": eventRunner{kind: "mock", events: []worker.Event{{Kind: worker.EventResult, Text: "ready"}}},
-	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	}, t.TempDir(), workspace)
 	service.SetPullRequestPublisher(publisher)
 	return service
 }
