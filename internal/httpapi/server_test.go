@@ -305,6 +305,14 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	if len(snapshot.Steering) != 1 || snapshot.Steering[0].TaskID != "active" || snapshot.Steering[0].Message != "Active steering." {
 		t.Fatalf("card steering = %+v, want active steering only", snapshot.Steering)
 	}
+	activeSummary := managerSummaryByTask(snapshot.ManagerSummary, "active")
+	if activeSummary.TaskID == "" || activeSummary.PendingApprovals != 1 || activeSummary.PendingFeedback != 1 || activeSummary.AttentionCount < 2 {
+		t.Fatalf("active manager summary = %+v, want pending approval and feedback attention", activeSummary)
+	}
+	doneSummary := managerSummaryByTask(snapshot.ManagerSummary, "done")
+	if doneSummary.TaskID == "" || doneSummary.Artifacts != 1 {
+		t.Fatalf("terminal manager summary = %+v, want compact summary without terminal detail payloads", doneSummary)
+	}
 
 	taskRes, err := http.Get(server.URL + "/api/tasks/done")
 	if err != nil {
@@ -341,6 +349,9 @@ func TestSnapshotTaskCardsKeepTerminalRowsWithoutTerminalDetails(t *testing.T) {
 	}
 	if len(taskSnapshot.Steering) != 1 || taskSnapshot.Steering[0].TaskID != "done" || taskSnapshot.Steering[0].Message != "Done steering." {
 		t.Fatalf("task snapshot steering = %+v", taskSnapshot.Steering)
+	}
+	if len(taskSnapshot.ManagerSummary) != 1 || taskSnapshot.ManagerSummary[0].TaskID != "done" || taskSnapshot.ManagerSummary[0].PendingFeedback != 1 || taskSnapshot.ManagerSummary[0].PendingApprovals != 1 {
+		t.Fatalf("task scoped manager summary = %+v, want only done summary", taskSnapshot.ManagerSummary)
 	}
 }
 
@@ -2103,6 +2114,15 @@ func taskByID(tasks []core.Task, id string) core.Task {
 		}
 	}
 	return core.Task{}
+}
+
+func managerSummaryByTask(summaries []core.ManagerSummary, taskID string) core.ManagerSummary {
+	for _, summary := range summaries {
+		if summary.TaskID == taskID {
+			return summary
+		}
+	}
+	return core.ManagerSummary{}
 }
 
 func hasHTTPAssignmentSourceKind(rows []core.TaskAssignment, sourceKind string) bool {

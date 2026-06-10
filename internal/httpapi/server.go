@@ -142,6 +142,7 @@ func taskScopedSnapshot(snapshot core.Snapshot, taskID string) (core.Snapshot, b
 	snapshot.PullRequests = filterTaskScoped(snapshot.PullRequests, keptTasks, func(pr core.PullRequest) string { return pr.TaskID })
 	snapshot.PullRequestFeedback = filterTaskScoped(snapshot.PullRequestFeedback, keptTasks, func(feedback core.PullRequestFeedback) string { return feedback.TaskID })
 	snapshot.Steering = filterTaskScoped(snapshot.Steering, keptTasks, func(item core.SteeringItem) string { return item.TaskID })
+	snapshot.ManagerSummary = filterTaskScoped(snapshot.ManagerSummary, keptTasks, func(summary core.ManagerSummary) string { return summary.TaskID })
 	snapshot.Events = filterTaskScoped(snapshot.Events, keptTasks, func(event core.Event) string { return event.TaskID })
 	return snapshot, true
 }

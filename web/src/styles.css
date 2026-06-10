@@ -934,6 +934,16 @@ button:disabled {
   white-space: normal;
 }
 
+.task-row-latest {
+  display: -webkit-box;
+  line-height: 1.25;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
 small {
   color: #767b84;
 }
@@ -955,11 +965,24 @@ small {
 }
 
 .pill.ok,
+.pill.attention,
 .status.succeeded,
 .status.satisfied {
   background: #e7f4ea;
   border-color: #9bc7a6;
   color: #1d6b34;
+}
+
+.pill.attention {
+  background: var(--warning-soft);
+  border-color: #dfbd57;
+  color: #7a4e00;
+}
+
+.pill.attention.danger {
+  background: var(--danger-soft);
+  border-color: #d98781;
+  color: #8c2922;
 }
 
 .status.running,
