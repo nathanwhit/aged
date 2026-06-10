@@ -1323,6 +1323,89 @@ func (s *SQLiteStore) taskCardsFromReadModel(ctx context.Context) (core.Snapshot
 	return state.taskCardsSnapshot(lastEventID), nil
 }
 
+func (s *SQLiteStore) taskAssignmentsFromReadModel(ctx context.Context, taskID string) (core.Snapshot, error) {
+	lastEventID, err := s.ensureReadModelCurrent(ctx)
+	if err != nil {
+		return core.Snapshot{}, err
+	}
+	state := newReadModelState()
+	if err := loadProjectionTask(ctx, s.db, state.Tasks, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadClearedTask(ctx, s.db, state.ClearedTasks, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if state.ClearedTasks[taskID] || state.Tasks[taskID].ID == "" {
+		return core.Snapshot{LastEventID: lastEventID, Events: snapshotResponseEvents(nil, false)}, nil
+	}
+	if err := loadProjectionWorkersForTask(ctx, s.db, state.Workers, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionExecutionNodesForTask(ctx, s.db, state.Nodes, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	for _, node := range state.Nodes {
+		if node.WorkerID != "" {
+			state.WorkerNodes[node.WorkerID] = node.ID
+		}
+	}
+	if err := loadProjectionWorkItemsForTask(ctx, s.db, state.WorkItems, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionArtifactsForTask(ctx, s.db, state.Artifacts, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	mergeArtifactsFromTasks(state.Artifacts, state.Tasks)
+	if err := loadProjectionQuestionsForTask(ctx, s.db, state.Questions, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionSessionsForTask(ctx, s.db, state.Sessions, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionPullRequestsForTask(ctx, s.db, state.PullRequests, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionPullRequestFeedbackForTask(ctx, s.db, state.PullRequestFeedback, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := loadProjectionSteeringForTask(ctx, s.db, state.Steering, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	if err := applyWorkerOutputWatermarksForTask(ctx, s.db, &state, taskID); err != nil {
+		return core.Snapshot{}, err
+	}
+	return state.snapshot(lastEventID, nil, false), nil
+}
+
+func (s *SQLiteStore) ensureReadModelCurrent(ctx context.Context) (int64, error) {
+	var lastEventID int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT last_event_id
+FROM projection_meta
+WHERE id = 1`).Scan(&lastEventID)
+	ok := true
+	if errorsIsNoRows(err) {
+		ok = false
+	} else if err != nil {
+		return 0, err
+	}
+	latestEventID, err := s.latestEventID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if ok && lastEventID == latestEventID {
+		return lastEventID, nil
+	}
+	if !ok && latestEventID == 0 {
+		return 0, nil
+	}
+	_, lastEventID, err = s.catchUpReadModel(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return lastEventID, nil
+}
+
 func (s *SQLiteStore) loadCurrentReadModel(ctx context.Context) (readModelState, int64, bool, error) {
 	state, lastEventID, ok, err := loadProjectionReadModel(ctx, s.db)
 	if err != nil {
@@ -1543,70 +1626,97 @@ FROM task_read_models`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var task core.Task
-		var status string
-		var objectiveStatus string
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		var milestones string
-		var workPlan string
-		var artifacts string
-		if err := rows.Scan(
-			&task.ID,
-			&task.ProjectID,
-			&task.WorkstreamID,
-			&task.Title,
-			&task.Prompt,
-			&status,
-			&task.Error,
-			&objectiveStatus,
-			&task.ObjectivePhase,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-			&task.AppliedWorkerID,
-			&milestones,
-			&workPlan,
-			&artifacts,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		task, err := scanProjectionTask(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		if milestones != "" {
-			if err := json.Unmarshal([]byte(milestones), &task.Milestones); err != nil {
-				return err
-			}
-		}
-		if workPlan != "" {
-			var plan core.WorkPlan
-			if err := json.Unmarshal([]byte(workPlan), &plan); err != nil {
-				return err
-			}
-			task.WorkPlan = &plan
-		}
-		if artifacts != "" {
-			if err := json.Unmarshal([]byte(artifacts), &task.Artifacts); err != nil {
-				return err
-			}
-		}
-		task.Status = core.TaskStatus(status)
-		task.ObjectiveStatus = core.ObjectiveStatus(objectiveStatus)
-		task.CreatedAt = createdAt
-		task.UpdatedAt = updatedAt
-		if metadata != "" {
-			task.Metadata = json.RawMessage(metadata)
 		}
 		out[task.ID] = task
 	}
 	return rows.Err()
+}
+
+func loadProjectionTask(ctx context.Context, q projectionQuerier, out map[string]core.Task, taskID string) error {
+	row := q.QueryRowContext(ctx, `
+SELECT id, project_id, workstream_id, title, prompt, status, error, objective_status, objective_phase,
+	created_at, updated_at, metadata, applied_worker_id, milestones, work_plan, artifacts
+FROM task_read_models
+WHERE id = ?`, taskID)
+	task, err := scanProjectionTask(row)
+	if errorsIsNoRows(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	out[task.ID] = task
+	return nil
+}
+
+func scanProjectionTask(row interface {
+	Scan(dest ...any) error
+}) (core.Task, error) {
+	var task core.Task
+	var status string
+	var objectiveStatus string
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	var milestones string
+	var workPlan string
+	var artifacts string
+	if err := row.Scan(
+		&task.ID,
+		&task.ProjectID,
+		&task.WorkstreamID,
+		&task.Title,
+		&task.Prompt,
+		&status,
+		&task.Error,
+		&objectiveStatus,
+		&task.ObjectivePhase,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+		&task.AppliedWorkerID,
+		&milestones,
+		&workPlan,
+		&artifacts,
+	); err != nil {
+		return core.Task{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.Task{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.Task{}, err
+	}
+	if milestones != "" {
+		if err := json.Unmarshal([]byte(milestones), &task.Milestones); err != nil {
+			return core.Task{}, err
+		}
+	}
+	if workPlan != "" {
+		var plan core.WorkPlan
+		if err := json.Unmarshal([]byte(workPlan), &plan); err != nil {
+			return core.Task{}, err
+		}
+		task.WorkPlan = &plan
+	}
+	if artifacts != "" {
+		if err := json.Unmarshal([]byte(artifacts), &task.Artifacts); err != nil {
+			return core.Task{}, err
+		}
+	}
+	task.Status = core.TaskStatus(status)
+	task.ObjectiveStatus = core.ObjectiveStatus(objectiveStatus)
+	task.CreatedAt = createdAt
+	task.UpdatedAt = updatedAt
+	if metadata != "" {
+		task.Metadata = json.RawMessage(metadata)
+	}
+	return task, nil
 }
 
 func loadProjectionWorkers(ctx context.Context, q projectionQuerier, out map[string]core.Worker) error {
@@ -1618,49 +1728,78 @@ FROM worker_read_models`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var worker core.Worker
-		var status string
-		var command string
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		if err := rows.Scan(
-			&worker.ID,
-			&worker.TaskID,
-			&worker.Kind,
-			&status,
-			&command,
-			&worker.Prompt,
-			&worker.PromptPath,
-			&worker.PromptError,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		worker, err := scanProjectionWorker(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		if command != "" {
-			if err := json.Unmarshal([]byte(command), &worker.Command); err != nil {
-				return err
-			}
-		}
-		worker.Status = core.WorkerStatus(status)
-		worker.CreatedAt = createdAt
-		worker.UpdatedAt = updatedAt
-		if metadata != "" {
-			worker.Metadata = json.RawMessage(metadata)
 		}
 		out[worker.ID] = worker
 	}
 	return rows.Err()
+}
+
+func loadProjectionWorkersForTask(ctx context.Context, q projectionQuerier, out map[string]core.Worker, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, kind, status, command, prompt, prompt_path, prompt_error, created_at, updated_at, metadata
+FROM worker_read_models
+WHERE task_id = ?`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		worker, err := scanProjectionWorker(rows)
+		if err != nil {
+			return err
+		}
+		out[worker.ID] = worker
+	}
+	return rows.Err()
+}
+
+func scanProjectionWorker(row interface {
+	Scan(dest ...any) error
+}) (core.Worker, error) {
+	var worker core.Worker
+	var status string
+	var command string
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	if err := row.Scan(
+		&worker.ID,
+		&worker.TaskID,
+		&worker.Kind,
+		&status,
+		&command,
+		&worker.Prompt,
+		&worker.PromptPath,
+		&worker.PromptError,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+	); err != nil {
+		return core.Worker{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.Worker{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.Worker{}, err
+	}
+	if command != "" {
+		if err := json.Unmarshal([]byte(command), &worker.Command); err != nil {
+			return core.Worker{}, err
+		}
+	}
+	worker.Status = core.WorkerStatus(status)
+	worker.CreatedAt = createdAt
+	worker.UpdatedAt = updatedAt
+	if metadata != "" {
+		worker.Metadata = json.RawMessage(metadata)
+	}
+	return worker, nil
 }
 
 func loadActiveProjectionWorkers(ctx context.Context, q projectionQuerier, out map[string]core.Worker) error {
@@ -1714,57 +1853,88 @@ FROM execution_node_read_models`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var node core.ExecutionNode
-		var status string
-		var dependsOn string
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		if err := rows.Scan(
-			&node.ID,
-			&node.TaskID,
-			&node.WorkerID,
-			&node.WorkerKind,
-			&status,
-			&node.PlanID,
-			&node.ParentNodeID,
-			&node.SpawnID,
-			&node.Role,
-			&node.Reason,
-			&node.TargetID,
-			&node.TargetKind,
-			&node.RemoteSession,
-			&node.RemoteRunDir,
-			&node.RemoteWorkDir,
-			&dependsOn,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		node, err := scanProjectionExecutionNode(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		if dependsOn != "" {
-			if err := json.Unmarshal([]byte(dependsOn), &node.DependsOn); err != nil {
-				return err
-			}
-		}
-		node.Status = core.WorkerStatus(status)
-		node.CreatedAt = createdAt
-		node.UpdatedAt = updatedAt
-		if metadata != "" {
-			node.Metadata = json.RawMessage(metadata)
 		}
 		out[node.ID] = node
 	}
 	return rows.Err()
+}
+
+func loadProjectionExecutionNodesForTask(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, worker_kind, status, plan_id, parent_node_id, spawn_id, role,
+	reason, target_id, target_kind, remote_session, remote_run_dir, remote_work_dir, depends_on,
+	created_at, updated_at, metadata
+FROM execution_node_read_models
+WHERE task_id = ?`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		node, err := scanProjectionExecutionNode(rows)
+		if err != nil {
+			return err
+		}
+		out[node.ID] = node
+	}
+	return rows.Err()
+}
+
+func scanProjectionExecutionNode(row interface {
+	Scan(dest ...any) error
+}) (core.ExecutionNode, error) {
+	var node core.ExecutionNode
+	var status string
+	var dependsOn string
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	if err := row.Scan(
+		&node.ID,
+		&node.TaskID,
+		&node.WorkerID,
+		&node.WorkerKind,
+		&status,
+		&node.PlanID,
+		&node.ParentNodeID,
+		&node.SpawnID,
+		&node.Role,
+		&node.Reason,
+		&node.TargetID,
+		&node.TargetKind,
+		&node.RemoteSession,
+		&node.RemoteRunDir,
+		&node.RemoteWorkDir,
+		&dependsOn,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+	); err != nil {
+		return core.ExecutionNode{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.ExecutionNode{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.ExecutionNode{}, err
+	}
+	if dependsOn != "" {
+		if err := json.Unmarshal([]byte(dependsOn), &node.DependsOn); err != nil {
+			return core.ExecutionNode{}, err
+		}
+	}
+	node.Status = core.WorkerStatus(status)
+	node.CreatedAt = createdAt
+	node.UpdatedAt = updatedAt
+	if metadata != "" {
+		node.Metadata = json.RawMessage(metadata)
+	}
+	return node, nil
 }
 
 func loadActiveProjectionExecutionNodes(ctx context.Context, q projectionQuerier, out map[string]core.ExecutionNode) error {
@@ -1828,56 +1998,85 @@ FROM work_item_read_models`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var item core.WorkItem
-		var status string
-		var leaseUntilRaw string
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		if err := rows.Scan(
-			&item.ID,
-			&item.TaskID,
-			&item.Kind,
-			&status,
-			&item.TargetKind,
-			&item.TargetID,
-			&item.Reason,
-			&item.Prompt,
-			&item.WorkerID,
-			&item.LeaseOwner,
-			&leaseUntilRaw,
-			&item.Attempt,
-			&item.Error,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		item, err := scanProjectionWorkItem(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		item.Status = core.WorkItemStatus(status)
-		if strings.TrimSpace(leaseUntilRaw) != "" {
-			leaseUntil, err := parseReadModelTime(leaseUntilRaw)
-			if err != nil {
-				return err
-			}
-			item.LeaseUntil = &leaseUntil
-		}
-		item.CreatedAt = createdAt
-		item.UpdatedAt = updatedAt
-		if metadata != "" {
-			item.Metadata = json.RawMessage(metadata)
 		}
 		out[item.ID] = item
 	}
 	return rows.Err()
+}
+
+func loadProjectionWorkItemsForTask(ctx context.Context, q projectionQuerier, out map[string]core.WorkItem, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, kind, status, target_kind, target_id, reason, prompt, worker_id, lease_owner, lease_until, attempt, error, created_at, updated_at, metadata
+FROM work_item_read_models
+WHERE task_id = ?`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanProjectionWorkItem(rows)
+		if err != nil {
+			return err
+		}
+		out[item.ID] = item
+	}
+	return rows.Err()
+}
+
+func scanProjectionWorkItem(row interface {
+	Scan(dest ...any) error
+}) (core.WorkItem, error) {
+	var item core.WorkItem
+	var status string
+	var leaseUntilRaw string
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	if err := row.Scan(
+		&item.ID,
+		&item.TaskID,
+		&item.Kind,
+		&status,
+		&item.TargetKind,
+		&item.TargetID,
+		&item.Reason,
+		&item.Prompt,
+		&item.WorkerID,
+		&item.LeaseOwner,
+		&leaseUntilRaw,
+		&item.Attempt,
+		&item.Error,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+	); err != nil {
+		return core.WorkItem{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.WorkItem{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.WorkItem{}, err
+	}
+	item.Status = core.WorkItemStatus(status)
+	if strings.TrimSpace(leaseUntilRaw) != "" {
+		leaseUntil, err := parseReadModelTime(leaseUntilRaw)
+		if err != nil {
+			return core.WorkItem{}, err
+		}
+		item.LeaseUntil = &leaseUntil
+	}
+	item.CreatedAt = createdAt
+	item.UpdatedAt = updatedAt
+	if metadata != "" {
+		item.Metadata = json.RawMessage(metadata)
+	}
+	return item, nil
 }
 
 func loadActiveProjectionWorkItems(ctx context.Context, q projectionQuerier, out map[string]core.WorkItem) error {
@@ -1939,6 +2138,25 @@ func loadProjectionArtifacts(ctx context.Context, q projectionQuerier, out map[s
 	return loadArtifactsFromTable(ctx, q, `artifact_read_models`, out)
 }
 
+func loadProjectionArtifactsForTask(ctx context.Context, q projectionQuerier, out map[string]core.Artifact, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, kind, name, url, ref, created_at, updated_at, metadata
+FROM artifact_read_models
+WHERE task_id = ?`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		artifact, err := scanProjectionArtifact(rows)
+		if err != nil {
+			return err
+		}
+		out[artifact.ID] = artifact
+	}
+	return rows.Err()
+}
+
 func loadProjectionMemoryEntries(ctx context.Context, q projectionQuerier, out map[string]core.MemoryEntry) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, project_id, task_id, kind, source_event_id, source_event, worker_id, summary, created_at, updated_at, metadata
@@ -1994,39 +2212,49 @@ FROM `+table)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var artifact core.Artifact
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		if err := rows.Scan(
-			&artifact.ID,
-			&artifact.TaskID,
-			&artifact.Kind,
-			&artifact.Name,
-			&artifact.URL,
-			&artifact.Ref,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		artifact, err := scanProjectionArtifact(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		artifact.CreatedAt = createdAt
-		artifact.UpdatedAt = updatedAt
-		if metadata != "" {
-			artifact.Metadata = json.RawMessage(metadata)
 		}
 		out[artifact.ID] = artifact
 	}
 	return rows.Err()
+}
+
+func scanProjectionArtifact(row interface {
+	Scan(dest ...any) error
+}) (core.Artifact, error) {
+	var artifact core.Artifact
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	if err := row.Scan(
+		&artifact.ID,
+		&artifact.TaskID,
+		&artifact.Kind,
+		&artifact.Name,
+		&artifact.URL,
+		&artifact.Ref,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+	); err != nil {
+		return core.Artifact{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.Artifact{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.Artifact{}, err
+	}
+	artifact.CreatedAt = createdAt
+	artifact.UpdatedAt = updatedAt
+	if metadata != "" {
+		artifact.Metadata = json.RawMessage(metadata)
+	}
+	return artifact, nil
 }
 
 func mergeArtifactsFromTasks(out map[string]core.Artifact, tasks map[string]core.Task) {
@@ -2058,6 +2286,25 @@ func loadProjectionQuestions(ctx context.Context, q projectionQuerier, out map[s
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, worker_id, reason, question, answer, decided, approved, created_at, updated_at, metadata
 FROM question_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		question, err := scanProjectionQuestion(rows, true)
+		if err != nil {
+			return err
+		}
+		out[question.ID] = question
+	}
+	return rows.Err()
+}
+
+func loadProjectionQuestionsForTask(ctx context.Context, q projectionQuerier, out map[string]core.Question, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, reason, question, answer, decided, approved, created_at, updated_at, metadata
+FROM question_read_models
+WHERE task_id = ?`, taskID)
 	if err != nil {
 		return err
 	}
@@ -2148,6 +2395,30 @@ SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, status, tar
 	created_at, started_at, updated_at,
 	completed_at, metadata
 FROM session_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		session, err := scanProjectionSession(rows)
+		if err != nil {
+			return err
+		}
+		out[session.ID] = session
+	}
+	return rows.Err()
+}
+
+func loadProjectionSessionsForTask(ctx context.Context, q projectionQuerier, out map[string]core.Session, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, status, target_id, target_kind,
+	remote_session, remote_run_dir, remote_work_dir, workspace_root, workspace_cwd, source_root,
+	workspace_name, workspace_mode, vcs_type, shared_root, shared_artifacts_dir, shared_worker_dir,
+	provider_session_id, current_action_label, current_action, current_action_at, current_action_event,
+	created_at, started_at, updated_at,
+	completed_at, metadata
+FROM session_read_models
+WHERE task_id = ?`, taskID)
 	if err != nil {
 		return err
 	}
@@ -2277,57 +2548,89 @@ FROM pull_request_read_models`)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var pr core.PullRequest
-		var draft int
-		var createdAtRaw string
-		var updatedAtRaw string
-		var metadata string
-		if err := rows.Scan(
-			&pr.ID,
-			&pr.TaskID,
-			&pr.Repo,
-			&pr.Number,
-			&pr.URL,
-			&pr.Branch,
-			&pr.Base,
-			&pr.Title,
-			&pr.State,
-			&draft,
-			&pr.ChecksStatus,
-			&pr.ChecksConclusion,
-			&pr.MergeStatus,
-			&pr.Mergeable,
-			&pr.ReviewStatus,
-			&pr.BabysitterTaskID,
-			&pr.BranchOwner,
-			&pr.BranchOwnerDir,
-			&pr.BranchHead,
-			&pr.UpdateLeaseOwner,
-			&pr.UpdateLeaseDir,
-			&pr.UpdateBaseHead,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&metadata,
-		); err != nil {
-			return err
-		}
-		createdAt, err := parseReadModelTime(createdAtRaw)
+		pr, err := scanProjectionPullRequest(rows)
 		if err != nil {
 			return err
-		}
-		updatedAt, err := parseReadModelTime(updatedAtRaw)
-		if err != nil {
-			return err
-		}
-		pr.Draft = draft != 0
-		pr.CreatedAt = createdAt
-		pr.UpdatedAt = updatedAt
-		if metadata != "" {
-			pr.Metadata = json.RawMessage(metadata)
 		}
 		out[pr.ID] = pr
 	}
 	return rows.Err()
+}
+
+func loadProjectionPullRequestsForTask(ctx context.Context, q projectionQuerier, out map[string]core.PullRequest, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, repo, number, url, branch, base, title, state, draft, checks_status,
+	checks_conclusion, merge_status, mergeable, review_status, babysitter_task_id,
+	branch_owner, branch_owner_dir, branch_head, update_lease_owner, update_lease_dir, update_base_head,
+	created_at, updated_at, metadata
+FROM pull_request_read_models
+WHERE task_id = ?`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		pr, err := scanProjectionPullRequest(rows)
+		if err != nil {
+			return err
+		}
+		out[pr.ID] = pr
+	}
+	return rows.Err()
+}
+
+func scanProjectionPullRequest(row interface {
+	Scan(dest ...any) error
+}) (core.PullRequest, error) {
+	var pr core.PullRequest
+	var draft int
+	var createdAtRaw string
+	var updatedAtRaw string
+	var metadata string
+	if err := row.Scan(
+		&pr.ID,
+		&pr.TaskID,
+		&pr.Repo,
+		&pr.Number,
+		&pr.URL,
+		&pr.Branch,
+		&pr.Base,
+		&pr.Title,
+		&pr.State,
+		&draft,
+		&pr.ChecksStatus,
+		&pr.ChecksConclusion,
+		&pr.MergeStatus,
+		&pr.Mergeable,
+		&pr.ReviewStatus,
+		&pr.BabysitterTaskID,
+		&pr.BranchOwner,
+		&pr.BranchOwnerDir,
+		&pr.BranchHead,
+		&pr.UpdateLeaseOwner,
+		&pr.UpdateLeaseDir,
+		&pr.UpdateBaseHead,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&metadata,
+	); err != nil {
+		return core.PullRequest{}, err
+	}
+	createdAt, err := parseReadModelTime(createdAtRaw)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	updatedAt, err := parseReadModelTime(updatedAtRaw)
+	if err != nil {
+		return core.PullRequest{}, err
+	}
+	pr.Draft = draft != 0
+	pr.CreatedAt = createdAt
+	pr.UpdatedAt = updatedAt
+	if metadata != "" {
+		pr.Metadata = json.RawMessage(metadata)
+	}
+	return pr, nil
 }
 
 func parseReadModelTime(value string) (time.Time, error) {
@@ -2405,12 +2708,46 @@ func loadClearedTasks(ctx context.Context, q projectionQuerier, table string, ou
 	return rows.Err()
 }
 
+func loadClearedTask(ctx context.Context, q projectionQuerier, out map[string]bool, taskID string) error {
+	var id string
+	err := q.QueryRowContext(ctx, `SELECT task_id FROM cleared_tasks WHERE task_id = ?`, taskID).Scan(&id)
+	if errorsIsNoRows(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	out[id] = true
+	return nil
+}
+
 func loadProjectionPullRequestFeedback(ctx context.Context, q projectionQuerier, out map[string]core.PullRequestFeedback) error {
 	rows, err := q.QueryContext(ctx, `
 SELECT id, task_id, pull_request_id, event_id, attempt, status, reason, repo, number, url, branch, base,
 	state, checks_status, merge_status, review_status, feedback_signature, feedback_body, prompt,
 	created_at, updated_at, handled_at, metadata
 FROM pull_request_feedback_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		feedback, err := scanProjectionPullRequestFeedback(rows)
+		if err != nil {
+			return err
+		}
+		out[feedback.ID] = feedback
+	}
+	return rows.Err()
+}
+
+func loadProjectionPullRequestFeedbackForTask(ctx context.Context, q projectionQuerier, out map[string]core.PullRequestFeedback, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, pull_request_id, event_id, attempt, status, reason, repo, number, url, branch, base,
+	state, checks_status, merge_status, review_status, feedback_signature, feedback_body, prompt,
+	created_at, updated_at, handled_at, metadata
+FROM pull_request_feedback_read_models
+WHERE task_id = ?`, taskID)
 	if err != nil {
 		return err
 	}
@@ -2507,6 +2844,26 @@ func loadProjectionSteering(ctx context.Context, q projectionQuerier, out map[st
 SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, candidate_worker_id, review_phase,
 	target_kind, target_id, status, reason, message, created_at, updated_at, applied_at, metadata
 FROM steering_read_models`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanProjectionSteering(rows)
+		if err != nil {
+			return err
+		}
+		out[item.ID] = item
+	}
+	return rows.Err()
+}
+
+func loadProjectionSteeringForTask(ctx context.Context, q projectionQuerier, out map[string]core.SteeringItem, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT id, task_id, worker_id, node_id, worker_kind, role, spawn_id, candidate_worker_id, review_phase,
+	target_kind, target_id, status, reason, message, created_at, updated_at, applied_at, metadata
+FROM steering_read_models
+WHERE task_id = ?`, taskID)
 	if err != nil {
 		return err
 	}
@@ -3551,6 +3908,46 @@ ORDER BY event_id ASC`)
 				state.Nodes[nodeID] = node
 			}
 		}
+	}
+	return rows.Err()
+}
+
+func applyWorkerOutputWatermarksForTask(ctx context.Context, q projectionQuerier, state *readModelState, taskID string) error {
+	rows, err := q.QueryContext(ctx, `
+SELECT worker_id, task_id, event_id, at
+FROM worker_output_watermarks
+WHERE task_id = ?
+ORDER BY event_id ASC`, taskID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var workerID string
+		var watermarkTaskID string
+		var eventID int64
+		var atRaw string
+		if err := rows.Scan(&workerID, &watermarkTaskID, &eventID, &atRaw); err != nil {
+			return err
+		}
+		at, err := time.Parse(time.RFC3339Nano, atRaw)
+		if err != nil {
+			continue
+		}
+		worker := state.Workers[workerID]
+		if worker.ID != "" && !isTerminalWorkerStatus(worker.Status) && at.After(worker.UpdatedAt) {
+			worker.UpdatedAt = at
+			state.Workers[workerID] = worker
+		}
+		if nodeID := state.WorkerNodes[workerID]; nodeID != "" {
+			node := state.Nodes[nodeID]
+			if node.ID != "" && !isTerminalWorkerStatus(node.Status) && at.After(node.UpdatedAt) {
+				node.UpdatedAt = at
+				state.Nodes[nodeID] = node
+			}
+		}
+		_ = eventID
+		_ = watermarkTaskID
 	}
 	return rows.Err()
 }

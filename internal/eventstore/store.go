@@ -15,6 +15,7 @@ type Store interface {
 	Snapshot(ctx context.Context) (core.Snapshot, error)
 	SnapshotSummary(ctx context.Context) (core.Snapshot, error)
 	SnapshotTaskCards(ctx context.Context) (core.Snapshot, error)
+	TaskAssignmentsSnapshot(ctx context.Context, taskID string) (core.Snapshot, error)
 	ListPlugins(ctx context.Context) ([]core.Plugin, error)
 	SavePlugin(ctx context.Context, plugin core.Plugin) (core.Plugin, error)
 	DeletePlugin(ctx context.Context, id string) error

@@ -1,7 +1,6 @@
-/// <reference lib="deno.ns" />
-import { assertEquals } from "jsr:@std/assert@^1";
-import { selectSessions, selectWorkItems } from "./assignments.ts";
-import type { Session, TaskAssignment, WorkItem } from "./types.ts";
+import { expect, it } from "vitest";
+import { selectSessions, selectWorkItems } from "./assignments";
+import type { Session, TaskAssignment, WorkItem } from "./types";
 
 const baseTimestamp = "2025-01-01T00:00:00Z";
 
@@ -32,13 +31,13 @@ function assignment(overrides: Partial<TaskAssignment> & { id: string; sourceKin
   };
 }
 
-Deno.test("selectWorkItems falls back to snapshot when no backend assignments", () => {
+it("selectWorkItems falls back to snapshot when no backend assignments", () => {
   const items = [workItem({ id: "w1", taskId: "t" }), workItem({ id: "w2", taskId: "t" })];
-  assertEquals(selectWorkItems(items, null), items);
-  assertEquals(selectWorkItems(items, undefined), items);
+  expect(selectWorkItems(items, null)).toEqual(items);
+  expect(selectWorkItems(items, undefined)).toEqual(items);
 });
 
-Deno.test("selectWorkItems prefers backend order and reuses snapshot data", () => {
+it("selectWorkItems prefers backend order and reuses snapshot data", () => {
   const snapshotItems = [
     workItem({ id: "w1", taskId: "t", reason: "first" }),
     workItem({ id: "w2", taskId: "t", reason: "second" }),
@@ -50,12 +49,12 @@ Deno.test("selectWorkItems prefers backend order and reuses snapshot data", () =
   ];
 
   const result = selectWorkItems(snapshotItems, assignments);
-  assertEquals(result.map((item) => item.id), ["w2", "w1"]);
-  assertEquals(result[0].reason, "second");
-  assertEquals(result[1].reason, "first");
+  expect(result.map((item) => item.id)).toEqual(["w2", "w1"]);
+  expect(result[0].reason).toEqual("second");
+  expect(result[1].reason).toEqual("first");
 });
 
-Deno.test("selectWorkItems synthesizes when snapshot row is missing", () => {
+it("selectWorkItems synthesizes when snapshot row is missing", () => {
   const assignments = [
     assignment({
       id: "work_item:w99",
@@ -71,39 +70,39 @@ Deno.test("selectWorkItems synthesizes when snapshot row is missing", () => {
     }),
   ];
   const result = selectWorkItems([], assignments);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].id, "w99");
-  assertEquals(result[0].kind, "objective.compose");
-  assertEquals(result[0].status, "running");
-  assertEquals(result[0].reason, "remote-only");
-  assertEquals(result[0].workerId, "worker-1");
-  assertEquals(result[0].targetKind, "ssh");
-  assertEquals(result[0].targetId, "host-a");
+  expect(result.length).toEqual(1);
+  expect(result[0].id).toEqual("w99");
+  expect(result[0].kind).toEqual("objective.compose");
+  expect(result[0].status).toEqual("running");
+  expect(result[0].reason).toEqual("remote-only");
+  expect(result[0].workerId).toEqual("worker-1");
+  expect(result[0].targetKind).toEqual("ssh");
+  expect(result[0].targetId).toEqual("host-a");
 });
 
-Deno.test("selectWorkItems deduplicates repeated assignment ids", () => {
+it("selectWorkItems deduplicates repeated assignment ids", () => {
   const items = [workItem({ id: "w1", taskId: "t" })];
   const assignments = [
     assignment({ id: "work_item:w1", sourceKind: "work_item", sourceId: "w1", taskId: "t" }),
     assignment({ id: "work_item:w1-dup", sourceKind: "work_item", sourceId: "w1", taskId: "t" }),
   ];
-  assertEquals(selectWorkItems(items, assignments).map((item) => item.id), ["w1"]);
+  expect(selectWorkItems(items, assignments).map((item) => item.id)).toEqual(["w1"]);
 });
 
-Deno.test("selectWorkItems returns empty array when backend lists no work_item rows", () => {
+it("selectWorkItems returns empty array when backend lists no work_item rows", () => {
   const items = [workItem({ id: "w1", taskId: "t" })];
   const assignments = [
     assignment({ id: "session:s1", sourceKind: "session", sourceId: "s1", taskId: "t" }),
   ];
-  assertEquals(selectWorkItems(items, assignments), []);
+  expect(selectWorkItems(items, assignments)).toEqual([]);
 });
 
-Deno.test("selectSessions falls back to snapshot when no backend assignments", () => {
+it("selectSessions falls back to snapshot when no backend assignments", () => {
   const sessions = [session({ id: "s1", taskId: "t", workerId: "w1" })];
-  assertEquals(selectSessions(sessions, null), sessions);
+  expect(selectSessions(sessions, null)).toEqual(sessions);
 });
 
-Deno.test("selectSessions prefers backend order and reuses snapshot data", () => {
+it("selectSessions prefers backend order and reuses snapshot data", () => {
   const sessions = [
     session({ id: "s1", taskId: "t", workerId: "w1", currentAction: "alpha" }),
     session({ id: "s2", taskId: "t", workerId: "w2", currentAction: "beta" }),
@@ -113,12 +112,12 @@ Deno.test("selectSessions prefers backend order and reuses snapshot data", () =>
     assignment({ id: "session:s1", sourceKind: "session", sourceId: "s1", taskId: "t" }),
   ];
   const result = selectSessions(sessions, assignments);
-  assertEquals(result.map((item) => item.id), ["s2", "s1"]);
-  assertEquals(result[0].currentAction, "beta");
-  assertEquals(result[1].currentAction, "alpha");
+  expect(result.map((item) => item.id)).toEqual(["s2", "s1"]);
+  expect(result[0].currentAction).toEqual("beta");
+  expect(result[1].currentAction).toEqual("alpha");
 });
 
-Deno.test("selectSessions synthesizes when snapshot row is missing", () => {
+it("selectSessions synthesizes when snapshot row is missing", () => {
   const assignments = [
     assignment({
       id: "session:s9",
@@ -135,13 +134,13 @@ Deno.test("selectSessions synthesizes when snapshot row is missing", () => {
     }),
   ];
   const result = selectSessions([], assignments);
-  assertEquals(result.length, 1);
-  assertEquals(result[0].id, "s9");
-  assertEquals(result[0].workerId, "worker-9");
-  assertEquals(result[0].workerKind, "claude");
-  assertEquals(result[0].nodeId, "node-9");
-  assertEquals(result[0].targetKind, "ssh");
-  assertEquals(result[0].targetId, "host-b");
-  assertEquals(result[0].status, "queued");
-  assertEquals(result[0].currentActionLabel, "Waiting");
+  expect(result.length).toEqual(1);
+  expect(result[0].id).toEqual("s9");
+  expect(result[0].workerId).toEqual("worker-9");
+  expect(result[0].workerKind).toEqual("claude");
+  expect(result[0].nodeId).toEqual("node-9");
+  expect(result[0].targetKind).toEqual("ssh");
+  expect(result[0].targetId).toEqual("host-b");
+  expect(result[0].status).toEqual("queued");
+  expect(result[0].currentActionLabel).toEqual("Waiting");
 });

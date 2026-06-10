@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Service) TaskAssignments(ctx context.Context, taskID string) (core.TaskAssignmentsResponse, error) {
-	snapshot, err := s.SnapshotSummary(ctx)
+	snapshot, err := s.store.TaskAssignmentsSnapshot(ctx, taskID)
 	if err != nil {
 		return core.TaskAssignmentsResponse{}, err
 	}

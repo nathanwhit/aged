@@ -1221,6 +1221,10 @@ func (s *SQLiteStore) SnapshotTaskCards(ctx context.Context) (core.Snapshot, err
 	return s.taskCardsFromReadModel(ctx)
 }
 
+func (s *SQLiteStore) TaskAssignmentsSnapshot(ctx context.Context, taskID string) (core.Snapshot, error) {
+	return s.taskAssignmentsFromReadModel(ctx, taskID)
+}
+
 func (s *SQLiteStore) PullRequestMonitorSnapshot(ctx context.Context) (core.Snapshot, error) {
 	lastEventID, err := s.latestEventID(ctx)
 	if err != nil {

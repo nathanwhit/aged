@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -181,6 +182,68 @@ func TestBuildTaskAssignmentsMissingTask(t *testing.T) {
 	if !errors.Is(err, eventstore.ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
+}
+
+func TestTaskAssignmentsUsesStoreScopedSnapshot(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	store := &taskAssignmentsScopedSnapshotStore{
+		snapshot: core.Snapshot{
+			Tasks: []core.Task{{
+				ID:        "task-1",
+				Status:    core.TaskRunning,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}},
+			WorkItems: []core.WorkItem{{
+				ID:        "work-1",
+				TaskID:    "task-1",
+				Kind:      "objective.implement",
+				Status:    core.WorkItemQueued,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}},
+		},
+	}
+	service := NewService(store, StaticBrain{}, nil, t.TempDir())
+
+	result, err := service.TaskAssignments(context.Background(), "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.taskAssignmentsCalls != 1 || store.taskAssignmentsTaskID != "task-1" {
+		t.Fatalf("task assignment snapshot calls = %d taskID = %q", store.taskAssignmentsCalls, store.taskAssignmentsTaskID)
+	}
+	if store.snapshotCalls != 0 || store.snapshotSummaryCalls != 0 {
+		t.Fatalf("global snapshot calls = Snapshot:%d SnapshotSummary:%d", store.snapshotCalls, store.snapshotSummaryCalls)
+	}
+	if result.TaskID != "task-1" || len(result.Assignments) != 1 || result.Assignments[0].SourceID != "work-1" {
+		t.Fatalf("assignments = %+v", result)
+	}
+}
+
+type taskAssignmentsScopedSnapshotStore struct {
+	eventstore.Store
+	snapshot              core.Snapshot
+	taskAssignmentsCalls  int
+	taskAssignmentsTaskID string
+	snapshotCalls         int
+	snapshotSummaryCalls  int
+}
+
+func (s *taskAssignmentsScopedSnapshotStore) TaskAssignmentsSnapshot(ctx context.Context, taskID string) (core.Snapshot, error) {
+	s.taskAssignmentsCalls++
+	s.taskAssignmentsTaskID = taskID
+	return s.snapshot, nil
+}
+
+func (s *taskAssignmentsScopedSnapshotStore) Snapshot(ctx context.Context) (core.Snapshot, error) {
+	s.snapshotCalls++
+	return core.Snapshot{}, errors.New("TaskAssignments must not call global Snapshot")
+}
+
+func (s *taskAssignmentsScopedSnapshotStore) SnapshotSummary(ctx context.Context) (core.Snapshot, error) {
+	s.snapshotSummaryCalls++
+	return core.Snapshot{}, errors.New("TaskAssignments must not call global SnapshotSummary")
 }
 
 func assignmentBySource(t *testing.T, rows []core.TaskAssignment, sourceKind string, sourceID string) core.TaskAssignment {
