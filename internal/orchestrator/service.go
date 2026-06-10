@@ -6909,14 +6909,18 @@ func (s *Service) executePlanAction(ctx context.Context, task core.Task, action 
 			workerID = singleUpdateCandidateWorkerID(results)
 		}
 		if workerID == "" && !metadataOnly {
+			err := errors.New("update_pull_request requires an explicit workerId when pushing worker changes for multi-result tasks")
 			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
 				"kind":   action.Kind,
 				"when":   nonEmpty(action.When, "after_success"),
 				"reason": action.Reason,
 				"inputs": action.Inputs,
 				"status": "skipped",
-				"error":  "update_pull_request requires an explicit workerId when pushing worker changes for multi-result tasks",
+				"error":  err.Error(),
 			}); err != nil {
+				return false, results, err
+			}
+			if nonEmpty(action.When, "after_success") == "after_success" {
 				return false, results, err
 			}
 			return true, results, nil

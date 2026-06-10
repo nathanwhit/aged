@@ -3005,7 +3005,7 @@ func TestServicePlanPullRequestUpdateWithMetadataFallsBackWhenWorkerHasNoChanges
 	}
 }
 
-func TestServicePullRequestUpdateDoesNotInferStaleTaskCandidate(t *testing.T) {
+func TestServicePullRequestUpdateFailsWithoutExplicitAfterSuccessWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	defer store.Close()
@@ -3073,11 +3073,11 @@ func TestServicePullRequestUpdateDoesNotInferStaleTaskCandidate(t *testing.T) {
 			"branch": "codex/pr-a",
 		},
 	}, results)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("missing explicit update worker should fail required after-success PR update")
 	}
-	if !keepGoing {
-		t.Fatal("missing explicit update worker should not stop broad objective work")
+	if keepGoing {
+		t.Fatal("missing explicit update worker should stop required after-success action")
 	}
 	if publisher.updateCalls != 0 {
 		t.Fatalf("update calls = %d, want 0; stale worker %q would have overwritten PR", publisher.updateCalls, publisher.updated.WorkerID)
