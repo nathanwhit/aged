@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { AssignmentBoard, type AssignmentRow, type ApprovalState } from "../main";
+import { AssignmentBoard, assignmentRowsForDisplay, mapBackendAssignmentRows, type AssignmentRow, type ApprovalState } from "../main";
+import type { TaskAssignmentDisplayRow } from "../types";
 
 const baseRow: Omit<AssignmentRow, "id" | "kind" | "title" | "subtitle" | "status" | "tone"> = {
   updatedAt: "2026-06-10T12:00:00Z",
@@ -100,6 +101,103 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof AssignmentBoar
 }
 
 describe("AssignmentBoard", () => {
+  it("maps backend display rows into assignment board rows", () => {
+    const rows: TaskAssignmentDisplayRow[] = [
+      {
+        id: "session:s1",
+        kind: "session",
+        title: "Implementation",
+        subtitle: "tmux · vm-1",
+        status: "running",
+        tone: "info",
+        updatedAt: "2026-06-10T12:00:00Z",
+        currentAction: "go test ./...",
+        owner: "Worker worker-1",
+        model: "gpt-5",
+        projectContext: "Ssh vm-1",
+        actions: [
+          { kind: "inspect-session", sessionId: "s1" },
+          { kind: "cancel-session", sessionId: "s1" },
+          { kind: "cancel-session" },
+        ],
+        selection: { kind: "session", sessionId: "s1" },
+      },
+      {
+        id: "pr:pr-1",
+        kind: "pull_request",
+        title: "Implement backend rows",
+        subtitle: "owner/repo#7",
+        status: "open",
+        tone: "warning",
+        updatedAt: "2026-06-10T12:01:00Z",
+        actions: [
+          { kind: "open-pr", url: "https://github.com/owner/repo/pull/7" },
+          { kind: "refresh-pr", pullRequestId: "pr-1" },
+          { kind: "babysit-pr", pullRequestId: "pr-1", disabled: true },
+        ],
+        selection: { kind: "pull_request", pullRequestId: "pr-1" },
+      },
+    ];
+
+    const mapped = mapBackendAssignmentRows(rows);
+
+    expect(mapped).toHaveLength(2);
+    expect(mapped[0]).toMatchObject({
+      id: "session:s1",
+      kind: "session",
+      tone: "info",
+      action: [
+        { kind: "inspect-session", sessionId: "s1" },
+        { kind: "cancel-session", sessionId: "s1" },
+      ],
+      selection: { kind: "session", sessionId: "s1" },
+    });
+    expect(mapped[1]).toMatchObject({
+      id: "pr:pr-1",
+      action: [
+        { kind: "open-pr", url: "https://github.com/owner/repo/pull/7" },
+        { kind: "refresh-pr", pullRequestId: "pr-1" },
+        { kind: "babysit-pr", pullRequestId: "pr-1", disabled: true },
+      ],
+    });
+  });
+
+  it("uses backend rows when present and falls back when absent or invalid", () => {
+    const fallback = rosterFixture();
+    const backend: TaskAssignmentDisplayRow[] = [
+      {
+        id: "work:w1",
+        kind: "work",
+        title: "Objective",
+        subtitle: "Work item",
+        status: "queued",
+        tone: "warning",
+        updatedAt: "2026-06-10T12:00:00Z",
+        selection: { kind: "work_item", workItemId: "w1" },
+      },
+    ];
+
+    expect(assignmentRowsForDisplay(backend, fallback).map((row) => row.id)).toEqual(["work:w1"]);
+    expect(assignmentRowsForDisplay([], fallback)).toBe(fallback);
+    expect(assignmentRowsForDisplay([{ ...backend[0], kind: "unknown" }], fallback)).toBe(fallback);
+  });
+
+  it("humanizes assignment status keys with trailing separators", () => {
+    render(<AssignmentBoard {...makeProps({
+      rows: [{
+        id: "debug:objective",
+        kind: "debug",
+        title: "Backend row",
+        subtitle: "Task lifecycle",
+        status: "objective.",
+        tone: "info",
+        ...baseRow,
+      }],
+    })} />);
+
+    expect(screen.getByText("Objective")).toBeInTheDocument();
+  });
+
   it("renders the assignment roster with each kind of row", () => {
     render(<AssignmentBoard {...makeProps()} />);
 

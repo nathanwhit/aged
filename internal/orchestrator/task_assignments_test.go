@@ -26,22 +26,36 @@ func TestBuildTaskAssignmentsProjectsTaskScopedRows(t *testing.T) {
 			{ID: "worker-orphan", TaskID: "task-1", Kind: "debug", Status: core.WorkerQueued, CreatedAt: now.Add(11 * time.Minute), UpdatedAt: now.Add(11 * time.Minute)},
 			{ID: "worker-other", TaskID: "task-2", Kind: "codex", Status: core.WorkerQueued, CreatedAt: now, UpdatedAt: now},
 		},
-		ExecutionNodes: []core.ExecutionNode{{
-			ID:           "node-1",
-			TaskID:       "task-1",
-			WorkerID:     "worker-1",
-			WorkerKind:   "codex",
-			Status:       core.WorkerRunning,
-			Role:         "implementation",
-			TargetKind:   "ssh",
-			TargetID:     "vm-1",
-			ParentNodeID: "node-parent",
-			SpawnID:      "impl",
-			DependsOn:    []string{"plan"},
-			Reason:       "Implement the task.",
-			CreatedAt:    now.Add(2 * time.Minute),
-			UpdatedAt:    now.Add(6 * time.Minute),
-		}},
+		ExecutionNodes: []core.ExecutionNode{
+			{
+				ID:           "node-1",
+				TaskID:       "task-1",
+				WorkerID:     "worker-1",
+				WorkerKind:   "codex",
+				Status:       core.WorkerRunning,
+				Role:         "implementation",
+				TargetKind:   "ssh",
+				TargetID:     "vm-1",
+				ParentNodeID: "node-parent",
+				SpawnID:      "impl",
+				DependsOn:    []string{"plan"},
+				Reason:       "Implement the task.",
+				CreatedAt:    now.Add(2 * time.Minute),
+				UpdatedAt:    now.Add(6 * time.Minute),
+			},
+			{
+				ID:         "node-debug",
+				TaskID:     "task-1",
+				WorkerKind: "codex",
+				Status:     core.WorkerQueued,
+				Role:       "review",
+				Reason:     "Waiting for capacity.",
+				TargetKind: "ssh",
+				TargetID:   "vm-2",
+				CreatedAt:  now.Add(10 * time.Minute),
+				UpdatedAt:  now.Add(10 * time.Minute),
+			},
+		},
 		Sessions: []core.Session{{
 			ID:                 "worker-1",
 			TaskID:             "task-1",
@@ -144,8 +158,8 @@ func TestBuildTaskAssignmentsProjectsTaskScopedRows(t *testing.T) {
 	if result.TaskID != "task-1" {
 		t.Fatalf("task id = %q", result.TaskID)
 	}
-	if len(result.Assignments) != 10 {
-		t.Fatalf("assignments = %d, want 10: %+v", len(result.Assignments), result.Assignments)
+	if len(result.Assignments) != 11 {
+		t.Fatalf("assignments = %d, want 11: %+v", len(result.Assignments), result.Assignments)
 	}
 
 	running := assignmentBySource(t, result.Assignments, "work_item", "running")
@@ -174,6 +188,67 @@ func TestBuildTaskAssignmentsProjectsTaskScopedRows(t *testing.T) {
 	orphan := assignmentBySource(t, result.Assignments, "worker", "worker-orphan")
 	if orphan.Kind != "debug" || orphan.WorkerID != "worker-orphan" {
 		t.Fatalf("orphan worker assignment = %+v", orphan)
+	}
+
+	if len(result.DisplayRows) == 0 {
+		t.Fatal("display rows were empty")
+	}
+	questionRow := displayRowByID(t, result.DisplayRows, "question:question-1")
+	if questionRow.Kind != "question" || questionRow.Tone != "warning" || questionRow.Selection == nil || questionRow.Selection.QuestionID != "question-1" {
+		t.Fatalf("question display row = %+v", questionRow)
+	}
+	sessionRow := displayRowByID(t, result.DisplayRows, "session:worker-1")
+	if sessionRow.Kind != "session" || sessionRow.Title != "Implementation" || sessionRow.Owner != "Worker worker-1" || len(sessionRow.Actions) != 2 {
+		t.Fatalf("session display row = %+v", sessionRow)
+	}
+	prRow := displayRowByID(t, result.DisplayRows, "pr:pr-1")
+	if prRow.Title != "Implement task" || prRow.Subtitle == prRow.Title || len(prRow.Actions) != 3 || prRow.Selection == nil || prRow.Selection.PullRequestID != "pr-1" {
+		t.Fatalf("pull request display row = %+v", prRow)
+	}
+	nodeRow := displayRowByID(t, result.DisplayRows, "execution_node:node-debug")
+	if nodeRow.Kind != "debug" || nodeRow.Title != "Review" || nodeRow.ProjectContext != "Ssh vm-2" {
+		t.Fatalf("execution node display row = %+v", nodeRow)
+	}
+	orphanRow := displayRowByID(t, result.DisplayRows, "debug_worker:worker-orphan")
+	if orphanRow.Kind != "debug" || orphanRow.Title != "debug" || len(orphanRow.Actions) != 1 || orphanRow.Actions[0].Kind != "cancel-worker" {
+		t.Fatalf("orphan display row = %+v", orphanRow)
+	}
+}
+
+func TestBuildTaskAssignmentsProjectsTaskLifecycleDisplayRows(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		task          core.Task
+		wantID        string
+		wantTitle     string
+		wantTone      string
+		wantActionLen int
+	}{
+		{
+			name:   "failed",
+			task:   core.Task{ID: "task-1", Status: core.TaskFailed, Error: "build failed", ObjectivePhase: "objective.", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			wantID: "task_failure:task-1", wantTitle: "Task failure", wantTone: "danger", wantActionLen: 2,
+		},
+		{
+			name:   "succeeded",
+			task:   core.Task{ID: "task-1", Status: core.TaskSucceeded, CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			wantID: "task_complete:task-1", wantTitle: "Task finished", wantTone: "good", wantActionLen: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := BuildTaskAssignments(core.Snapshot{Tasks: []core.Task{tc.task}}, "task-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			row := displayRowByID(t, result.DisplayRows, tc.wantID)
+			if row.Title != tc.wantTitle || row.Tone != tc.wantTone || len(row.Actions) != tc.wantActionLen {
+				t.Fatalf("lifecycle row = %+v", row)
+			}
+			if row.Subtitle == "" {
+				t.Fatalf("lifecycle row subtitle was empty: %+v", row)
+			}
+		})
 	}
 }
 
@@ -255,4 +330,15 @@ func assignmentBySource(t *testing.T, rows []core.TaskAssignment, sourceKind str
 	}
 	t.Fatalf("missing assignment %s/%s in %+v", sourceKind, sourceID, rows)
 	return core.TaskAssignment{}
+}
+
+func displayRowByID(t *testing.T, rows []core.TaskAssignmentDisplayRow, id string) core.TaskAssignmentDisplayRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("missing display row %s in %+v", id, rows)
+	return core.TaskAssignmentDisplayRow{}
 }

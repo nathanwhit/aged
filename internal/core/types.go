@@ -758,9 +758,47 @@ type TaskAssignment struct {
 	CompletedAt        *time.Time `json:"completedAt,omitempty"`
 }
 
+type TaskAssignmentActionDescriptor struct {
+	Kind          string `json:"kind"`
+	SessionID     string `json:"sessionId,omitempty"`
+	URL           string `json:"url,omitempty"`
+	WorkerID      string `json:"workerId,omitempty"`
+	WorkItemID    string `json:"workItemId,omitempty"`
+	TaskID        string `json:"taskId,omitempty"`
+	PullRequestID string `json:"pullRequestId,omitempty"`
+	Disabled      bool   `json:"disabled,omitempty"`
+}
+
+type TaskAssignmentSelection struct {
+	Kind          string `json:"kind"`
+	SessionID     string `json:"sessionId,omitempty"`
+	PullRequestID string `json:"pullRequestId,omitempty"`
+	QuestionID    string `json:"questionId,omitempty"`
+	WorkItemID    string `json:"workItemId,omitempty"`
+	ArtifactID    string `json:"artifactId,omitempty"`
+}
+
+type TaskAssignmentDisplayRow struct {
+	ID             string                           `json:"id"`
+	Kind           string                           `json:"kind"`
+	Title          string                           `json:"title"`
+	Subtitle       string                           `json:"subtitle"`
+	Status         string                           `json:"status"`
+	Tone           string                           `json:"tone"`
+	UpdatedAt      time.Time                        `json:"updatedAt"`
+	CurrentAction  string                           `json:"currentAction,omitempty"`
+	Owner          string                           `json:"owner,omitempty"`
+	Model          string                           `json:"model,omitempty"`
+	ProjectContext string                           `json:"projectContext,omitempty"`
+	PRContext      string                           `json:"prContext,omitempty"`
+	Actions        []TaskAssignmentActionDescriptor `json:"actions,omitempty"`
+	Selection      *TaskAssignmentSelection         `json:"selection,omitempty"`
+}
+
 type TaskAssignmentsResponse struct {
-	TaskID      string           `json:"taskId"`
-	Assignments []TaskAssignment `json:"assignments"`
+	TaskID      string                     `json:"taskId"`
+	Assignments []TaskAssignment           `json:"assignments"`
+	DisplayRows []TaskAssignmentDisplayRow `json:"displayRows,omitempty"`
 }
 
 type CreateTaskRequest struct {

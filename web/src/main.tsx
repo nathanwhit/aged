@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelSession as cancelSessionAPI, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerSession as steerSessionAPI, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, ManagerSummary, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignment, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, ManagerSummary, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignmentActionDescriptor, TaskAssignmentDisplayRow, TaskAssignmentSelection, TaskAssignmentsResponse, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import { selectSessions, selectWorkItems } from "./assignments";
 import "./styles.css";
 
@@ -255,7 +255,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [retryingTaskId, setRetryingTaskId] = useState("");
   const [hydratedTaskIds, setHydratedTaskIds] = useState<Set<string>>(() => new Set());
-  const [assignmentsByTask, setAssignmentsByTask] = useState<Map<string, TaskAssignment[]>>(() => new Map());
+  const [assignmentsByTask, setAssignmentsByTask] = useState<Map<string, TaskAssignmentsResponse>>(() => new Map());
   const [initialSnapshotStatus, setInitialSnapshotStatus] = useState<InitialSnapshotStatus>("loading");
   const [showCompletedTasks, setShowCompletedTasks] = useState(false);
 
@@ -337,7 +337,7 @@ function App() {
         if (!active) return;
         setAssignmentsByTask((current) => {
           const next = new Map(current);
-          next.set(response.taskId, response.assignments ?? []);
+          next.set(response.taskId, response);
           return next;
         });
       })
@@ -356,7 +356,9 @@ function App() {
   }, [hydratedTaskIds, initialSnapshotStatus, selectedTask?.id, selectedTask?.status, snapshot.snapshotEventId]);
   const selectedWorkers = selectedTask ? workersByTask.get(selectedTask.id) ?? EMPTY_WORKERS : EMPTY_WORKERS;
   const selectedNodes = selectedTask ? nodesByTask.get(selectedTask.id) ?? EMPTY_EXECUTION_NODES : EMPTY_EXECUTION_NODES;
-  const selectedAssignments = selectedTask ? assignmentsByTask.get(selectedTask.id) ?? null : null;
+  const selectedAssignmentResponse = selectedTask ? assignmentsByTask.get(selectedTask.id) ?? null : null;
+  const selectedAssignments = selectedAssignmentResponse?.assignments ?? null;
+  const selectedBackendAssignmentRows = selectedAssignmentResponse?.displayRows ?? null;
   const selectedSnapshotWorkItems = selectedTask ? workItemsByTask.get(selectedTask.id) ?? EMPTY_WORK_ITEMS : EMPTY_WORK_ITEMS;
   const selectedWorkItems = useMemo(() => selectWorkItems(selectedSnapshotWorkItems, selectedAssignments), [selectedSnapshotWorkItems, selectedAssignments]);
   const selectedArtifacts = selectedTask ? artifactsByTask.get(selectedTask.id) ?? selectedTask.artifacts?.map((artifact) => ({ ...artifact, taskId: selectedTask.id })) ?? EMPTY_ARTIFACTS : EMPTY_ARTIFACTS;
@@ -500,7 +502,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onClear={handleClearTask} onCancelSession={cancelSessionAPI} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onPublishPullRequest={publishTaskPullRequest} onWatchPullRequests={watchTaskPullRequests} onRefreshPullRequest={refreshPullRequest} onBabysitPullRequest={babysitPullRequest} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} backendAssignmentRows={selectedBackendAssignmentRows} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onClear={handleClearTask} onCancelSession={cancelSessionAPI} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onPublishPullRequest={publishTaskPullRequest} onWatchPullRequests={watchTaskPullRequests} onRefreshPullRequest={refreshPullRequest} onBabysitPullRequest={babysitPullRequest} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -1931,6 +1933,7 @@ function assistantProgressLabel(elapsedSeconds: number): string {
 function TaskDetail({
   task,
   managerSummary,
+  backendAssignmentRows,
   workers,
   nodes,
   workItems,
@@ -1963,6 +1966,7 @@ function TaskDetail({
 }: {
   task: Task;
   managerSummary?: ManagerSummary;
+  backendAssignmentRows?: TaskAssignmentDisplayRow[] | null;
   workers: Worker[];
   nodes: ExecutionNode[];
   workItems: WorkItem[];
@@ -2017,10 +2021,11 @@ function TaskDetail({
   const activeWorkers = workers.filter((worker) => !isTerminalWorkerStatus(worker.status)).length;
   const activeNodes = nodes.filter((node) => !isTerminalWorkerStatus(node.status)).length;
   const activeWorkItems = workItems.filter((item) => item.status === "queued" || item.status === "running").length;
-  const assignments = useMemo(
+  const fallbackAssignments = useMemo(
     () => deriveAssignmentRows({ task, workers, nodes, workItems, artifacts, questions, sessions, pullRequests, pullRequestFeedback, steering, eventsByWorker }),
     [artifacts, eventsByWorker, nodes, pullRequestFeedback, pullRequests, questions, sessions, steering, task, workItems, workers],
   );
+  const assignments = useMemo(() => assignmentRowsForDisplay(backendAssignmentRows, fallbackAssignments), [backendAssignmentRows, fallbackAssignments]);
   const selectedSession = useMemo(() => selectedLiveSession(sessions, selectedSessionId), [selectedSessionId, sessions]);
   const selectedPullRequest = useMemo(() => selectedPullRequestForSummary(pullRequests, selectedPullRequestId), [pullRequests, selectedPullRequestId]);
   const pullRequestArtifacts = artifacts.filter((artifact) => artifact.kind.toLowerCase().includes("pull") || artifact.kind.toLowerCase().includes("pr"));
@@ -2082,7 +2087,7 @@ function TaskDetail({
     }
   }
 
-  function selectAssignment(row: AssignmentRow) {
+function selectAssignment(row: AssignmentRow) {
     setSelectedAssignmentId(row.id);
     if (!row.selection) return;
     switch (row.selection.kind) {
@@ -2227,6 +2232,109 @@ function TaskDetail({
       </details>
     </section>
   );
+}
+
+export function mapBackendAssignmentRows(rows: TaskAssignmentDisplayRow[] | null | undefined): AssignmentRow[] {
+  if (!rows || rows.length === 0) return [];
+  return rows
+    .map((row): AssignmentRow | null => {
+      const kind = assignmentKindFromBackend(row.kind);
+      const tone = assignmentToneFromBackend(row.tone);
+      if (!kind || !tone) return null;
+      const actions = (row.actions ?? []).map(assignmentActionFromBackend).filter((action): action is AssignmentAction => Boolean(action));
+      return {
+        id: row.id,
+        kind,
+        title: row.title,
+        subtitle: row.subtitle,
+        status: row.status,
+        tone,
+        updatedAt: row.updatedAt,
+        currentAction: row.currentAction,
+        owner: row.owner,
+        model: row.model,
+        projectContext: row.projectContext,
+        prContext: row.prContext,
+        action: actions.length > 0 ? actions : undefined,
+        selection: assignmentSelectionFromBackend(row.selection),
+      };
+    })
+    .filter((row): row is AssignmentRow => Boolean(row));
+}
+
+export function assignmentRowsForDisplay(backendRows: TaskAssignmentDisplayRow[] | null | undefined, fallbackRows: AssignmentRow[]): AssignmentRow[] {
+  const rows = mapBackendAssignmentRows(backendRows);
+  return rows.length > 0 ? rows : fallbackRows;
+}
+
+function assignmentKindFromBackend(kind: string): AssignmentKind | null {
+  switch (kind) {
+    case "session":
+    case "work":
+    case "pull_request":
+    case "feedback":
+    case "question":
+    case "artifact":
+    case "debug":
+      return kind;
+    default:
+      return null;
+  }
+}
+
+function assignmentToneFromBackend(tone: string): AttentionTone | null {
+  switch (tone) {
+    case "good":
+    case "info":
+    case "warning":
+    case "danger":
+      return tone;
+    default:
+      return null;
+  }
+}
+
+function assignmentActionFromBackend(action: TaskAssignmentActionDescriptor): AssignmentAction | null {
+  switch (action.kind) {
+    case "inspect-session":
+      return action.sessionId ? { kind: "inspect-session", sessionId: action.sessionId } : null;
+    case "open-pr":
+      return action.url ? { kind: "open-pr", url: action.url } : null;
+    case "cancel-session":
+      return action.sessionId ? { kind: "cancel-session", sessionId: action.sessionId } : null;
+    case "cancel-worker":
+      return action.workerId ? { kind: "cancel-worker", workerId: action.workerId } : null;
+    case "cancel-work-item":
+      return action.workItemId ? { kind: "cancel-work-item", workItemId: action.workItemId } : null;
+    case "retry-task":
+      return action.taskId ? { kind: "retry-task", taskId: action.taskId } : null;
+    case "clear-task":
+      return action.taskId ? { kind: "clear-task", taskId: action.taskId } : null;
+    case "refresh-pr":
+      return action.pullRequestId ? { kind: "refresh-pr", pullRequestId: action.pullRequestId } : null;
+    case "babysit-pr":
+      return action.pullRequestId ? { kind: "babysit-pr", pullRequestId: action.pullRequestId, disabled: action.disabled } : null;
+    default:
+      return null;
+  }
+}
+
+function assignmentSelectionFromBackend(selection: TaskAssignmentSelection | undefined): AssignmentSelection | undefined {
+  if (!selection) return undefined;
+  switch (selection.kind) {
+    case "session":
+      return selection.sessionId ? { kind: "session", sessionId: selection.sessionId } : undefined;
+    case "pull_request":
+      return selection.pullRequestId ? { kind: "pull_request", pullRequestId: selection.pullRequestId } : undefined;
+    case "question":
+      return selection.questionId ? { kind: "question", questionId: selection.questionId } : undefined;
+    case "work_item":
+      return selection.workItemId ? { kind: "work_item", workItemId: selection.workItemId } : undefined;
+    case "artifact":
+      return selection.artifactId ? { kind: "artifact", artifactId: selection.artifactId } : undefined;
+    default:
+      return undefined;
+  }
 }
 
 function deriveAssignmentRows({
@@ -2390,17 +2498,21 @@ function deriveAssignmentRows({
 
   for (const pr of pullRequests) {
     const feedbackCount = pullRequestFeedback.filter((item) => item.pullRequestId === pr.id && item.status === "pending").length;
+    const context = prContextFromParts(pr.repo, pr.number, pr.branch);
+    const branchContext = [pr.base && `base ${pr.base}`, pr.branch && `head ${pr.branch}`].filter(Boolean).join(" · ");
+    const title = pr.title || context || "Pull request";
+    const subtitle = title.toLowerCase() === context.toLowerCase() ? branchContext || "Pull request" : context || branchContext || "Pull request";
     rows.push({
       id: `pr:${pr.id}`,
       kind: "pull_request",
-      title: pr.title || prContextFromParts(pr.repo, pr.number, pr.branch),
-      subtitle: prContextFromParts(pr.repo, pr.number, pr.branch),
+      title,
+      subtitle,
       status: pr.reviewStatus || pr.checksStatus || pr.state || "open",
       tone: feedbackCount > 0 ? "warning" : toneForStatus(pr.state || pr.checksStatus || "open"),
       updatedAt: pr.updatedAt || pr.createdAt,
       currentAction: feedbackCount > 0 ? `${feedbackCount} pending feedback item${feedbackCount === 1 ? "" : "s"}` : pr.mergeStatus || pr.checksConclusion,
       owner: pr.branchOwner ? `Owner ${shortID(pr.branchOwner)}` : undefined,
-      prContext: [pr.base && `base ${pr.base}`, pr.branch && `head ${pr.branch}`].filter(Boolean).join(" · "),
+      prContext: branchContext,
       selection: { kind: "pull_request", pullRequestId: pr.id },
       action: [
         ...(pr.url ? [{ kind: "open-pr" as const, url: pr.url }] : []),
@@ -6539,8 +6651,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 function humanizeKey(key: string): string {
   return key
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .replace(/^./, (char) => char.toUpperCase());
+    .replace(/[_.-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function Status({ value }: { value: string }) {

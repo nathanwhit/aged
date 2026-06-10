@@ -631,7 +631,45 @@ export type TaskAssignment = {
   completedAt?: string;
 };
 
+export type TaskAssignmentActionDescriptor = {
+  kind: string;
+  sessionId?: string;
+  url?: string;
+  workerId?: string;
+  workItemId?: string;
+  taskId?: string;
+  pullRequestId?: string;
+  disabled?: boolean;
+};
+
+export type TaskAssignmentSelection = {
+  kind: string;
+  sessionId?: string;
+  pullRequestId?: string;
+  questionId?: string;
+  workItemId?: string;
+  artifactId?: string;
+};
+
+export type TaskAssignmentDisplayRow = {
+  id: string;
+  kind: string;
+  title: string;
+  subtitle: string;
+  status: string;
+  tone: string;
+  updatedAt: string;
+  currentAction?: string;
+  owner?: string;
+  model?: string;
+  projectContext?: string;
+  prContext?: string;
+  actions?: TaskAssignmentActionDescriptor[];
+  selection?: TaskAssignmentSelection;
+};
+
 export type TaskAssignmentsResponse = {
   taskId: string;
   assignments: TaskAssignment[];
+  displayRows?: TaskAssignmentDisplayRow[];
 };
