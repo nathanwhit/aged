@@ -487,6 +487,24 @@ export type SteeringItem = {
   metadata?: Record<string, unknown>;
 };
 
+export type ManagerSummary = {
+  taskId: string;
+  activeSignals: number;
+  attentionCount: number;
+  pendingApprovals?: number;
+  pendingFeedback?: number;
+  activeSessions?: number;
+  activeWorkers?: number;
+  activeWorkItems?: number;
+  pullRequests?: number;
+  artifacts?: number;
+  latestAction?: string;
+  latestActionAt?: string;
+  latestActionLabel?: string;
+  tone?: string;
+  updatedAt?: string;
+};
+
 export type WatchPullRequestsInput = {
   repo?: string;
   number?: number;
@@ -581,6 +599,7 @@ export type Snapshot = {
   pullRequests?: PullRequestState[] | null;
   pullRequestFeedback?: PullRequestFeedback[] | null;
   steering?: SteeringItem[] | null;
+  managerSummary?: ManagerSummary[] | null;
   lastEventId?: number;
   events: EventRecord[] | null;
 };

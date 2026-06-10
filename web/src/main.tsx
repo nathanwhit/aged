@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelSession as cancelSessionAPI, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerSession as steerSessionAPI, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignment, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, ManagerSummary, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignment, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import { selectSessions, selectWorkItems } from "./assignments";
 import "./styles.css";
 
@@ -44,6 +44,7 @@ type AppSnapshot = {
   pullRequests: PullRequestState[];
   pullRequestFeedback: PullRequestFeedback[];
   steering: SteeringItem[];
+  managerSummary: ManagerSummary[];
   lastEventId: number;
   snapshotEventId: number;
   events: EventRecord[];
@@ -113,6 +114,7 @@ const emptySnapshot: AppSnapshot = {
   pullRequests: [],
   pullRequestFeedback: [],
   steering: [],
+  managerSummary: [],
   lastEventId: 0,
   snapshotEventId: 0,
   events: [],
@@ -287,6 +289,7 @@ function App() {
   const pullRequestsByTask = useMemo(() => groupByTask(snapshot.pullRequests, (pr) => pr.taskId), [snapshot.pullRequests]);
   const pullRequestFeedbackByTask = useMemo(() => groupByTask(snapshot.pullRequestFeedback, (feedback) => feedback.taskId), [snapshot.pullRequestFeedback]);
   const steeringByTask = useMemo(() => groupByTask(snapshot.steering, (item) => item.taskId), [snapshot.steering]);
+  const managerSummaryByTask = useMemo(() => mapByTask(snapshot.managerSummary, (summary) => summary.taskId), [snapshot.managerSummary]);
   const selectedTask = taskById.get(selectedTaskId) ?? preferredTask(snapshot.tasks);
 
   useEffect(() => {
@@ -353,6 +356,7 @@ function App() {
   const selectedPullRequests = selectedTask ? pullRequestsByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUESTS : EMPTY_PULL_REQUESTS;
   const selectedPullRequestFeedback = selectedTask ? pullRequestFeedbackByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUEST_FEEDBACK : EMPTY_PULL_REQUEST_FEEDBACK;
   const selectedSteering = selectedTask ? steeringByTask.get(selectedTask.id) ?? EMPTY_STEERING : EMPTY_STEERING;
+  const selectedManagerSummary = selectedTask ? managerSummaryByTask.get(selectedTask.id) : undefined;
   const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
   const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
   const selectedWorkerEvents = selectedWorker ? selectedEventsByWorker.get(selectedWorker.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
@@ -483,7 +487,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelSession={cancelSessionAPI} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
+          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onCancelSession={cancelSessionAPI} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
         {
           id: "pull-requests",
@@ -572,6 +576,7 @@ function App() {
       <DashboardOverview
         tasks={snapshot.tasks}
         workers={snapshot.workers}
+        managerSummary={snapshot.managerSummary}
         selectedTask={selectedTask}
         progress={progress}
       />
@@ -603,6 +608,7 @@ function App() {
                     <TaskRow
                       key={task.id}
                       task={task}
+                      managerSummary={managerSummaryByTask.get(task.id)}
                       selected={task.id === selectedTask?.id}
                       retrying={retryingTaskId === task.id}
                       onSelect={setSelectedTaskId}
@@ -624,6 +630,7 @@ function App() {
                           <TaskRow
                             key={task.id}
                             task={task}
+                            managerSummary={managerSummaryByTask.get(task.id)}
                             selected={task.id === selectedTask?.id}
                             retrying={retryingTaskId === task.id}
                             onSelect={setSelectedTaskId}
@@ -683,11 +690,13 @@ function App() {
 function DashboardOverview({
   tasks,
   workers,
+  managerSummary,
   selectedTask,
   progress,
 }: {
   tasks: Task[];
   workers: Worker[];
+  managerSummary: ManagerSummary[];
   selectedTask: Task | undefined;
   progress: WorkProgress;
 }) {
@@ -695,6 +704,7 @@ function DashboardOverview({
   const runningWorkers = workers.filter((worker) => worker.status === "running").length;
   const waitingWorkers = workers.filter((worker) => worker.status === "waiting" || worker.status === "queued").length;
   const failedTasks = tasks.filter((task) => task.status === "failed" || task.status === "canceled").length;
+  const attentionCount = managerSummary.reduce((total, summary) => total + Math.max(0, summary.attentionCount || 0), 0);
   return (
     <section className="overview-strip" aria-label="Dashboard overview">
       <div className="overview-primary">
@@ -709,6 +719,7 @@ function DashboardOverview({
       <OverviewMetric label="Active Tasks" value={String(activeTasks.length)} />
       <OverviewMetric label="Running Workers" value={String(runningWorkers || progress.running)} />
       <OverviewMetric label="Waiting" value={String(waitingWorkers || progress.waiting)} />
+      <OverviewMetric label="Needs Attention" value={String(attentionCount)} tone={attentionCount ? "bad" : undefined} />
       <OverviewMetric label="Failed" value={String(failedTasks)} tone={failedTasks ? "bad" : undefined} />
     </section>
   );
@@ -734,6 +745,7 @@ function TaskListLoading({ label = "Loading tasks..." }: { label?: string }) {
 
 function TaskRow({
   task,
+  managerSummary,
   selected,
   retrying,
   onSelect,
@@ -741,12 +753,16 @@ function TaskRow({
   onClear,
 }: {
   task: Task;
+  managerSummary?: ManagerSummary;
   selected: boolean;
   retrying: boolean;
   onSelect: (id: string) => void;
   onRetry: (id: string) => void;
   onClear: (id: string) => void;
 }) {
+  const attentionCount = managerSummary?.attentionCount ?? 0;
+  const activeSignals = managerSummary?.activeSignals ?? 0;
+  const latestAction = managerSummary?.latestAction;
   return (
     <div className={selected ? "task-row selected" : "task-row"}>
       <button className="task-row-main" onClick={() => onSelect(task.id)} type="button" aria-current={selected ? "true" : undefined}>
@@ -756,8 +772,11 @@ function TaskRow({
             {[task.projectId && `Project ${task.projectId}`, task.id.slice(0, 8)].filter(Boolean).join(" · ")}
           </small>
           {task.error && <small className="task-row-error">{task.error}</small>}
+          {latestAction && <small className="task-row-latest">{latestAction}</small>}
         </span>
         <span className="task-row-status">
+          {attentionCount > 0 && <span className={`pill attention ${managerSummary?.tone === "danger" ? "danger" : ""}`}>{attentionCount} attention</span>}
+          {attentionCount === 0 && activeSignals > 0 && <span className="pill subtle">{activeSignals} signals</span>}
           {isBroadObjectiveMetadata(task.metadata) && <span className="pill subtle">Objective</span>}
           {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
           <Status value={task.status} />
@@ -1898,6 +1917,7 @@ function assistantProgressLabel(elapsedSeconds: number): string {
 
 function TaskDetail({
   task,
+  managerSummary,
   workers,
   nodes,
   workItems,
@@ -1923,6 +1943,7 @@ function TaskDetail({
   onError,
 }: {
   task: Task;
+  managerSummary?: ManagerSummary;
   workers: Worker[];
   nodes: ExecutionNode[];
   workItems: WorkItem[];
@@ -1977,10 +1998,10 @@ function TaskDetail({
   const attentionItems = taskAttentionItems({
     task,
     taskError,
-    pendingApprovalCount: pendingApprovals.length,
-    pendingFeedbackCount: pendingFeedback.length,
+    pendingApprovalCount: managerSummary?.pendingApprovals ?? pendingApprovals.length,
+    pendingFeedbackCount: managerSummary?.pendingFeedback ?? pendingFeedback.length,
     workerUpdate,
-    activeCount: activeNodes || activeWorkers || activeWorkItems,
+    activeCount: managerSummary ? (managerSummary.activeWorkers ?? 0) + (managerSummary.activeSessions ?? 0) + (managerSummary.activeWorkItems ?? 0) : activeNodes || activeWorkers || activeWorkItems,
   });
 
   useEffect(() => {
@@ -2065,6 +2086,7 @@ function TaskDetail({
       <AssignmentBoard
         taskId={task.id}
         rows={assignments}
+        managerSummary={managerSummary}
         approvals={pendingApprovals}
         onInspectSession={setSelectedSessionId}
         onCancelSession={onCancelSession}
@@ -2314,6 +2336,7 @@ function deriveAssignmentRows({
 export function AssignmentBoard({
   taskId,
   rows,
+  managerSummary,
   approvals,
   onInspectSession,
   onCancelSession,
@@ -2324,6 +2347,7 @@ export function AssignmentBoard({
 }: {
   taskId: string;
   rows: AssignmentRow[];
+  managerSummary?: ManagerSummary;
   approvals: ApprovalState[];
   onInspectSession: (sessionId: string) => void;
   onCancelSession: (workerId: string) => Promise<void>;
@@ -2334,7 +2358,8 @@ export function AssignmentBoard({
 }) {
   const [busyAction, setBusyAction] = useState("");
   const [showAllRows, setShowAllRows] = useState(false);
-  const pendingCount = rows.filter((row) => row.tone === "warning" || row.tone === "danger").length;
+  const pendingCount = managerSummary?.attentionCount ?? rows.filter((row) => row.tone === "warning" || row.tone === "danger").length;
+  const activeSignals = managerSummary?.activeSignals ?? rows.length;
   const hiddenCount = Math.max(0, rows.length - ASSIGNMENT_ROW_LIMIT);
   const visibleRows = showAllRows ? rows : rows.slice(0, ASSIGNMENT_ROW_LIMIT);
 
@@ -2390,7 +2415,7 @@ export function AssignmentBoard({
       <div className="manager-section-title">
         <div>
           <span>Assignments</span>
-          <strong>{rows.length} active signals</strong>
+          <strong>{activeSignals} active signals</strong>
         </div>
         {pendingCount > 0 && <span className="pill">{pendingCount} need attention</span>}
       </div>
@@ -2752,23 +2777,27 @@ function taskAttentionItems({
       detail: taskError,
     }];
   }
+  const items: TaskAttentionItem[] = [];
   if (pendingApprovalCount > 0) {
-    return [{
+    items.push({
       tone: "warning",
       icon: <MessageSquarePlus size={16} />,
       label: "Waiting",
       title: `${pendingApprovalCount} approval${pendingApprovalCount === 1 ? "" : "s"} pending`,
       detail: "Answer the approval request to let orchestration continue.",
-    }];
+    });
   }
   if (pendingFeedbackCount > 0) {
-    return [{
+    items.push({
       tone: "warning",
       icon: <GitPullRequest size={16} />,
       label: "Review",
       title: `${pendingFeedbackCount} PR feedback item${pendingFeedbackCount === 1 ? "" : "s"} pending`,
       detail: "Pull request feedback is queued for follow-up work.",
-    }];
+    });
+  }
+  if (items.length > 0) {
+    return items;
   }
   if (workerUpdate) {
     return [{
@@ -6207,6 +6236,7 @@ function normalizeSnapshot(snapshot: Snapshot): AppSnapshot {
     pullRequests: snapshot.pullRequests ?? [],
     pullRequestFeedback: snapshot.pullRequestFeedback ?? [],
     steering: snapshot.steering ?? [],
+    managerSummary: snapshot.managerSummary ?? [],
     lastEventId,
     snapshotEventId: lastEventId,
     events: snapshot.events ?? [],
@@ -6284,6 +6314,10 @@ function mergeTaskSnapshot(snapshot: AppSnapshot, taskSnapshot: AppSnapshot): Ap
       ...snapshot.steering.filter((item) => !taskIds.has(item.taskId)),
       ...taskSnapshot.steering,
     ],
+    managerSummary: [
+      ...snapshot.managerSummary.filter((summary) => !taskIds.has(summary.taskId)),
+      ...taskSnapshot.managerSummary,
+    ],
     lastEventId: Math.max(snapshot.lastEventId, taskSnapshot.lastEventId),
   };
 }
@@ -6292,11 +6326,12 @@ function reduceEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {
   if (snapshot.events.some((existing) => existing.id === event.id)) {
     return snapshot;
   }
-  return applyProjectionEvent({
+  const next = applyProjectionEvent({
     ...snapshot,
     events: mergeEvents(snapshot.events, [event]),
     lastEventId: Math.max(snapshot.lastEventId, event.id),
   }, event);
+  return event.taskId ? withTaskManagerSummary(next, event.taskId) : next;
 }
 
 function applyTaskHistoryEvents(snapshot: AppSnapshot, events: EventRecord[]): AppSnapshot {
@@ -6311,6 +6346,9 @@ function applyTaskHistoryEvents(snapshot: AppSnapshot, events: EventRecord[]): A
       continue;
     }
     next = applyProjectionEvent(next, event);
+    if (event.taskId) {
+      next = withTaskManagerSummary(next, event.taskId);
+    }
   }
   return next;
 }
@@ -6343,6 +6381,131 @@ function trimTaskEventHistory(events: EventRecord[]): EventRecord[] {
 
 function maxEventId(events: EventRecord[]): number {
   return events.reduce((max, event) => Math.max(max, event.id), 0);
+}
+
+function withTaskManagerSummary(snapshot: AppSnapshot, taskId: string): AppSnapshot {
+  const summary = deriveManagerSummaryForTask(snapshot, taskId);
+  if (!summary) {
+    return {
+      ...snapshot,
+      managerSummary: snapshot.managerSummary.filter((item) => item.taskId !== taskId),
+    };
+  }
+  const managerSummary = snapshot.managerSummary.some((item) => item.taskId === taskId)
+    ? snapshot.managerSummary.map((item) => (item.taskId === taskId ? summary : item))
+    : [...snapshot.managerSummary, summary];
+  return { ...snapshot, managerSummary };
+}
+
+function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): ManagerSummary | undefined {
+  const task = snapshot.tasks.find((candidate) => candidate.id === taskId);
+  if (!task) return undefined;
+  const workers = snapshot.workers.filter((worker) => worker.taskId === taskId);
+  const workItems = snapshot.workItems.filter((item) => item.taskId === taskId);
+  const artifacts = snapshot.artifacts.filter((artifact) => artifact.taskId === taskId);
+  const questions = snapshot.questions.filter((question) => question.taskId === taskId);
+  const sessions = snapshot.sessions.filter((session) => session.taskId === taskId);
+  const pullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === taskId);
+  const feedback = snapshot.pullRequestFeedback.filter((item) => item.taskId === taskId);
+  const steering = snapshot.steering.filter((item) => item.taskId === taskId);
+  const sessionWorkerIds = new Set(sessions.map((session) => session.workerId));
+  let activeSignals = 0;
+  let attentionCount = task.status === "failed" || task.status === "canceled" || task.error ? 1 : 0;
+  let activeSessions = 0;
+  let activeWorkers = 0;
+  let activeWorkItems = 0;
+  let pendingApprovals = 0;
+  let pendingFeedback = 0;
+  let tone: AttentionTone = task.status === "succeeded" ? "good" : attentionCount ? "danger" : "info";
+  let latestAction = "";
+  let latestActionAt = "";
+  let latestActionLabel = "";
+
+  function applyAttention(nextTone: AttentionTone) {
+    if (nextTone === "danger" || (nextTone === "warning" && tone !== "danger")) {
+      tone = nextTone;
+    }
+  }
+  function noteLatest(text: string | undefined, at: string | undefined, label: string) {
+    if (!text || !at) return;
+    if (!latestActionAt || Date.parse(at) >= Date.parse(latestActionAt)) {
+      latestAction = text;
+      latestActionAt = at;
+      latestActionLabel = label;
+    }
+  }
+
+  for (const session of sessions) {
+    activeSignals += 1;
+    if (!isTerminalWorkerStatus(session.status)) activeSessions += 1;
+    if (session.status === "queued" || session.status === "waiting") {
+      attentionCount += 1;
+      applyAttention("warning");
+    }
+    if (session.status === "failed" || session.status === "canceled") {
+      attentionCount += 1;
+      applyAttention("danger");
+    }
+    noteLatest(session.currentAction, session.currentActionAt || session.updatedAt, session.currentActionLabel || "Session");
+  }
+  for (const worker of workers) {
+    if (!isTerminalWorkerStatus(worker.status)) activeWorkers += 1;
+    if (!sessionWorkerIds.has(worker.id)) {
+      activeSignals += 1;
+      if (worker.status === "queued" || worker.status === "waiting") {
+        attentionCount += 1;
+        applyAttention("warning");
+      }
+      if (worker.status === "failed" || worker.status === "canceled") {
+        attentionCount += 1;
+        applyAttention("danger");
+      }
+    }
+  }
+  for (const item of workItems) {
+    if (item.status === "queued" || item.status === "running" || item.status === "failed") {
+      activeSignals += 1;
+      activeWorkItems += 1;
+      attentionCount += 1;
+      applyAttention(item.status === "failed" ? "danger" : "warning");
+    }
+    noteLatest(item.error || item.reason, item.updatedAt, "Work item");
+  }
+  for (const question of questions) {
+    if (!question.decided) {
+      activeSignals += 1;
+      attentionCount += 1;
+      pendingApprovals += 1;
+      applyAttention("warning");
+    }
+  }
+  for (const item of feedback) {
+    if (item.status === "pending") {
+      activeSignals += 1;
+      attentionCount += 1;
+      pendingFeedback += 1;
+      applyAttention("warning");
+    }
+  }
+  activeSignals += pullRequests.length + artifacts.length + steering.filter((item) => item.status === "pending" || item.status === "queued" || item.status === "running").length;
+
+  return {
+    taskId,
+    activeSignals,
+    attentionCount,
+    pendingApprovals,
+    pendingFeedback,
+    activeSessions,
+    activeWorkers,
+    activeWorkItems,
+    pullRequests: pullRequests.length,
+    artifacts: artifacts.length,
+    latestAction,
+    latestActionAt,
+    latestActionLabel,
+    tone,
+    updatedAt: latestActionAt || task.updatedAt,
+  };
 }
 
 function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSnapshot {
@@ -6494,6 +6657,7 @@ function applyProjectionEvent(snapshot: AppSnapshot, event: EventRecord): AppSna
       pullRequests: snapshot.pullRequests.filter((pr) => pr.taskId !== event.taskId),
       pullRequestFeedback: snapshot.pullRequestFeedback.filter((feedback) => feedback.taskId !== event.taskId),
       steering: snapshot.steering.filter((item) => item.taskId !== event.taskId),
+      managerSummary: snapshot.managerSummary.filter((summary) => summary.taskId !== event.taskId),
     };
   }
   if (event.type === "execution.node_planned" && event.taskId) {

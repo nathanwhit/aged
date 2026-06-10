@@ -91,18 +91,27 @@ func (p *readModelState) snapshot(lastEventID int64, events []core.Event, includ
 	p.ensure()
 	filteredTasks := filterClearedTasks(p.Tasks, p.ClearedTasks)
 	filteredNodes := filterClearedExecutionNodes(p.Nodes, p.ClearedTasks)
+	filteredWorkers := filterClearedWorkers(p.Workers, p.ClearedTasks)
+	filteredWorkItems := filterClearedWorkItems(p.WorkItems, p.ClearedTasks)
+	filteredArtifacts := filterClearedArtifacts(p.Artifacts, p.ClearedTasks)
+	filteredQuestions := filterClearedQuestions(p.Questions, p.ClearedTasks)
+	filteredSessions := filterClearedSessions(p.Sessions, p.ClearedTasks)
+	filteredPullRequests := filterClearedPullRequests(p.PullRequests, p.ClearedTasks)
+	filteredPullRequestFeedback := filterClearedPullRequestFeedback(p.PullRequestFeedback, p.ClearedTasks)
+	filteredSteering := filterClearedSteering(p.Steering, p.ClearedTasks)
 	return core.Snapshot{
 		Tasks:               orderedTasks(filteredTasks),
-		Workers:             orderedWorkers(filterClearedWorkers(p.Workers, p.ClearedTasks)),
+		Workers:             orderedWorkers(filteredWorkers),
 		ExecutionNodes:      orderedExecutionNodes(filteredNodes),
-		WorkItems:           orderedWorkItems(filterClearedWorkItems(p.WorkItems, p.ClearedTasks)),
-		Artifacts:           orderedArtifacts(filterClearedArtifacts(p.Artifacts, p.ClearedTasks)),
+		WorkItems:           orderedWorkItems(filteredWorkItems),
+		Artifacts:           orderedArtifacts(filteredArtifacts),
 		MemoryEntries:       orderedMemoryEntries(filterClearedMemoryEntries(p.MemoryEntries, p.ClearedTasks)),
-		Questions:           orderedQuestions(filterClearedQuestions(p.Questions, p.ClearedTasks)),
-		Sessions:            orderedSessions(filterClearedSessions(p.Sessions, p.ClearedTasks)),
-		PullRequests:        orderedPullRequests(filterClearedPullRequests(p.PullRequests, p.ClearedTasks)),
-		PullRequestFeedback: orderedPullRequestFeedback(filterClearedPullRequestFeedback(p.PullRequestFeedback, p.ClearedTasks)),
-		Steering:            orderedSteering(filterClearedSteering(p.Steering, p.ClearedTasks)),
+		Questions:           orderedQuestions(filteredQuestions),
+		Sessions:            orderedSessions(filteredSessions),
+		PullRequests:        orderedPullRequests(filteredPullRequests),
+		PullRequestFeedback: orderedPullRequestFeedback(filteredPullRequestFeedback),
+		Steering:            orderedSteering(filteredSteering),
+		ManagerSummary:      buildManagerSummaries(filteredTasks, filteredWorkers, filteredWorkItems, filteredArtifacts, filteredQuestions, filteredSessions, filteredPullRequests, filteredPullRequestFeedback, filteredSteering),
 		LastEventID:         lastEventID,
 		Events:              snapshotResponseEvents(events, includeEvents),
 	}
@@ -126,6 +135,8 @@ func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 	pullRequestFeedback := filterTasks(p.PullRequestFeedback, p.ClearedTasks, activeTasks, func(feedback core.PullRequestFeedback) string { return feedback.TaskID })
 	steering := filterTasks(p.Steering, p.ClearedTasks, activeTasks, func(item core.SteeringItem) string { return item.TaskID })
 	sessions := filterTasks(p.Sessions, p.ClearedTasks, activeTasks, func(session core.Session) string { return session.TaskID })
+	questions := filterTasks(p.Questions, p.ClearedTasks, activeTasks, func(question core.Question) string { return question.TaskID })
+	workItems := filterTasks(p.WorkItems, p.ClearedTasks, activeTasks, func(item core.WorkItem) string { return item.TaskID })
 	workers = compactCardWorkers(workers)
 	nodes = compactCardExecutionNodes(nodes)
 	pullRequests = compactCardPullRequests(pullRequests)
@@ -134,13 +145,14 @@ func (p *readModelState) taskCardsSnapshot(lastEventID int64) core.Snapshot {
 		Tasks:               orderedTasks(taskCards),
 		Workers:             orderedWorkers(workers),
 		ExecutionNodes:      orderedExecutionNodes(nodes),
-		WorkItems:           orderedWorkItems(filterTasks(p.WorkItems, p.ClearedTasks, activeTasks, func(item core.WorkItem) string { return item.TaskID })),
+		WorkItems:           orderedWorkItems(workItems),
 		Artifacts:           orderedArtifacts(compactCardArtifacts(artifacts)),
-		Questions:           orderedQuestions(filterTasks(p.Questions, p.ClearedTasks, activeTasks, func(question core.Question) string { return question.TaskID })),
+		Questions:           orderedQuestions(questions),
 		Sessions:            orderedSessions(sessions),
 		PullRequests:        orderedPullRequests(pullRequests),
 		PullRequestFeedback: orderedPullRequestFeedback(compactCardPullRequestFeedback(pullRequestFeedback)),
 		Steering:            orderedSteering(compactCardSteering(steering)),
+		ManagerSummary:      buildManagerSummaries(filteredTasks, workers, workItems, artifacts, questions, sessions, pullRequests, pullRequestFeedback, steering),
 		LastEventID:         lastEventID,
 	}
 }
@@ -330,6 +342,214 @@ func filterTasks[T any](values map[string]T, cleared map[string]bool, keptTasks 
 		out[id] = value
 	}
 	return out
+}
+
+func buildManagerSummaries(
+	tasks map[string]core.Task,
+	workers map[string]core.Worker,
+	workItems map[string]core.WorkItem,
+	artifacts map[string]core.Artifact,
+	questions map[string]core.Question,
+	sessions map[string]core.Session,
+	pullRequests map[string]core.PullRequest,
+	pullRequestFeedback map[string]core.PullRequestFeedback,
+	steering map[string]core.SteeringItem,
+) []core.ManagerSummary {
+	summaries := make(map[string]core.ManagerSummary, len(tasks))
+	for id, task := range tasks {
+		tone := "info"
+		if task.Status == core.TaskSucceeded {
+			tone = "good"
+		}
+		if task.Status == core.TaskFailed || task.Status == core.TaskCanceled || task.Error != "" {
+			tone = "danger"
+		}
+		summaries[id] = core.ManagerSummary{
+			TaskID:    id,
+			Tone:      tone,
+			UpdatedAt: task.UpdatedAt,
+		}
+	}
+	sessionWorkers := map[string]bool{}
+	for _, session := range sessions {
+		sessionWorkers[session.WorkerID] = true
+		summary, ok := summaries[session.TaskID]
+		if !ok {
+			continue
+		}
+		summary.ActiveSignals++
+		if !isTerminalWorkerStatus(session.Status) {
+			summary.ActiveSessions++
+			if session.Status == core.WorkerWaiting || session.Status == core.WorkerQueued {
+				summary.AttentionCount++
+				summary.Tone = managerSummaryTone(summary.Tone, "warning")
+			}
+		}
+		if session.Status == core.WorkerFailed || session.Status == core.WorkerCanceled {
+			summary.AttentionCount++
+			summary.Tone = managerSummaryTone(summary.Tone, "danger")
+		}
+		actionAt := valueTime(session.CurrentActionAt, session.UpdatedAt)
+		if managerSummaryLatestActionAfter(summary, session.CurrentAction, actionAt) {
+			summary.LatestAction = session.CurrentAction
+			summary.LatestActionAt = actionAt
+			summary.LatestActionLabel = session.CurrentActionLabel
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, session.UpdatedAt)
+		summaries[session.TaskID] = summary
+	}
+	for _, worker := range workers {
+		summary, ok := summaries[worker.TaskID]
+		if !ok {
+			continue
+		}
+		if !isTerminalWorkerStatus(worker.Status) {
+			summary.ActiveWorkers++
+		}
+		if !sessionWorkers[worker.ID] {
+			summary.ActiveSignals++
+			if worker.Status == core.WorkerWaiting || worker.Status == core.WorkerQueued {
+				summary.AttentionCount++
+				summary.Tone = managerSummaryTone(summary.Tone, "warning")
+			}
+			if worker.Status == core.WorkerFailed || worker.Status == core.WorkerCanceled {
+				summary.AttentionCount++
+				summary.Tone = managerSummaryTone(summary.Tone, "danger")
+			}
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, worker.UpdatedAt)
+		summaries[worker.TaskID] = summary
+	}
+	for _, item := range workItems {
+		summary, ok := summaries[item.TaskID]
+		if !ok {
+			continue
+		}
+		if item.Status == core.WorkItemQueued || item.Status == core.WorkItemRunning || item.Status == core.WorkItemFailed {
+			summary.ActiveSignals++
+			summary.ActiveWorkItems++
+			summary.AttentionCount++
+			if item.Status == core.WorkItemFailed {
+				summary.Tone = managerSummaryTone(summary.Tone, "danger")
+			} else {
+				summary.Tone = managerSummaryTone(summary.Tone, "warning")
+			}
+		}
+		if item.Error != "" && managerSummaryLatestActionAfter(summary, item.Error, item.UpdatedAt) {
+			summary.LatestAction = item.Error
+			summary.LatestActionAt = item.UpdatedAt
+			summary.LatestActionLabel = "Work item"
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, item.UpdatedAt)
+		summaries[item.TaskID] = summary
+	}
+	for _, question := range questions {
+		summary, ok := summaries[question.TaskID]
+		if !ok {
+			continue
+		}
+		if !question.Decided {
+			summary.ActiveSignals++
+			summary.AttentionCount++
+			summary.PendingApprovals++
+			summary.Tone = managerSummaryTone(summary.Tone, "warning")
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, question.UpdatedAt)
+		summaries[question.TaskID] = summary
+	}
+	for _, feedback := range pullRequestFeedback {
+		summary, ok := summaries[feedback.TaskID]
+		if !ok {
+			continue
+		}
+		if feedback.Status == "pending" {
+			summary.ActiveSignals++
+			summary.AttentionCount++
+			summary.PendingFeedback++
+			summary.Tone = managerSummaryTone(summary.Tone, "warning")
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, feedback.UpdatedAt)
+		summaries[feedback.TaskID] = summary
+	}
+	for _, pr := range pullRequests {
+		summary, ok := summaries[pr.TaskID]
+		if !ok {
+			continue
+		}
+		summary.ActiveSignals++
+		summary.PullRequests++
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, pr.UpdatedAt)
+		summaries[pr.TaskID] = summary
+	}
+	for _, artifact := range artifacts {
+		summary, ok := summaries[artifact.TaskID]
+		if !ok {
+			continue
+		}
+		summary.ActiveSignals++
+		summary.Artifacts++
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, artifact.UpdatedAt)
+		summaries[artifact.TaskID] = summary
+	}
+	for _, item := range steering {
+		summary, ok := summaries[item.TaskID]
+		if !ok {
+			continue
+		}
+		if item.Status == "pending" || item.Status == "queued" || item.Status == "running" {
+			summary.ActiveSignals++
+		}
+		summary.UpdatedAt = latestTime(summary.UpdatedAt, item.UpdatedAt)
+		summaries[item.TaskID] = summary
+	}
+	return orderedManagerSummaries(summaries, tasks)
+}
+
+func managerSummaryTone(current string, next string) string {
+	rank := map[string]int{"good": 0, "info": 1, "warning": 2, "danger": 3}
+	if rank[next] > rank[current] {
+		return next
+	}
+	return current
+}
+
+func managerSummaryLatestActionAfter(summary core.ManagerSummary, action string, at time.Time) bool {
+	if action == "" {
+		return false
+	}
+	if summary.LatestAction == "" {
+		return true
+	}
+	if at.After(summary.LatestActionAt) {
+		return true
+	}
+	if at.Equal(summary.LatestActionAt) {
+		return action > summary.LatestAction
+	}
+	return false
+}
+
+func latestTime(left time.Time, right time.Time) time.Time {
+	if right.After(left) {
+		return right
+	}
+	return left
+}
+
+func valueTime(value *time.Time, fallback time.Time) time.Time {
+	if value != nil {
+		return *value
+	}
+	return fallback
+}
+
+func orderedManagerSummaries(values map[string]core.ManagerSummary, tasks map[string]core.Task) []core.ManagerSummary {
+	return orderedSnapshotValues(values, func(summary core.ManagerSummary) string { return summary.TaskID }, func(summary core.ManagerSummary) time.Time {
+		if task, ok := tasks[summary.TaskID]; ok {
+			return task.CreatedAt
+		}
+		return summary.UpdatedAt
+	})
 }
 
 type sessionExecutionPayload struct {

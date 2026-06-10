@@ -713,6 +713,24 @@ type SteeringItem struct {
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
+type ManagerSummary struct {
+	TaskID            string    `json:"taskId"`
+	ActiveSignals     int       `json:"activeSignals"`
+	AttentionCount    int       `json:"attentionCount"`
+	PendingApprovals  int       `json:"pendingApprovals"`
+	PendingFeedback   int       `json:"pendingFeedback"`
+	ActiveSessions    int       `json:"activeSessions"`
+	ActiveWorkers     int       `json:"activeWorkers"`
+	ActiveWorkItems   int       `json:"activeWorkItems"`
+	PullRequests      int       `json:"pullRequests"`
+	Artifacts         int       `json:"artifacts"`
+	LatestAction      string    `json:"latestAction,omitempty"`
+	LatestActionAt    time.Time `json:"latestActionAt,omitempty"`
+	LatestActionLabel string    `json:"latestActionLabel,omitempty"`
+	Tone              string    `json:"tone,omitempty"`
+	UpdatedAt         time.Time `json:"updatedAt,omitempty"`
+}
+
 type TaskAssignment struct {
 	ID                 string     `json:"id"`
 	TaskID             string     `json:"taskId"`
@@ -833,6 +851,7 @@ type Snapshot struct {
 	PullRequests        []PullRequest         `json:"pullRequests,omitempty"`
 	PullRequestFeedback []PullRequestFeedback `json:"pullRequestFeedback,omitempty"`
 	Steering            []SteeringItem        `json:"steering,omitempty"`
+	ManagerSummary      []ManagerSummary      `json:"managerSummary,omitempty"`
 	LastEventID         int64                 `json:"lastEventId,omitempty"`
 	Events              []Event               `json:"events"`
 }
