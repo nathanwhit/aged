@@ -3858,6 +3858,116 @@ func TestPendingPullRequestFeedbackSkipsUntrackedAndTerminalPullRequests(t *test
 	}
 }
 
+func TestQueuePlanWorkItemsSkipsTerminalPullRequestFollowUp(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-terminal-pr-followup"
+	appendTrackedPullRequest(t, ctx, store, taskID, "", core.TaskRunning)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":    "pr-1",
+			"state": "MERGED",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, taskID)
+	if !ok {
+		t.Fatal("missing task")
+	}
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+
+	queued, err := service.queuePlanWorkItems(ctx, task, Plan{
+		WorkItems: []WorkItemRequest{{
+			ID:         "repair-pr",
+			Kind:       "pr.followup",
+			Reason:     "Repair review feedback.",
+			WorkerKind: "codex",
+			Metadata: map[string]any{
+				"pullRequestId": "pr-1",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("queued work items = %+v, want none for merged PR", queued)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countEvents(snapshot.Events, core.EventWorkItemQueued, taskID); got != 0 {
+		t.Fatalf("work item queued events = %d, want 0", got)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "terminal_pull_request_followup_skipped", "skipped") {
+		t.Fatalf("missing terminal follow-up skipped action:\n%s", taskActionPayloads(snapshot.Events, taskID))
+	}
+}
+
+func TestRunSpawnedWorkItemSkipsTerminalPullRequestFollowUp(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	taskID := "task-terminal-pr-race"
+	appendTrackedPullRequest(t, ctx, store, taskID, "", core.TaskRunning)
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{
+		"codex": eventRunner{kind: "codex"},
+	}, t.TempDir(), fakeWorkspaceManager{cwd: t.TempDir()})
+	if err := service.recordWorkItemQueued(ctx, taskID, map[string]any{
+		"id":         "repair-pr",
+		"kind":       "pr.followup",
+		"targetKind": "pull_request",
+		"targetId":   "pr-1",
+		"reason":     "Repair review feedback.",
+		"metadata": map[string]any{
+			"sourceAction":      "plan",
+			"pullRequestID":     "pr-1",
+			"workerKind":        "codex",
+			"feedbackSignature": "sig-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: taskID,
+		Payload: core.MustJSON(map[string]any{
+			"id":    "pr-1",
+			"state": "MERGED",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	service.runSpawnedWorkItem(ctx, taskID, "repair-pr")
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, ok := workItemByIDFromSnapshot(snapshot, taskID, "repair-pr")
+	if !ok || item.Status != core.WorkItemSucceeded || item.WorkerID != "" {
+		t.Fatalf("work item = %+v ok=%v, want succeeded without worker", item, ok)
+	}
+	if got := countEvents(snapshot.Events, core.EventWorkerCreated, taskID); got != 0 {
+		t.Fatalf("worker created events = %d, want 0", got)
+	}
+	if !hasTaskAction(snapshot.Events, taskID, "terminal_pull_request_followup_skipped", "skipped") {
+		t.Fatalf("missing terminal follow-up skipped action:\n%s", taskActionPayloads(snapshot.Events, taskID))
+	}
+}
+
 func TestServicePlanActionSkipsMissingPullRequestUpdateTarget(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
