@@ -433,6 +433,21 @@ func TestTaskAssignmentsEndpoint(t *testing.T) {
 	if artifact.TargetKind != "pull_request" || artifact.TargetID != "pr-1" || artifact.WorkerID != "worker-1" {
 		t.Fatalf("artifact assignment = %+v", artifact)
 	}
+	if len(result.DisplayRows) == 0 {
+		t.Fatalf("displayRows were empty in response: %+v", result)
+	}
+	questionRow := httpDisplayRowByKind(t, result.DisplayRows, "question")
+	if questionRow.Kind != "question" || questionRow.Selection == nil || questionRow.Selection.Kind != "question" || questionRow.Selection.QuestionID == "" {
+		t.Fatalf("question display row = %+v", questionRow)
+	}
+	sessionRow := httpDisplayRowByID(t, result.DisplayRows, "session:worker-1")
+	if sessionRow.Kind != "session" || sessionRow.Selection == nil || sessionRow.Selection.SessionID != "worker-1" || len(sessionRow.Actions) == 0 {
+		t.Fatalf("session display row = %+v", sessionRow)
+	}
+	prRow := httpDisplayRowByID(t, result.DisplayRows, "pr:pr-1")
+	if prRow.Kind != "pull_request" || prRow.Title == "" || prRow.Subtitle == prRow.Title || prRow.Selection == nil || prRow.Selection.PullRequestID != "pr-1" {
+		t.Fatalf("pull request display row = %+v", prRow)
+	}
 
 	missing, err := http.Get(server.URL + "/api/tasks/missing/assignments")
 	if err != nil {
@@ -2143,4 +2158,26 @@ func httpAssignmentBySource(t *testing.T, rows []core.TaskAssignment, sourceKind
 	}
 	t.Fatalf("missing assignment %s/%s in %+v", sourceKind, sourceID, rows)
 	return core.TaskAssignment{}
+}
+
+func httpDisplayRowByID(t *testing.T, rows []core.TaskAssignmentDisplayRow, id string) core.TaskAssignmentDisplayRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("missing display row %s in %+v", id, rows)
+	return core.TaskAssignmentDisplayRow{}
+}
+
+func httpDisplayRowByKind(t *testing.T, rows []core.TaskAssignmentDisplayRow, kind string) core.TaskAssignmentDisplayRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.Kind == kind {
+			return row
+		}
+	}
+	t.Fatalf("missing display row kind %s in %+v", kind, rows)
+	return core.TaskAssignmentDisplayRow{}
 }
