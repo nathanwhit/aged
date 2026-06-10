@@ -14242,6 +14242,18 @@ func TestServiceSessionTailReturnsWorkerEventsAndCurrentAction(t *testing.T) {
 	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{
+		"nodeId":        "node-session-tail",
+		"workerId":      workerID,
+		"workerKind":    "mock",
+		"role":          "implementation",
+		"targetId":      "vultr-vm",
+		"targetKind":    "ssh",
+		"remoteSession": "aged-worker-tail",
+		"remoteWorkDir": "/work/repo",
+	})}); err != nil {
+		t.Fatal(err)
+	}
 	started, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})})
 	if err != nil {
 		t.Fatal(err)
@@ -14253,6 +14265,29 @@ func TestServiceSessionTailReturnsWorkerEventsAndCurrentAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	completed, err := store.Append(ctx, core.Event{Type: core.EventWorkerCompleted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{
+		"status":  core.WorkerSucceeded,
+		"summary": "tail done",
+		"workspaceChanges": map[string]any{
+			"changedFiles": []map[string]any{{"path": "internal/orchestrator/service.go", "status": "modified"}},
+		},
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventPRPublished, TaskID: taskID, Payload: core.MustJSON(map[string]any{
+		"id":     "pr-session-tail",
+		"repo":   "owner/repo",
+		"number": 9,
+		"url":    "https://github.com/owner/repo/pull/9",
+		"branch": "session-tail",
+		"title":  "Session tail",
+		"metadata": map[string]any{
+			"workerId": workerID,
+		},
+	})}); err != nil {
+		t.Fatal(err)
+	}
 
 	tail, err := service.SessionTail(ctx, workerID, started.ID, 10)
 	if err != nil {
@@ -14261,14 +14296,29 @@ func TestServiceSessionTailReturnsWorkerEventsAndCurrentAction(t *testing.T) {
 	if tail.SessionID != workerID || tail.WorkerID != workerID || tail.TaskID != taskID {
 		t.Fatalf("tail identity = %+v", tail)
 	}
-	if tail.LastEventID != output.ID {
-		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, output.ID)
+	if tail.LastEventID != completed.ID {
+		t.Fatalf("lastEventId = %d, want %d", tail.LastEventID, completed.ID)
 	}
-	if len(tail.Events) != 1 || tail.Events[0].ID != output.ID {
-		t.Fatalf("events = %+v, want output event %d", tail.Events, output.ID)
+	if len(tail.Events) != 2 || tail.Events[0].ID != output.ID || tail.Events[1].ID != completed.ID {
+		t.Fatalf("events = %+v, want output/completed events %d/%d", tail.Events, output.ID, completed.ID)
 	}
 	if tail.CurrentAction == nil || !strings.Contains(tail.CurrentAction.Text, "go test") || tail.CurrentAction.EventID != output.ID {
 		t.Fatalf("current action = %+v", tail.CurrentAction)
+	}
+	if tail.Session == nil || tail.Session.RemoteSession != "aged-worker-tail" || tail.Session.RemoteWorkDir != "/work/repo" {
+		t.Fatalf("session context = %+v", tail.Session)
+	}
+	if tail.Worker == nil || tail.Worker.Kind != "mock" {
+		t.Fatalf("worker context = %+v", tail.Worker)
+	}
+	if tail.Node == nil || tail.Node.ID != "node-session-tail" || tail.Node.TargetID != "vultr-vm" {
+		t.Fatalf("node context = %+v", tail.Node)
+	}
+	if len(tail.PullRequests) != 1 || tail.PullRequests[0].ID != "pr-session-tail" {
+		t.Fatalf("pull requests = %+v", tail.PullRequests)
+	}
+	if tail.Completion == nil || tail.Completion.EventID != completed.ID || len(tail.ChangedFiles) != 1 || tail.ChangedFiles[0].Path != "internal/orchestrator/service.go" {
+		t.Fatalf("completion = %+v changedFiles = %+v", tail.Completion, tail.ChangedFiles)
 	}
 }
 

@@ -38,6 +38,15 @@ export type SessionCurrentAction = {
   eventId?: number;
 };
 
+export type SessionCompletion = {
+  status?: WorkerStatus;
+  summary?: string;
+  error?: string;
+  eventId?: number;
+  at?: string;
+  changedFiles?: WorkspaceChangedFile[];
+};
+
 export type SessionTail = {
   sessionId: string;
   workerId: string;
@@ -46,6 +55,12 @@ export type SessionTail = {
   lastEventId: number;
   events: EventRecord[];
   currentAction?: SessionCurrentAction;
+  session?: Session;
+  worker?: Worker;
+  node?: ExecutionNode;
+  pullRequests?: PullRequestState[];
+  completion?: SessionCompletion;
+  changedFiles?: WorkspaceChangedFile[];
 };
 
 export type Task = {

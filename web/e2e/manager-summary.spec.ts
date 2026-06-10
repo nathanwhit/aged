@@ -141,6 +141,19 @@ async function mockApi(page: Page) {
   await page.route(`**/api/tasks/${taskId}`, (route) => route.fulfill({ json: snapshot }));
   await page.route(`**/api/tasks/${taskId}/assignments`, (route) => route.fulfill({ json: { taskId, assignments: [] } }));
   await page.route(`**/api/tasks/${taskId}/events?**`, (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/sessions/session-manager-summary/tail?**", (route) =>
+    route.fulfill({
+      json: {
+        sessionId: "session-manager-summary",
+        workerId: "worker-manager-summary",
+        taskId,
+        status: "running",
+        lastEventId: 1,
+        events: [],
+        currentAction: { label: "Validation", text: "Running validation checks for manager summary", at: now, eventId: 1 },
+      },
+    }),
+  );
   await page.route("**/api/events/stream?**", (route) =>
     route.fulfill({
       status: 200,
@@ -179,4 +192,19 @@ test("manager summary badges render through dashboard and task detail without ho
   await expect(page.getByRole("heading", { name: "Manager summary validation" })).toBeVisible();
   await expect(page.getByText("Assignments")).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+test("selected task defaults to manager console without legacy backend panes", async ({ page }) => {
+  await mockApi(page);
+  await page.setViewportSize({ width: 1366, height: 900 });
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Manager summary validation" })).toBeVisible();
+  await expect(page.getByText("Pull Requests", { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Current State" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Orchestration" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Worker Detail" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Timeline" })).toHaveCount(0);
+  await expect(page.locator(".debug-backend-internals")).toHaveCount(0);
+  await expect(page.locator(".debug-pane summary").getByText("Debug")).toBeVisible();
 });

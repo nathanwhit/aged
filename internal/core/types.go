@@ -472,6 +472,20 @@ type SessionCurrentAction struct {
 	EventID int64      `json:"eventId,omitempty"`
 }
 
+type SessionChangedFile struct {
+	Path   string `json:"path"`
+	Status string `json:"status,omitempty"`
+}
+
+type SessionCompletion struct {
+	Status       WorkerStatus         `json:"status,omitempty"`
+	Summary      string               `json:"summary,omitempty"`
+	Error        string               `json:"error,omitempty"`
+	EventID      int64                `json:"eventId,omitempty"`
+	At           time.Time            `json:"at,omitempty"`
+	ChangedFiles []SessionChangedFile `json:"changedFiles,omitempty"`
+}
+
 type SessionTail struct {
 	SessionID     string                `json:"sessionId"`
 	WorkerID      string                `json:"workerId"`
@@ -480,6 +494,12 @@ type SessionTail struct {
 	LastEventID   int64                 `json:"lastEventId"`
 	Events        []Event               `json:"events"`
 	CurrentAction *SessionCurrentAction `json:"currentAction,omitempty"`
+	Session       *Session              `json:"session,omitempty"`
+	Worker        *Worker               `json:"worker,omitempty"`
+	Node          *ExecutionNode        `json:"node,omitempty"`
+	PullRequests  []PullRequest         `json:"pullRequests,omitempty"`
+	Completion    *SessionCompletion    `json:"completion,omitempty"`
+	ChangedFiles  []SessionChangedFile  `json:"changedFiles,omitempty"`
 }
 
 type TargetCapacity struct {

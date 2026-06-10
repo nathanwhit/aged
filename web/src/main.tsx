@@ -22,9 +22,9 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelSession as cancelSessionAPI, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerSession as steerSessionAPI, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
+import { answerTaskQuestion, applyWorkerChanges, askAssistant, babysitPullRequest, cancelSession as cancelSessionAPI, cancelTask, cancelWorkItem, cancelWorker, clearFinishedTasks, clearTask, createProject, createTarget, createTask, deletePlugin, deleteProject, deletePromptSet, deleteTarget, getProjectHealth, getSessionTail, getSnapshot, getTaskAssignments, getTaskEvents, getTaskSnapshot, getWorkerChanges, publishTaskPullRequest, refreshPullRequest, refreshTargetHealth, registerPlugin, registerPromptSet, retryTask, steerSession as steerSessionAPI, steerTask, steerWorker, updatePlugin, updateProject, updatePromptSet, updateTarget, updateTaskLoopConfig, watchTaskPullRequests } from "./api";
 import type { TargetInput } from "./api";
-import type { Artifact, EventRecord, ExecutionNode, ManagerSummary, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, Snapshot, SteeringItem, TargetState, Task, TaskAssignmentActionDescriptor, TaskAssignmentDisplayRow, TaskAssignmentSelection, TaskAssignmentsResponse, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
+import type { Artifact, EventRecord, ExecutionNode, ManagerSummary, MemoryEntry, Plugin, Project, ProjectHealth, ProjectInput, PromptSet, PullRequestFeedback, PullRequestPolicy, PullRequestState, Question, Session, SessionTail, Snapshot, SteeringItem, TargetState, Task, TaskAssignmentActionDescriptor, TaskAssignmentDisplayRow, TaskAssignmentSelection, TaskAssignmentsResponse, WatchPullRequestsInput, WorkItem, Worker, WorkerChangesReview, WorkerStatus } from "./types";
 import { selectSessions, selectWorkItems } from "./assignments";
 import "./styles.css";
 
@@ -158,8 +158,8 @@ type DashboardPane = {
   element: React.ReactNode;
 };
 
-const LEGACY_DASHBOARD_LAYOUT_STORAGE_KEYS = ["aged.dashboard.layout.v3"];
-const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v4";
+const LEGACY_DASHBOARD_LAYOUT_STORAGE_KEYS = ["aged.dashboard.layout.v3", "aged.dashboard.layout.v4"];
+const DASHBOARD_LAYOUT_STORAGE_KEY = "aged.dashboard.layout.v5";
 const DASHBOARD_MIN_SPAN = 4;
 const DASHBOARD_MAX_SPAN = 12;
 const DASHBOARD_MIN_HEIGHT = 0;
@@ -180,11 +180,6 @@ const EMPTY_QUESTIONS: Question[] = [];
 const EMPTY_SESSIONS: Session[] = [];
 const DEFAULT_DASHBOARD_LAYOUT: DashboardPaneLayout[] = [
   { id: "task-detail", span: 12, minHeight: 0 },
-  { id: "current-state", span: 4, minHeight: 0 },
-  { id: "pull-requests", span: 8, minHeight: 0 },
-  { id: "workers", span: 12, minHeight: 0 },
-  { id: "worker-detail", span: 8, minHeight: 0 },
-  { id: "timeline", span: 12, minHeight: 320 },
   { id: "targets", span: 4, minHeight: 0 },
   { id: "projects", span: 4, minHeight: 0 },
   { id: "prompt-sets", span: 4, minHeight: 0 },
@@ -249,7 +244,6 @@ function groupByWorker(events: EventRecord[]): Map<string, EventRecord[]> {
 function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(emptySnapshot);
   const [selectedTaskId, setSelectedTaskId] = useState<string>("");
-  const [selectedWorkerId, setSelectedWorkerId] = useState<string>("");
   const [pendingTask, setPendingTask] = useState<TaskStartInput | null>(null);
   const [error, setError] = useState<string>("");
   const [connected, setConnected] = useState(false);
@@ -372,9 +366,6 @@ function App() {
   const selectedPullRequestFeedback = selectedTask ? pullRequestFeedbackByTask.get(selectedTask.id) ?? EMPTY_PULL_REQUEST_FEEDBACK : EMPTY_PULL_REQUEST_FEEDBACK;
   const selectedSteering = selectedTask ? steeringByTask.get(selectedTask.id) ?? EMPTY_STEERING : EMPTY_STEERING;
   const selectedManagerSummary = selectedTask ? managerSummaryByTask.get(selectedTask.id) : undefined;
-  const selectedWorker = selectedWorkers.find((worker) => worker.id === selectedWorkerId);
-  const selectedWorkerNode = selectedNodes.find((node) => node.workerId === selectedWorker?.id);
-  const selectedWorkerEvents = selectedWorker ? selectedEventsByWorker.get(selectedWorker.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = useMemo(() => snapshot.tasks.some(isTerminalTask), [snapshot.tasks]);
   const activeTasks = useMemo(() => snapshot.tasks.filter((task) => !isTerminalTask(task)), [snapshot.tasks]);
@@ -502,65 +493,7 @@ function App() {
         {
           id: "task-detail",
           title: "Task",
-          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} backendAssignmentRows={selectedBackendAssignmentRows} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onClear={handleClearTask} onCancelSession={cancelSessionAPI} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onAnswerQuestion={answerTaskQuestion} onPublishPullRequest={publishTaskPullRequest} onWatchPullRequests={watchTaskPullRequests} onRefreshPullRequest={refreshPullRequest} onBabysitPullRequest={babysitPullRequest} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
-        },
-        {
-          id: "pull-requests",
-          title: "Pull Requests",
-          element: (
-            <PullRequestPanel
-              task={selectedTask}
-              pullRequests={selectedPullRequests}
-              pullRequestFeedback={selectedPullRequestFeedback}
-              onPublish={publishTaskPullRequest}
-              onWatch={watchTaskPullRequests}
-              onRefresh={refreshPullRequest}
-              onBabysit={babysitPullRequest}
-              onSteer={steerTask}
-              onDone={refresh}
-              onError={setError}
-            />
-          ),
-        },
-        {
-          id: "current-state",
-          title: "Current State",
-          element: <WorkSummary progress={progress} nodes={selectedNodes} workers={selectedWorkers} workItems={selectedWorkItems} sessions={selectedSessions} />,
-        },
-        {
-          id: "workers",
-          title: "Orchestration",
-          element: (
-            <WorkerList
-              workers={selectedWorkers}
-              nodes={selectedNodes}
-              progress={progress}
-              task={selectedTask}
-              eventsByWorker={selectedEventsByWorker}
-              selectedWorkerId={selectedWorkerId}
-              onSelect={setSelectedWorkerId}
-              onReview={getWorkerChanges}
-              onApply={applyWorkerChanges}
-              onApplied={refresh}
-              onCancel={cancelWorker}
-              onSteer={steerWorker}
-              onError={setError}
-            />
-          ),
-        },
-        ...(selectedWorker
-          ? [
-              {
-                id: "worker-detail" as const,
-                title: "Worker Detail",
-                element: <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />,
-              },
-            ]
-          : []),
-        {
-          id: "timeline",
-          title: "Timeline",
-          element: <EventLog events={selectedEvents} />,
+          element: <TaskDetail task={selectedTask} managerSummary={selectedManagerSummary} backendAssignmentRows={selectedBackendAssignmentRows} workers={selectedWorkers} nodes={selectedNodes} workItems={selectedWorkItems} artifacts={selectedArtifacts} memoryEntries={selectedMemoryEntries} questions={selectedQuestions} sessions={selectedSessions} pullRequests={selectedPullRequests} pullRequestFeedback={selectedPullRequestFeedback} steering={selectedSteering} targets={snapshot.targets} events={selectedEvents} onCancel={cancelTask} onClear={handleClearTask} onCancelSession={cancelSessionAPI} onCancelWorker={cancelWorker} onCancelWorkItem={cancelWorkItem} onRetry={handleRetryTask} onSteer={steerTask} onSteerSession={steerSessionAPI} onSteerWorker={steerWorker} onAnswerQuestion={answerTaskQuestion} onPublishPullRequest={publishTaskPullRequest} onWatchPullRequests={watchTaskPullRequests} onRefreshPullRequest={refreshPullRequest} onBabysitPullRequest={babysitPullRequest} onReviewWorkerChanges={getWorkerChanges} onApplyWorkerChanges={applyWorkerChanges} onUpdateLoopConfig={updateTaskLoopConfig} onLoopConfigUpdated={refresh} retrying={retryingTaskId === selectedTask.id} onError={setError} />,
         },
       ]
     : [];
@@ -834,7 +767,7 @@ function DashboardGrid({ panes }: { panes: DashboardPane[] }) {
     const orderedIds = new Set(ordered.map((pane) => pane.id));
     return [...ordered, ...panes.filter((pane) => !orderedIds.has(pane.id))];
   }, [layout, paneById, panes]);
-  const hasTaskPane = orderedPanes.some((pane) => pane.id === "task-detail" || pane.id === "workers" || pane.id === "timeline");
+  const hasTaskPane = orderedPanes.some((pane) => pane.id === "task-detail");
   const customizable = hasTaskPane && orderedPanes.length > 2;
 
   useEffect(() => {
@@ -1953,11 +1886,14 @@ function TaskDetail({
   onRetry,
   onSteer,
   onSteerSession,
+  onSteerWorker,
   onAnswerQuestion,
   onPublishPullRequest,
   onWatchPullRequests,
   onRefreshPullRequest,
   onBabysitPullRequest,
+  onReviewWorkerChanges,
+  onApplyWorkerChanges,
   onCancelWorkItem,
   onUpdateLoopConfig,
   onLoopConfigUpdated,
@@ -1986,11 +1922,14 @@ function TaskDetail({
   onRetry: (id: string) => Promise<void>;
   onSteer: (id: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
   onSteerSession: (id: string, message: string) => Promise<void>;
+  onSteerWorker: (id: string, message: string) => Promise<void>;
   onAnswerQuestion: (taskId: string, questionId: string, answer: string) => Promise<void>;
   onPublishPullRequest: (taskId: string) => Promise<PullRequestState>;
   onWatchPullRequests: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
   onRefreshPullRequest: (id: string) => Promise<PullRequestState>;
   onBabysitPullRequest: (id: string) => Promise<unknown>;
+  onReviewWorkerChanges: (id: string) => Promise<WorkerChangesReview>;
+  onApplyWorkerChanges: (id: string) => Promise<void>;
   onCancelWorkItem: (taskId: string, itemId: string) => Promise<void>;
   onUpdateLoopConfig: (id: string, input: { loopIntervalSeconds?: number; loopPrompt?: string; requiredTargetID?: string }) => Promise<Task>;
   onLoopConfigUpdated: () => Promise<void>;
@@ -2006,6 +1945,7 @@ function TaskDetail({
   const [selectedPullRequestId, setSelectedPullRequestId] = useState("");
   const [selectedQuestionId, setSelectedQuestionId] = useState("");
   const [selectedAssignmentId, setSelectedAssignmentId] = useState("");
+  const [debugOpen, setDebugOpen] = useState(false);
   const durableLoop = isDurableLoopMetadata(task.metadata);
   const broadObjective = isBroadObjectiveMetadata(task.metadata);
   const loopInterval = durableLoopIntervalSeconds(task.metadata);
@@ -2029,6 +1969,7 @@ function TaskDetail({
   const selectedSession = useMemo(() => selectedLiveSession(sessions, selectedSessionId), [selectedSessionId, sessions]);
   const selectedPullRequest = useMemo(() => selectedPullRequestForSummary(pullRequests, selectedPullRequestId), [pullRequests, selectedPullRequestId]);
   const pullRequestArtifacts = artifacts.filter((artifact) => artifact.kind.toLowerCase().includes("pull") || artifact.kind.toLowerCase().includes("pr"));
+  const progress = useMemo(() => workProgress(task, workers, nodes), [nodes, task, workers]);
   const attentionItems = taskAttentionItems({
     task,
     taskError,
@@ -2216,20 +2157,131 @@ function selectAssignment(row: AssignmentRow) {
           <Send size={18} />
         </button>
       </form>
-      <details className="debug-pane">
+      <details className="debug-pane" open={debugOpen} onToggle={(event) => setDebugOpen(event.currentTarget.open)}>
         <summary>
           <span>Debug</span>
           <small>{workers.length || nodes.length} workers · {workItems.length} work items · {events.length} events</small>
         </summary>
-        <div className="debug-pane-content">
-          <WorkerProgressSpotlight update={workerUpdate} />
-          <WideWorkProgress items={workItems} />
-          <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
-          <SessionQueue sessions={sessions} onCancel={onCancelSession} onSteer={onSteerSession} onError={onError} />
-          <SteeringQueue items={steering} />
-          <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
-        </div>
+        {debugOpen && (
+          <div className="debug-pane-content">
+            <WorkerProgressSpotlight update={workerUpdate} />
+            <WideWorkProgress items={workItems} />
+            <WorkItemQueue taskId={task.id} items={workItems} onCancel={onCancelWorkItem} onSteer={onSteer} onError={onError} />
+            <SessionQueue sessions={sessions} onCancel={onCancelSession} onSteer={onSteerSession} onError={onError} />
+            <SteeringQueue items={steering} />
+            <PullRequestFeedbackQueue feedback={pullRequestFeedback} />
+            <DebugBackendInternals
+              task={task}
+              pullRequests={pullRequests}
+              pullRequestFeedback={pullRequestFeedback}
+              progress={progress}
+              nodes={nodes}
+              workers={workers}
+              workItems={workItems}
+              sessions={sessions}
+              events={events}
+              eventsByWorker={eventsByWorker}
+              onPublish={onPublishPullRequest}
+              onWatch={onWatchPullRequests}
+              onRefresh={onRefreshPullRequest}
+              onBabysit={onBabysitPullRequest}
+              onSteerTask={onSteer}
+              onReviewWorkerChanges={onReviewWorkerChanges}
+              onApplyWorkerChanges={onApplyWorkerChanges}
+              onCancelWorker={onCancelWorker}
+              onSteerWorker={onSteerWorker}
+              onDone={onLoopConfigUpdated}
+              onError={onError}
+            />
+          </div>
+        )}
       </details>
+    </section>
+  );
+}
+
+function DebugBackendInternals({
+  task,
+  pullRequests,
+  pullRequestFeedback,
+  progress,
+  nodes,
+  workers,
+  workItems,
+  sessions,
+  events,
+  eventsByWorker,
+  onPublish,
+  onWatch,
+  onRefresh,
+  onBabysit,
+  onSteerTask,
+  onReviewWorkerChanges,
+  onApplyWorkerChanges,
+  onCancelWorker,
+  onSteerWorker,
+  onDone,
+  onError,
+}: {
+  task: Task;
+  pullRequests: PullRequestState[];
+  pullRequestFeedback: PullRequestFeedback[];
+  progress: WorkProgress;
+  nodes: ExecutionNode[];
+  workers: Worker[];
+  workItems: WorkItem[];
+  sessions: Session[];
+  events: EventRecord[];
+  eventsByWorker: Map<string, EventRecord[]>;
+  onPublish: (taskId: string) => Promise<PullRequestState>;
+  onWatch: (taskId: string, input: WatchPullRequestsInput) => Promise<PullRequestState[]>;
+  onRefresh: (id: string) => Promise<PullRequestState>;
+  onBabysit: (id: string) => Promise<unknown>;
+  onSteerTask: (id: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>;
+  onReviewWorkerChanges: (id: string) => Promise<WorkerChangesReview>;
+  onApplyWorkerChanges: (id: string) => Promise<void>;
+  onCancelWorker: (id: string) => Promise<void>;
+  onSteerWorker: (id: string, message: string) => Promise<void>;
+  onDone: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [selectedWorkerId, setSelectedWorkerId] = useState("");
+  const selectedWorker = workers.find((worker) => worker.id === selectedWorkerId);
+  const selectedWorkerNode = selectedWorker ? nodes.find((node) => node.workerId === selectedWorker.id) : undefined;
+  const selectedWorkerEvents = selectedWorker ? eventsByWorker.get(selectedWorker.id) ?? EMPTY_EVENTS : EMPTY_EVENTS;
+
+  return (
+    <section className="debug-backend-internals" aria-label="Backend internals">
+      <WorkSummary progress={progress} nodes={nodes} workers={workers} workItems={workItems} sessions={sessions} />
+      <PullRequestPanel
+        task={task}
+        pullRequests={pullRequests}
+        pullRequestFeedback={pullRequestFeedback}
+        onPublish={onPublish}
+        onWatch={onWatch}
+        onRefresh={onRefresh}
+        onBabysit={onBabysit}
+        onSteer={onSteerTask}
+        onDone={onDone}
+        onError={onError}
+      />
+      <WorkerList
+        workers={workers}
+        nodes={nodes}
+        progress={progress}
+        task={task}
+        eventsByWorker={eventsByWorker}
+        selectedWorkerId={selectedWorkerId}
+        onSelect={setSelectedWorkerId}
+        onReview={onReviewWorkerChanges}
+        onApply={onApplyWorkerChanges}
+        onApplied={onDone}
+        onCancel={onCancelWorker}
+        onSteer={onSteerWorker}
+        onError={onError}
+      />
+      {selectedWorker && <WorkerDetail worker={selectedWorker} node={selectedWorkerNode} events={selectedWorkerEvents} />}
+      <EventLog events={events} />
     </section>
   );
 }
@@ -2751,7 +2803,7 @@ export function AssignmentBoard({
   );
 }
 
-function LiveSessionPanel({
+export function LiveSessionPanel({
   session,
   worker,
   node,
@@ -2773,6 +2825,42 @@ function LiveSessionPanel({
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [canceling, setCanceling] = useState(false);
+  const [tail, setTail] = useState<SessionTail | null>(null);
+  const fallbackEventCursor = useMemo(() => maxEventId(events), [events]);
+  const displayEvents = useMemo(() => mergeEvents(events, tail?.events ?? []), [events, tail?.events]);
+  const cursorRef = useRef(0);
+
+  useEffect(() => {
+    setTail(null);
+    cursorRef.current = fallbackEventCursor;
+    if (!session) return;
+    const selectedSession = session;
+    let canceled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+
+    async function poll() {
+      try {
+        const next = await getSessionTail(selectedSession.id, { after: cursorRef.current, limit: 50 });
+        if (canceled) return;
+        cursorRef.current = Math.max(cursorRef.current, next.lastEventId ?? 0, maxEventId(next.events ?? []));
+        setTail((current) => mergeSessionTail(current, next));
+      } catch {
+        if (!canceled) {
+          setTail((current) => current);
+        }
+      }
+    }
+
+    void poll();
+    if (!isTerminalWorkerStatus(selectedSession.status)) {
+      timer = setInterval(() => void poll(), 3000);
+    }
+    return () => {
+      canceled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [fallbackEventCursor, session?.id, session?.status]);
+
   if (!session) {
     return (
       <section className="manager-section live-session-panel empty-session" aria-label="Agent session details">
@@ -2786,19 +2874,37 @@ function LiveSessionPanel({
       </section>
     );
   }
-  const activeSession = session;
-  const latestEvent = latestWorkerProgressEvent(events) ?? latestInspectableWorkerEvent(events);
-  const completion = latestWorkerCompletion(events, activeSession.workerId);
-  const changedFiles = completion.changedFiles ?? completion.workspaceChanges?.changedFiles ?? [];
-  const command = worker?.command?.join(" ") || metadataString(activeSession.metadata, "command") || metadataString(worker?.metadata, "command");
-  const model = metadataString(activeSession.metadata, "model") || metadataString(activeSession.metadata, "brain") || metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain");
-  const provider = metadataString(activeSession.metadata, "provider") || metadataString(worker?.metadata, "provider");
-  const branch = metadataString(activeSession.metadata, "branch") || metadataString(worker?.metadata, "branch");
-  const latestOutput = activeSession.currentAction || (latestEvent ? eventDisplayText(latestEvent) : "");
-  const location = activeSession.workspaceCwd || activeSession.remoteWorkDir || activeSession.workspaceRoot || node?.remoteWorkDir || "";
+  const activeSession: Session = tail
+    ? {
+        ...session,
+        ...(tail.session ?? {}),
+        status: tail.status || tail.session?.status || session.status,
+        currentAction: tail.currentAction?.text ?? tail.session?.currentAction ?? session.currentAction,
+        currentActionLabel: tail.currentAction?.label ?? tail.session?.currentActionLabel ?? session.currentActionLabel,
+        currentActionAt: tail.currentAction?.at ?? tail.session?.currentActionAt ?? session.currentActionAt,
+        currentActionEvent: tail.currentAction?.eventId ?? tail.session?.currentActionEvent ?? session.currentActionEvent,
+      }
+    : session;
+  const activeWorker = tail?.worker ?? worker;
+  const activeNode = tail?.node ?? node;
+  const latestEvent = latestWorkerProgressEvent(displayEvents) ?? latestInspectableWorkerEvent(displayEvents);
+  const fallbackCompletion = latestWorkerCompletion(displayEvents, activeSession.workerId);
+  const changedFiles = tail?.changedFiles?.length
+    ? tail.changedFiles
+    : tail?.completion?.changedFiles?.length
+      ? tail.completion.changedFiles
+      : fallbackCompletion.changedFiles ?? fallbackCompletion.workspaceChanges?.changedFiles ?? [];
+  const pullRequests = tail?.pullRequests ?? [];
+  const primaryPullRequest = pullRequests[0];
+  const command = activeWorker?.command?.join(" ") || metadataString(activeSession.metadata, "command") || metadataString(activeWorker?.metadata, "command");
+  const model = metadataString(activeSession.metadata, "model") || metadataString(activeSession.metadata, "brain") || metadataString(activeWorker?.metadata, "model") || metadataString(activeWorker?.metadata, "brain");
+  const provider = metadataString(activeSession.metadata, "provider") || metadataString(activeWorker?.metadata, "provider");
+  const branch = metadataString(activeSession.metadata, "branch") || metadataString(activeWorker?.metadata, "branch") || primaryPullRequest?.branch;
+  const latestOutput = activeSession.currentAction || tail?.completion?.summary || tail?.completion?.error || (latestEvent ? eventDisplayText(latestEvent) : "");
+  const location = activeSession.workspaceCwd || activeSession.remoteWorkDir || activeSession.workspaceRoot || activeNode?.remoteWorkDir || "";
   const scratch = activeSession.sharedWorkerDir || activeSession.sharedArtifactsDir || activeSession.sharedRoot || "";
   const target = [activeSession.targetKind && humanizeKey(activeSession.targetKind), activeSession.targetId].filter(Boolean).join(" ");
-  const eventTail = events.slice(-6).filter((event) => event.type !== "worker_completed" || eventDisplayText(event));
+  const eventTail = displayEvents.slice(-6).filter((event) => event.type !== "worker.completed" || eventDisplayText(event));
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -2860,6 +2966,7 @@ function LiveSessionPanel({
           {scratch && <TerminalFact label="Scratch" value={scratch} />}
           {activeSession.remoteRunDir && <TerminalFact label="Run dir" value={activeSession.remoteRunDir} />}
           {activeSession.currentActionLabel && <TerminalFact label="Action" value={activeSession.currentActionLabel} />}
+          {primaryPullRequest && <TerminalFact label="Pull request" value={pullRequestDisplay(primaryPullRequest)} />}
         </dl>
         {latestOutput ? (
           <pre className="terminal-output">{latestOutput}</pre>
@@ -2911,6 +3018,29 @@ function TerminalFact({ label, value }: { label: string; value: string }) {
       <dd>{value}</dd>
     </div>
   );
+}
+
+function mergeSessionTail(current: SessionTail | null, next: SessionTail): SessionTail {
+  if (!current || current.sessionId !== next.sessionId) return next;
+  return {
+    ...current,
+    ...next,
+    events: mergeEvents(current.events ?? [], next.events ?? []),
+    session: next.session ?? current.session,
+    worker: next.worker ?? current.worker,
+    node: next.node ?? current.node,
+    pullRequests: next.pullRequests ?? current.pullRequests,
+    completion: next.completion ?? current.completion,
+    changedFiles: next.changedFiles?.length ? next.changedFiles : current.changedFiles,
+    currentAction: next.currentAction ?? current.currentAction,
+    lastEventId: Math.max(current.lastEventId ?? 0, next.lastEventId ?? 0),
+  };
+}
+
+function pullRequestDisplay(pr: PullRequestState): string {
+  const number = pr.number ? `#${pr.number}` : pr.id;
+  const state = pr.state ? ` ${pr.state}` : "";
+  return `${pr.repo} ${number}${state}`;
 }
 
 function ManagerPullRequestSummary({

@@ -1732,6 +1732,10 @@ func (s *Service) SessionTail(ctx context.Context, sessionID string, afterID int
 	if err != nil {
 		return core.SessionTail{}, err
 	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.SessionTail{}, err
+	}
 	if len(kinds) == 0 {
 		kinds = []core.EventType{
 			core.EventWorkerOutput,
@@ -1759,6 +1763,14 @@ func (s *Service) SessionTail(ctx context.Context, sessionID string, afterID int
 			EventID: session.CurrentActionEvent,
 		}
 	}
+	worker := sessionTailWorker(snapshot.Workers, session.WorkerID)
+	node := sessionTailNode(snapshot.ExecutionNodes, session)
+	pullRequests := sessionTailPullRequests(snapshot.PullRequests, session.TaskID, session.WorkerID)
+	completion := s.sessionTailCompletion(ctx, session.WorkerID)
+	changedFiles := []core.SessionChangedFile(nil)
+	if completion != nil {
+		changedFiles = completion.ChangedFiles
+	}
 	return core.SessionTail{
 		SessionID:     session.ID,
 		WorkerID:      session.WorkerID,
@@ -1767,7 +1779,99 @@ func (s *Service) SessionTail(ctx context.Context, sessionID string, afterID int
 		LastEventID:   lastEventID,
 		Events:        events,
 		CurrentAction: currentAction,
+		Session:       &session,
+		Worker:        worker,
+		Node:          node,
+		PullRequests:  pullRequests,
+		Completion:    completion,
+		ChangedFiles:  changedFiles,
 	}, nil
+}
+
+func sessionTailWorker(workers []core.Worker, workerID string) *core.Worker {
+	for _, worker := range workers {
+		if worker.ID == workerID {
+			return &worker
+		}
+	}
+	return nil
+}
+
+func sessionTailNode(nodes []core.ExecutionNode, session core.Session) *core.ExecutionNode {
+	for _, node := range nodes {
+		if session.NodeID != "" && node.ID == session.NodeID {
+			return &node
+		}
+	}
+	for _, node := range nodes {
+		if node.WorkerID == session.WorkerID {
+			return &node
+		}
+	}
+	return nil
+}
+
+func sessionTailPullRequests(pullRequests []core.PullRequest, taskID string, workerID string) []core.PullRequest {
+	taskPullRequests := []core.PullRequest{}
+	workerPullRequests := []core.PullRequest{}
+	for _, pr := range pullRequests {
+		if pr.TaskID != taskID {
+			continue
+		}
+		taskPullRequests = append(taskPullRequests, pr)
+		if workerID != "" && pullRequestMetadataString(pr, "workerId") == workerID {
+			workerPullRequests = append(workerPullRequests, pr)
+		}
+	}
+	if len(workerPullRequests) > 0 {
+		return workerPullRequests
+	}
+	return taskPullRequests
+}
+
+func (s *Service) sessionTailCompletion(ctx context.Context, workerID string) *core.SessionCompletion {
+	events, err := s.store.ListWorkerEvents(ctx, workerID, 0, 1000, core.EventWorkerCompleted)
+	if err != nil {
+		return nil
+	}
+	var completion *core.SessionCompletion
+	for _, event := range events {
+		next := sessionCompletionFromEvent(event)
+		if next != nil {
+			completion = next
+		}
+	}
+	return completion
+}
+
+func sessionCompletionFromEvent(event core.Event) *core.SessionCompletion {
+	if event.Type != core.EventWorkerCompleted {
+		return nil
+	}
+	var payload struct {
+		Status           core.WorkerStatus         `json:"status,omitempty"`
+		Summary          string                    `json:"summary,omitempty"`
+		Error            string                    `json:"error,omitempty"`
+		ChangedFiles     []core.SessionChangedFile `json:"changedFiles,omitempty"`
+		WorkspaceChanges struct {
+			ChangedFiles []core.SessionChangedFile `json:"changedFiles,omitempty"`
+		} `json:"workspaceChanges,omitempty"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return nil
+	}
+	changedFiles := payload.ChangedFiles
+	if len(changedFiles) == 0 {
+		changedFiles = payload.WorkspaceChanges.ChangedFiles
+	}
+	return &core.SessionCompletion{
+		Status:       payload.Status,
+		Summary:      payload.Summary,
+		Error:        payload.Error,
+		EventID:      event.ID,
+		At:           event.At,
+		ChangedFiles: changedFiles,
+	}
 }
 
 func (s *Service) Subscribe() (int, <-chan core.Event) {
