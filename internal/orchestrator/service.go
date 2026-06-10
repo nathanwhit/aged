@@ -7433,6 +7433,21 @@ func (s *Service) queuePlanWorkItems(ctx context.Context, task core.Task, plan P
 		if plan.Metadata != nil {
 			metadata["planMetadata"] = plan.Metadata
 		}
+		if existing, ok, err := s.existingPullRequestFollowUpWorkItem(ctx, task.ID, kind, targetKind, targetID, metadata); err != nil {
+			return nil, err
+		} else if ok {
+			if err := s.recordTaskAction(ctx, task.ID, map[string]any{
+				"kind":               "duplicate_pull_request_followup_skipped",
+				"status":             "skipped",
+				"reason":             "A queued or running pull request follow-up already exists for this pull request.",
+				"workItemId":         itemID,
+				"existingWorkItemId": existing.ID,
+				"targetId":           targetID,
+			}); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if err := s.recordWorkItemQueued(ctx, task.ID, map[string]any{
 			"id":         itemID,
 			"kind":       kind,
@@ -7460,6 +7475,28 @@ func (s *Service) queuePlanWorkItems(ctx context.Context, task core.Task, plan P
 		})
 	}
 	return queued, nil
+}
+
+func (s *Service) existingPullRequestFollowUpWorkItem(ctx context.Context, taskID string, kind string, targetKind string, targetID string, metadata map[string]any) (core.WorkItem, bool, error) {
+	if kind != "pr.followup" || targetKind != "pull_request" {
+		return core.WorkItem{}, false, nil
+	}
+	prID := strings.TrimSpace(targetID)
+	if prID == "" {
+		prID = strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestID"), stringMetadata(metadata, "pullRequestId")))
+	}
+	if prID == "" {
+		return core.WorkItem{}, false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return core.WorkItem{}, false, err
+	}
+	signature := strings.TrimSpace(stringMetadata(metadata, "feedbackSignature"))
+	if existing, ok := pullRequestFollowUpWorkItem(snapshot, taskID, prID, signature); ok {
+		return existing, true, nil
+	}
+	return core.WorkItem{}, false, nil
 }
 
 func planQueuedWorkItemID(planID string, itemID string) string {

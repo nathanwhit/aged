@@ -3247,6 +3247,16 @@ func (s *Service) pullRequestFollowUpForPlan(ctx context.Context, taskID string,
 
 func pullRequestFollowUpForPlan(snapshot core.Snapshot, taskID string, plan Plan) (core.PullRequest, string, bool) {
 	items := pendingPullRequestFeedback(snapshot, taskID)
+	if len(items) > 0 {
+		filtered := items[:0]
+		for _, item := range items {
+			if _, ok := pullRequestFollowUpWorkItem(snapshot, taskID, item.PullRequestID, item.FeedbackSignature); ok {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		items = filtered
+	}
 	if len(items) == 0 {
 		return core.PullRequest{}, "", false
 	}

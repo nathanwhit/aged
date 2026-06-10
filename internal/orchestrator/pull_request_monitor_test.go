@@ -570,6 +570,141 @@ func TestServiceDefaultPullRequestMonitorQueuesFeedbackWhileTaskRunning(t *testi
 	}
 }
 
+func TestPullRequestFollowUpPlanIgnoresFeedbackAlreadyBeingHandled(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRStatusChecked,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id": "pr-1",
+			"metadata": map[string]any{
+				"latestPullRequestFeedbackSignature":          "2026-05-11T22:01:05Z:conversation:IC_1",
+				"latestPullRequestFeedbackTriggeredSignature": "2026-05-11T21:59:00Z:conversation:IC_0",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{
+		Type:   core.EventPRFollowUp,
+		TaskID: "task-1",
+		Payload: core.MustJSON(map[string]any{
+			"id":                "pr-1",
+			"attempt":           1,
+			"status":            "queued",
+			"reason":            "pull_request_needs_work",
+			"repo":              "owner/repo",
+			"number":            7,
+			"url":               "https://github.com/owner/repo/pull/7",
+			"branch":            "codex/aged-test",
+			"feedbackSignature": "2026-05-11T22:01:05Z:conversation:IC_1",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := newTestPullRequestMonitorService(t, store, &fakePullRequestPublisher{})
+	if err := service.recordPullRequestFollowUpWorkItem(ctx, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/aged-test",
+		Base:   "main",
+	}, "address review", "2026-05-11T22:01:05Z:conversation:IC_1"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending := pendingPullRequestFeedback(snapshot, "task-1"); len(pending) != 1 {
+		t.Fatalf("pending feedback = %+v, want original pending feedback preserved", pending)
+	}
+	if _, _, ok := pullRequestFollowUpForPlan(snapshot, "task-1", Plan{
+		WorkItems: []WorkItemRequest{{
+			ID:              "continue-objective",
+			Kind:            "objective.implement",
+			Reason:          "continue independent objective work",
+			Prompt:          "continue",
+			TargetKind:      "objective",
+			TargetID:        "task-1",
+			WorkerKind:      "mock",
+			ReasoningEffort: "low",
+		}},
+	}); ok {
+		t.Fatal("planner treated already-covered PR feedback as requiring another follow-up")
+	}
+}
+
+func TestQueuePlanWorkItemsSkipsDuplicatePullRequestFollowUp(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := newTestPullRequestMonitorService(t, store, &fakePullRequestPublisher{})
+	appendTrackedPullRequest(t, ctx, store, "task-1", "", core.TaskRunning)
+	if err := service.recordPullRequestFollowUpWorkItem(ctx, core.PullRequest{
+		ID:     "pr-1",
+		TaskID: "task-1",
+		Repo:   "owner/repo",
+		Number: 7,
+		URL:    "https://github.com/owner/repo/pull/7",
+		Branch: "codex/aged-test",
+		Base:   "main",
+	}, "address review", "sig-1"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, ok := findTask(snapshot, "task-1")
+	if !ok {
+		t.Fatal("missing task")
+	}
+	queued, err := service.queuePlanWorkItems(ctx, task, Plan{
+		Metadata: map[string]any{"planID": "plan-1"},
+		WorkItems: []WorkItemRequest{{
+			ID:              "handle-pr-feedback",
+			Kind:            "pr.followup",
+			Reason:          "handle review",
+			Prompt:          "address review",
+			TargetKind:      "pull_request",
+			TargetID:        "pr-1",
+			WorkerKind:      "mock",
+			ReasoningEffort: "low",
+			Metadata:        map[string]any{"feedbackSignature": "sig-1"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("queued duplicate work items = %+v, want none", queued)
+	}
+	snapshot, err = store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, item := range snapshot.WorkItems {
+		if item.TaskID == "task-1" && item.Kind == "pr.followup" && item.TargetID == "pr-1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("pr.followup work item count = %d, want 1; items = %+v", count, snapshot.WorkItems)
+	}
+	if !hasTaskAction(snapshot.Events, "task-1", "duplicate_pull_request_followup_skipped", "skipped") {
+		t.Fatal("missing duplicate skip task action")
+	}
+}
+
 func TestServicePullRequestMonitorStartsBackgroundFollowUpWhileObjectiveWorkerRuns(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
