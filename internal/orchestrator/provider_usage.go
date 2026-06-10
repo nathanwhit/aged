@@ -20,6 +20,12 @@ const (
 	providerUsageSwitchMargin   = 10
 )
 
+type ProviderUsageExhaustion struct {
+	Provider string
+	Summary  string
+	Detail   string
+}
+
 type ProviderUsageSource interface {
 	Snapshot(ctx context.Context) ProviderUsageSnapshot
 }
@@ -368,4 +374,73 @@ func providerUsagePressure(usage ProviderUsage) (int, bool) {
 		}
 	}
 	return clampPercent(maxUsed), true
+}
+
+func classifyProviderUsageExhaustion(kind string, values ...string) (ProviderUsageExhaustion, bool) {
+	text := strings.TrimSpace(strings.Join(values, "\n"))
+	if text == "" {
+		return ProviderUsageExhaustion{}, false
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(text), " "))
+	for _, excluded := range []string{
+		"context window",
+		"context-window",
+		"context_window",
+		"model_context_window",
+		"maximum context",
+		"too many tokens",
+		"token limit exceeded",
+	} {
+		if strings.Contains(normalized, excluded) {
+			return ProviderUsageExhaustion{}, false
+		}
+	}
+
+	provider := strings.TrimSpace(kind)
+	switch {
+	case strings.Contains(normalized, "claude"):
+		provider = "claude"
+	case strings.Contains(normalized, "codex") || strings.Contains(normalized, "openai"):
+		provider = "codex"
+	}
+
+	needles := []string{
+		"usage limit",
+		"usage limits",
+		"limit reached",
+		"rate limit",
+		"rate_limit",
+		"rate_limit_exceeded",
+		"too many requests",
+		"status 429",
+		"429 too many",
+		"quota exceeded",
+		"insufficient_quota",
+		"current quota",
+		"credit balance",
+		"monthly spend limit",
+		"usage credits",
+		"try again later",
+		"limits reset",
+		"limit resets",
+	}
+	matched := false
+	for _, needle := range needles {
+		if strings.Contains(normalized, needle) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return ProviderUsageExhaustion{}, false
+	}
+	summary := "Model provider usage is exhausted."
+	if provider != "" {
+		summary = provider + " usage is exhausted."
+	}
+	return ProviderUsageExhaustion{
+		Provider: provider,
+		Summary:  summary,
+		Detail:   truncateStringForPrompt(text, 2000),
+	}, true
 }
