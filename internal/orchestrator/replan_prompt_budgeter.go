@@ -250,6 +250,9 @@ func (b ReplanPromptBudgeter) compactPullRequestFeedback(items []PullRequestFeed
 func (b ReplanPromptBudgeter) compactArtifacts(artifacts []core.TaskArtifact) []ReplanPromptArtifact {
 	compact := make([]ReplanPromptArtifact, 0, len(artifacts))
 	for _, artifact := range artifacts {
+		if promptArtifactOmitted(artifact) {
+			continue
+		}
 		item := ReplanPromptArtifact{
 			ID:       artifact.ID,
 			Kind:     artifact.Kind,
@@ -273,6 +276,10 @@ func (b ReplanPromptBudgeter) compactArtifacts(artifacts []core.TaskArtifact) []
 		compactTokens.drop(dropIndex)
 	}
 	return compact
+}
+
+func promptArtifactOmitted(artifact core.TaskArtifact) bool {
+	return strings.EqualFold(strings.TrimSpace(artifact.Kind), "worker_log")
 }
 
 func (b ReplanPromptBudgeter) degradeToTotalBudget(payload map[string]any, state ReplanPromptState) ReplanPromptState {

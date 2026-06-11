@@ -247,8 +247,8 @@ func (p Plan) Validate() error {
 			return errors.New("plan workItems must contain at least one work item")
 		}
 		for _, action := range p.Actions {
-			if strings.TrimSpace(action.When) != "immediate" {
-				return errors.New("work-itemless plans may only contain immediate actions")
+			if !actionAllowedWithoutWorkItem(action) {
+				return errors.New("work-itemless plans may only contain immediate actions or worker-bound PR actions")
 			}
 		}
 	} else if err := validateWorkItemRequests(p.WorkItems); err != nil {
@@ -260,6 +260,21 @@ func (p Plan) Validate() error {
 		}
 	}
 	return nil
+}
+
+func actionAllowedWithoutWorkItem(action PlanAction) bool {
+	if strings.TrimSpace(action.When) == "immediate" {
+		return true
+	}
+	if strings.TrimSpace(action.WorkerID) == "" {
+		return false
+	}
+	switch strings.TrimSpace(action.Kind) {
+	case "publish_pull_request", "update_pull_request":
+		return strings.TrimSpace(action.When) == "after_success"
+	default:
+		return false
+	}
 }
 
 func validateWorkItemRequests(items []WorkItemRequest) error {
