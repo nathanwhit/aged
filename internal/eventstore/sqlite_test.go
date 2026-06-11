@@ -1300,6 +1300,43 @@ func TestListWorkerEventsFiltersWorkerAfterLimitAndKinds(t *testing.T) {
 	}
 }
 
+func TestListLatestWorkerEventsReturnsTailAscending(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLiteStore(t, ctx)
+
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-b", Payload: core.MustJSON(map[string]any{"text": "other worker"})}); err != nil {
+		t.Fatal(err)
+	}
+	var outputs []core.Event
+	for i := 0; i < 5; i++ {
+		event, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: "task-a", WorkerID: "worker-a", Payload: core.MustJSON(map[string]any{"text": fmt.Sprintf("line-%d", i)})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs = append(outputs, event)
+	}
+
+	events, err := store.ListLatestWorkerEvents(ctx, "worker-a", 3, core.EventWorkerOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3; events = %+v", len(events), events)
+	}
+	wantIDs := []int64{outputs[2].ID, outputs[3].ID, outputs[4].ID}
+	for i, event := range events {
+		if event.WorkerID != "worker-a" || event.Type != core.EventWorkerOutput {
+			t.Fatalf("unexpected event %+v", event)
+		}
+		if event.ID != wantIDs[i] {
+			t.Fatalf("events[%d].ID = %d, want %d (events=%+v)", i, event.ID, wantIDs[i], events)
+		}
+	}
+}
+
 func TestListWorkerEventsUsesWorkerIndex(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLiteStore(t, ctx)

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "../api";
@@ -11,6 +11,7 @@ vi.mock("../api", async () => ({
 }));
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -122,6 +123,81 @@ describe("LiveSessionPanel", () => {
     expect(await screen.findAllByText("running npm test")).not.toHaveLength(0);
     expect(screen.getByText("owner/repo #7 OPEN")).toBeInTheDocument();
     expect(screen.getByText("modified web/src/main.tsx")).toBeInTheDocument();
+  });
+
+  it("polls incrementally after receiving the initial latest tail", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(api.getSessionTail)
+        .mockResolvedValueOnce({
+          sessionId: "session-1",
+          workerId: "worker-1",
+          taskId: "task-1",
+          status: "running",
+          lastEventId: 42,
+          events: [
+            {
+              id: 41,
+              at: "2026-06-10T00:00:01Z",
+              type: "worker.output",
+              taskId: "task-1",
+              workerId: "worker-1",
+              payload: { text: "tail line a" },
+            },
+            {
+              id: 42,
+              at: "2026-06-10T00:00:02Z",
+              type: "worker.output",
+              taskId: "task-1",
+              workerId: "worker-1",
+              payload: { text: "tail line b" },
+            },
+          ],
+          session: baseSession,
+          worker: baseWorker,
+          node: baseNode,
+          pullRequests: [],
+          changedFiles: [],
+        })
+        .mockResolvedValueOnce({
+          sessionId: "session-1",
+          workerId: "worker-1",
+          taskId: "task-1",
+          status: "running",
+          lastEventId: 43,
+          events: [
+            {
+              id: 43,
+              at: "2026-06-10T00:00:03Z",
+              type: "worker.output",
+              taskId: "task-1",
+              workerId: "worker-1",
+              payload: { text: "incremental line" },
+            },
+          ],
+          session: baseSession,
+          worker: baseWorker,
+          node: baseNode,
+          pullRequests: [],
+          changedFiles: [],
+        });
+
+      renderPanel();
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await vi.waitFor(() =>
+        expect(api.getSessionTail).toHaveBeenNthCalledWith(1, "session-1", { after: 0, limit: 50 }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+
+      expect(api.getSessionTail).toHaveBeenNthCalledWith(2, "session-1", { after: 42, limit: 50 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("falls back to snapshot events when tail polling fails", async () => {
