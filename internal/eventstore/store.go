@@ -11,6 +11,7 @@ type Store interface {
 	ListEvents(ctx context.Context, afterID int64, limit int) ([]core.Event, error)
 	ListTaskEvents(ctx context.Context, taskID string, limit int) ([]core.Event, error)
 	ListWorkerEvents(ctx context.Context, workerID string, afterID int64, limit int, kinds ...core.EventType) ([]core.Event, error)
+	ListLatestWorkerEvents(ctx context.Context, workerID string, limit int, kinds ...core.EventType) ([]core.Event, error)
 	ListTaskLedgerEvents(ctx context.Context, taskID string) ([]core.Event, error)
 	TaskStatus(ctx context.Context, taskID string) (core.TaskStatus, bool, error)
 	Snapshot(ctx context.Context) (core.Snapshot, error)

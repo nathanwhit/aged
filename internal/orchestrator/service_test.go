@@ -14322,6 +14322,64 @@ func TestServiceSessionTailReturnsWorkerEventsAndCurrentAction(t *testing.T) {
 	}
 }
 
+func TestServiceSessionTailInitialReturnsLatestWindow(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	taskID := "task-session-tail-latest"
+	workerID := "worker-session-tail-latest"
+	if _, err := store.Append(ctx, core.Event{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Tail", "prompt": "Tail latest"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, core.Event{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})}); err != nil {
+		t.Fatal(err)
+	}
+	var outputs []core.Event
+	for i := 0; i < 8; i++ {
+		event, err := store.Append(ctx, core.Event{Type: core.EventWorkerOutput, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "tool", "text": fmt.Sprintf("line-%d", i)})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs = append(outputs, event)
+	}
+
+	tail, err := service.SessionTail(ctx, workerID, 0, 3, core.EventWorkerOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tail.Events) != 3 {
+		t.Fatalf("initial tail event count = %d, want 3 (events=%+v)", len(tail.Events), tail.Events)
+	}
+	wantIDs := []int64{outputs[5].ID, outputs[6].ID, outputs[7].ID}
+	for i, event := range tail.Events {
+		if event.ID != wantIDs[i] {
+			t.Fatalf("initial tail events[%d].ID = %d, want %d (events=%+v)", i, event.ID, wantIDs[i], tail.Events)
+		}
+	}
+	if tail.LastEventID != outputs[7].ID {
+		t.Fatalf("LastEventID = %d, want %d", tail.LastEventID, outputs[7].ID)
+	}
+
+	incremental, err := service.SessionTail(ctx, workerID, outputs[5].ID, 10, core.EventWorkerOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incremental.Events) != 2 {
+		t.Fatalf("incremental tail event count = %d, want 2 (events=%+v)", len(incremental.Events), incremental.Events)
+	}
+	if incremental.Events[0].ID != outputs[6].ID || incremental.Events[1].ID != outputs[7].ID {
+		t.Fatalf("incremental tail events = %+v, want %d/%d", incremental.Events, outputs[6].ID, outputs[7].ID)
+	}
+	if incremental.LastEventID != outputs[7].ID {
+		t.Fatalf("incremental LastEventID = %d, want %d", incremental.LastEventID, outputs[7].ID)
+	}
+}
+
 func TestServiceSessionControlDelegatesToWorker(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

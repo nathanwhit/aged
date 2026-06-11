@@ -1744,11 +1744,19 @@ func (s *Service) SessionTail(ctx context.Context, sessionID string, afterID int
 			core.EventWorkerSteered,
 		}
 	}
-	events, err := s.store.ListWorkerEvents(ctx, session.WorkerID, afterID, limit, kinds...)
+	var events []core.Event
+	if afterID > 0 {
+		events, err = s.store.ListWorkerEvents(ctx, session.WorkerID, afterID, limit, kinds...)
+	} else {
+		events, err = s.store.ListLatestWorkerEvents(ctx, session.WorkerID, limit, kinds...)
+	}
 	if err != nil {
 		return core.SessionTail{}, err
 	}
 	lastEventID := afterID
+	if lastEventID < 0 {
+		lastEventID = 0
+	}
 	for _, event := range events {
 		if event.ID > lastEventID {
 			lastEventID = event.ID
