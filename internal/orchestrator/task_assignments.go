@@ -527,6 +527,9 @@ func (b *taskAssignmentBuilder) addPullRequestFeedbackDisplayRows(feedbackRows [
 			continue
 		}
 		pr := b.pullRequestsByID[feedback.PullRequestID]
+		if pr.ID != "" && isTerminalPullRequestState(pr.State) {
+			continue
+		}
 		title := nonEmpty(prContext(feedback.Repo, feedback.Number, feedback.Branch), prContext(pr.Repo, pr.Number, pr.Branch), feedback.URL, feedback.PullRequestID, "Pull request")
 		actions := []core.TaskAssignmentActionDescriptor{}
 		if feedback.URL != "" {
@@ -615,7 +618,7 @@ func (b *taskAssignmentBuilder) addWorkItemDisplayRows(items []core.WorkItem, ta
 
 func (b *taskAssignmentBuilder) addPullRequestDisplayRows(pullRequests []core.PullRequest) {
 	for _, pr := range pullRequests {
-		if pr.TaskID != b.taskID {
+		if pr.TaskID != b.taskID || isTerminalPullRequestState(pr.State) {
 			continue
 		}
 		context := prContext(pr.Repo, pr.Number, pr.Branch)
@@ -702,11 +705,11 @@ func (b *taskAssignmentBuilder) addSteeringDisplayRows(items []core.SteeringItem
 
 func (b *taskAssignmentBuilder) addExecutionNodeDisplayRows(nodes []core.ExecutionNode) {
 	for _, node := range nodes {
-		if node.TaskID != b.taskID {
+		if node.TaskID != b.taskID || isTerminalWorkerStatus(node.Status) {
 			continue
 		}
 		_, hasSession := b.sessionsByWorker[node.WorkerID]
-		if hasSession && node.Status != core.WorkerFailed {
+		if hasSession {
 			continue
 		}
 		row := core.TaskAssignmentDisplayRow{
@@ -729,7 +732,7 @@ func (b *taskAssignmentBuilder) addExecutionNodeDisplayRows(nodes []core.Executi
 
 func (b *taskAssignmentBuilder) addOrphanWorkerDisplayRows(workers []core.Worker) {
 	for _, worker := range workers {
-		if worker.TaskID != b.taskID {
+		if worker.TaskID != b.taskID || isTerminalWorkerStatus(worker.Status) {
 			continue
 		}
 		if _, ok := b.sessionsByWorker[worker.ID]; ok {
@@ -800,7 +803,7 @@ func taskDisplayActions(task core.Task) []core.TaskAssignmentActionDescriptor {
 }
 
 func isDisplayWorkItemStatus(status core.WorkItemStatus) bool {
-	return status == core.WorkItemQueued || status == core.WorkItemRunning || status == core.WorkItemFailed
+	return status == core.WorkItemQueued || status == core.WorkItemRunning
 }
 
 func isActiveAssignmentStatus(status string) bool {

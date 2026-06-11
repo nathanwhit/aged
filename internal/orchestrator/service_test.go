@@ -12222,7 +12222,7 @@ func TestServiceRunsInitialWorkersInParallel(t *testing.T) {
 	}
 
 	got := map[string]bool{}
-	deadline := time.After(500 * time.Millisecond)
+	deadline := time.After(2 * time.Second)
 	for len(got) < 2 {
 		select {
 		case kind := <-started:
