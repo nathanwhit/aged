@@ -188,6 +188,60 @@ func TestReplanDecisionAllowsFinishObjective(t *testing.T) {
 	}
 }
 
+func TestReplanDecisionAllowsWorkerBoundActionOnlyPublish(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+		"action": "continue",
+		"rationale": "validated candidate should be published",
+		"plan": {
+			"rationale": "publish the already-completed validation worker result",
+			"steps": [],
+			"requiredApprovals": [],
+			"actions": [{
+				"kind": "publish_pull_request",
+				"when": "after_success",
+				"reason": "Publish the validated manager list slice.",
+				"workerId": "worker-1",
+				"inputs": {
+					"title": "Add compact manager objective rows",
+					"body": "## Summary\n- add compact manager objective rows\n\n## Validation\n- npm run build"
+				}
+			}],
+			"workItems": []
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err != nil {
+		t.Fatalf("worker-bound publish-only replan decision rejected: %v", err)
+	}
+}
+
+func TestReplanDecisionRejectsUnboundActionOnlyDeferredPublish(t *testing.T) {
+	decision, err := decodeReplanDecision([]byte(`{
+		"action": "continue",
+		"rationale": "invalid deferred publish",
+		"plan": {
+			"actions": [{
+				"kind": "publish_pull_request",
+				"when": "after_success",
+				"reason": "Publish something later.",
+				"inputs": {
+					"title": "Update manager console",
+					"body": "## Summary\n- update manager console"
+				}
+			}],
+			"workItems": []
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decision.Validate(); err == nil {
+		t.Fatal("expected unbound deferred publish-only decision to be rejected")
+	}
+}
+
 func TestCodexBrainReplanPromptCompactsLargeState(t *testing.T) {
 	brain := &CodexBrain{template: "schedule the work"}
 	results := make([]WorkerTurnResult, 120)

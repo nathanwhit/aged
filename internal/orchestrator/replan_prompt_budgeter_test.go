@@ -1,9 +1,12 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+
+	"aged/internal/core"
 )
 
 func TestJSONArrayTokenSizerMatchesMarshalEstimate(t *testing.T) {
@@ -49,6 +52,47 @@ func TestCompactContextLedgerUsesBudget(t *testing.T) {
 	}
 	if len(compact) >= len(entries) {
 		t.Fatalf("compact context ledger count = %d, want fewer than %d", len(compact), len(entries))
+	}
+}
+
+func TestCompactArtifactsOmitsWorkerLogs(t *testing.T) {
+	budgeter := DefaultReplanPromptBudgeter()
+	stdoutMetadata := core.MustJSON(map[string]any{
+		"bytes":   2_800_000,
+		"content": strings.Repeat("remote stdout line\n", 10_000),
+	})
+	artifacts := []core.TaskArtifact{
+		{
+			ID:       "stdout-1",
+			Kind:     "worker_log",
+			Name:     "Remote stdout",
+			Ref:      "/home/bot/work/worker/stdout.log",
+			Metadata: stdoutMetadata,
+		},
+		{
+			ID:   "pr-1",
+			Kind: "github_pull_request",
+			Name: "Add compact manager objective rows",
+			URL:  "https://github.com/nathanwhit/aged/pull/123",
+			Metadata: core.MustJSON(map[string]any{
+				"number": 123,
+			}),
+		},
+	}
+
+	compact := budgeter.compactArtifacts(artifacts)
+	if len(compact) != 1 {
+		t.Fatalf("compact artifacts count = %d, want 1: %+v", len(compact), compact)
+	}
+	if compact[0].Kind != "github_pull_request" || compact[0].ID != "pr-1" {
+		t.Fatalf("unexpected compact artifact: %+v", compact[0])
+	}
+	data, err := json.Marshal(compact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "remote stdout") || strings.Contains(string(data), "contentPreview") || strings.Contains(string(data), "contentOmittedBytes") {
+		t.Fatalf("worker log leaked into prompt artifacts: %s", data)
 	}
 }
 
