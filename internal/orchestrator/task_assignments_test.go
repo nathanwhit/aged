@@ -283,6 +283,7 @@ func TestBuildTaskAssignmentsDisplayRowsHideHistoricalFailures(t *testing.T) {
 		},
 		Artifacts: []core.Artifact{
 			{ID: "stdout-log", TaskID: "task-1", Kind: "worker_log", Name: "Remote stdout", Ref: "/home/bot/work/worker/stdout.log", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "pr-open", TaskID: "task-1", Kind: "github_pull_request", Name: "Open result", Ref: "feature/open", URL: "https://github.com/owner/repo/pull/2", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
 			{ID: "benchmark", TaskID: "task-1", Kind: "benchmark", Name: "Benchmark", Ref: "shared/bench.txt", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
 		},
 	}
@@ -298,6 +299,7 @@ func TestBuildTaskAssignmentsDisplayRowsHideHistoricalFailures(t *testing.T) {
 	displayRowAbsent(t, result.DisplayRows, "pr:pr-merged")
 	displayRowAbsent(t, result.DisplayRows, "feedback:feedback-merged")
 	displayRowAbsent(t, result.DisplayRows, "artifact:stdout-log")
+	displayRowAbsent(t, result.DisplayRows, "artifact:pr-open")
 
 	displayRowByID(t, result.DisplayRows, "work:queued-work")
 	displayRowByID(t, result.DisplayRows, "debug_worker:worker-queued")
