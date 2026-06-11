@@ -125,6 +125,53 @@ describe("LiveSessionPanel", () => {
     expect(screen.getByText("modified web/src/main.tsx")).toBeInTheDocument();
   });
 
+  it("summarizes codex json tool output instead of dumping raw protocol text", async () => {
+    vi.mocked(api.getSessionTail).mockResolvedValue({
+      sessionId: "session-1",
+      workerId: "worker-1",
+      taskId: "task-1",
+      status: "running",
+      lastEventId: 22,
+      events: [],
+      session: baseSession,
+      worker: baseWorker,
+      node: baseNode,
+      pullRequests: [],
+      changedFiles: [],
+    });
+    const rawToolOutput = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "item_52",
+        type: "mcp_tool_call",
+        server: "codex_apps",
+        tool: "github_search_prs",
+        status: "completed",
+        arguments: { query: "Manager OR objective" },
+        result: {
+          structured_content: {
+            issues: [{ number: 427 }, { number: 275 }],
+          },
+        },
+      },
+    });
+
+    renderPanel([
+      {
+        id: 22,
+        at: "2026-06-10T00:00:02Z",
+        type: "worker.output",
+        taskId: "task-1",
+        workerId: "worker-1",
+        payload: { kind: "log", stream: "stdout", text: rawToolOutput },
+      },
+    ]);
+
+    expect(screen.getAllByText("codex_apps.github_search_prs | completed | 2 issues")).not.toHaveLength(0);
+    expect(screen.queryByText(rawToolOutput)).not.toBeInTheDocument();
+    await waitFor(() => expect(api.getSessionTail).toHaveBeenCalledWith("session-1", { after: 22, limit: 50 }));
+  });
+
   it("polls incrementally after receiving the initial latest tail", async () => {
     vi.useFakeTimers();
     try {

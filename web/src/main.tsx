@@ -3009,7 +3009,7 @@ export function LiveSessionPanel({
   const model = metadataString(activeSession.metadata, "model") || metadataString(activeSession.metadata, "brain") || metadataString(activeWorker?.metadata, "model") || metadataString(activeWorker?.metadata, "brain");
   const provider = metadataString(activeSession.metadata, "provider") || metadataString(activeWorker?.metadata, "provider");
   const branch = metadataString(activeSession.metadata, "branch") || metadataString(activeWorker?.metadata, "branch") || primaryPullRequest?.branch;
-  const latestOutput = activeSession.currentAction || tail?.completion?.summary || tail?.completion?.error || (latestEvent ? eventDisplayText(latestEvent) : "");
+  const latestOutput = readableWorkerOutputText(activeSession.currentAction) || tail?.completion?.summary || tail?.completion?.error || (latestEvent ? eventDisplayText(latestEvent) : "");
   const location = activeSession.workspaceCwd || activeSession.remoteWorkDir || activeSession.workspaceRoot || activeNode?.remoteWorkDir || "";
   const scratch = activeSession.sharedWorkerDir || activeSession.sharedArtifactsDir || activeSession.sharedRoot || "";
   const target = [activeSession.targetKind && humanizeKey(activeSession.targetKind), activeSession.targetId].filter(Boolean).join(" ");
@@ -3103,15 +3103,16 @@ export function LiveSessionPanel({
         )}
       </div>
       {canCancel && (
-        <form className="session-steer manager-session-steer" onSubmit={submit}>
+        <form className="session-steer manager-session-steer" aria-label="Steer live session" onSubmit={submit}>
           <div className="steer-target-labels">
-            <span>Session steering</span>
-            <code>{activeSession.id.slice(0, 8)}</code>
-            <code>{activeSession.workerId.slice(0, 8)}</code>
+            <span>Live session steering</span>
+            <code>session {activeSession.id.slice(0, 8)}</code>
+            <code>worker {activeSession.workerId.slice(0, 8)}</code>
+            {activeSession.role && <code>{humanizeKey(activeSession.role)}</code>}
             {target && <code>{target}</code>}
           </div>
           <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Steer this exact session..." required />
-          <button className="icon-button" disabled={busy || !message.trim()} title="Send session steering">
+          <button className="icon-button" disabled={busy || !message.trim()} title="Send session steering" aria-label="Send session steering">
             <Send size={16} />
           </button>
         </form>
@@ -3273,7 +3274,13 @@ export function ManagerPullRequestSummary({
                   ))}
                 </div>
               )}
-              <form className="inline-steer-form" onSubmit={submitSteering}>
+              <form className="inline-steer-form" aria-label="Steer pull request follow-up" onSubmit={submitSteering}>
+                <div className="steer-target-labels">
+                  <span>PR follow-up steering</span>
+                  <code>{selectedPR.repo}{selectedPR.number ? `#${selectedPR.number}` : ""}</code>
+                  <code>{selectedPR.state}</code>
+                  {selectedPR.branch && <code>head {selectedPR.branch}</code>}
+                </div>
                 <input value={steering} onChange={(event) => setSteering(event.target.value)} placeholder="Steer this PR..." required />
                 <button className="secondary compact" disabled={busy === `steer:${selectedPR.id}` || !steering.trim()}>
                   {busy === `steer:${selectedPR.id}` ? "Queued" : "Steer"}
@@ -3628,7 +3635,14 @@ export function WorkItemQueue({ taskId, items, onCancel, onSteer, onError }: { t
                       <CircleStop size={14} />
                     </button>
                   )}
-                  <form className="inline-steer-form" onSubmit={(event) => steerItem(event, item)}>
+                  <form className="inline-steer-form" aria-label={`Steer ${humanizeKey(item.kind)} work item`} onSubmit={(event) => steerItem(event, item)}>
+                    <div className="steer-target-labels">
+                      <span>Work item steering</span>
+                      <code>{humanizeKey(item.kind)}</code>
+                      <code>{item.id.slice(0, 8)}</code>
+                      <code>{item.status}</code>
+                      {item.targetKind && item.targetId && <code>{humanizeKey(item.targetKind)} {item.targetId.slice(0, 8)}</code>}
+                    </div>
                     <input aria-label={`Steer ${humanizeKey(item.kind)} work item`} value={steering[item.id] ?? ""} onChange={(event) => setSteering((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="Steer this work item..." required />
                     <button className="secondary compact" disabled={Boolean(steeringBusy[item.id]) || !(steering[item.id] ?? "").trim()}>
                       {steeringBusy[item.id] ? "Queued" : "Steer"}
@@ -4111,9 +4125,15 @@ export function ApprovalResponseForm({
   }
 
   return (
-    <form className="approval-response" onSubmit={submit}>
+    <form className="approval-response" aria-label="Answer question" onSubmit={submit}>
+      <div className="steer-target-labels">
+        <span>Question answer</span>
+        <code>{approval.id.slice(0, 8)}</code>
+        {approval.reason && <code>{humanizeKey(approval.reason)}</code>}
+        {approval.workerId && <code>worker {approval.workerId.slice(0, 8)}</code>}
+      </div>
       <input value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Answer this question..." required />
-      <button className="icon-button" disabled={submitting} title="Send answer">
+      <button className="icon-button" disabled={submitting} title="Send answer" aria-label="Send answer">
         <Send size={16} />
       </button>
     </form>
@@ -4965,7 +4985,7 @@ function isWorkerProgressEvent(event: EventRecord): boolean {
     return false;
   }
   const payload = asRecord(event.payload);
-  const raw = asRecord(payload.raw ?? payload.rawResult);
+  const raw = workerRawPayload(payload);
   if (isClaudeRaw(raw)) {
     return isClaudeProgressRaw(raw);
   }
@@ -4979,13 +4999,14 @@ function isWorkerProgressEvent(event: EventRecord): boolean {
 function workerEventLabel(event: EventRecord): string {
   if (event.type === "worker.output") {
     const payload = event.payload as { kind?: string; stream?: string; raw?: unknown; rawResult?: unknown };
-    const raw = asRecord(payload.raw ?? payload.rawResult);
+    const raw = workerRawPayload(asRecord(payload));
     const item = asRecord(raw.item);
     const claudeLabel = isClaudeRaw(raw) ? claudeWorkerEventLabel(raw, payload.kind) : "";
     if (claudeLabel) return claudeLabel;
     if (item.type === "command_execution") return `command:${payload.kind ?? "log"}`;
     if (item.type === "agent_message") return `message:${payload.kind ?? "result"}`;
     if (item.type === "file_change") return `file:${String(item.status ?? payload.kind ?? "log")}`;
+    if (item.type === "mcp_tool_call") return `tool:${payloadValue(item.tool) || payloadValue(item.name) || payload.kind || "call"}`;
     if (raw.type === "turn.completed") return "usage";
     if (raw.type === "thread.started") return "thread";
     if (raw.type === "turn.started") return "turn";
@@ -4999,7 +5020,7 @@ function isClaudeThinkingEvent(event: EventRecord): boolean {
     return false;
   }
   const payload = asRecord(event.payload);
-  const raw = asRecord(payload.raw ?? payload.rawResult);
+  const raw = workerRawPayload(payload);
   return isClaudeRaw(raw) && payloadValue(raw.type) === "assistant" && payloadValue(claudeMessageContent(raw)[0]?.type) === "thinking";
 }
 
@@ -6011,7 +6032,7 @@ function structuredWorkerEvent(event: EventRecord): React.ReactNode {
     return null;
   }
   const payload = asRecord(event.payload);
-  const raw = asRecord(payload.raw ?? payload.rawResult);
+  const raw = workerRawPayload(payload);
   const item = asRecord(raw.item);
 
   if (event.type === "worker.created") {
@@ -6044,6 +6065,9 @@ function structuredWorkerEvent(event: EventRecord): React.ReactNode {
   }
   if (item.type === "file_change") {
     return <FileChangeCard payload={payload} item={item} raw={raw} />;
+  }
+  if (item.type === "mcp_tool_call") {
+    return <MCPToolCallCard item={item} raw={raw} />;
   }
   if (raw.type === "turn.completed") {
     return <UsageCard raw={raw} />;
@@ -6382,6 +6406,73 @@ function FileChangeCard({ payload, item, raw }: { payload: Record<string, unknow
   );
 }
 
+function MCPToolCallCard({ item, raw }: { item: Record<string, unknown>; raw: Record<string, unknown> }) {
+  const server = payloadValue(item.server);
+  const tool = payloadValue(item.tool || item.name) || "tool";
+  const status = payloadValue(item.status) || payloadValue(raw.type).replace(/^item\./, "") || "recorded";
+  const result = asRecord(item.result);
+  const args = item.arguments ?? item.input;
+  const summary = mcpToolResultSummary(result);
+  return (
+    <div className="tool-card">
+      <div className="tool-card-header">
+        <strong>{server ? `${server}.${tool}` : tool}</strong>
+        <span className="tool-status">{status}</span>
+        <span className="tool-status neutral">tool call</span>
+      </div>
+      <p>{summary || "Tool call recorded."}</p>
+      <PayloadDetails label="Arguments" value={args} />
+      <PayloadDetails label="Result" value={result} />
+    </div>
+  );
+}
+
+function mcpToolCallSummary(item: Record<string, unknown>): string {
+  const server = payloadValue(item.server);
+  const tool = payloadValue(item.tool || item.name) || "tool";
+  const status = payloadValue(item.status);
+  const summary = mcpToolResultSummary(asRecord(item.result));
+  return [server ? `${server}.${tool}` : tool, status, summary].filter(Boolean).join(" | ");
+}
+
+function mcpToolResultSummary(result: Record<string, unknown>): string {
+  const error = payloadValue(result.error);
+  if (error) {
+    return error.length > 160 ? `${error.slice(0, 157)}...` : error;
+  }
+  const structured = asRecord(result.structuredContent ?? result.structured_content);
+  const structuredSummary = collectionResultSummary(structured);
+  if (structuredSummary) {
+    return structuredSummary;
+  }
+  const content = Array.isArray(result.content) ? result.content.map(asRecord) : [];
+  for (const part of content) {
+    const text = payloadValue(part.text);
+    if (!text) continue;
+    const parsed = asRecord(parseJSONPayload(text));
+    const parsedSummary = collectionResultSummary(parsed);
+    if (parsedSummary) {
+      return parsedSummary;
+    }
+    return summarizeText(text);
+  }
+  return "";
+}
+
+function collectionResultSummary(value: Record<string, unknown>): string {
+  for (const [key, item] of Object.entries(value)) {
+    if (Array.isArray(item)) {
+      const label = item.length === 1 ? humanizeKey(key).replace(/s$/, "") : humanizeKey(key).toLowerCase();
+      return `${item.length} ${label}`;
+    }
+  }
+  const structuredContent = asRecord(value.structured_content ?? value.structuredContent);
+  if (Object.keys(structuredContent).length > 0) {
+    return collectionResultSummary(structuredContent);
+  }
+  return "";
+}
+
 function UsageCard({ raw }: { raw: Record<string, unknown> }) {
   const usage = asRecord(raw.usage);
   return (
@@ -6495,6 +6586,16 @@ function RawPayloadDetails({ value }: { value: unknown }) {
   );
 }
 
+function PayloadDetails({ label, value }: { label: string; value: unknown }) {
+  if (value === undefined || value === null || prettyPayload(value) === "{}") return null;
+  return (
+    <details className="event-raw compact">
+      <summary>{label}</summary>
+      <pre>{prettyPayload(value)}</pre>
+    </details>
+  );
+}
+
 function parseJSONPayload(value: string): unknown {
   const trimmed = value.trim();
   if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) {
@@ -6505,6 +6606,25 @@ function parseJSONPayload(value: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function workerRawPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const explicit = asRecord(payload.raw ?? payload.rawResult);
+  if (Object.keys(explicit).length > 0) {
+    return explicit;
+  }
+  return asRecord(parseJSONPayload(payloadValue(payload.text)));
+}
+
+function readableWorkerOutputText(value: string | undefined): string {
+  const text = payloadValue(value);
+  if (!text) {
+    return "";
+  }
+  if (parseJSONPayload(text) === undefined) {
+    return text;
+  }
+  return compactEventDisplay({ id: 0, at: "", type: "worker.output", payload: { text } }) || "Structured worker output";
 }
 
 function summarizeText(value: string): string {
@@ -6571,6 +6691,9 @@ function eventDisplayText(event: EventRecord): string {
           .map((file) => file.path)
           .join(", ")}${changedFiles.length > 4 ? "..." : ""}`
       : undefined;
+  if (event.type === "worker.output" && parseJSONPayload(payloadValue(payload.text)) !== undefined) {
+    return changeText ? `Structured worker output | ${changeText}` : "Structured worker output";
+  }
   const workspaceText = payload.cwd || payload.root ? `${payload.mode ?? "workspace"} ${payload.cwd ?? payload.root}` : undefined;
   const primaryText =
     payload.text ??
@@ -6658,7 +6781,7 @@ function compactEventDisplay(event: EventRecord): string {
     return payloadValue(payload.result) || payloadValue(payload.cleanupPolicy || payload.policy) || "Workspace cleanup recorded";
   }
   if (event.type === "worker.output") {
-    const raw = asRecord(payload.raw ?? payload.rawResult);
+    const raw = workerRawPayload(payload);
     const claudeText = isClaudeRaw(raw) ? claudeEventDisplayText(payload, raw) : "";
     if (claudeText) return claudeText;
     const item = asRecord(raw.item);
@@ -6670,6 +6793,9 @@ function compactEventDisplay(event: EventRecord): string {
     }
     if (item.type === "file_change") {
       return payloadValue(item.path || item.file || payload.text) || "File changed";
+    }
+    if (item.type === "mcp_tool_call") {
+      return mcpToolCallSummary(item);
     }
     if (raw.type === "thread.started") return "Thread started";
     if (raw.type === "turn.started") return "Turn started";
