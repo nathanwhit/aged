@@ -64,6 +64,17 @@ type InitialSnapshotStatus = "loading" | "ready" | "error";
 
 type AttentionTone = "good" | "info" | "warning" | "danger";
 
+type GlobalManagerRow = {
+  task: Task;
+  projectLabel: string;
+  activeAgentCount: number;
+  pullRequestCount: number;
+  latestState: string;
+  latestAction?: string;
+  latestActionLabel?: string;
+  managerSummary?: ManagerSummary;
+};
+
 type TaskAttentionItem = {
   tone: AttentionTone;
   icon: React.ReactNode;
@@ -297,6 +308,18 @@ function App() {
   const pullRequestFeedbackByTask = useMemo(() => groupByTask(snapshot.pullRequestFeedback, (feedback) => feedback.taskId), [snapshot.pullRequestFeedback]);
   const steeringByTask = useMemo(() => groupByTask(snapshot.steering, (item) => item.taskId), [snapshot.steering]);
   const managerSummaryByTask = useMemo(() => mapByTask(snapshot.managerSummary, (summary) => summary.taskId), [snapshot.managerSummary]);
+  const projectById = useMemo(() => new Map(snapshot.projects.map((project) => [project.id, project])), [snapshot.projects]);
+  const globalManagerRows = useMemo(
+    () => deriveGlobalManagerRows({
+      tasks: snapshot.tasks,
+      projectsById: projectById,
+      managerSummaryByTask,
+      workersByTask,
+      sessionsByTask,
+      pullRequestsByTask,
+    }),
+    [managerSummaryByTask, projectById, pullRequestsByTask, sessionsByTask, snapshot.tasks, workersByTask],
+  );
   const selectedTask = taskById.get(selectedTaskId) ?? preferredTask(snapshot.tasks);
 
   useEffect(() => {
@@ -368,8 +391,8 @@ function App() {
   const selectedManagerSummary = selectedTask ? managerSummaryByTask.get(selectedTask.id) : undefined;
   const progress = workProgress(selectedTask, selectedWorkers, selectedNodes);
   const hasTerminalTasks = useMemo(() => snapshot.tasks.some(isTerminalTask), [snapshot.tasks]);
-  const activeTasks = useMemo(() => snapshot.tasks.filter((task) => !isTerminalTask(task)), [snapshot.tasks]);
-  const completedTasks = useMemo(() => tasksByNewestCompletion(snapshot.tasks.filter(isTerminalTask)), [snapshot.tasks]);
+  const activeManagerRows = useMemo(() => globalManagerRows.filter((row) => !isTerminalTask(row.task)), [globalManagerRows]);
+  const completedManagerRows = useMemo(() => managerRowsByNewestCompletion(globalManagerRows.filter((row) => isTerminalTask(row.task))), [globalManagerRows]);
   async function handleClearTask(taskId: string) {
     try {
       setError("");
@@ -535,7 +558,7 @@ function App() {
             <div className="panel-title split-title">
               <span>
                 <Activity size={18} />
-                <h2>Tasks</h2>
+                <h2>Manager</h2>
               </span>
               <button className="icon-button ghost" disabled={!hasTerminalTasks} onClick={handleClearFinished} title="Clear finished tasks">
                 <Trash2 size={16} />
@@ -549,16 +572,15 @@ function App() {
               <p className="empty">No tasks yet.</p>
             ) : (
               <>
-                {activeTasks.length === 0 && !pendingTask ? (
-                  <p className="empty">No active tasks.</p>
+                {activeManagerRows.length === 0 && !pendingTask ? (
+                  <p className="empty">No active objectives.</p>
                 ) : (
-                  activeTasks.map((task) => (
-                    <TaskRow
-                      key={task.id}
-                      task={task}
-                      managerSummary={managerSummaryByTask.get(task.id)}
-                      selected={task.id === selectedTask?.id}
-                      retrying={retryingTaskId === task.id}
+                  activeManagerRows.map((row) => (
+                    <GlobalManagerRowView
+                      key={row.task.id}
+                      row={row}
+                      selected={row.task.id === selectedTask?.id}
+                      retrying={retryingTaskId === row.task.id}
                       onSelect={setSelectedTaskId}
                       onRetry={handleRetryTask}
                       onClear={handleClearTask}
@@ -566,21 +588,20 @@ function App() {
                   ))
                 )}
                 {pendingTask && <PendingTaskRow task={pendingTask} />}
-                {completedTasks.length > 0 && (
+                {completedManagerRows.length > 0 && (
                   <div className="completed-task-group">
                     <button className="secondary compact completed-toggle" onClick={() => setShowCompletedTasks((value) => !value)}>
                       <Check size={14} />
-                      {showCompletedTasks ? "Hide completed" : `Show completed (${completedTasks.length})`}
+                      {showCompletedTasks ? "Hide completed" : `Show completed (${completedManagerRows.length})`}
                     </button>
                     {showCompletedTasks && (
                       <div className="completed-task-list">
-                        {completedTasks.map((task) => (
-                          <TaskRow
-                            key={task.id}
-                            task={task}
-                            managerSummary={managerSummaryByTask.get(task.id)}
-                            selected={task.id === selectedTask?.id}
-                            retrying={retryingTaskId === task.id}
+                        {completedManagerRows.map((row) => (
+                          <GlobalManagerRowView
+                            key={row.task.id}
+                            row={row}
+                            selected={row.task.id === selectedTask?.id}
+                            retrying={retryingTaskId === row.task.id}
                             onSelect={setSelectedTaskId}
                             onRetry={handleRetryTask}
                             onClear={handleClearTask}
@@ -691,45 +712,58 @@ function TaskListLoading({ label = "Loading tasks..." }: { label?: string }) {
   );
 }
 
-function TaskRow({
-  task,
-  managerSummary,
+function GlobalManagerRowView({
+  row,
   selected,
   retrying,
   onSelect,
   onRetry,
   onClear,
 }: {
-  task: Task;
-  managerSummary?: ManagerSummary;
+  row: GlobalManagerRow;
   selected: boolean;
   retrying: boolean;
   onSelect: (id: string) => void;
   onRetry: (id: string) => void;
   onClear: (id: string) => void;
 }) {
-  const attentionCount = managerSummary?.attentionCount ?? 0;
+  const { task, managerSummary } = row;
   const activeSignals = managerSummary?.activeSignals ?? 0;
-  const latestAction = managerSummary?.latestAction;
+  const attentionBadges = managerAttentionBadges(managerSummary);
   return (
-    <div className={selected ? "task-row selected" : "task-row"}>
-      <button className="task-row-main" onClick={() => onSelect(task.id)} type="button" aria-current={selected ? "true" : undefined}>
-        <span className="task-row-copy">
+    <div className={selected ? "task-row manager-objective-row selected" : "task-row manager-objective-row"}>
+      <button className="task-row-main manager-row-main" onClick={() => onSelect(task.id)} type="button" aria-current={selected ? "true" : undefined}>
+        <span className="task-row-copy manager-row-copy">
           <strong>{task.title}</strong>
           <small className="task-row-meta">
-            {[task.projectId && `Project ${task.projectId}`, task.id.slice(0, 8)].filter(Boolean).join(" · ")}
+            {[row.projectLabel, task.id.slice(0, 8)].filter(Boolean).join(" · ")}
           </small>
           {task.error && <small className="task-row-error">{task.error}</small>}
-          {latestAction && <small className="task-row-latest">{latestAction}</small>}
+          {row.latestAction && (
+            <small className="task-row-latest">
+              {[row.latestActionLabel, row.latestAction].filter(Boolean).join(": ")}
+            </small>
+          )}
         </span>
-        <span className="task-row-status">
-          {attentionCount > 0 && <span className={`pill attention ${managerSummary?.tone === "danger" ? "danger" : ""}`}>{attentionCount} attention</span>}
-          {attentionCount === 0 && activeSignals > 0 && <span className="pill subtle">{activeSignals} signals</span>}
-          {isBroadObjectiveMetadata(task.metadata) && <span className="pill subtle">Objective</span>}
-          {isDurableLoopMetadata(task.metadata) && <span className="pill subtle">Loop</span>}
-          <Status value={task.status} />
-          {task.objectiveStatus && String(task.objectiveStatus) !== task.status && <span className="pill subtle">{humanizeKey(task.objectiveStatus)}</span>}
-          {task.objectivePhase && task.objectivePhase !== task.status && <span className="pill subtle">{humanizeKey(task.objectivePhase)}</span>}
+        <span className="manager-row-status">
+          <span className="manager-row-facts" aria-label="Objective metrics">
+            <span title="Active agents">
+              <Bot size={13} />
+              {row.activeAgentCount}
+            </span>
+            <span title="Open pull requests">
+              <GitPullRequest size={13} />
+              {row.pullRequestCount}
+            </span>
+            <span title="Latest state">{row.latestState}</span>
+          </span>
+          <span className="manager-row-badges" aria-label="Objective attention">
+            {attentionBadges.map((badge) => (
+              <span key={badge.key} className={badge.className} title={badge.title}>{badge.label}</span>
+            ))}
+            {attentionBadges.length === 0 && activeSignals > 0 && <span className="pill subtle" title="Active signals">{activeSignals} sig</span>}
+            {attentionBadges.length === 0 && activeSignals === 0 && <Status value={task.status} />}
+          </span>
         </span>
       </button>
       <div className="task-row-actions">
@@ -1033,12 +1067,89 @@ function workProgress(task: Task | undefined, workers: Worker[], nodes: Executio
   };
 }
 
+function deriveGlobalManagerRows({
+  tasks,
+  projectsById,
+  managerSummaryByTask,
+  workersByTask,
+  sessionsByTask,
+  pullRequestsByTask,
+}: {
+  tasks: Task[];
+  projectsById: Map<string, Project>;
+  managerSummaryByTask: Map<string, ManagerSummary>;
+  workersByTask: Map<string, Worker[]>;
+  sessionsByTask: Map<string, Session[]>;
+  pullRequestsByTask: Map<string, PullRequestState[]>;
+}): GlobalManagerRow[] {
+  return [...tasks]
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    .map((task) => {
+      const managerSummary = managerSummaryByTask.get(task.id);
+      const workers = workersByTask.get(task.id) ?? EMPTY_WORKERS;
+      const sessions = sessionsByTask.get(task.id) ?? EMPTY_SESSIONS;
+      const pullRequests = pullRequestsByTask.get(task.id) ?? EMPTY_PULL_REQUESTS;
+      return {
+        task,
+        projectLabel: projectDisplayName(task, projectsById),
+        activeAgentCount: globalRowActiveAgentCount(managerSummary, workers, sessions),
+        pullRequestCount: managerSummary?.pullRequests ?? pullRequests.filter((pr) => !isTerminalPullRequestState(pr.state)).length,
+        latestState: latestTaskStateLabel(task),
+        latestAction: managerSummary?.latestAction,
+        latestActionLabel: managerSummary?.latestActionLabel,
+        managerSummary,
+      };
+    });
+}
+
+function projectDisplayName(task: Task, projectsById: Map<string, Project>): string {
+  if (!task.projectId) return "Default project";
+  const project = projectsById.get(task.projectId);
+  if (project?.name) return project.name;
+  if (project?.repo) return project.repo;
+  const metadata = task.metadata ?? {};
+  for (const key of ["projectName", "project", "repo", "repository"]) {
+    const value = String(metadata[key] ?? "").trim();
+    if (value) return value;
+  }
+  return `Project ${task.projectId}`;
+}
+
+function globalRowActiveAgentCount(managerSummary: ManagerSummary | undefined, workers: Worker[], sessions: Session[]): number {
+  const summaryWorkers = Math.max(0, managerSummary?.activeWorkers ?? 0);
+  const summarySessions = Math.max(0, managerSummary?.activeSessions ?? 0);
+  if (summaryWorkers > 0 || summarySessions > 0) return Math.max(summaryWorkers, summarySessions);
+  const activeSessions = sessions.filter((session) => !isTerminalWorkerStatus(session.status)).length;
+  if (activeSessions > 0) return activeSessions;
+  return workers.filter((worker) => !isTerminalWorkerStatus(worker.status)).length;
+}
+
+function latestTaskStateLabel(task: Task): string {
+  return humanizeKey(task.objectivePhase || task.objectiveStatus || task.status);
+}
+
+function managerAttentionBadges(managerSummary: ManagerSummary | undefined): { key: string; className: string; label: string; title: string }[] {
+  if (!managerSummary) return [];
+  const danger = managerSummary.tone === "danger" ? " danger" : "";
+  return [
+    managerSummary.attentionCount > 0
+      ? { key: "attention", className: `pill attention${danger}`, label: `${managerSummary.attentionCount} attn`, title: `${managerSummary.attentionCount} need attention` }
+      : null,
+    (managerSummary.pendingApprovals ?? 0) > 0
+      ? { key: "approvals", className: "pill attention", label: `${managerSummary.pendingApprovals} ask`, title: `${managerSummary.pendingApprovals} approvals pending` }
+      : null,
+    (managerSummary.pendingFeedback ?? 0) > 0
+      ? { key: "feedback", className: "pill attention", label: `${managerSummary.pendingFeedback} fb`, title: `${managerSummary.pendingFeedback} PR feedback items pending` }
+      : null,
+  ].filter((badge): badge is { key: string; className: string; label: string; title: string } => Boolean(badge));
+}
+
 function isTerminalTask(task: Task): boolean {
   return task.status === "succeeded" || task.status === "failed" || task.status === "canceled";
 }
 
-function tasksByNewestCompletion(tasks: Task[]): Task[] {
-  return [...tasks].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+function managerRowsByNewestCompletion(rows: GlobalManagerRow[]): GlobalManagerRow[] {
+  return [...rows].sort((left, right) => Date.parse(right.task.updatedAt) - Date.parse(left.task.updatedAt));
 }
 
 function preferredTask(tasks: Task[]): Task | undefined {
