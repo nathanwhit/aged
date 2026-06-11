@@ -659,7 +659,7 @@ func (b *taskAssignmentBuilder) addPullRequestDisplayRows(pullRequests []core.Pu
 
 func (b *taskAssignmentBuilder) addArtifactDisplayRows(artifacts []core.Artifact, task core.Task) {
 	for index, artifact := range artifacts {
-		if artifact.TaskID != b.taskID {
+		if artifact.TaskID != b.taskID || !isManagerVisibleArtifact(artifact.Kind) {
 			continue
 		}
 		key := nonEmpty(artifact.ID, artifact.Ref, artifact.URL, fmt.Sprintf("%s-%d", humanizeAssignmentKey(artifact.Kind), index+1))
@@ -804,6 +804,10 @@ func taskDisplayActions(task core.Task) []core.TaskAssignmentActionDescriptor {
 
 func isDisplayWorkItemStatus(status core.WorkItemStatus) bool {
 	return status == core.WorkItemQueued || status == core.WorkItemRunning
+}
+
+func isManagerVisibleArtifact(kind string) bool {
+	return !strings.EqualFold(strings.TrimSpace(kind), "worker_log")
 }
 
 func isActiveAssignmentStatus(status string) bool {

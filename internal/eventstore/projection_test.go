@@ -205,7 +205,15 @@ func TestBuildManagerSummariesCountsOnlyCurrentSignals(t *testing.T) {
 		"artifact": {
 			ID:        "artifact",
 			TaskID:    "task",
+			Kind:      "benchmark",
 			UpdatedAt: base.Add(13 * time.Minute),
+		},
+		"worker-log": {
+			ID:        "worker-log",
+			TaskID:    "task",
+			Kind:      "worker_log",
+			Name:      "Remote stdout",
+			UpdatedAt: base.Add(14 * time.Minute),
 		},
 	}
 	steering := map[string]core.SteeringItem{
@@ -213,7 +221,7 @@ func TestBuildManagerSummariesCountsOnlyCurrentSignals(t *testing.T) {
 			ID:        "steering",
 			TaskID:    "task",
 			Status:    "pending",
-			UpdatedAt: base.Add(14 * time.Minute),
+			UpdatedAt: base.Add(15 * time.Minute),
 		},
 	}
 

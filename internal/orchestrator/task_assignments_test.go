@@ -281,6 +281,10 @@ func TestBuildTaskAssignmentsDisplayRowsHideHistoricalFailures(t *testing.T) {
 			{ID: "feedback-merged", TaskID: "task-1", PullRequestID: "pr-merged", Status: "pending", Reason: "review", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
 			{ID: "feedback-open", TaskID: "task-1", PullRequestID: "pr-open", Status: "pending", Reason: "review", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
 		},
+		Artifacts: []core.Artifact{
+			{ID: "stdout-log", TaskID: "task-1", Kind: "worker_log", Name: "Remote stdout", Ref: "/home/bot/work/worker/stdout.log", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "benchmark", TaskID: "task-1", Kind: "benchmark", Name: "Benchmark", Ref: "shared/bench.txt", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
 	}
 
 	result, err := BuildTaskAssignments(snapshot, "task-1")
@@ -293,12 +297,14 @@ func TestBuildTaskAssignmentsDisplayRowsHideHistoricalFailures(t *testing.T) {
 	displayRowAbsent(t, result.DisplayRows, "execution_node:node-failed")
 	displayRowAbsent(t, result.DisplayRows, "pr:pr-merged")
 	displayRowAbsent(t, result.DisplayRows, "feedback:feedback-merged")
+	displayRowAbsent(t, result.DisplayRows, "artifact:stdout-log")
 
 	displayRowByID(t, result.DisplayRows, "work:queued-work")
 	displayRowByID(t, result.DisplayRows, "debug_worker:worker-queued")
 	displayRowByID(t, result.DisplayRows, "execution_node:node-queued")
 	displayRowByID(t, result.DisplayRows, "pr:pr-open")
 	displayRowByID(t, result.DisplayRows, "feedback:feedback-open")
+	displayRowByID(t, result.DisplayRows, "artifact:benchmark")
 }
 
 func TestBuildTaskAssignmentsMissingTask(t *testing.T) {

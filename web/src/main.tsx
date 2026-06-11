@@ -2572,7 +2572,7 @@ function deriveAssignmentRows({
     });
   }
 
-  for (const [index, artifact] of artifacts.entries()) {
+  for (const [index, artifact] of artifacts.filter(isManagerVisibleArtifact).entries()) {
     const artifactKey = artifact.id || artifact.ref || artifact.url || `${humanizeKey(artifact.kind)}-${index + 1}`;
     rows.push({
       id: `artifact:${artifactKey}`,
@@ -3246,7 +3246,7 @@ function ObjectiveBrief({
         </div>
       </details>
       <TaskAttentionPanel items={attentionItems} />
-      {(artifacts.length || task.milestones?.length) && <TaskObjectiveStrip task={task} artifacts={artifacts} />}
+      {(artifacts.some(isManagerVisibleArtifact) || task.milestones?.length) && <TaskObjectiveStrip task={task} artifacts={artifacts.filter(isManagerVisibleArtifact)} />}
       <MemoryEntryPanel taskId={task.id} entries={memoryEntries} />
       <SharedScratchPanel sessions={sessions} />
       {taskError && (
@@ -4537,6 +4537,10 @@ function isTerminalWorkerStatus(status: Worker["status"]): boolean {
 function isTerminalPullRequestState(state: PullRequestState["state"] | undefined): boolean {
   const normalized = (state ?? "").toUpperCase();
   return normalized === "MERGED" || normalized === "CLOSED";
+}
+
+function isManagerVisibleArtifact(artifact: Artifact): boolean {
+  return artifact.kind.trim().toLowerCase() !== "worker_log";
 }
 
 function formatDuration(start: string, end: string): string {
@@ -7073,7 +7077,7 @@ function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): Man
     activeWorkers,
     activeWorkItems,
     pullRequests: pullRequests.filter((pr) => !isTerminalPullRequestState(pr.state)).length,
-    artifacts: artifacts.length,
+    artifacts: artifacts.filter(isManagerVisibleArtifact).length,
     latestAction,
     latestActionAt,
     latestActionLabel,
