@@ -10554,7 +10554,19 @@ func TestServiceWaitsForProviderCapacityWhenUsageExhaustedWithoutFallback(t *tes
 		t.Fatal(err)
 	}
 
-	snapshot := waitForTaskStatus(t, store, task.ID, core.TaskWaiting)
+	snapshot := waitForSnapshot(t, store, func(snapshot core.Snapshot) bool {
+		if len(snapshot.Tasks) == 0 {
+			return false
+		}
+		got := snapshot.Tasks[0]
+		return got.ID == task.ID &&
+			got.Status == core.TaskWaiting &&
+			got.ObjectiveStatus == core.ObjectiveWaitingExternal &&
+			got.ObjectivePhase == "provider_usage_exhausted" &&
+			hasTaskAction(snapshot.Events, task.ID, "provider_usage_exhausted", "waiting_external")
+	}, func(snapshot core.Snapshot) string {
+		return fmt.Sprintf("missing provider usage exhausted waiting state/action:\n%s", taskActionPayloads(snapshot.Events, task.ID))
+	})
 	if snapshot.Tasks[0].ObjectiveStatus != core.ObjectiveWaitingExternal || snapshot.Tasks[0].ObjectivePhase != "provider_usage_exhausted" {
 		t.Fatalf("objective = %q phase %q", snapshot.Tasks[0].ObjectiveStatus, snapshot.Tasks[0].ObjectivePhase)
 	}

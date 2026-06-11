@@ -807,7 +807,8 @@ func isDisplayWorkItemStatus(status core.WorkItemStatus) bool {
 }
 
 func isManagerVisibleArtifact(kind string) bool {
-	return !strings.EqualFold(strings.TrimSpace(kind), "worker_log")
+	normalized := strings.ToLower(strings.TrimSpace(kind))
+	return normalized != "worker_log" && normalized != "github_pull_request"
 }
 
 func isActiveAssignmentStatus(status string) bool {

@@ -4671,7 +4671,8 @@ function isTerminalPullRequestState(state: PullRequestState["state"] | undefined
 }
 
 function isManagerVisibleArtifact(artifact: Artifact): boolean {
-  return artifact.kind.trim().toLowerCase() !== "worker_log";
+  const kind = artifact.kind.trim().toLowerCase();
+  return kind !== "worker_log" && kind !== "github_pull_request";
 }
 
 function formatDuration(start: string, end: string): string {
