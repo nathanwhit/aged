@@ -4919,6 +4919,9 @@ func (s *Service) rebalancePlanWorkerKind(ctx context.Context, plan Plan) Plan {
 	if s == nil || s.usageSource == nil {
 		return plan
 	}
+	if boolMetadata(plan.Metadata, "workerKindPinned") {
+		return plan
+	}
 	kind := strings.TrimSpace(plan.WorkerKind)
 	if kind != "codex" && kind != "claude" {
 		return plan
@@ -7695,6 +7698,18 @@ func (s *Service) queueWorkItemsFromAction(ctx context.Context, task core.Task, 
 			metadata = map[string]any{}
 		}
 		metadata["sourceAction"] = action.Kind
+		normalizedTargetKind, normalizedTargetID, terminalPR, terminal, err := s.normalizePullRequestFollowUpWorkItem(ctx, task.ID, kind, targetKind, targetID, metadata)
+		if err != nil {
+			return nil, err
+		}
+		targetKind = normalizedTargetKind
+		targetID = normalizedTargetID
+		if terminal {
+			if err := s.recordTerminalPullRequestFollowUpSkipped(ctx, task.ID, itemID, terminalPR, "spawn_work item targets a terminal pull request"); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if spec.WorkerKind != "" {
 			metadata["workerKind"] = spec.WorkerKind
 		}
@@ -7794,6 +7809,18 @@ func (s *Service) queuePlanWorkItems(ctx context.Context, task core.Task, plan P
 		metadata["dependsOn"] = queuedDependencyIDs(request.DependsOn, itemIDs)
 		metadata["role"] = workItemRole(kind, request.Reason)
 		metadata["planRationale"] = plan.Rationale
+		normalizedTargetKind, normalizedTargetID, terminalPR, terminal, err := s.normalizePullRequestFollowUpWorkItem(ctx, task.ID, kind, targetKind, targetID, metadata)
+		if err != nil {
+			return nil, err
+		}
+		targetKind = normalizedTargetKind
+		targetID = normalizedTargetID
+		if terminal {
+			if err := s.recordTerminalPullRequestFollowUpSkipped(ctx, task.ID, itemID, terminalPR, "plan work item targets a terminal pull request"); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if actions := deferredPlanActionsForWorkItem(plan.Actions, baseItemID); len(actions) > 0 {
 			metadata["planActions"] = actions
 			if deferredPlanActionsTargetWorkItem(actions, baseItemID) {
@@ -7867,6 +7894,59 @@ func (s *Service) existingPullRequestFollowUpWorkItem(ctx context.Context, taskI
 		return existing, true, nil
 	}
 	return core.WorkItem{}, false, nil
+}
+
+func (s *Service) normalizePullRequestFollowUpWorkItem(ctx context.Context, taskID string, kind string, targetKind string, targetID string, metadata map[string]any) (string, string, core.PullRequest, bool, error) {
+	if kind != "pr.followup" {
+		return targetKind, targetID, core.PullRequest{}, false, nil
+	}
+	snapshot, err := s.store.Snapshot(ctx)
+	if err != nil {
+		return targetKind, targetID, core.PullRequest{}, false, err
+	}
+	id := ""
+	if targetKind == "pull_request" {
+		id = strings.TrimSpace(targetID)
+	}
+	id = nonEmpty(id, stringMetadata(metadata, "pullRequestID"), stringMetadata(metadata, "pullRequestId"), stringMetadata(metadata, "id"))
+	repo := strings.ToLower(strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestRepo"), stringMetadata(metadata, "repo"))))
+	number := firstNonZero(intMetadata(metadata, "pullRequestNumber"), intMetadata(metadata, "number"))
+	url := strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestURL"), stringMetadata(metadata, "url")))
+	branch := strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestBranch"), stringMetadata(metadata, "branch"), stringMetadata(metadata, "headBranch")))
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID != taskID || !pullRequestMatchesUpdateTarget(pr, id, repo, number, url, branch) {
+			continue
+		}
+		metadata["pullRequestID"] = pr.ID
+		metadata["pullRequestId"] = pr.ID
+		metadata["pullRequestRepo"] = pr.Repo
+		metadata["pullRequestNumber"] = pr.Number
+		metadata["pullRequestURL"] = pr.URL
+		metadata["pullRequestBranch"] = pr.Branch
+		metadata["repo"] = pr.Repo
+		metadata["number"] = pr.Number
+		metadata["url"] = pr.URL
+		metadata["branch"] = pr.Branch
+		return "pull_request", pr.ID, pr, isTerminalPullRequestState(pr.State), nil
+	}
+	if id != "" {
+		return "pull_request", id, core.PullRequest{}, false, nil
+	}
+	return targetKind, targetID, core.PullRequest{}, false, nil
+}
+
+func (s *Service) recordTerminalPullRequestFollowUpSkipped(ctx context.Context, taskID string, workItemID string, pr core.PullRequest, reason string) error {
+	return s.recordTaskAction(ctx, taskID, map[string]any{
+		"kind":          "terminal_pull_request_followup_skipped",
+		"status":        "skipped",
+		"reason":        reason,
+		"workItemId":    workItemID,
+		"pullRequestId": pr.ID,
+		"repo":          pr.Repo,
+		"number":        pr.Number,
+		"url":           pr.URL,
+		"state":         pr.State,
+	})
 }
 
 func planQueuedWorkItemID(planID string, itemID string) string {
@@ -7958,6 +8038,12 @@ func (s *Service) runSpawnedWorkItem(ctx context.Context, taskID string, itemID 
 		return
 	}
 	if !spawnWorkItemDependenciesSatisfied(snapshot, taskID, item) {
+		return
+	}
+	if pr, ok := terminalPullRequestForFollowUpWorkItem(snapshot, taskID, item); ok {
+		_ = s.recordWorkItemCompleted(context.Background(), taskID, itemID, core.WorkItemSucceeded, "", "pull request is already terminal")
+		_ = s.recordTerminalPullRequestFollowUpSkipped(context.Background(), taskID, itemID, pr, "queued pull request follow-up target is already terminal")
+		s.resumeObjectiveAfterSpawnWorkDrained(context.Background(), taskID)
 		return
 	}
 	plan, err := s.planForSpawnedWorkItem(snapshot, task, item)
@@ -8170,6 +8256,9 @@ func (s *Service) planForSpawnedWorkItem(snapshot core.Snapshot, task core.Task,
 	if planMetadata == nil {
 		planMetadata = map[string]any{}
 	}
+	if strings.TrimSpace(requestedWorkerKind) != "" {
+		planMetadata["workerKindPinned"] = true
+	}
 	planMetadata["brain"] = nonEmpty(stringMetadata(planMetadata, "brain"), "work-item-scheduler")
 	planMetadata["scheduler"] = nonEmpty(stringMetadata(planMetadata, "scheduler"), "work-item")
 	planMetadata["workItemID"] = item.ID
@@ -8201,6 +8290,28 @@ func (s *Service) planForSpawnedWorkItem(snapshot core.Snapshot, task core.Task,
 		Actions:  planActionsFromMetadata(planMetadata),
 		Metadata: planMetadata,
 	}, nil
+}
+
+func terminalPullRequestForFollowUpWorkItem(snapshot core.Snapshot, taskID string, item core.WorkItem) (core.PullRequest, bool) {
+	if item.Kind != "pr.followup" {
+		return core.PullRequest{}, false
+	}
+	metadata := workItemMetadata(item)
+	id := item.TargetID
+	if item.TargetKind != "pull_request" {
+		id = ""
+	}
+	id = nonEmpty(id, stringMetadata(metadata, "pullRequestID"), stringMetadata(metadata, "pullRequestId"), stringMetadata(metadata, "id"))
+	repo := strings.ToLower(strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestRepo"), stringMetadata(metadata, "repo"))))
+	number := firstNonZero(intMetadata(metadata, "pullRequestNumber"), intMetadata(metadata, "number"))
+	url := strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestURL"), stringMetadata(metadata, "url")))
+	branch := strings.TrimSpace(nonEmpty(stringMetadata(metadata, "pullRequestBranch"), stringMetadata(metadata, "branch"), stringMetadata(metadata, "headBranch")))
+	for _, pr := range snapshot.PullRequests {
+		if pr.TaskID == taskID && pullRequestMatchesUpdateTarget(pr, id, repo, number, url, branch) && isTerminalPullRequestState(pr.State) {
+			return pr, true
+		}
+	}
+	return core.PullRequest{}, false
 }
 
 func anyMapMetadata(metadata map[string]any, key string) map[string]any {

@@ -92,6 +92,29 @@ func TestRebalancePlanWorkerKindSwitchesWhenCurrentProviderUnavailable(t *testin
 	}
 }
 
+func TestRebalancePlanWorkerKindKeepsPinnedWorkerKind(t *testing.T) {
+	service := &Service{
+		runners: map[string]worker.Runner{
+			"codex":  eventRunner{kind: "codex"},
+			"claude": eventRunner{kind: "claude"},
+		},
+		usageSource: staticProviderUsageSource{snapshot: ProviderUsageSnapshot{Providers: map[string]ProviderUsage{
+			"codex":  usageWithPressure("codex", 100),
+			"claude": usageWithPressure("claude", 0),
+		}}},
+	}
+	plan := service.rebalancePlanWorkerKind(context.Background(), Plan{
+		WorkerKind: "codex",
+		Metadata:   map[string]any{"workerKindPinned": true},
+	})
+	if plan.WorkerKind != "codex" {
+		t.Fatalf("worker kind = %q, want pinned codex", plan.WorkerKind)
+	}
+	if _, ok := plan.Metadata["usageSelectedWorkerKind"]; ok {
+		t.Fatalf("pinned plan was usage-rebalanced: %+v", plan.Metadata)
+	}
+}
+
 func TestClassifyProviderUsageExhaustion(t *testing.T) {
 	exhaustion, ok := classifyProviderUsageExhaustion("claude", "Claude usage limit reached. Your limit resets at 3pm.")
 	if !ok {
@@ -107,7 +130,6 @@ func TestClassifyProviderUsageExhaustionIgnoresContextWindow(t *testing.T) {
 		t.Fatalf("unexpected usage exhaustion: %+v", exhaustion)
 	}
 }
-
 func readUsageFixture(t *testing.T, name string) string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
