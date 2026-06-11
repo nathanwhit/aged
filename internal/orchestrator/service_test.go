@@ -856,6 +856,48 @@ func TestServiceAnswerQuestionTargetsSpecificQuestion(t *testing.T) {
 	}
 }
 
+func TestSplitPreFollowUpActionsRunsImmediateWorkerBoundPRActions(t *testing.T) {
+	results := []WorkerTurnResult{{
+		WorkerID: "worker-1",
+		Status:   core.WorkerSucceeded,
+	}}
+	actions := []PlanAction{
+		{
+			Kind:     "publish_pull_request",
+			When:     "immediate",
+			WorkerID: "worker-1",
+			Inputs: map[string]any{
+				"title": "Add manager-style global objective list",
+				"body":  "## Summary\n- add list",
+			},
+		},
+		{
+			Kind: "watch_pull_requests",
+			When: "immediate",
+		},
+		{
+			Kind:     "publish_pull_request",
+			When:     "after_success",
+			WorkerID: "future-worker",
+			Inputs: map[string]any{
+				"title": "Add manager-first objective detail console",
+				"body":  "## Summary\n- add detail",
+			},
+		},
+	}
+
+	early, remaining := splitPreFollowUpActions(actions, results)
+	if len(early) != 1 {
+		t.Fatalf("early actions = %+v, want one worker-bound publish action", early)
+	}
+	if early[0].Kind != "publish_pull_request" || early[0].WorkerID != "worker-1" || early[0].When != "after_success" {
+		t.Fatalf("early action = %+v, want normalized worker-bound publish", early[0])
+	}
+	if len(remaining) != 1 || remaining[0].WorkerID != "future-worker" {
+		t.Fatalf("remaining actions = %+v, want only future worker action", remaining)
+	}
+}
+
 func TestServiceResumesAssistantProviderSession(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
