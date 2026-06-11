@@ -276,7 +276,7 @@ Auth flags:
 - `-auth-session-key` / `AGED_AUTH_SESSION_KEY`
 - `-auth-redirect-url` / `AGED_AUTH_REDIRECT_URL`
 
-When auth is enabled, login/logout routes and `/api/health` remain public enough to complete auth. Dashboard pages and operational APIs require a signed session cookie.
+When auth is enabled, login/logout routes and `/api/health` remain public so auth can complete. Dashboard pages and operational APIs require a signed session cookie.
 
 ## API Sketch
 
