@@ -2416,6 +2416,7 @@ function deriveAssignmentRows({
 }): AssignmentRow[] {
   const workersById = new Map(workers.map((worker) => [worker.id, worker]));
   const nodesByWorkerId = new Map(nodes.filter((node) => node.workerId).map((node) => [node.workerId!, node]));
+  const pullRequestsById = new Map(pullRequests.map((pr) => [pr.id, pr]));
   const rows: AssignmentRow[] = [];
   const taskActions: AssignmentAction[] = [];
   if (isRetryableTask(task)) taskActions.push({ kind: "retry-task", taskId: task.id });
@@ -2467,7 +2468,7 @@ function deriveAssignmentRows({
     });
   }
 
-  for (const feedback of pullRequestFeedback.filter((item) => item.status === "pending")) {
+  for (const feedback of pullRequestFeedback.filter((item) => item.status === "pending" && !isTerminalPullRequestState(pullRequestsById.get(item.pullRequestId ?? "")?.state))) {
     rows.push({
       id: `feedback:${feedback.id}`,
       kind: "feedback",
@@ -2484,12 +2485,11 @@ function deriveAssignmentRows({
     });
   }
 
-  for (const session of sessions) {
+  for (const session of sessions.filter((item) => !isTerminalWorkerStatus(item.status))) {
     const worker = workersById.get(session.workerId);
     const node = nodesByWorkerId.get(session.workerId) ?? nodes.find((item) => item.id === session.nodeId);
     const workerEvents = eventsByWorker.get(session.workerId) ?? EMPTY_EVENTS;
     const latestEvent = latestWorkerProgressEvent(workerEvents) ?? latestInspectableWorkerEvent(workerEvents);
-    const isActive = !isTerminalWorkerStatus(session.status);
     rows.push({
       id: `session:${session.id}`,
       kind: "session",
@@ -2503,17 +2503,15 @@ function deriveAssignmentRows({
       model: metadataString(worker?.metadata, "model") || metadataString(worker?.metadata, "brain") || metadataString(session.metadata, "model"),
       projectContext: [node?.targetKind && humanizeKey(node.targetKind), node?.targetId].filter(Boolean).join(" "),
       selection: { kind: "session", sessionId: session.id },
-      action: isActive
-        ? [
-            { kind: "inspect-session", sessionId: session.id },
-            { kind: "cancel-session", sessionId: session.id },
-          ]
-        : { kind: "inspect-session", sessionId: session.id },
+      action: [
+        { kind: "inspect-session", sessionId: session.id },
+        { kind: "cancel-session", sessionId: session.id },
+      ],
     });
   }
 
   const sessionWorkerIds = new Set(sessions.map((session) => session.workerId));
-  for (const worker of workers.filter((item) => !sessionWorkerIds.has(item.id))) {
+  for (const worker of workers.filter((item) => !sessionWorkerIds.has(item.id) && !isTerminalWorkerStatus(item.status))) {
     const node = nodesByWorkerId.get(worker.id);
     rows.push({
       id: `debug-worker:${worker.id}`,
@@ -2527,11 +2525,11 @@ function deriveAssignmentRows({
       owner: `Worker ${shortID(worker.id)}`,
       model: metadataString(worker.metadata, "model") || metadataString(worker.metadata, "brain"),
       projectContext: targetLabel(node),
-      action: !isTerminalWorkerStatus(worker.status) ? { kind: "cancel-worker", workerId: worker.id } : undefined,
+      action: { kind: "cancel-worker", workerId: worker.id },
     });
   }
 
-  for (const item of workItems.filter((workItem) => workItem.status === "queued" || workItem.status === "running" || workItem.status === "failed")) {
+  for (const item of workItems.filter((workItem) => workItem.status === "queued" || workItem.status === "running")) {
     rows.push({
       id: `work:${item.id}`,
       kind: "work",
@@ -2548,8 +2546,8 @@ function deriveAssignmentRows({
     });
   }
 
-  for (const pr of pullRequests) {
-    const feedbackCount = pullRequestFeedback.filter((item) => item.pullRequestId === pr.id && item.status === "pending").length;
+  for (const pr of pullRequests.filter((item) => !isTerminalPullRequestState(item.state))) {
+    const feedbackCount = pullRequestFeedback.filter((item) => item.pullRequestId === pr.id && item.status === "pending" && !isTerminalPullRequestState(pr.state)).length;
     const context = prContextFromParts(pr.repo, pr.number, pr.branch);
     const branchContext = [pr.base && `base ${pr.base}`, pr.branch && `head ${pr.branch}`].filter(Boolean).join(" · ");
     const title = pr.title || context || "Pull request";
@@ -4534,6 +4532,11 @@ function targetLabel(node: ExecutionNode | undefined): string {
 
 function isTerminalWorkerStatus(status: Worker["status"]): boolean {
   return status === "succeeded" || status === "failed" || status === "canceled";
+}
+
+function isTerminalPullRequestState(state: PullRequestState["state"] | undefined): boolean {
+  const normalized = (state ?? "").toUpperCase();
+  return normalized === "MERGED" || normalized === "CLOSED";
 }
 
 function formatDuration(start: string, end: string): string {
@@ -6984,6 +6987,7 @@ function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): Man
   const pullRequests = snapshot.pullRequests.filter((pr) => pr.taskId === taskId);
   const feedback = snapshot.pullRequestFeedback.filter((item) => item.taskId === taskId);
   const steering = snapshot.steering.filter((item) => item.taskId === taskId);
+  const pullRequestsById = new Map(pullRequests.map((pr) => [pr.id, pr]));
   const sessionWorkerIds = new Set(sessions.map((session) => session.workerId));
   let activeSignals = 0;
   let attentionCount = task.status === "failed" || task.status === "canceled" || task.error ? 1 : 0;
@@ -7012,38 +7016,31 @@ function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): Man
   }
 
   for (const session of sessions) {
-    activeSignals += 1;
-    if (!isTerminalWorkerStatus(session.status)) activeSessions += 1;
-    if (session.status === "queued" || session.status === "waiting") {
-      attentionCount += 1;
-      applyAttention("warning");
-    }
-    if (session.status === "failed" || session.status === "canceled") {
-      attentionCount += 1;
-      applyAttention("danger");
+    if (!isTerminalWorkerStatus(session.status)) {
+      activeSignals += 1;
+      activeSessions += 1;
+      if (session.status === "queued" || session.status === "waiting") {
+        attentionCount += 1;
+        applyAttention("warning");
+      }
     }
     noteLatest(session.currentAction, session.currentActionAt || session.updatedAt, session.currentActionLabel || "Session");
   }
   for (const worker of workers) {
     if (!isTerminalWorkerStatus(worker.status)) activeWorkers += 1;
-    if (!sessionWorkerIds.has(worker.id)) {
+    if (!sessionWorkerIds.has(worker.id) && !isTerminalWorkerStatus(worker.status)) {
       activeSignals += 1;
       if (worker.status === "queued" || worker.status === "waiting") {
         attentionCount += 1;
         applyAttention("warning");
       }
-      if (worker.status === "failed" || worker.status === "canceled") {
-        attentionCount += 1;
-        applyAttention("danger");
-      }
     }
   }
   for (const item of workItems) {
-    if (item.status === "queued" || item.status === "running" || item.status === "failed") {
+    if (item.status === "queued" || item.status === "running") {
       activeSignals += 1;
       activeWorkItems += 1;
-      attentionCount += 1;
-      applyAttention(item.status === "failed" ? "danger" : "warning");
+      applyAttention("warning");
     }
     noteLatest(item.error || item.reason, item.updatedAt, "Work item");
   }
@@ -7056,14 +7053,15 @@ function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): Man
     }
   }
   for (const item of feedback) {
-    if (item.status === "pending") {
+    if (item.status === "pending" && !isTerminalPullRequestState(pullRequestsById.get(item.pullRequestId ?? "")?.state)) {
       activeSignals += 1;
       attentionCount += 1;
       pendingFeedback += 1;
       applyAttention("warning");
     }
   }
-  activeSignals += pullRequests.length + artifacts.length + steering.filter((item) => item.status === "pending" || item.status === "queued" || item.status === "running").length;
+  activeSignals += pullRequests.filter((pr) => !isTerminalPullRequestState(pr.state)).length
+    + steering.filter((item) => item.status === "pending" || item.status === "queued" || item.status === "running").length;
 
   return {
     taskId,
@@ -7074,7 +7072,7 @@ function deriveManagerSummaryForTask(snapshot: AppSnapshot, taskId: string): Man
     activeSessions,
     activeWorkers,
     activeWorkItems,
-    pullRequests: pullRequests.length,
+    pullRequests: pullRequests.filter((pr) => !isTerminalPullRequestState(pr.state)).length,
     artifacts: artifacts.length,
     latestAction,
     latestActionAt,
@@ -7574,10 +7572,6 @@ function pullRequestFeedbackRequiresMetadataUpdate(item: PullRequestFeedback): b
 
 function updatePullRequestActionHasMetadata(inputs: Record<string, unknown>): boolean {
   return Boolean(payloadValue(inputs.title) || payloadValue(inputs.body));
-}
-
-function isTerminalPullRequestState(state: string | undefined): boolean {
-  return state === "MERGED" || state === "CLOSED";
 }
 
 function numberPayload(value: unknown): number | undefined {

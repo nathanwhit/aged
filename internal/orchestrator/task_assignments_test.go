@@ -252,6 +252,55 @@ func TestBuildTaskAssignmentsProjectsTaskLifecycleDisplayRows(t *testing.T) {
 	}
 }
 
+func TestBuildTaskAssignmentsDisplayRowsHideHistoricalFailures(t *testing.T) {
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	snapshot := core.Snapshot{
+		Tasks: []core.Task{{
+			ID:        "task-1",
+			Status:    core.TaskRunning,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+		Workers: []core.Worker{
+			{ID: "worker-failed", TaskID: "task-1", Kind: "codex", Status: core.WorkerFailed, CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "worker-queued", TaskID: "task-1", Kind: "codex", Status: core.WorkerQueued, CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
+		ExecutionNodes: []core.ExecutionNode{
+			{ID: "node-failed", TaskID: "task-1", WorkerID: "node-worker-failed", WorkerKind: "codex", Status: core.WorkerFailed, Role: "review", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "node-queued", TaskID: "task-1", WorkerID: "node-worker-queued", WorkerKind: "codex", Status: core.WorkerQueued, Role: "validate", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
+		WorkItems: []core.WorkItem{
+			{ID: "failed-work", TaskID: "task-1", Kind: "pr.followup", Status: core.WorkItemFailed, Error: "remote worker exited with status 1", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "queued-work", TaskID: "task-1", Kind: "objective.implement", Status: core.WorkItemQueued, Reason: "Continue active objective work.", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
+		PullRequests: []core.PullRequest{
+			{ID: "pr-merged", TaskID: "task-1", Repo: "owner/repo", Number: 1, State: "MERGED", Title: "Merged result", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "pr-open", TaskID: "task-1", Repo: "owner/repo", Number: 2, State: "OPEN", Title: "Open result", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
+		PullRequestFeedback: []core.PullRequestFeedback{
+			{ID: "feedback-merged", TaskID: "task-1", PullRequestID: "pr-merged", Status: "pending", Reason: "review", CreatedAt: now, UpdatedAt: now.Add(time.Minute)},
+			{ID: "feedback-open", TaskID: "task-1", PullRequestID: "pr-open", Status: "pending", Reason: "review", CreatedAt: now, UpdatedAt: now.Add(2 * time.Minute)},
+		},
+	}
+
+	result, err := BuildTaskAssignments(snapshot, "task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	displayRowAbsent(t, result.DisplayRows, "work:failed-work")
+	displayRowAbsent(t, result.DisplayRows, "debug_worker:worker-failed")
+	displayRowAbsent(t, result.DisplayRows, "execution_node:node-failed")
+	displayRowAbsent(t, result.DisplayRows, "pr:pr-merged")
+	displayRowAbsent(t, result.DisplayRows, "feedback:feedback-merged")
+
+	displayRowByID(t, result.DisplayRows, "work:queued-work")
+	displayRowByID(t, result.DisplayRows, "debug_worker:worker-queued")
+	displayRowByID(t, result.DisplayRows, "execution_node:node-queued")
+	displayRowByID(t, result.DisplayRows, "pr:pr-open")
+	displayRowByID(t, result.DisplayRows, "feedback:feedback-open")
+}
+
 func TestBuildTaskAssignmentsMissingTask(t *testing.T) {
 	_, err := BuildTaskAssignments(core.Snapshot{}, "missing")
 	if !errors.Is(err, eventstore.ErrNotFound) {
@@ -341,4 +390,13 @@ func displayRowByID(t *testing.T, rows []core.TaskAssignmentDisplayRow, id strin
 	}
 	t.Fatalf("missing display row %s in %+v", id, rows)
 	return core.TaskAssignmentDisplayRow{}
+}
+
+func displayRowAbsent(t *testing.T, rows []core.TaskAssignmentDisplayRow, id string) {
+	t.Helper()
+	for _, row := range rows {
+		if row.ID == id {
+			t.Fatalf("unexpected display row %s in %+v", id, rows)
+		}
+	}
 }

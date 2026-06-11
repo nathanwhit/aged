@@ -377,17 +377,13 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		summary.ActiveSignals++
 		if !isTerminalWorkerStatus(session.Status) {
+			summary.ActiveSignals++
 			summary.ActiveSessions++
 			if session.Status == core.WorkerWaiting || session.Status == core.WorkerQueued {
 				summary.AttentionCount++
 				summary.Tone = managerSummaryTone(summary.Tone, "warning")
 			}
-		}
-		if session.Status == core.WorkerFailed || session.Status == core.WorkerCanceled {
-			summary.AttentionCount++
-			summary.Tone = managerSummaryTone(summary.Tone, "danger")
 		}
 		actionAt := valueTime(session.CurrentActionAt, session.UpdatedAt)
 		if managerSummaryLatestActionAfter(summary, session.CurrentAction, actionAt) {
@@ -406,15 +402,11 @@ func buildManagerSummaries(
 		if !isTerminalWorkerStatus(worker.Status) {
 			summary.ActiveWorkers++
 		}
-		if !sessionWorkers[worker.ID] {
+		if !sessionWorkers[worker.ID] && !isTerminalWorkerStatus(worker.Status) {
 			summary.ActiveSignals++
 			if worker.Status == core.WorkerWaiting || worker.Status == core.WorkerQueued {
 				summary.AttentionCount++
 				summary.Tone = managerSummaryTone(summary.Tone, "warning")
-			}
-			if worker.Status == core.WorkerFailed || worker.Status == core.WorkerCanceled {
-				summary.AttentionCount++
-				summary.Tone = managerSummaryTone(summary.Tone, "danger")
 			}
 		}
 		summary.UpdatedAt = latestTime(summary.UpdatedAt, worker.UpdatedAt)
@@ -425,15 +417,10 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		if item.Status == core.WorkItemQueued || item.Status == core.WorkItemRunning || item.Status == core.WorkItemFailed {
+		if item.Status == core.WorkItemQueued || item.Status == core.WorkItemRunning {
 			summary.ActiveSignals++
 			summary.ActiveWorkItems++
-			summary.AttentionCount++
-			if item.Status == core.WorkItemFailed {
-				summary.Tone = managerSummaryTone(summary.Tone, "danger")
-			} else {
-				summary.Tone = managerSummaryTone(summary.Tone, "warning")
-			}
+			summary.Tone = managerSummaryTone(summary.Tone, "warning")
 		}
 		if item.Error != "" && managerSummaryLatestActionAfter(summary, item.Error, item.UpdatedAt) {
 			summary.LatestAction = item.Error
@@ -462,7 +449,7 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		if feedback.Status == "pending" {
+		if feedback.Status == "pending" && !pendingFeedbackTargetsTerminalPullRequest(feedback, pullRequests) {
 			summary.ActiveSignals++
 			summary.AttentionCount++
 			summary.PendingFeedback++
@@ -476,8 +463,10 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		summary.ActiveSignals++
-		summary.PullRequests++
+		if !isTerminalPullRequestState(pr.State) {
+			summary.ActiveSignals++
+			summary.PullRequests++
+		}
 		summary.UpdatedAt = latestTime(summary.UpdatedAt, pr.UpdatedAt)
 		summaries[pr.TaskID] = summary
 	}
@@ -486,7 +475,6 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		summary.ActiveSignals++
 		summary.Artifacts++
 		summary.UpdatedAt = latestTime(summary.UpdatedAt, artifact.UpdatedAt)
 		summaries[artifact.TaskID] = summary
@@ -503,6 +491,18 @@ func buildManagerSummaries(
 		summaries[item.TaskID] = summary
 	}
 	return orderedManagerSummaries(summaries, tasks)
+}
+
+func pendingFeedbackTargetsTerminalPullRequest(feedback core.PullRequestFeedback, pullRequests map[string]core.PullRequest) bool {
+	if feedback.PullRequestID == "" {
+		return false
+	}
+	pr, ok := pullRequests[feedback.PullRequestID]
+	return ok && isTerminalPullRequestState(pr.State)
+}
+
+func isTerminalPullRequestState(state string) bool {
+	return strings.EqualFold(state, "MERGED") || strings.EqualFold(state, "CLOSED")
 }
 
 func managerSummaryTone(current string, next string) string {
