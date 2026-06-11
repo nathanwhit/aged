@@ -6967,18 +6967,32 @@ func splitPreFollowUpActions(actions []PlanAction, results []WorkerTurnResult) (
 	early := []PlanAction{}
 	remaining := []PlanAction{}
 	for _, action := range actions {
-		if strings.TrimSpace(action.When) == "immediate" {
-			continue
-		}
 		if strings.TrimSpace(action.WorkerID) != "" {
 			if _, ok := workerResultByReference(results, action.WorkerID); ok {
-				early = append(early, action)
-				continue
+				if strings.TrimSpace(action.When) == "immediate" && planActionConsumesWorkerResult(action) {
+					action.When = "after_success"
+				}
+				if strings.TrimSpace(action.When) != "immediate" {
+					early = append(early, action)
+					continue
+				}
 			}
+		}
+		if strings.TrimSpace(action.When) == "immediate" {
+			continue
 		}
 		remaining = append(remaining, action)
 	}
 	return early, remaining
+}
+
+func planActionConsumesWorkerResult(action PlanAction) bool {
+	switch strings.TrimSpace(action.Kind) {
+	case "publish_pull_request", "update_pull_request":
+		return true
+	default:
+		return false
+	}
 }
 
 func planWithActions(plan Plan, actions []PlanAction) Plan {
