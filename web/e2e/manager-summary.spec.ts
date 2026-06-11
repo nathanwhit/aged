@@ -180,7 +180,16 @@ test("manager summary badges render through dashboard and task detail without ho
 
   await expect(page.getByRole("heading", { name: "Manager summary validation" })).toBeVisible();
   await expect(page.getByText("Needs Attention")).toBeVisible();
-  await expect(page.getByText("3 attention")).toBeVisible();
+  const managerRow = page.locator(".manager-objective-row", { hasText: "Manager summary validation" });
+  await expect(managerRow).toBeVisible();
+  await expect(managerRow).toContainText("Project proj-a");
+  await expect(managerRow.getByTitle("Active agents")).toHaveText("1");
+  await expect(managerRow.getByTitle("Open pull requests")).toHaveText("1");
+  await expect(managerRow.getByTitle("Latest state")).toHaveText("Review");
+  await expect(managerRow.getByTitle("3 need attention")).toHaveText("3 attn");
+  await expect(managerRow.getByTitle("1 approvals pending")).toHaveText("1 ask");
+  await expect(managerRow.getByTitle("1 PR feedback items pending")).toHaveText("1 fb");
+  await managerRow.getByRole("button").click();
   await expect(page.getByText("Running validation checks for manager summary").first()).toBeVisible();
   await expect(page.getByText("5 active signals")).toBeVisible();
   await expect(page.getByText("3 need attention")).toBeVisible();

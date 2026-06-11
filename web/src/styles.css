@@ -896,6 +896,60 @@ button:disabled {
   max-width: 150px;
 }
 
+.manager-objective-row .task-row-main {
+  gap: 10px;
+}
+
+.manager-row-copy {
+  min-width: 0;
+}
+
+.manager-row-status {
+  align-items: flex-end;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  min-width: 112px;
+}
+
+.manager-row-facts,
+.manager-row-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.manager-row-facts span {
+  align-items: center;
+  background: #f1f5f9;
+  border: 1px solid #dbe3ed;
+  border-radius: 999px;
+  color: #536070;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  gap: 4px;
+  line-height: 1;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  padding: 5px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manager-row-facts svg {
+  flex: 0 0 auto;
+}
+
+.manager-row-badges .pill {
+  font-size: 11px;
+  padding: 5px 7px;
+}
+
 .task-row-status .status,
 .task-row-status .pill {
   max-width: 100%;
@@ -3874,6 +3928,17 @@ small {
 
   .task-row-main {
     grid-template-columns: 1fr;
+  }
+
+  .manager-row-status {
+    align-items: flex-start;
+    justify-items: start;
+    min-width: 0;
+  }
+
+  .manager-row-facts,
+  .manager-row-badges {
+    justify-content: flex-start;
   }
 
   .task-row-status {
