@@ -13851,6 +13851,128 @@ func TestServiceSteerTaskMissingTaskReturnsNotFoundWithoutEvent(t *testing.T) {
 	}
 }
 
+func TestNormalizeSteeringTargetKindAliases(t *testing.T) {
+	cases := map[string]string{
+		"":             "",
+		"task":         "task",
+		"  Task ":      "task",
+		"objective":    "task",
+		"OBJECTIVE":    "task",
+		"worker":       "worker",
+		"Worker":       "worker",
+		"session":      "session",
+		"  Session  ":  "session",
+		"work_item":    "work_item",
+		"work-item":    "work_item",
+		"workitem":     "work_item",
+		"item":         "work_item",
+		"pull_request": "pull_request",
+		"pull-request": "pull_request",
+		"pullrequest":  "pull_request",
+		"PR":           "pull_request",
+		"mystery":      "mystery",
+	}
+	for in, want := range cases {
+		if got := normalizeSteeringTargetKind(in); got != want {
+			t.Errorf("normalizeSteeringTargetKind(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestServiceSteerTaskRejectsTargetWithoutTargetID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+	for _, kind := range []string{"worker", "session", "work_item", "pull_request"} {
+		err := service.SteerTask(ctx, "task-x", core.SteeringRequest{Message: "go", TargetKind: kind})
+		if err == nil || !strings.Contains(err.Error(), "targetId is required") {
+			t.Fatalf("SteerTask(%q) err = %v, want targetId is required", kind, err)
+		}
+	}
+}
+
+func TestServiceSteerTaskRejectsUnsupportedTargetKind(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, nil, t.TempDir(), fakeWorkspaceManager{})
+	err := service.SteerTask(ctx, "task-x", core.SteeringRequest{Message: "go", TargetKind: "mystery", TargetID: "x"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported steering target kind") {
+		t.Fatalf("SteerTask err = %v, want unsupported steering target kind", err)
+	}
+}
+
+func TestServiceSteerTaskRoutesWorkerTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewServiceWithWorkspaceManager(store, fixedBrain{}, map[string]worker.Runner{}, t.TempDir(), fakeWorkspaceManager{})
+	seedSteerableWorkerGraph(t, ctx, store, "task-routed-worker", "worker-1")
+
+	if err := service.SteerTask(ctx, "task-routed-worker", core.SteeringRequest{
+		Message:    "Bigger benchmarks please.",
+		TargetKind: "worker",
+		TargetID:   "worker-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerSteered, "task-routed-worker", "worker-1") {
+		t.Fatalf("worker.steered event missing after SteerTask(worker): %+v", snapshot.Events)
+	}
+	if hasEvent(snapshot.Events, core.EventTaskSteered, "task-routed-worker", "") {
+		t.Fatalf("SteerTask(worker) should not emit task.steered: %+v", snapshot.Events)
+	}
+}
+
+func TestServiceSteerTaskRoutesSessionTarget(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	defer store.Close()
+
+	service := NewService(store, fixedBrain{}, nil, t.TempDir())
+	taskID := "task-routed-session"
+	workerID := "worker-routed-session"
+	for _, event := range []core.Event{
+		{Type: core.EventTaskCreated, TaskID: taskID, Payload: core.MustJSON(map[string]any{"title": "Route session", "prompt": "Route session"})},
+		{Type: core.EventTaskPlanned, TaskID: taskID, Payload: core.MustJSON(Plan{WorkerKind: "mock", Prompt: "work"})},
+		{Type: core.EventExecutionPlanned, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"nodeId": "node-routed-session", "workerId": workerID, "workerKind": "mock"})},
+		{Type: core.EventWorkerCreated, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{"kind": "mock"})},
+		{Type: core.EventWorkerStarted, TaskID: taskID, WorkerID: workerID, Payload: core.MustJSON(map[string]any{})},
+	} {
+		if _, err := store.Append(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.SteerTask(ctx, taskID, core.SteeringRequest{
+		Message:    "focus the session",
+		TargetKind: "session",
+		TargetID:   workerID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := store.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(snapshot.Events, core.EventWorkerSteered, taskID, workerID) {
+		t.Fatalf("SteerTask(session) should reach worker via SteerSession: %+v", snapshot.Events)
+	}
+	if hasEvent(snapshot.Events, core.EventTaskSteered, taskID, "") {
+		t.Fatalf("SteerTask(session) should not emit task.steered: %+v", snapshot.Events)
+	}
+}
+
 func TestServiceSteerWorkItemRecordsTargetedSteering(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

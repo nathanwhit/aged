@@ -3043,7 +3043,7 @@ function pullRequestDisplay(pr: PullRequestState): string {
   return `${pr.repo} ${number}${state}`;
 }
 
-function ManagerPullRequestSummary({
+export function ManagerPullRequestSummary({
   task,
   pullRequests,
   selectedPullRequest,
@@ -3452,7 +3452,7 @@ function TaskObjectiveStrip({ task, artifacts }: { task: Task; artifacts: Artifa
   );
 }
 
-function WorkItemQueue({ taskId, items, onCancel, onSteer, onError }: { taskId: string; items: WorkItem[]; onCancel: (taskId: string, itemId: string) => Promise<void>; onSteer: (taskId: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>; onError: (message: string) => void }) {
+export function WorkItemQueue({ taskId, items, onCancel, onSteer, onError }: { taskId: string; items: WorkItem[]; onCancel: (taskId: string, itemId: string) => Promise<void>; onSteer: (taskId: string, message: string, target?: { targetKind?: string; targetId?: string }) => Promise<void>; onError: (message: string) => void }) {
   const [canceling, setCanceling] = useState<Record<string, boolean>>({});
   const [steering, setSteering] = useState<Record<string, string>>({});
   const [steeringBusy, setSteeringBusy] = useState<Record<string, boolean>>({});
@@ -3966,7 +3966,7 @@ function ApprovalPanel({
   );
 }
 
-function ApprovalResponseForm({
+export function ApprovalResponseForm({
   taskId,
   approval,
   onAnswer,
