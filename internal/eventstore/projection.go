@@ -475,7 +475,9 @@ func buildManagerSummaries(
 		if !ok {
 			continue
 		}
-		summary.Artifacts++
+		if isManagerVisibleArtifact(artifact.Kind) {
+			summary.Artifacts++
+		}
 		summary.UpdatedAt = latestTime(summary.UpdatedAt, artifact.UpdatedAt)
 		summaries[artifact.TaskID] = summary
 	}
@@ -503,6 +505,10 @@ func pendingFeedbackTargetsTerminalPullRequest(feedback core.PullRequestFeedback
 
 func isTerminalPullRequestState(state string) bool {
 	return strings.EqualFold(state, "MERGED") || strings.EqualFold(state, "CLOSED")
+}
+
+func isManagerVisibleArtifact(kind string) bool {
+	return !strings.EqualFold(strings.TrimSpace(kind), "worker_log")
 }
 
 func managerSummaryTone(current string, next string) string {
