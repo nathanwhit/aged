@@ -9225,6 +9225,8 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	stalledTurns := 0
 	limitUnproductiveTurns := !taskIsBroadObjective(task)
 	currentWorkPlan := initial.WorkPlan
+	lastCompletionRejection := ""
+	repeatedCompletionRejections := 0
 	for {
 		stateSnapshot, err := s.store.Snapshot(ctx)
 		if err != nil {
@@ -9312,6 +9314,11 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				}
 				recoveryHint = reason
 				stalledTurns++
+				lastCompletionRejection, repeatedCompletionRejections = updateRepeatedReplanCompletionRejection(lastCompletionRejection, repeatedCompletionRejections, reason)
+				if repeatedCompletionRejections >= maxConsecutiveUnproductiveReplanTurns {
+					s.waitForRepeatedReplanCompletionRejection(ctx, task, turn, reason)
+					return false, "", results
+				}
 				continue
 			}
 			if reason := broadObjectiveWorkPlanCompletionBlockReason(task, currentWorkPlan); reason != "" {
@@ -9321,6 +9328,11 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				}
 				recoveryHint = reason
 				stalledTurns++
+				lastCompletionRejection, repeatedCompletionRejections = updateRepeatedReplanCompletionRejection(lastCompletionRejection, repeatedCompletionRejections, reason)
+				if repeatedCompletionRejections >= maxConsecutiveUnproductiveReplanTurns {
+					s.waitForRepeatedReplanCompletionRejection(ctx, task, turn, reason)
+					return false, "", results
+				}
 				continue
 			}
 			return true, decision.Rationale, results
@@ -9332,6 +9344,11 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				}
 				recoveryHint = reason
 				stalledTurns++
+				lastCompletionRejection, repeatedCompletionRejections = updateRepeatedReplanCompletionRejection(lastCompletionRejection, repeatedCompletionRejections, reason)
+				if repeatedCompletionRejections >= maxConsecutiveUnproductiveReplanTurns {
+					s.waitForRepeatedReplanCompletionRejection(ctx, task, turn, reason)
+					return false, "", results
+				}
 				continue
 			}
 			if reason := broadObjectiveWorkPlanCompletionBlockReason(task, currentWorkPlan); reason != "" {
@@ -9341,6 +9358,11 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 				}
 				recoveryHint = reason
 				stalledTurns++
+				lastCompletionRejection, repeatedCompletionRejections = updateRepeatedReplanCompletionRejection(lastCompletionRejection, repeatedCompletionRejections, reason)
+				if repeatedCompletionRejections >= maxConsecutiveUnproductiveReplanTurns {
+					s.waitForRepeatedReplanCompletionRejection(ctx, task, turn, reason)
+					return false, "", results
+				}
 				continue
 			}
 			if err := s.finishObjectiveFromReplan(ctx, task, decision); err != nil {
@@ -9474,6 +9496,13 @@ func (s *Service) replanLoopWithOptions(ctx context.Context, task core.Task, ini
 	}
 }
 
+func updateRepeatedReplanCompletionRejection(last string, count int, reason string) (string, int) {
+	if reason == last {
+		return last, count + 1
+	}
+	return reason, 1
+}
+
 func nextReplanTurn(snapshot core.Snapshot, taskID string) int {
 	turn := 1
 	for _, event := range snapshot.Events {
@@ -9533,6 +9562,9 @@ func unpublishedCandidateCompletionBlockReasonFromSnapshot(snapshot core.Snapsho
 		if result.Status != core.WorkerSucceeded || !resultHasCandidateChanges(result) {
 			continue
 		}
+		if isReviewOrEvaluatorFollowUp(result) {
+			continue
+		}
 		workerID := strings.TrimSpace(result.WorkerID)
 		if workerID != "" && published[workerID] {
 			continue
@@ -9544,6 +9576,18 @@ func unpublishedCandidateCompletionBlockReasonFromSnapshot(snapshot core.Snapsho
 		return fmt.Sprintf("successful worker %s has unpublished candidate changes (%s); publish, update, or explicitly continue with another work item before finishing the objective", nonEmpty(workerID, "unknown"), strings.Join(files, ", "))
 	}
 	return ""
+}
+
+func (s *Service) waitForRepeatedReplanCompletionRejection(ctx context.Context, task core.Task, turn int, reason string) {
+	replanErr := fmt.Errorf("dynamic replanning repeatedly selected blocked completion: %s", reason)
+	s.waitForReplanFallback(ctx, task, turn, replanErr, replanFallbackConfig{
+		CompleteReasonPrefix: "fallback completion after repeated blocked completion",
+		CompleteMessage:      "Dynamic replanning repeatedly selected a blocked completion, so aged paused for explicit steering.",
+		WaitRationale:        "dynamic replanning repeatedly selected blocked completion",
+		WaitQuestion:         "Dynamic replanning repeatedly selected a blocked completion. Provide steering so aged can continue with explicit work items/actions.",
+		WaitReason:           "dynamic_replan_completion_rejected",
+		WaitObjective:        "Dynamic replanning repeatedly selected a blocked completion and needs user steering before continuing.",
+	}, reason)
 }
 
 func (s *Service) unpublishedCandidateCompletionBlockReason(ctx context.Context, taskID string, results []WorkerTurnResult) string {
